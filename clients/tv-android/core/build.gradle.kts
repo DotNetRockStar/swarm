@@ -56,18 +56,29 @@ tasks.register<Test>("interopTest") {
     filter {
         includeTestsMatching("*InteropTest")
     }
-    // Each test method gets a fresh JVM (forkEvery = 1) — this cuts down
-    // cross-test flakiness substantially but does not eliminate it: even a
-    // single test run in complete JVM isolation occasionally hits
-    // `IOException: Connection closed` (a real, unresolved finding, not
-    // papered over — see PeerQuicClientInteropTest's class doc). Since a
-    // fresh JVM rules out same-process resource reuse as the sole cause,
-    // this points more toward OS-level timing/socket-reuse sensitivity in
-    // kwik's real-clock loss-detection/ACK logic on a loaded dev machine
-    // than a same-JVM leak specifically. Real usage holds one long-lived
-    // connection, not rapid reconnect cycles, so this doesn't block the
-    // interop conclusion, but it's worth deeper investigation before
-    // leaning on kwik for a reconnect-heavy path.
+    // kwik's LossDetector.detectLostPackets() has `assert(lossDelay > 0)`
+    // (core/recovery/LossDetector.java:159 as of kwik 0.10.3), which is
+    // *reachable*: lossDelay is computed as
+    // `(int) (9f/8f * max(smoothedRtt, latestRtt))` and both RTT estimates
+    // are legitimately 0 microseconds early in a connection's life on a
+    // loopback QUIC connection — trivially fast enough that this isn't the
+    // rare edge case the assert's author evidently assumed. Root-caused
+    // after finding this assert's exact source and confirming empirically:
+    // running with assertions disabled here makes both the deterministic
+    // 2-concurrent-connection crash AND the previously-mysterious
+    // occasional single-connection "Connection closed" flakiness disappear
+    // (6+ consecutive clean full-suite runs vs. near-certain failure with
+    // assertions on) — one root cause explains both symptoms. This isn't
+    // papering over a protocol bug: Java's `assert` is off by default on
+    // every real JVM and on Android (ART doesn't enable it either), and
+    // Gradle's Test task defaults `enableAssertions` to true — so the
+    // *test harness*, not kwik or this project's code, was the thing
+    // behaving unlike production. Disabling it here matches what a real
+    // Android install actually does.
+    enableAssertions = false
+    // Each test method still gets a fresh JVM — cheap, and no longer load-
+    // bearing for reliability the way it looked like it was before this
+    // was root-caused, but no reason to remove it.
     forkEvery = 1
     maxParallelForks = 1
 }

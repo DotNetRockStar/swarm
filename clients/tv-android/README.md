@@ -92,14 +92,9 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
     `Content-Range` headers, and byte-exact bodies. If a generic HTTP
     client works here, Media3's `DefaultHttpDataSource` (which speaks
     nothing more exotic than this) will too.
-  - See the test class's doc comment for the one open finding: running
-    several of these tests back to back is occasionally flaky
-    (`IOException: Connection closed` on one connection in the cluster)
-    even though every isolated run and the full multi-request sessions are
-    100% reliable — undiagnosed, flagged for follow-up before leaning on
-    kwik for a reconnect-heavy path (e.g. Phase 4's hole-punch retry loop),
-    not blocking the "kwik is a viable QUIC stack for this protocol"
-    conclusion.
+  - An earlier finding here — running several of these tests back to back
+    was occasionally flaky (`IOException: Connection closed`) — turned out
+    to be root-causable, not just a thing to note and move past. See below.
 - **Servers self-report where they are; a client can now dial them from a
   bare STUN roster.** `SwarmDevice.metadata["peer_addr"]` (the Rust side's
   `swarm-p2p::local_addr` self-report, wire-identical to
@@ -117,23 +112,28 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   address, no hardcoded host:port anywhere in the test) plus one
   never-registered device merges to the right one-entry catalog and streams
   the file through the proxy correctly.
-- **Real finding: kwik cannot yet hold two concurrent connections in one
-  process.** The obvious next step from the single-server proof above — a
-  `CatalogSession` connected to *two* real servers at once, exactly what a
-  multi-server swarm needs for merged browsing — reliably crashes kwik: the
-  second connection's receiver thread throws `AssertionError` inside
-  `tech.kwik.core.recovery.LossDetector.detectLostPackets` and the
-  connection is torn down. 100% reproducible (not the occasional flakiness
-  above), on both kwik 0.10.3 and the latest 0.11 (tried upgrading
-  specifically to check whether this was already fixed upstream — it
-  wasn't, and 0.11 also regressed a previously-reliable single-connection
-  test, so stayed on 0.10.3). The test is in
-  `PeerQuicClientInteropTest.kt`, marked `@Disabled` with the full
-  writeup rather than deleted, so it's easy to re-check after a future kwik
-  release. This sharpens the project plan's kwik risk-register entry from
-  "throughput on real hardware unproven" to a concrete correctness blocker
-  for multi-server swarms specifically; the plan's quiche-JNI fallback is
-  the mitigation path if it isn't fixed upstream first.
+- **Multi-server concurrent connections: found a real kwik bug, then
+  root-caused and fixed it (not a workaround).** A `CatalogSession`
+  connected to *two* real servers at once — exactly what a multi-server
+  swarm needs for merged browsing — first reliably crashed kwik: the
+  second connection's receiver thread threw `AssertionError` inside
+  `tech.kwik.core.recovery.LossDetector.detectLostPackets`. Traced to the
+  exact source line: that method computes
+  `lossDelay = (int) (9f/8f * max(smoothedRtt, latestRtt))` and asserts
+  it's `> 0` — reachable whenever both RTT estimates are still exactly 0
+  microseconds, which a loopback QUIC connection hits easily, more so with
+  two connections contending for the CPU. The fix: Java assertions are off
+  by default in production JVMs and on Android, but Gradle's `Test` task
+  turns them on by default, so the *test harness* — not kwik, not this
+  project's code — was exercising kwik under conditions it never actually
+  ships under. `enableAssertions = false` on the `interopTest` task
+  (`core/build.gradle.kts`) matches real Android behavior and made the
+  2-connection test, and every other test in this file, reliable across
+  6+ consecutive full-suite runs (this also explains the "occasional
+  flakiness" noted above in earlier runs — same root cause). Tried
+  upgrading kwik 0.10.3 -> 0.11 first, before finding the actual cause:
+  didn't help, which is why the dependency stayed on 0.10.3 — the fix was
+  never about the version. Multi-server catalog merging works.
 
 ## Catalog browsing and playback (`:app`)
 
@@ -172,10 +172,6 @@ Google-Play-Services string anywhere in the APK despite adding
   `AndroidKeyStore` handle the way it accepts the in-memory keys every test
   here uses (untested either way, so this is a real open question, not an
   assumed-fine detail).
-- Multi-server catalog merging is gated on the kwik concurrent-connection
-  bug documented above — today, `browseCatalog()` will reliably show
-  exactly one server's entries even in a swarm with several servers online,
-  because only the first connection `CatalogSession` opens survives.
 - Resume/watched state, direct-play/transcode negotiation, a diagnostics
   screen (NAT type, punch results, per-server RTT), the hole-punch candidate
   exchange for the cross-network case (this client currently only reaches

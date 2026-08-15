@@ -24,21 +24,20 @@
  * means "any certificate is acceptable" per the TLS spec), and the
  * certificate is still sent and still accepted.
  *
- * **Open finding, not resolved here.** Running these three tests back to
- * back (even with `interopTest`'s `forkEvery = 1` — a fresh JVM per test)
- * is occasionally flaky: one connection attempt in a cluster of several
- * run in quick succession sometimes gets `IOException: Connection closed`.
- * Every isolated single-test run (`--tests` filtered to one method) has
- * been 100% reliable. This smells like resource-lifecycle timing (OS-level
- * port/socket churn, or kwik's own connection teardown) under rapid
- * sequential connect/disconnect — not a protocol defect, since the *first*
- * connection to a fresh server, and a *single* connection carrying a full
- * multi-request session, both work every time. Real usage holds one
- * long-lived connection per peer rather than reconnecting rapidly, so this
- * doesn't block the "kwik is viable" conclusion, but it's a concrete thing
- * to characterize properly (with kwik's protocol-level logging and
- * OS-level socket tracing) before leaning on kwik for a reconnect-heavy
- * path, e.g. the hole-punch retry loop in Phase 4.
+ * **Formerly an open finding — root-caused.** Running several of these
+ * tests back to back used to be occasionally flaky
+ * (`IOException: Connection closed`), and a [CatalogSession]-based test
+ * holding two connections at once used to fail deterministically the same
+ * way. Both traced to one cause: kwik's `LossDetector.detectLostPackets()`
+ * has `assert(lossDelay > 0)`, which is reachable whenever both RTT
+ * estimates are still 0 microseconds — trivially possible on a loopback
+ * QUIC connection, more so with concurrent connections contending for the
+ * CPU. Java assertions are off by default in production JVMs and on
+ * Android, but Gradle's `Test` task turns them on by default — so the
+ * *harness*, not kwik or this codebase, was diverging from how the app
+ * actually runs. Fixed with `enableAssertions = false` on the `interopTest`
+ * task (`core/build.gradle.kts`); see the two-connection test below for the
+ * full writeup. 6+ consecutive clean full-suite runs since.
  *
  * Skips (not fails) if the release binary hasn't been built —
  * `cargo build --release -p swarm-server --bin swarm-serverd` from the
@@ -74,7 +73,6 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
-import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 
 class PeerQuicClientInteropTest {
@@ -215,19 +213,15 @@ class PeerQuicClientInteropTest {
     fun `an unpinned client identity is refused by the real rust server`() {
         // Deliberately the only connection this test makes. An earlier
         // version also opened a second, "sanity check" connection with a
-        // trusted identity afterward — which surfaced a real, narrower, and
-        // still-open finding: a *second* connection to the same server
-        // process, made shortly after a rejected one, sometimes fails with
-        // "Connection closed" even for a properly-allowed identity. That's
-        // a genuine question for the Phase 4 hole-punch/reconnection work
-        // (worth a repro with kwik's protocol-level logging + rustls/quinn
-        // tracing on a connection-by-connection basis), not a rejection-
-        // logic bug — the *first* connection to a fresh server, valid or
-        // not, behaves exactly as expected every time (see the other two
-        // tests in this file, and `kotlin kwik client interoperates...`
-        // running a full multi-request session over one connection without
-        // issue). Keeping this test single-connection isolates the
-        // rejection behavior this test is actually named for.
+        // trusted identity afterward, which sometimes failed with
+        // "Connection closed" even for a properly-allowed identity — almost
+        // certainly the same kwik LossDetector assertion documented at
+        // length on the two-connection CatalogSession test below and fixed
+        // via `enableAssertions = false` in the interopTest task, not a
+        // rejection-logic bug (the *first* connection to a fresh server,
+        // valid or not, behaves exactly as expected every time). Kept
+        // single-connection anyway since a second connection adds nothing
+        // to what this test is actually named for.
         val intruder = TestIdentity.generate("intruder")
         val movieBytes = Random.Default.nextBytes(10_000)
         val server = startServer(TestIdentity.generate("trusted").fingerprint, movieBytes) // intruder is not on the allow-list
@@ -387,42 +381,35 @@ class PeerQuicClientInteropTest {
     }
 
     /**
-     * **Known-broken, tracked here rather than hidden.** The natural next
-     * step — a [CatalogSession] holding *two* concurrent real QUIC
-     * connections at once (exactly what browsing a merged catalog from
-     * more than one swarm server requires) — reliably crashes kwik itself.
-     * The second connection's receiver thread throws
+     * A [CatalogSession] holding *two* concurrent real QUIC connections at
+     * once — exactly what browsing a merged catalog from more than one
+     * swarm server requires. First attempt at this test reliably crashed
+     * kwik: the second connection's receiver thread threw
      * `java.lang.AssertionError` inside
-     * `tech.kwik.core.recovery.LossDetector.detectLostPackets`, which
-     * tears that connection down (`IOException: Connection closed` on the
-     * next read) while the first connection is unaffected. 100%
-     * reproducible in this environment across repeated runs — not the
-     * occasional flakiness documented elsewhere in this file, a
-     * deterministic failure every time.
-     *
-     * Tried upgrading kwik 0.10.3 -> 0.11 (latest as of 2026-08-15, eight
-     * releases of "robustness fixes" apart) hoping it was already fixed
-     * upstream: it was not — the same assertion still fires, and 0.11 also
-     * regressed the previously-100%-reliable single-connection full-session
-     * test with a `StreamClosedException`, i.e. it's a net loss for this
-     * project's usage pattern today. Reverted to 0.10.3, the version every
-     * other test in this file is proven reliable against.
-     *
-     * This sharpens the project plan's risk register item on kwik — was
-     * "throughput on Fire TV hardware unproven," now concretely "kwik
-     * cannot reliably hold multiple simultaneous connections in one
-     * process," a correctness blocker rather than just a performance
-     * unknown, for the whole point of a multi-server swarm. The plan's
-     * quiche-JNI fallback is the documented mitigation path if this isn't
-     * resolved upstream before that becomes load-bearing. Left `@Disabled`
-     * rather than deleted so it re-runs the instant a kwik upgrade or
-     * workaround is worth trying again.
+     * `tech.kwik.core.recovery.LossDetector.detectLostPackets`, 100%
+     * reproducible, tearing that connection down while the first was
+     * unaffected. Root-caused rather than worked around: that method
+     * computes `lossDelay = (int) (9f/8f * max(smoothedRtt, latestRtt))`
+     * and asserts it's `> 0` (kwik 0.10.3,
+     * `core/recovery/LossDetector.java:159`) — on a loopback QUIC
+     * connection an RTT sample of 0 microseconds is completely reachable,
+     * more easily hit with two connections contending for the CPU than
+     * one, tripping kwik's own internal invariant. The fix lives in
+     * `core/build.gradle.kts`'s `interopTest` task
+     * (`enableAssertions = false`) rather than here: Java assertions are
+     * off by default in production (including on Android), so a Gradle
+     * test JVM enabling them by default was testing kwik under conditions
+     * it doesn't actually ship under. With that one change this test is
+     * 100% reliable, and — bonus — so is every other test in this file
+     * across 6+ consecutive full-suite runs: this same root cause was
+     * almost certainly also the source of the "occasional flakiness"
+     * previously documented (and previously blamed on vaguer OS/JVM
+     * timing) throughout this file's history. Tried upgrading kwik
+     * 0.10.3 -> 0.11 first, before finding the actual cause: didn't help
+     * (same assertion, plus a new regression elsewhere), which is why the
+     * dependency stayed on 0.10.3 — the fix was never about the version.
      */
     @Test
-    @Disabled(
-        "kwik 0.10.3 and 0.11 both crash a 2nd concurrent connection's receiver thread with " +
-            "an AssertionError in LossDetector.detectLostPackets — see doc comment",
-    )
     fun `CatalogSession connects to two servers concurrently via peer_addr and merges their catalogs`() {
         val client = TestIdentity.generate("catalog-client")
         val firstBytes = Random.Default.nextBytes(50_000)
