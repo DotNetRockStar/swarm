@@ -53,6 +53,7 @@ import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.CatalogManifest
 import app.swarm.tv.core.peer.CatalogThumbprint
 import app.swarm.tv.core.peer.MediaKind
+import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.SwarmJson
 import java.io.BufferedReader
 import java.io.File
@@ -61,6 +62,8 @@ import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 import kotlin.random.Random
 import kotlinx.serialization.decodeFromString
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -260,5 +263,64 @@ class PeerQuicClientInteropTest {
         }
         assertEquals(wrongFingerprint, error.expected)
         assertEquals(server.fingerprint, error.actual)
+    }
+
+    /**
+     * The complete story minus ExoPlayer itself: a plain HTTP client (OkHttp
+     * standing in for ExoPlayer's own HTTP data source) fetches media
+     * through [app.swarm.tv.core.proxy.PeerLoopbackProxy], which is wired to
+     * a real [PeerQuicClient] connection to the real Rust server. If a
+     * generic HTTP client gets correct status/headers/bytes here — full
+     * body, a mid-file seek Range, and a 404 for an unknown entry — Media3's
+     * `DefaultHttpDataSource` (which speaks nothing more exotic than this)
+     * will too. This is what turns "the transport works" into "a player
+     * could actually use it."
+     */
+    @Test
+    fun `a plain http client streams real media through the proxy over real quic`() {
+        val client = TestIdentity.generate("proxy-client")
+        val movieBytes = Random.Default.nextBytes(300_000)
+        val server = startServer(client.fingerprint, movieBytes)
+        val (host, portStr) = server.addr.split(":")
+        val port = portStr.toInt()
+
+        PeerQuicClient.connect(host, port, client.certificate, client.privateKey, server.fingerprint).use { peer ->
+            PeerLoopbackProxy.start().use { proxy ->
+                proxy.register("srv1", peer)
+                val http = OkHttpClient()
+
+                val manifestBytes = http.newCall(
+                    Request.Builder().url(proxy.urlFor("srv1", "/catalog/manifest")).build(),
+                ).execute().use { response ->
+                    assertEquals(200, response.code)
+                    response.body!!.bytes()
+                }
+                val manifest = SwarmJson.decodeFromString<CatalogManifest>(manifestBytes.decodeToString())
+                val entryKey = manifest.entries.single().entryKey
+
+                // Full body, exactly like ExoPlayer's initial GET.
+                http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/media/$entryKey")).build())
+                    .execute().use { response ->
+                        assertEquals(200, response.code)
+                        assertEquals("300000", response.header("Content-Length"))
+                        assertArrayEquals(movieBytes, response.body!!.bytes())
+                    }
+
+                // Seek, exactly like ExoPlayer re-issuing the request with a Range header.
+                http.newCall(
+                    Request.Builder().url(proxy.urlFor("srv1", "/media/$entryKey")).header("Range", "bytes=250000-").build(),
+                ).execute().use { response ->
+                    assertEquals(206, response.code)
+                    assertEquals("bytes 250000-299999/300000", response.header("Content-Range"))
+                    assertArrayEquals(movieBytes.copyOfRange(250_000, 300_000), response.body!!.bytes())
+                }
+
+                // A real 404 from the real server, proxied through faithfully.
+                http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/media/0000000000000000")).build())
+                    .execute().use { response -> assertEquals(404, response.code) }
+
+                println("[test] proxy end-to-end: manifest, full body, seek Range, and 404 all correct over real QUIC")
+            }
+        }
     }
 }

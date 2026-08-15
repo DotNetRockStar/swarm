@@ -65,7 +65,17 @@ sealed class PeerQuicError(message: String) : IOException(message) {
 /** A response header plus a stream bounded to exactly `header.len` bytes. */
 class PeerResponse(val header: PeerResponseHeader, val body: InputStream)
 
-class PeerQuicClient private constructor(private val connection: QuicClientConnection) : AutoCloseable {
+/**
+ * What [app.swarm.tv.core.proxy.PeerLoopbackProxy] (and anything else that
+ * just wants to issue peer requests) depends on, rather than the concrete
+ * kwik-backed [PeerQuicClient] directly — lets that HTTP-translation layer
+ * be tested against a fake, with no live QUIC connection required.
+ */
+interface PeerConnection {
+    fun request(path: String, range: ByteRange? = null, ifNoneMatch: String? = null): PeerResponse
+}
+
+class PeerQuicClient private constructor(private val connection: QuicClientConnection) : PeerConnection, AutoCloseable {
 
     companion object {
         /**
@@ -120,7 +130,7 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
      * across concurrent requests on the same connection).
      */
     @Throws(IOException::class)
-    fun request(path: String, range: ByteRange? = null, ifNoneMatch: String? = null): PeerResponse {
+    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?): PeerResponse {
         val stream: QuicStream = connection.createStream(true)
         val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch)) + "\n"
         stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }

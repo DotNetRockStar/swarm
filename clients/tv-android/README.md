@@ -37,12 +37,12 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   internally-tagged one. **Every fixture in the test suite was captured by
   actually running `serde_json::to_string` against equivalent Rust values**
   (see the doc comments on `ContractsTest.kt` in both `rest/` and `peer/`) —
-  not hand-guessed JSON — so the 24 passing `:core` tests are a real
-  cross-language compatibility proof, not just internal self-consistency.
-  Also: `StunApiClient` (OkHttp, mirrors `swarm-stun-client::client::StunClient`
+  not hand-guessed JSON — so those `:core` tests are a real cross-language
+  compatibility proof, not just internal self-consistency. Also:
+  `StunApiClient` (OkHttp, mirrors `swarm-stun-client::client::StunClient`
   method-for-method, tested against MockWebServer) and `CatalogMerger` (the
   same-fingerprint-on-two-servers-is-one-entry merge rule from
-  `docs/PROTOCOL.md`, fully unit tested).
+  `docs/PROTOCOL.md`, fully unit tested). 33 tests, all passing.
 - **`:app`** — compiles into a real, installable debug APK. Manifest verified
   via `aapt dump badging`: `LEANBACK_LAUNCHER` present,
   `android.hardware.touchscreen` explicitly not required,
@@ -67,35 +67,52 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   certificate, post-handshake fingerprint pinning (kwik's builder has no
   CA-less pinning callback, so this verifies `getServerCertificateChain()`
   itself and closes on mismatch — see the class doc), and the
-  one-request-per-QUIC-stream framing. **Proven against the real Rust server**,
-  not just compiled: `PeerQuicClientInteropTest` (`./gradlew :core:interopTest`)
-  spawns the actual release `swarm-serverd` binary and drives it from Kotlin
-  over loopback QUIC — a full session (thumbprint, manifest, a byte-exact
-  300 KB direct-play transfer, a seek Range, a suffix Range) passes
-  repeatedly with every byte verified, and a client whose certificate isn't
-  on the server's allow-list is correctly refused. See that test class's doc
-  comment for the one open finding: running the three interop tests back to
-  back is occasionally flaky (`IOException: Connection closed` on one of
-  several connections made in quick succession) even though every isolated
-  run and the full multi-request single-connection session are 100%
-  reliable — undiagnosed, flagged for follow-up before leaning on kwik for a
-  reconnect-heavy path (e.g. Phase 4's hole-punch retry loop), not blocking
-  the "kwik is a viable QUIC stack for this protocol" conclusion.
+  one-request-per-QUIC-stream framing.
+- **`PeerLoopbackProxy`** (`:core/proxy`) — bridges standard HTTP (what
+  Media3/ExoPlayer, or any off-the-shelf client, speaks) to the peer
+  protocol: hands out `http://127.0.0.1:<port>/<serverId>/<peerPath>` URLs,
+  translates each request (`Range`, `If-None-Match` included) into a
+  `PeerConnection.request()` call, and streams the response back with
+  correct status/headers. Programs against a small `PeerConnection`
+  interface (not `PeerQuicClient` directly) so its HTTP-translation logic is
+  unit tested fast, against a fake, with no live QUIC connection required.
+- **Both proven against the real Rust server, not just compiled.**
+  `PeerQuicClientInteropTest` (`./gradlew :core:interopTest`) spawns the
+  actual release `swarm-serverd` binary and drives it from Kotlin over
+  loopback QUIC:
+  - A full `PeerQuicClient` session — thumbprint, manifest, a byte-exact
+    300 KB direct-play transfer, a seek Range, a suffix Range — passes
+    repeatedly with every byte verified, and a client whose certificate
+    isn't on the server's allow-list is correctly refused.
+  - **The complete story minus ExoPlayer itself**: a plain HTTP client
+    (OkHttp, standing in for ExoPlayer's own data source) fetches the
+    manifest, the full file, and a mid-file seek — all through
+    `PeerLoopbackProxy`, wired to a real `PeerQuicClient`, over real QUIC,
+    from the real Rust server — and gets back correct status codes,
+    `Content-Range` headers, and byte-exact bodies. If a generic HTTP
+    client works here, Media3's `DefaultHttpDataSource` (which speaks
+    nothing more exotic than this) will too.
+  - See the test class's doc comment for the one open finding: running
+    several of these tests back to back is occasionally flaky
+    (`IOException: Connection closed` on one connection in the cluster)
+    even though every isolated run and the full multi-request sessions are
+    100% reliable — undiagnosed, flagged for follow-up before leaning on
+    kwik for a reconnect-heavy path (e.g. Phase 4's hole-punch retry loop),
+    not blocking the "kwik is a viable QUIC stack for this protocol"
+    conclusion.
 
 ## Deliberately not built yet
 
-- **The loopback HTTP↔QUIC proxy and ExoPlayer wiring.** `PeerQuicClient`
-  moves bytes correctly; what's missing is the layer that makes a media
-  player able to use it — a local `127.0.0.1` HTTP server translating
-  ExoPlayer's requests (including `Range`) into `PeerQuicClient.request()`
-  calls, per `docs/PROTOCOL.md`'s loopback-proxy note. Mechanical work on top
-  of a now-proven transport, not a research question anymore.
 - **Real hardware throughput.** The project plan's risk register asks for a
   kwik throughput spike *on Fire TV hardware specifically* — no physical
   device or Android emulator is available in this environment, so only the
   loopback-over-localhost interop (above) could be verified here. Loopback
   proves correctness, not throughput/latency under real wifi and a
   constrained TV CPU.
+- **ExoPlayer wiring itself.** The proxy is proven with a generic HTTP
+  client; pointing an actual `MediaItem`/`ExoPlayer` at
+  `proxy.urlFor(serverId, peerPath)` and confirming playback is Android-UI
+  work that needs a device/emulator to see run.
 - Merged multi-server catalog UI, resume/watched state, direct-play/transcode
   negotiation, diagnostics screen (NAT type, punch results, per-server RTT),
   the hole-punch candidate exchange itself (this client dials a known
