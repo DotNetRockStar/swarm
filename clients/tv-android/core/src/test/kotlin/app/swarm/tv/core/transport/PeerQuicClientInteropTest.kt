@@ -49,11 +49,14 @@
  */
 package app.swarm.tv.core.transport
 
+import app.swarm.tv.core.catalog.CatalogSession
 import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.CatalogManifest
 import app.swarm.tv.core.peer.CatalogThumbprint
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
+import app.swarm.tv.core.rest.DeviceType
+import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmJson
 import java.io.BufferedReader
 import java.io.File
@@ -71,12 +74,13 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 
 class PeerQuicClientInteropTest {
-    private var process: Process? = null
-    private lateinit var mediaRoot: File
-    private lateinit var dataDir: File
+    private val processes = mutableListOf<Process>()
+    private val mediaRoots = mutableListOf<File>()
+    private val dataDirs = mutableListOf<File>()
 
     @BeforeEach
     fun setUp() {
@@ -89,9 +93,9 @@ class PeerQuicClientInteropTest {
 
     @AfterEach
     fun tearDown() {
-        process?.destroyForcibly()?.waitFor(5, TimeUnit.SECONDS)
-        if (::mediaRoot.isInitialized) mediaRoot.deleteRecursively()
-        if (::dataDir.isInitialized) dataDir.deleteRecursively()
+        processes.forEach { it.destroyForcibly().waitFor(5, TimeUnit.SECONDS) }
+        mediaRoots.forEach { it.deleteRecursively() }
+        dataDirs.forEach { it.deleteRecursively() }
     }
 
     private fun resolveServerBinary(): File? {
@@ -105,8 +109,10 @@ class PeerQuicClientInteropTest {
     private fun startServer(allowedFingerprint: String, movieBytes: ByteArray): RunningServer {
         val binary = resolveServerBinary()!!
         val tag = Random.nextInt(Int.MAX_VALUE)
-        mediaRoot = File(System.getProperty("java.io.tmpdir"), "swarm-interop-media-$tag")
-        dataDir = File(System.getProperty("java.io.tmpdir"), "swarm-interop-data-$tag")
+        val mediaRoot = File(System.getProperty("java.io.tmpdir"), "swarm-interop-media-$tag")
+        val dataDir = File(System.getProperty("java.io.tmpdir"), "swarm-interop-data-$tag")
+        mediaRoots += mediaRoot
+        dataDirs += dataDir
         File(mediaRoot, "movies/Interop (2026)").mkdirs()
         File(mediaRoot, "movies/Interop (2026)/Interop.2026.mkv").writeBytes(movieBytes)
 
@@ -120,7 +126,7 @@ class PeerQuicClientInteropTest {
             put("RUST_LOG", "info")
         }
         val proc = builder.start()
-        process = proc
+        processes += proc
 
         val reader = BufferedReader(proc.inputStream.reader())
         var addr: String? = null
@@ -320,6 +326,142 @@ class PeerQuicClientInteropTest {
                     .execute().use { response -> assertEquals(404, response.code) }
 
                 println("[test] proxy end-to-end: manifest, full body, seek Range, and 404 all correct over real QUIC")
+            }
+        }
+    }
+
+    /**
+     * The other half of the `peer_addr` story: a client with a swarm
+     * roster entry (as a `SwarmDevice`, exactly the shape the STUN server
+     * hands back) and no prior knowledge of *where* that server lives,
+     * connecting purely from its self-reported `peer_addr` metadata,
+     * fetching its catalog, and streaming from it through the loopback
+     * proxy by roster device id. This is what `peer_addr` unblocks —
+     * without it [CatalogSession] would have no way to dial the server at
+     * all. A second roster entry with no `peer_addr` proves one
+     * unreachable device is skipped, not fatal.
+     */
+    @Test
+    fun `CatalogSession connects to a server via peer_addr and streams through the proxy`() {
+        val client = TestIdentity.generate("catalog-client")
+        val movieBytes = Random.Default.nextBytes(50_000)
+        val server = startServer(client.fingerprint, movieBytes)
+
+        val device = SwarmDevice(
+            deviceId = "srv1",
+            name = "srv1",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = server.fingerprint,
+            online = true,
+            metadata = mapOf("peer_addr" to server.addr),
+        )
+        val unreachableDevice = SwarmDevice(
+            deviceId = "srv-offline",
+            name = "offline",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = false,
+            metadata = emptyMap(), // never self-reported an address
+        )
+
+        PeerLoopbackProxy.start().use { proxy ->
+            CatalogSession(proxy).use { session ->
+                val result = session.refresh(listOf(device, unreachableDevice), client.certificate, client.privateKey)
+
+                assertEquals(listOf("srv-offline"), result.unreachable.map { it.deviceId })
+                assertEquals(1, result.entries.size)
+                val entry = result.entries.single()
+                assertEquals(listOf("srv1"), entry.sources)
+                assertEquals(movieBytes.size.toLong(), entry.entry.size)
+                println("[test] merged catalog: 1 entry from the real server, 1 correctly unreachable")
+
+                val http = OkHttpClient()
+                http.newCall(Request.Builder().url(session.urlFor("srv1", "/media/${entry.entry.entryKey}")).build())
+                    .execute().use { response ->
+                        assertEquals(200, response.code)
+                        assertArrayEquals(movieBytes, response.body!!.bytes())
+                    }
+                println("[test] CatalogSession: connected via peer_addr, streamed through the proxy over real QUIC")
+            }
+        }
+    }
+
+    /**
+     * **Known-broken, tracked here rather than hidden.** The natural next
+     * step — a [CatalogSession] holding *two* concurrent real QUIC
+     * connections at once (exactly what browsing a merged catalog from
+     * more than one swarm server requires) — reliably crashes kwik itself.
+     * The second connection's receiver thread throws
+     * `java.lang.AssertionError` inside
+     * `tech.kwik.core.recovery.LossDetector.detectLostPackets`, which
+     * tears that connection down (`IOException: Connection closed` on the
+     * next read) while the first connection is unaffected. 100%
+     * reproducible in this environment across repeated runs — not the
+     * occasional flakiness documented elsewhere in this file, a
+     * deterministic failure every time.
+     *
+     * Tried upgrading kwik 0.10.3 -> 0.11 (latest as of 2026-08-15, eight
+     * releases of "robustness fixes" apart) hoping it was already fixed
+     * upstream: it was not — the same assertion still fires, and 0.11 also
+     * regressed the previously-100%-reliable single-connection full-session
+     * test with a `StreamClosedException`, i.e. it's a net loss for this
+     * project's usage pattern today. Reverted to 0.10.3, the version every
+     * other test in this file is proven reliable against.
+     *
+     * This sharpens the project plan's risk register item on kwik — was
+     * "throughput on Fire TV hardware unproven," now concretely "kwik
+     * cannot reliably hold multiple simultaneous connections in one
+     * process," a correctness blocker rather than just a performance
+     * unknown, for the whole point of a multi-server swarm. The plan's
+     * quiche-JNI fallback is the documented mitigation path if this isn't
+     * resolved upstream before that becomes load-bearing. Left `@Disabled`
+     * rather than deleted so it re-runs the instant a kwik upgrade or
+     * workaround is worth trying again.
+     */
+    @Test
+    @Disabled(
+        "kwik 0.10.3 and 0.11 both crash a 2nd concurrent connection's receiver thread with " +
+            "an AssertionError in LossDetector.detectLostPackets — see doc comment",
+    )
+    fun `CatalogSession connects to two servers concurrently via peer_addr and merges their catalogs`() {
+        val client = TestIdentity.generate("catalog-client")
+        val firstBytes = Random.Default.nextBytes(50_000)
+        val secondBytes = Random.Default.nextBytes(60_000)
+        val first = startServer(client.fingerprint, firstBytes)
+        val second = startServer(client.fingerprint, secondBytes)
+
+        fun device(id: String, server: RunningServer) = SwarmDevice(
+            deviceId = id,
+            name = id,
+            deviceType = DeviceType.SERVER,
+            certFingerprint = server.fingerprint,
+            online = true,
+            metadata = mapOf("peer_addr" to server.addr),
+        )
+
+        PeerLoopbackProxy.start().use { proxy ->
+            CatalogSession(proxy).use { session ->
+                val result = session.refresh(
+                    listOf(device("srv1", first), device("srv2", second)),
+                    client.certificate,
+                    client.privateKey,
+                )
+
+                assertEquals(emptyList<SwarmDevice>(), result.unreachable)
+                assertEquals(2, result.entries.size)
+                val bySource = result.entries.associateBy { it.sources.single() }
+                assertEquals(firstBytes.size.toLong(), bySource.getValue("srv1").entry.size)
+                assertEquals(secondBytes.size.toLong(), bySource.getValue("srv2").entry.size)
+
+                val http = OkHttpClient()
+                for ((serverId, bytes) in listOf("srv1" to firstBytes, "srv2" to secondBytes)) {
+                    val entryKey = bySource.getValue(serverId).entry.entryKey
+                    http.newCall(Request.Builder().url(session.urlFor(serverId, "/media/$entryKey")).build())
+                        .execute().use { response ->
+                            assertEquals(200, response.code)
+                            assertArrayEquals(bytes, response.body!!.bytes())
+                        }
+                }
             }
         }
     }

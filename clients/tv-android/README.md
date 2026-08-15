@@ -42,7 +42,7 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   `StunApiClient` (OkHttp, mirrors `swarm-stun-client::client::StunClient`
   method-for-method, tested against MockWebServer) and `CatalogMerger` (the
   same-fingerprint-on-two-servers-is-one-entry merge rule from
-  `docs/PROTOCOL.md`, fully unit tested). 33 tests, all passing.
+  `docs/PROTOCOL.md`, fully unit tested). 38 tests, all passing.
 - **`:app`** — compiles into a real, installable debug APK. Manifest verified
   via `aapt dump badging`: `LEANBACK_LAUNCHER` present,
   `android.hardware.touchscreen` explicitly not required,
@@ -100,6 +100,40 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
     kwik for a reconnect-heavy path (e.g. Phase 4's hole-punch retry loop),
     not blocking the "kwik is a viable QUIC stack for this protocol"
     conclusion.
+- **Servers self-report where they are; a client can now dial them from a
+  bare STUN roster.** `SwarmDevice.metadata["peer_addr"]` (the Rust side's
+  `swarm-p2p::local_addr` self-report, wire-identical to
+  `SocketAddr::to_string()`) is parsed by `PeerAddress.parse` (`:core/transport`,
+  handles both `host:port` and bracketed `[host]:port` IPv6, unit tested against
+  malformed input — never throws, returns null so one bad/not-yet-ready
+  roster entry doesn't take down the rest) and fed to `PeerQuicClient.connect`
+  via `connectToServer(device, ...)`. `CatalogSession` (`:core/catalog`) is
+  the piece that actually uses this: given a swarm roster, it connects to
+  every server with a usable `peer_addr`, registers each live connection
+  with a `PeerLoopbackProxy`, fetches and merges their catalogs via
+  `CatalogMerger`, and reports which devices weren't reachable rather than
+  failing the whole refresh. Proven against a real `swarm-serverd`: a
+  roster with one real server (dialed purely from its self-reported
+  address, no hardcoded host:port anywhere in the test) plus one
+  never-registered device merges to the right one-entry catalog and streams
+  the file through the proxy correctly.
+- **Real finding: kwik cannot yet hold two concurrent connections in one
+  process.** The obvious next step from the single-server proof above — a
+  `CatalogSession` connected to *two* real servers at once, exactly what a
+  multi-server swarm needs for merged browsing — reliably crashes kwik: the
+  second connection's receiver thread throws `AssertionError` inside
+  `tech.kwik.core.recovery.LossDetector.detectLostPackets` and the
+  connection is torn down. 100% reproducible (not the occasional flakiness
+  above), on both kwik 0.10.3 and the latest 0.11 (tried upgrading
+  specifically to check whether this was already fixed upstream — it
+  wasn't, and 0.11 also regressed a previously-reliable single-connection
+  test, so stayed on 0.10.3). The test is in
+  `PeerQuicClientInteropTest.kt`, marked `@Disabled` with the full
+  writeup rather than deleted, so it's easy to re-check after a future kwik
+  release. This sharpens the project plan's kwik risk-register entry from
+  "throughput on real hardware unproven" to a concrete correctness blocker
+  for multi-server swarms specifically; the plan's quiche-JNI fallback is
+  the mitigation path if it isn't fixed upstream first.
 
 ## Deliberately not built yet
 
@@ -113,11 +147,25 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   client; pointing an actual `MediaItem`/`ExoPlayer` at
   `proxy.urlFor(serverId, peerPath)` and confirming playback is Android-UI
   work that needs a device/emulator to see run.
-- Merged multi-server catalog UI, resume/watched state, direct-play/transcode
-  negotiation, diagnostics screen (NAT type, punch results, per-server RTT),
-  the hole-punch candidate exchange itself (this client dials a known
-  host:port directly; it doesn't yet gather/exchange candidates over WSS
-  signaling) — all build on the transport above but aren't wired up yet.
+- **Merged multi-server catalog UI.** `CatalogSession` (see above) is the
+  data layer this needs and works for one server; the actual Compose screen
+  (rows, grid, focus handling) isn't built, and multi-server merging is
+  currently gated on the kwik concurrent-connection bug documented above —
+  worth resolving or working around before building UI that assumes it.
+- Resume/watched state, direct-play/transcode negotiation, diagnostics
+  screen (NAT type, punch results, per-server RTT), the hole-punch candidate
+  exchange itself (this client dials a known host:port directly — or now, a
+  self-reported `peer_addr` on the same LAN; it doesn't yet gather/exchange
+  candidates over WSS signaling for the cross-network case) — all build on
+  the transport above but aren't wired up yet.
+- Getting `AndroidDeviceIdentity`'s cert/key into `connectToServer`.
+  `connectToServer`/`CatalogSession` take a plain `X509Certificate` +
+  `PrivateKey`; `AndroidDeviceIdentity` deliberately keeps the private key
+  non-exportable inside `AndroidKeyStore` (see its doc comment). Whether
+  kwik's `clientCertificateKey(PrivateKey)` works correctly with a
+  non-exportable AndroidKeyStore key handle — as opposed to an in-memory one
+  like every test here uses — is unverified; needs a device/emulator either
+  way, so it's untested regardless.
 - Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
   wired into the Gradle build; adding it means also adding the KSP plugin.
 - Visual/on-device verification of the `:app` UI. The debug APK builds and

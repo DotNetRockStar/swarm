@@ -56,15 +56,18 @@ tasks.register<Test>("interopTest") {
     filter {
         includeTestsMatching("*InteropTest")
     }
-    // Each test method gets a fresh JVM. Empirically, this suite is 100%
-    // reliable with one test per JVM but flaky when several run back to
-    // back in one JVM — a real, unresolved finding (not papered over): some
-    // kwik-side native/background resource from one connect/disconnect
-    // cycle appears to interfere with the next fresh QuicClientConnection
-    // in the same process. Real usage holds one long-lived connection, not
-    // rapid reconnect cycles, so this doesn't block the interop conclusion
-    // (see PeerQuicClientInteropTest's class doc), but it's worth deeper
-    // investigation before leaning on kwik for a reconnect-heavy path.
+    // Each test method gets a fresh JVM (forkEvery = 1) — this cuts down
+    // cross-test flakiness substantially but does not eliminate it: even a
+    // single test run in complete JVM isolation occasionally hits
+    // `IOException: Connection closed` (a real, unresolved finding, not
+    // papered over — see PeerQuicClientInteropTest's class doc). Since a
+    // fresh JVM rules out same-process resource reuse as the sole cause,
+    // this points more toward OS-level timing/socket-reuse sensitivity in
+    // kwik's real-clock loss-detection/ACK logic on a loaded dev machine
+    // than a same-JVM leak specifically. Real usage holds one long-lived
+    // connection, not rapid reconnect cycles, so this doesn't block the
+    // interop conclusion, but it's worth deeper investigation before
+    // leaning on kwik for a reconnect-heavy path.
     forkEvery = 1
     maxParallelForks = 1
 }
