@@ -30,7 +30,7 @@ use utoipa::{Modify, OpenApi};
         swarm_core::rest::DeviceRegistration, swarm_core::rest::RegisterDeviceResponse,
         swarm_core::rest::JoinSwarmRequest, swarm_core::rest::SwarmSummary,
         swarm_core::rest::SwarmDevice, swarm_core::rest::SwarmDevicesResponse,
-        swarm_core::rest::ApiError,
+        swarm_core::rest::MetadataPatchRequest, swarm_core::rest::ApiError,
     )),
     modifiers(&SecuritySchemes),
     tags(

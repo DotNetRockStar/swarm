@@ -3,9 +3,10 @@
 //! (WSS signaling is a separate concern, landing with the hole-punch work in
 //! a later phase — this crate covers the REST half of Phase 1's contract.)
 
+use std::collections::BTreeMap;
 use swarm_core::rest::{
-    ApiError, DeviceRegistration, JoinSwarmRequest, RegisterDeviceRequest, RegisterDeviceResponse,
-    SwarmDevicesResponse, SwarmSummary,
+    ApiError, DeviceRegistration, JoinSwarmRequest, MetadataPatchRequest, RegisterDeviceRequest,
+    RegisterDeviceResponse, SwarmDevicesResponse, SwarmSummary,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +67,24 @@ impl StunClient {
         self.get_json(&format!("/api/v1/swarms/{swarm_id}/devices"), Some(access_token)).await
     }
 
+    /// Update the device's own arbitrary key/value metadata — a server uses
+    /// this to self-report the address peers should dial (key
+    /// `peer_addr`, value `host:port`), since the STUN roster otherwise
+    /// only says a server exists, never where it is. Keys set to an empty
+    /// string are removed server-side.
+    pub async fn patch_metadata(
+        &self,
+        access_token: &str,
+        device_id: &str,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<(), StunClientError> {
+        let request = MetadataPatchRequest { metadata };
+        let _: serde_json::Value = self
+            .patch_json(&format!("/api/v1/devices/{device_id}/metadata"), &request, Some(access_token))
+            .await?;
+        Ok(())
+    }
+
     async fn post_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -73,6 +92,20 @@ impl StunClient {
         bearer: Option<&str>,
     ) -> Result<Resp, StunClientError> {
         let mut request = self.http.post(format!("{}{path}", self.base_url)).json(body);
+        if let Some(token) = bearer {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        Self::parse_response(response).await
+    }
+
+    async fn patch_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Req,
+        bearer: Option<&str>,
+    ) -> Result<Resp, StunClientError> {
+        let mut request = self.http.patch(format!("{}{path}", self.base_url)).json(body);
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }

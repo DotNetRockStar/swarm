@@ -190,6 +190,12 @@ impl ServerCore {
         device_name: &str,
     ) -> Result<SwarmSummary, ServerError> {
         let machine_id = swarm_stun_client::machine_id::ensure_machine_id(&self.data_dir)?;
+        // Submitted immediately so a client checking the roster right after
+        // this server joins doesn't have to wait for the first periodic
+        // sync tick to learn where to dial it — see sync_roster for the
+        // ongoing refresh.
+        let mut metadata = BTreeMap::new();
+        metadata.insert("peer_addr".to_string(), swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string());
         let registration = DeviceRegistration {
             name: device_name.to_string(),
             device_type: DeviceType::Server,
@@ -197,7 +203,7 @@ impl ServerCore {
             cert_fingerprint: self.identity.fingerprint.clone(),
             platform: std::env::consts::OS.to_string(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
-            metadata: BTreeMap::new(),
+            metadata,
         };
         let base_url = base_url.trim_end_matches('/').to_string();
         let client = StunClient::new(base_url.clone());
@@ -294,6 +300,19 @@ impl ServerCore {
     async fn sync_roster(&self) -> Result<usize, ServerError> {
         let guard = self.stun.lock().await;
         let Some(ctx) = guard.as_ref() else { return Ok(0) };
+
+        // Best-effort: keep the connectable address peers see on the STUN
+        // roster fresh (DHCP renewal, wifi reconnect, ...). Never blocks or
+        // fails the allowed-peer sync below — a stale address just means a
+        // client's next connect attempt uses last-known-good info, same
+        // spirit as the peer route memory the Kotlin/Rust P2P clients keep.
+        let mut self_metadata = BTreeMap::new();
+        self_metadata
+            .insert("peer_addr".to_string(), swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string());
+        if let Err(err) = ctx.client.patch_metadata(&ctx.access_token, &ctx.link.device_id, self_metadata).await {
+            tracing::debug!(%err, "failed to self-report peer address this cycle");
+        }
+
         let mut fingerprints: HashSet<String> = self.static_fingerprints.iter().cloned().collect();
         for swarm in &ctx.link.swarms {
             match ctx.client.swarm_devices(&ctx.access_token, &swarm.id).await {

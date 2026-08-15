@@ -16,11 +16,12 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use swarm_core::rest::{
-    DeviceRegistration, JoinSwarmRequest, RegisterDeviceRequest, RegisterDeviceResponse, SwarmSummary,
+    DeviceRegistration, JoinSwarmRequest, MetadataPatchRequest, RegisterDeviceRequest, RegisterDeviceResponse,
+    SwarmSummary,
 };
 use utoipa::ToSchema;
 
@@ -38,13 +39,6 @@ pub struct MyDevice {
 #[derive(Serialize, ToSchema)]
 pub struct MyDevicesResponse {
     pub devices: Vec<MyDevice>,
-}
-
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataPatchRequest {
-    /// Keys set to an empty string are removed; others upserted.
-    pub metadata: BTreeMap<String, String>,
 }
 
 fn validate_registration(device: &DeviceRegistration) -> Result<(), AppError> {

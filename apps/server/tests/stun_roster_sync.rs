@@ -265,3 +265,49 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
     second_run.resync().await.unwrap();
     assert!(second_run.allowed.contains(&peer.identity.fingerprint));
 }
+
+/// A server self-reports where it can be dialed (`peer_addr` metadata) —
+/// otherwise a client's swarm roster tells it *that* a server exists but
+/// never *where*, which is the whole point of the roster for a client
+/// trying to connect. Covers both the immediate value submitted at
+/// registration and the ongoing refresh on resync.
+#[tokio::test]
+async fn server_self_reports_a_dialable_peer_addr() {
+    let stun_base = spawn_stun_server().await;
+    let browser = Browser::login_fresh_account(&stun_base, "peer-addr@example.com").await;
+    let swarm_id = browser.create_swarm("Home").await;
+
+    let server = spawn_media_server("addr-report").await;
+    let code = browser.create_code(&swarm_id).await;
+    server.register_with_stun(&stun_base, &code, "Server").await.unwrap();
+
+    let roster: swarm_core::rest::SwarmDevicesResponse = browser
+        .request(reqwest::Method::GET, &format!("/api/v1/swarms/{swarm_id}/devices"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device = roster.devices.iter().find(|d| d.cert_fingerprint == server.identity.fingerprint).unwrap();
+    let reported: std::net::SocketAddr = device.metadata.get("peer_addr").expect("peer_addr metadata missing").parse().unwrap();
+    assert_eq!(reported.port(), server.listen_addr.port());
+
+    // Ongoing refresh: resync must re-submit (not just the one-time value
+    // from registration) — prove the mechanism actually runs on that path.
+    server.resync().await.unwrap();
+    let roster_after: swarm_core::rest::SwarmDevicesResponse = browser
+        .request(reqwest::Method::GET, &format!("/api/v1/swarms/{swarm_id}/devices"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device_after = roster_after.devices.iter().find(|d| d.cert_fingerprint == server.identity.fingerprint).unwrap();
+    assert_eq!(device_after.metadata.get("peer_addr"), Some(&reported.to_string()));
+}

@@ -99,6 +99,17 @@ pub struct SwarmDevicesResponse {
     pub devices: Vec<SwarmDevice>,
 }
 
+/// `PATCH /api/v1/devices/{device_id}/metadata` — a device updating its own
+/// arbitrary key/value metadata (e.g. a server self-reporting the address
+/// peers should dial: `{"peer_addr": "192.168.1.50:8543"}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MetadataPatchRequest {
+    /// Keys set to an empty string are removed; others upserted.
+    pub metadata: BTreeMap<String, String>,
+}
+
 /// Uniform error body for every non-2xx REST response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -8,13 +8,18 @@
 //!   side. No CA, no hostname.
 //! - [`endpoint`] — quinn QUIC endpoints wired to those verifiers + the
 //!   one-request-per-bidi-stream peer framing from `swarm-core::peer`.
+//! - [`local_addr`] — LAN-facing address self-detection (zero-packet UDP
+//!   route-table probe), for a server to self-report where it can be dialed.
 //!
 //! Planned (Phase 4): reflector client, hole punching, candidate ordering
-//! with persisted route promotion, UPnP/NAT-PMP, loopback HTTP<->QUIC proxy
-//! (see the recovered references in `docs/reference/`).
+//! with persisted route promotion, UPnP/NAT-PMP (the loopback HTTP<->QUIC
+//! proxy landed on the Kotlin client's `:core/proxy` — see the recovered
+//! references in `docs/reference/` for the hole-punch protocol this crate
+//! still needs).
 
 pub mod endpoint;
 pub mod identity;
+pub mod local_addr;
 pub mod pin;
 
 pub use swarm_core as core;
