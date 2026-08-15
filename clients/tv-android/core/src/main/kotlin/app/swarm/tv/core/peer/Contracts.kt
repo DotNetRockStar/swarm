@@ -1,0 +1,157 @@
+/**
+ * Device <-> device contracts carried over hole-punched QUIC. Hand-mirrored
+ * from `swarm-core::peer` (Rust) — see that module's docs for the wire
+ * shape (one request per QUIC bidi stream: a JSON header line, then raw
+ * body bytes). The actual QUIC transport is not implemented on this side
+ * yet (see `docs/reference` notes on the kwik integration); these types
+ * exist now so the catalog-merge logic in [app.swarm.tv.core.catalog] has
+ * something real to operate on and is ready the moment the transport lands.
+ */
+package app.swarm.tv.core.peer
+
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.putJsonObject
+
+@Serializable
+enum class MediaKind {
+    @SerialName("movie") MOVIE,
+    @SerialName("episode") EPISODE,
+    @SerialName("track") TRACK,
+}
+
+@Serializable
+data class VideoStreamInfo(
+    val codec: String,
+    val width: Int,
+    val height: Int,
+    val level: String? = null,
+    val bitrate: Long? = null,
+)
+
+@Serializable
+data class AudioStreamInfo(
+    val codec: String,
+    val channels: Int,
+    val bitrate: Long? = null,
+)
+
+/** One asset as advertised by a server. Merge key across servers is [fingerprint]. */
+@Serializable
+data class CatalogEntry(
+    val entryKey: String,
+    val fingerprint: String,
+    val kind: MediaKind,
+    val title: String,
+    val size: Long,
+    val durationSecs: Double? = null,
+    val showTitle: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val trackNumber: Int? = null,
+    val scrapedTitle: String? = null,
+    val genres: List<String> = emptyList(),
+    val video: VideoStreamInfo? = null,
+    val audio: AudioStreamInfo? = null,
+    val artworkEtag: String? = null,
+)
+
+@Serializable
+data class CatalogThumbprint(
+    val thumbprint: String,
+    val entryCount: Long,
+)
+
+@Serializable
+data class CatalogManifest(
+    val thumbprint: String,
+    val entries: List<CatalogEntry>,
+    val removed: List<String> = emptyList(),
+)
+
+/**
+ * HTTP-style byte range. Serde's default representation for a Rust enum
+ * with struct variants and no explicit `#[serde(tag = ...)]` is
+ * *externally* tagged — `{"from_to": {"start": N, "end": M|null}}` or
+ * `{"suffix": {"last": N}}` — not kotlinx.serialization's default
+ * internally-tagged `{"type": "from_to", ...}` shape, so this needs a
+ * hand-written [ByteRangeSerializer] rather than the usual sealed-class
+ * polymorphism.
+ */
+@Serializable(with = ByteRangeSerializer::class)
+sealed class ByteRange {
+    data class FromTo(val start: Long, val end: Long? = null) : ByteRange()
+    data class Suffix(val last: Long) : ByteRange()
+}
+
+object ByteRangeSerializer : KSerializer<ByteRange> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor("ByteRange")
+
+    override fun serialize(encoder: Encoder, value: ByteRange) {
+        check(encoder is JsonEncoder) { "ByteRange only supports JSON encoding" }
+        val json = when (value) {
+            is ByteRange.FromTo -> buildJsonObject {
+                putJsonObject("from_to") {
+                    put("start", JsonPrimitive(value.start))
+                    put("end", value.end?.let { JsonPrimitive(it) } ?: JsonNull)
+                }
+            }
+            is ByteRange.Suffix -> buildJsonObject {
+                putJsonObject("suffix") { put("last", JsonPrimitive(value.last)) }
+            }
+        }
+        encoder.encodeJsonElement(json)
+    }
+
+    override fun deserialize(decoder: Decoder): ByteRange {
+        check(decoder is JsonDecoder) { "ByteRange only supports JSON decoding" }
+        val obj = decoder.decodeJsonElement().jsonObject
+        obj["from_to"]?.let { fromTo ->
+            val inner = fromTo.jsonObject
+            return ByteRange.FromTo(inner.getValue("start").jsonPrimitive.long, inner["end"]?.jsonPrimitive?.longOrNull)
+        }
+        obj["suffix"]?.let { suffix ->
+            return ByteRange.Suffix(suffix.jsonObject.getValue("last").jsonPrimitive.long)
+        }
+        error("unknown ByteRange variant in $obj")
+    }
+}
+
+@Serializable
+data class PeerRequest(
+    val path: String,
+    val range: ByteRange? = null,
+    val ifNoneMatch: String? = null,
+)
+
+@Serializable
+data class ContentRange(
+    val start: Long,
+    val end: Long,
+    val total: Long,
+)
+
+@Serializable
+data class PeerResponseHeader(
+    val status: Int,
+    val len: Long,
+    val contentType: String? = null,
+    val contentRange: ContentRange? = null,
+    val etag: String? = null,
+)

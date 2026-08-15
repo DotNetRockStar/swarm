@@ -1,0 +1,10 @@
+<resources>
+    <!-- Compose owns all real theming (see ui/theme); this XML theme only
+         needs to set a dark, no-action-bar window background so there's no
+         flash-of-wrong-theme before the first Compose frame draws. -->
+    <style name="Theme.SwarmTv" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/swarm_bg</item>
+        <item name="android:navigationBarColor">@color/swarm_bg</item>
+        <item name="android:statusBarColor">@color/swarm_bg</item>
+    </style>
+</resources>

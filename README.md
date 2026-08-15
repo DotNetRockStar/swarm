@@ -27,8 +27,8 @@ crates/swarm-p2p/          QUIC + pinning, identity certs, reflector client, hol
 crates/swarm-media/        library scan/store/delta-sync, tags, ffprobe, scrapers, HLS transcode
 crates/swarm-stun-client/  device-side STUN registration + WSS session
 apps/stun-server/          the hosted rendezvous service
-apps/server/               Tauri desktop media server (Phase 2)
-clients/tv-android/        Fire TV client (Phase 3)
+apps/server/               Tauri desktop media server
+clients/tv-android/        Fire TV client — Gradle multi-module (:core, :app); see its own README
 openapi/                   generated OpenAPI + generated Kotlin client (CI gate)
 deploy/                    docker-compose + Caddy for the STUN server
 tests/integration/         docker-composed multi-node + simulated-NAT harness
@@ -49,6 +49,15 @@ The fingerprint tests pin byte-for-byte compatibility with the original Python `
 
 Server app env vars (headless daemon; the GUI persists the same settings to `<app data dir>/settings.json` instead): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
 
+TV client (`clients/tv-android`, Gradle — see its own README for the full build/test story and what's deliberately not built yet):
+
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+cd clients/tv-android
+./gradlew :core:test          # wire contracts + STUN client + catalog merger — JDK only
+./gradlew :app:assembleDebug  # full APK; needs local.properties -> an Android SDK
+```
+
 ## Roadmap
 
-Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission.
+Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission. Phase 3 (TV client) has registration, encrypted token storage, and the swarm dashboard working end-to-end against a real STUN server; the peer QUIC transport (and everything downstream of it — merged catalog, playback) is next, gated on a kwik throughput spike per the risk register.

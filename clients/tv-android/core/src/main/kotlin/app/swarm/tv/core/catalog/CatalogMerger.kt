@@ -1,0 +1,54 @@
+/**
+ * Merges the catalog manifests of every server in a swarm into one list:
+ * the same [app.swarm.tv.core.peer.CatalogEntry.fingerprint] on two servers
+ * collapses into a single [MergedEntry] with multiple sources, per
+ * `docs/PROTOCOL.md`'s catalog-identity section. STUN never sees any of
+ * this — manifests are fetched peer-to-peer, so merging happens entirely
+ * client-side.
+ */
+package app.swarm.tv.core.catalog
+
+import app.swarm.tv.core.peer.CatalogEntry
+import app.swarm.tv.core.peer.CatalogManifest
+
+data class MergedEntry(
+    val fingerprint: String,
+    /** Server ids holding this fingerprint, sorted for determinism. */
+    val sources: List<String>,
+    /** The richest [CatalogEntry] seen for this fingerprint — see [isRicher]. */
+    val entry: CatalogEntry,
+)
+
+object CatalogMerger {
+    /** `serverId -> that server's current manifest`. */
+    fun merge(manifestsByServer: Map<String, CatalogManifest>): List<MergedEntry> {
+        val sourcesByFingerprint = linkedMapOf<String, MutableList<String>>()
+        val bestEntryByFingerprint = linkedMapOf<String, CatalogEntry>()
+
+        for (serverId in manifestsByServer.keys.sorted()) {
+            val manifest = manifestsByServer.getValue(serverId)
+            for (entry in manifest.entries) {
+                sourcesByFingerprint.getOrPut(entry.fingerprint) { mutableListOf() }.add(serverId)
+                val existing = bestEntryByFingerprint[entry.fingerprint]
+                if (existing == null || isRicher(entry, existing)) {
+                    bestEntryByFingerprint[entry.fingerprint] = entry
+                }
+            }
+        }
+
+        return bestEntryByFingerprint.entries
+            .map { (fingerprint, entry) -> MergedEntry(fingerprint, sourcesByFingerprint.getValue(fingerprint).toList(), entry) }
+            .sortedBy { it.entry.title.lowercase() }
+    }
+
+    /**
+     * A scraped title or downloaded artwork makes one server's copy of an
+     * entry more useful to display than another's — deterministic tie-break
+     * (sorted server-id iteration above) when neither has an edge, so the
+     * merge is reproducible given the same inputs regardless of map order.
+     */
+    private fun isRicher(candidate: CatalogEntry, existing: CatalogEntry): Boolean {
+        fun score(e: CatalogEntry) = (if (e.scrapedTitle != null) 1 else 0) + (if (e.artworkEtag != null) 1 else 0)
+        return score(candidate) > score(existing)
+    }
+}

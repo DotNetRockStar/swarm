@@ -8,5 +8,6 @@ Cargo.lock.orig
 apps/server/gen/
 node_modules/
 clients/tv-android/.gradle/
-clients/tv-android/build/
+clients/tv-android/**/build/
 clients/tv-android/local.properties
+clients/tv-android/*/gen/
