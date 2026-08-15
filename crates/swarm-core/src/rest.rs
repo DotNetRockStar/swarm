@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {
     /// Only requests streams from servers.
@@ -23,6 +24,7 @@ pub enum DeviceType {
 /// code. The cert fingerprint submitted here is the TOFU trust anchor for all
 /// later peer connections.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegisterDeviceRequest {
     /// 8-digit join code generated in the STUN web UI, scoped to one swarm.
@@ -31,6 +33,7 @@ pub struct RegisterDeviceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeviceRegistration {
     pub name: String,
@@ -49,6 +52,7 @@ pub struct DeviceRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterDeviceResponse {
     /// Opaque bearer token; store encrypted at rest on-device.
     pub access_token: String,
@@ -59,12 +63,14 @@ pub struct RegisterDeviceResponse {
 /// `POST /api/v1/swarms/join` — add an already-registered device (Bearer auth)
 /// to another swarm with a fresh join code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct JoinSwarmRequest {
     pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SwarmSummary {
     pub id: String,
     pub name: String,
@@ -73,6 +79,7 @@ pub struct SwarmSummary {
 /// One row of `GET /api/v1/swarms/{id}/devices` — everything a peer needs to
 /// decide whether and how to connect. `cert_fingerprint` is the pin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SwarmDevice {
     pub device_id: String,
     pub name: String,
@@ -86,6 +93,7 @@ pub struct SwarmDevice {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SwarmDevicesResponse {
     pub swarm: SwarmSummary,
     pub devices: Vec<SwarmDevice>,
@@ -93,6 +101,7 @@ pub struct SwarmDevicesResponse {
 
 /// Uniform error body for every non-2xx REST response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiError {
     pub code: String,
     pub message: String,

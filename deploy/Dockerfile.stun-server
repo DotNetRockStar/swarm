@@ -1,0 +1,18 @@
+# Multi-stage build for the SWARM STUN server (linux/arm64 for Oracle Ampere,
+# but arch-agnostic — buildx picks the platform).
+FROM rust:1-slim AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY apps/stun-server ./apps/stun-server
+RUN cargo build --release -p stun-server
+
+FROM debian:bookworm-slim
+RUN useradd --system --home /data swarm && mkdir -p /data && chown swarm /data
+COPY --from=build /src/target/release/swarm-stun-server /usr/local/bin/
+COPY apps/stun-server/static /opt/swarm/static
+USER swarm
+WORKDIR /data
+ENV SWARM_STATIC_DIR=/opt/swarm/static
+EXPOSE 8080 9443/udp 3478/udp
+ENTRYPOINT ["swarm-stun-server"]

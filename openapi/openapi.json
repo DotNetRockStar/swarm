@@ -1,0 +1,1023 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SWARM STUN API",
+    "description": "Rendezvous service for the SWARM P2P media suite: accounts, swarms, join codes, device registry, and WSS signaling (see /api/v1/ws — not representable in OpenAPI).",
+    "license": {
+      "name": "GPL-3.0-or-later",
+      "identifier": "GPL-3.0-or-later"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/request-reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "request_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "reset_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "session",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "verify_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/register": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterDeviceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}": {
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "revoke",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}/metadata": {
+      "patch": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "patch_metadata",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MetadataPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "my_devices",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MyDevicesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/swarms": {
+      "get": {
+        "tags": [
+          "swarms"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "swarms"
+        ],
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSwarmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/swarms/join": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "join_swarm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinSwarmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmSummary"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/swarms/{swarm_id}": {
+      "delete": {
+        "tags": [
+          "swarms"
+        ],
+        "operationId": "delete",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/swarms/{swarm_id}/codes": {
+      "post": {
+        "tags": [
+          "swarms"
+        ],
+        "operationId": "create_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinCodeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/swarms/{swarm_id}/devices": {
+      "get": {
+        "tags": [
+          "swarms"
+        ],
+        "operationId": "devices",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmDevicesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Uniform error body for every non-2xx REST response.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateCodeRequest": {
+        "type": "object",
+        "properties": {
+          "device_type_hint": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeviceType",
+                "description": "Optional expected device type, shown in the UI; not enforced at\nredemption (the device declares its real type)."
+              }
+            ],
+            "default": null
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateSwarmRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeviceRegistration": {
+        "type": "object",
+        "required": [
+          "name",
+          "device_type",
+          "machine_id",
+          "cert_fingerprint",
+          "platform",
+          "app_version"
+        ],
+        "properties": {
+          "app_version": {
+            "type": "string"
+          },
+          "cert_fingerprint": {
+            "type": "string",
+            "description": "Lowercase hex SHA-256 of the device's self-signed certificate (DER)."
+          },
+          "device_type": {
+            "$ref": "#/components/schemas/DeviceType"
+          },
+          "machine_id": {
+            "type": "string",
+            "description": "Stable machine identity (persisted NIC-MAC-derived id), so\nre-registration updates the existing device row instead of duplicating."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Arbitrary user-visible key/value metadata (hostname, cpu, disk, ...).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string",
+            "description": "e.g. \"macos-aarch64\", \"firetv-api25\"."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeviceType": {
+        "type": "string",
+        "enum": [
+          "client",
+          "server",
+          "both"
+        ]
+      },
+      "JoinCodeResponse": {
+        "type": "object",
+        "required": [
+          "code",
+          "expires_at"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Shown exactly once; only a hash is stored."
+          },
+          "expires_at": {
+            "type": "string"
+          }
+        }
+      },
+      "JoinSwarmRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/swarms/join` — add an already-registered device (Bearer auth)\nto another swarm with a fresh join code.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MetadataPatchRequest": {
+        "type": "object",
+        "required": [
+          "metadata"
+        ],
+        "properties": {
+          "metadata": {
+            "type": "object",
+            "description": "Keys set to an empty string are removed; others upserted.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "MyDevice": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "name",
+          "device_type",
+          "platform",
+          "online",
+          "swarms"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "device_type": {
+            "$ref": "#/components/schemas/DeviceType"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "swarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwarmSummary"
+            }
+          }
+        }
+      },
+      "MyDevicesResponse": {
+        "type": "object",
+        "required": [
+          "devices"
+        ],
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MyDevice"
+            }
+          }
+        }
+      },
+      "PasswordChangeRequest": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterDeviceRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/devices/register` — redeem a single-use, swarm-scoped join\ncode. The cert fingerprint submitted here is the TOFU trust anchor for all\nlater peer connections.",
+        "required": [
+          "code",
+          "device"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "8-digit join code generated in the STUN web UI, scoped to one swarm."
+          },
+          "device": {
+            "$ref": "#/components/schemas/DeviceRegistration"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterDeviceResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "device_id",
+          "swarm"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "Opaque bearer token; store encrypted at rest on-device."
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "swarm": {
+            "$ref": "#/components/schemas/SwarmSummary"
+          }
+        }
+      },
+      "RegisterUserRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RequestResetRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "required": [
+          "token",
+          "new_password"
+        ],
+        "properties": {
+          "new_password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": [
+          "authenticated"
+        ],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "SwarmDevice": {
+        "type": "object",
+        "description": "One row of `GET /api/v1/swarms/{id}/devices` — everything a peer needs to\ndecide whether and how to connect. `cert_fingerprint` is the pin.",
+        "required": [
+          "device_id",
+          "name",
+          "device_type",
+          "cert_fingerprint",
+          "online"
+        ],
+        "properties": {
+          "cert_fingerprint": {
+            "type": "string"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_type": {
+            "$ref": "#/components/schemas/DeviceType"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339; None until first seen."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SwarmDevicesResponse": {
+        "type": "object",
+        "required": [
+          "swarm",
+          "devices"
+        ],
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwarmDevice"
+            }
+          },
+          "swarm": {
+            "$ref": "#/components/schemas/SwarmSummary"
+          }
+        }
+      },
+      "SwarmListEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "device_count"
+        ],
+        "properties": {
+          "device_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SwarmListResponse": {
+        "type": "object",
+        "required": [
+          "swarms"
+        ],
+        "properties": {
+          "swarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwarmListEntry"
+            }
+          }
+        }
+      },
+      "SwarmSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "VerifyEmailRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "swarm_session"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Account registration and sessions (browser, cookie auth)"
+    },
+    {
+      "name": "swarms",
+      "description": "Swarm management and rosters"
+    },
+    {
+      "name": "devices",
+      "description": "Device registration and management"
+    }
+  ]
+}

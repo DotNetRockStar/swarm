@@ -10,6 +10,25 @@ name = "swarm-stun-server"
 path = "src/main.rs"
 
 [dependencies]
-swarm-core = { workspace = true }
+swarm-core = { workspace = true, features = ["openapi"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+utoipa = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros"] }
+argon2 = "0.5"
+rand = "0.8"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
