@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SWARM Server</title>
+<style>
+:root {
+  --bg: #101828; --surface: #151f32; --surface-muted: #1f2a44; --border: #31405f;
+  --accent: #00c2ff; --green: #34d399; --text: #ecf6ff; --muted: #9fb0c9;
+}
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
+  font-family: "Nunito", system-ui, sans-serif;
+  background-image:
+    linear-gradient(rgba(0,194,255,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,194,255,.04) 1px, transparent 1px);
+  background-size: 42px 42px;
+}
+header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.brand-mark {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--accent), #05386b);
+  box-shadow: 0 0 12px rgba(0,194,255,.7);
+}
+h1 { font-size: 1.3rem; letter-spacing: .12em; font-weight: 800; }
+.tag { font-size: .7rem; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+.card h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.stat { background: var(--surface-muted); border-radius: 10px; padding: 12px 14px; }
+.stat .label { font-size: .72rem; color: var(--muted); }
+.stat .value { font-size: 1.05rem; font-weight: 700; word-break: break-all; }
+.stat .value.mono { font-family: ui-monospace, monospace; font-size: .8rem; }
+button {
+  background: var(--accent); color: #04263a; border: 0; border-radius: 8px;
+  padding: 8px 16px; font-weight: 700; font-family: inherit; cursor: pointer;
+}
+button:hover { filter: brightness(1.15); }
+table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+th { text-align: left; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 6px 8px; }
+td { padding: 6px 8px; border-top: 1px solid var(--border); }
+td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--muted); }
+.error { color: #ff8db4; }
+#scanNote { color: var(--green); font-size: .8rem; margin-left: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand-mark"></div>
+  <h1>SWARM</h1>
+  <span class="tag">SERVER</span>
+</header>
+
+<div class="card">
+  <h2>Status</h2>
+  <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+</div>
+
+<div class="card">
+  <h2>Library <button id="rescanBtn" style="float:right">Rescan</button><span id="scanNote"></span></h2>
+  <div id="library">Loading…</div>
+</div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function stat(label, value, mono) {
+  return `<div class="stat"><div class="label">${esc(label)}</div><div class="value${mono ? " mono" : ""}">${esc(value)}</div></div>`;
+}
+
+async function refresh() {
+  try {
+    const status = await invoke("get_status");
+    document.getElementById("statusGrid").innerHTML =
+      stat("Entries", status.entry_count) +
+      stat("Listening (QUIC)", status.listen_addr) +
+      stat("Media root", status.media_root) +
+      stat("Device fingerprint", status.fingerprint, true) +
+      stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);
+    const entries = await invoke("list_entries");
+    if (!entries.length) {
+      document.getElementById("library").innerHTML = `<span style="color:var(--muted)">No media found under the media root.</span>`;
+      return;
+    }
+    document.getElementById("library").innerHTML = `<table>
+      <thead><tr><th>Title</th><th>Kind</th><th>Path</th><th>Size</th></tr></thead>
+      <tbody>` + entries.map(e => `<tr>
+        <td>${esc(e.title)}</td><td>${esc(e.kind)}</td>
+        <td class="mono">${esc(e.relative_path)}</td>
+        <td>${(e.size / 1048576).toFixed(1)} MB</td>
+      </tr>`).join("") + `</tbody></table>`;
+  } catch (err) {
+    document.getElementById("statusGrid").innerHTML = `<div class="stat"><div class="label error">Error</div><div class="value">${esc(err)}</div></div>`;
+    document.getElementById("library").textContent = "";
+  }
+}
+
+document.getElementById("rescanBtn").addEventListener("click", async () => {
+  try {
+    const r = await invoke("rescan");
+    document.getElementById("scanNote").textContent =
+      `+${r.added} added, ${r.updated} updated, ${r.removed} removed`;
+    await refresh();
+  } catch (err) {
+    document.getElementById("scanNote").textContent = String(err);
+  }
+});
+
+refresh();
+</script>
+</body>
+</html>

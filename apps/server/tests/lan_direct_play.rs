@@ -44,7 +44,7 @@ async fn spawn_test_server(tag: &str, allowed: &[&DeviceIdentity]) -> TestServer
     allowed_set.replace(allowed.iter().map(|id| id.fingerprint.clone()));
     let endpoint = listen("127.0.0.1:0".parse().unwrap(), &identity, allowed_set).unwrap();
     let addr = endpoint.local_addr().unwrap();
-    let service = Arc::new(MediaService::new(library, media_root));
+    let service = Arc::new(MediaService::new(Arc::new(library), media_root));
     tokio::spawn(accept_loop(endpoint, service));
     TestServer { addr, identity, movie_bytes }
 }

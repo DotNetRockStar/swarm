@@ -18,7 +18,7 @@ use swarm_p2p::endpoint::{read_request, write_response_header, P2pError};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub struct MediaService {
-    library: Library,
+    library: Arc<Library>,
     media_root: PathBuf,
 }
 
@@ -55,7 +55,7 @@ fn json_response(status: u16, value: &impl serde::Serialize) -> Resolved {
 }
 
 impl MediaService {
-    pub fn new(library: Library, media_root: PathBuf) -> Self {
+    pub fn new(library: Arc<Library>, media_root: PathBuf) -> Self {
         Self { library, media_root }
     }
 

@@ -1,13 +1,23 @@
 [package]
 name = "swarm-server"
-description = "SWARM media server: library engine + peer QUIC serving. Headless daemon today; the Tauri desktop shell wraps this core."
+description = "SWARM media server: library engine + peer QUIC serving. Headless daemon (swarm-serverd) plus the Tauri desktop shell (swarm-server-app)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "swarm-serverd"
 
 [[bin]]
 name = "swarm-serverd"
 path = "src/main.rs"
+
+[[bin]]
+name = "swarm-server-app"
+path = "src/gui.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+gui = ["dep:tauri", "dep:tauri-build"]
 
 [dependencies]
 swarm-core = { workspace = true }
@@ -15,9 +25,15 @@ swarm-p2p = { path = "../../crates/swarm-p2p" }
 swarm-media = { path = "../../crates/swarm-media" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tauri = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
