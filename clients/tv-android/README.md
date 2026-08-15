@@ -158,6 +158,25 @@ wired in; manifest re-verified via `aapt dump badging` (still
 Google-Play-Services string anywhere in the APK despite adding
 `media3-ui`).
 
+`CatalogCard` now shows real artwork: `SwarmViewModel.artworkUrl(entry)`
+skips the request entirely when `artworkEtag == null` (no scrape ever
+found any), otherwise builds a `CatalogSession.urlFor(serverId,
+"/art/<entryKey>/<kind>")` URL — `poster` for movies/episodes, `cover` for
+tracks — served over the exact same peer connection and loopback proxy as
+media, just a different path (`swarm-media`'s `/art/` route uses the same
+`PeerRequest`/`PeerResponseHeader` shape as `/media/`, Range and ETag
+included). Rendered with Coil's `AsyncImage`. **Coil 2.7.0, deliberately
+not 3.x**: Coil 3's own dependencies need Kotlin 2.2+ and compileSdk 36,
+both ahead of what this project is pinned to (Kotlin 2.0.21, compileSdk
+35, AGP 8.7.3 — bumping any of that to fit an image-loading library wasn't
+a trade worth making, especially with the AGP/Kotlin lint bug already on
+file). Tried 3.5.0 first (needs compileSdk 36, hard Gradle error), then
+3.4.0 (compiles against a newer Kotlin stdlib than 2.0.21 can load —
+"Module was compiled with an incompatible version of Kotlin"); 2.x needs
+neither bump and needs no separate network-engine artifact or
+`SingletonImageLoader` wiring either, so it's genuinely the better fit
+here, not just the fallback.
+
 ## Deliberately not built yet
 
 - **Real hardware throughput, and any visual verification at all.** No
@@ -177,12 +196,6 @@ Google-Play-Services string anywhere in the APK despite adding
   exchange for the cross-network case (this client currently only reaches
   servers whose self-reported `peer_addr` is directly dialable — same LAN,
   or a manually forwarded port; it doesn't yet gather/exchange candidates
-  over WSS signaling), artwork loading (the `/art/{key}/{kind}` peer route
-  exists server-side but `CatalogCard` shows title text only, no image).
+  over WSS signaling).
 - Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
   wired into the Gradle build; adding it means also adding the KSP plugin.
-- Visual/on-device verification of the `:app` UI. The debug APK builds and
-  its manifest is correct, but nobody has run it — no physical Fire TV and
-  no emulator was set up in this environment. Install
-  `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` on a real device or
-  `adb`-connected emulator to see it render.

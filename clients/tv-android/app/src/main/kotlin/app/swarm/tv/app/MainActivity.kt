@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
                         onPlay = viewModel::play,
                         onStopPlayback = viewModel::stopPlayback,
                         onBackToDashboard = viewModel::backToDashboard,
+                        artworkUrl = viewModel::artworkUrl,
                     )
                 }
             }
@@ -71,6 +72,7 @@ private fun SwarmApp(
     onPlay: (MergedEntry) -> Unit,
     onStopPlayback: () -> Unit,
     onBackToDashboard: () -> Unit,
+    artworkUrl: (MergedEntry) -> String?,
 ) {
     when (state) {
         is UiState.PasscodeEntry ->
@@ -82,7 +84,7 @@ private fun SwarmApp(
         is UiState.Dashboard ->
             SwarmDashboardScreen(state.swarm, state.devices, state.resyncing, onResync, onBrowseCatalog)
         is UiState.Catalog ->
-            CatalogScreen(state.swarm, state.entries, state.loading, state.unreachable, onPlay, onBackToDashboard)
+            CatalogScreen(state.swarm, state.entries, state.loading, state.unreachable, artworkUrl, onPlay, onBackToDashboard)
         is UiState.Player ->
             PlayerScreen(state.url, state.title, onStopPlayback)
     }

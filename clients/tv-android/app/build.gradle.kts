@@ -83,6 +83,13 @@ dependencies {
     implementation(libs.media3.hls)
     implementation(libs.media3.ui)
 
+    // Artwork over the same peer QUIC connection as media, via the loopback
+    // proxy. Coil 2.x, not 3.x: Coil 3's own dependencies need Kotlin
+    // 2.2+/compileSdk 36, both ahead of what this project is pinned to —
+    // 2.x needs neither and needs no separate network-engine artifact
+    // either (bundles OkHttp fetching by default).
+    implementation(libs.coil.compose)
+
     // Room lands with local catalog persistence in a later pass — not
     // needed yet (no DAO/entity code exists), and pulling it in would need
     // the KSP plugin for nothing.

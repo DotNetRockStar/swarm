@@ -6,6 +6,7 @@ import app.swarm.tv.core.catalog.CatalogSession
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
+import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
@@ -126,6 +127,19 @@ class SwarmViewModel(
                 _state.value = stateNow.copy(entries = result.entries, loading = false, unreachable = result.unreachable)
             }
         }
+    }
+
+    /**
+     * The proxy URL for [entry]'s artwork, or null if it never scraped any
+     * (`artworkEtag == null` — no point spending a request finding that
+     * out). Movies/episodes use the `poster` kind, tracks `cover` — the
+     * scraper (`swarm-media`) always writes exactly one of those per kind
+     * of entry, per `docs/PROTOCOL.md`'s artwork section.
+     */
+    fun artworkUrl(entry: MergedEntry): String? {
+        if (entry.entry.artworkEtag == null) return null
+        val kind = if (entry.entry.kind == MediaKind.TRACK) "cover" else "poster"
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind")
     }
 
     /** Streams [entry] from whichever of its sources [CatalogSession] already holds a connection to. */
