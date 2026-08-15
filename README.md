@@ -1,0 +1,49 @@
+# SWARM
+
+A free, secure, strictly peer-to-peer media streaming suite — Plex-like, but your media never touches a cloud. People who own their music and video stream it from their own machines to their own devices, end-to-end encrypted. The hosted STUN server coordinates devices and relays hole-punch signaling only; it cannot see or decrypt media.
+
+Three apps:
+
+| App | Where | Stack |
+|---|---|---|
+| **STUN server** (`apps/stun-server`) | hosted (Oracle Cloud free tier, Docker + Caddy on :443) | Rust, Axum, utoipa/Swagger, SQLite |
+| **Server app** (`apps/server`) | your macOS/Linux/Windows machine with the media | Tauri (Rust core + web UI), bundled ffmpeg |
+| **TV client** (`clients/tv-android`) | Fire TV (first), Amazon Appstore | Kotlin, Compose for TV, Media3/ExoPlayer |
+
+## How it works
+
+1. Register on the STUN server web UI, create a **swarm** (a private device group), and generate an 8-digit join code.
+2. Enter the code on a device (server app or TV client). The device registers — submitting its metadata and its self-signed certificate fingerprint — and receives an access token (stored encrypted on-device).
+3. Devices in the same swarm find each other via STUN presence, exchange hole-punch candidates over WSS signaling, punch, and connect **directly** over QUIC with mutually pinned certificates. No relay exists; media flows only device-to-device.
+4. Clients merge the catalogs of every server in their swarms (keyed on content fingerprints, so the same file on two servers is one entry with two sources) and pick the best source at play time. Direct play when the client can decode the file; otherwise the server transcodes to HLS with an adaptive bitrate ladder.
+
+Full protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md). Design lineage: patterns ported from [Batocera Fleet Federation / Batocera.Drone](../batocera-fleet-federation/) (pairing/pinning, transport selection, library delta-sync, transcode sessions); originals of the recovered protocol references are in [docs/reference/](docs/reference/).
+
+## Repo layout
+
+```
+crates/swarm-core/         shared contracts (REST/WSS/peer), fingerprint, entry keys — no I/O
+crates/swarm-p2p/          QUIC + pinning, identity certs, reflector client, hole punch, UPnP, loopback proxy
+crates/swarm-media/        library scan/store/delta-sync, tags, ffprobe, scrapers, HLS transcode
+crates/swarm-stun-client/  device-side STUN registration + WSS session
+apps/stun-server/          the hosted rendezvous service
+apps/server/               Tauri desktop media server (Phase 2)
+clients/tv-android/        Fire TV client (Phase 3)
+openapi/                   generated OpenAPI + generated Kotlin client (CI gate)
+deploy/                    docker-compose + Caddy for the STUN server
+tests/integration/         docker-composed multi-node + simulated-NAT harness
+docs/                      PROTOCOL.md, recovered reference implementations
+```
+
+## Development
+
+```bash
+cargo test --workspace      # contract round-trips, fingerprint byte-compat vectors
+cargo run -p stun-server    # (Phase 1) run the STUN server locally
+```
+
+The fingerprint tests pin byte-for-byte compatibility with the original Python `sample-fp-v1` implementation — do not change `fingerprint.rs` without regenerating vectors against `batocera.drone/app/common/fingerprint.py`.
+
+## Roadmap
+
+Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission.

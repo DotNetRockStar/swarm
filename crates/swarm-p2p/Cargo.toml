@@ -1,0 +1,12 @@
+[package]
+name = "swarm-p2p"
+description = "Peer connectivity: QUIC endpoint with fingerprint pinning, device identity certs, reflector client, hole punching, UPnP, candidate ordering, loopback HTTP<->QUIC proxy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swarm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

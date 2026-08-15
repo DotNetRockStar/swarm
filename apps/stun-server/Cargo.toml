@@ -1,0 +1,15 @@
+[package]
+name = "stun-server"
+description = "SWARM STUN server: accounts, swarms, join codes, device registry, WSS signaling hub, UDP reflector."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "swarm-stun-server"
+path = "src/main.rs"
+
+[dependencies]
+swarm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

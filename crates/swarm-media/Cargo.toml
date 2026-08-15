@@ -1,0 +1,12 @@
+[package]
+name = "swarm-media"
+description = "Media library engine: scanning, fingerprinting, SQLite store with delta sync, embedded tags, ffprobe, HLS transcode sessions, Range serving, metadata scrapers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swarm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

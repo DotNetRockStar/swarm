@@ -1,0 +1,11 @@
+/target
+Cargo.lock.orig
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+/openapi/generated/
+node_modules/
+clients/tv-android/.gradle/
+clients/tv-android/build/
+clients/tv-android/local.properties

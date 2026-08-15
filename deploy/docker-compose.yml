@@ -1,0 +1,46 @@
+# SWARM STUN server deployment — Oracle Cloud Always Free (Ampere ARM).
+# Caddy terminates TLS on 443 and reverse-proxies REST + WSS; the UDP
+# reflector cannot be proxied, so stun-server binds those host ports directly.
+#
+# Prereqs: DNS A record -> VM public IP; Oracle VCN security list opens
+# TCP/80 (ACME), TCP/443, UDP/443, UDP/3478.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - stun-server
+
+  stun-server:
+    image: ghcr.io/jerrod/swarm-stun-server:latest # placeholder until CI publishes
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.stun-server
+    restart: unless-stopped
+    ports:
+      - "443:9443/udp"   # reflector primary
+      - "3478:3478/udp"  # reflector fallback (standard STUN port)
+    environment:
+      SWARM_DATABASE_PATH: /data/swarm.sqlite
+      SWARM_HTTP_BIND: 0.0.0.0:8080
+      SWARM_REFLECTOR_PORTS: "9443,3478"
+      # Optional Google login — leave unset to disable the routes entirely.
+      # GOOGLE_CLIENT_ID:
+      # GOOGLE_CLIENT_SECRET:
+      # Outgoing mail for email verification / password reset.
+      # SWARM_SMTP_HOST: / SWARM_SMTP_PORT: / SWARM_SMTP_USERNAME: / SWARM_SMTP_PASSWORD:
+    volumes:
+      - stun-data:/data
+
+volumes:
+  caddy-data:
+  caddy-config:
+  stun-data:
