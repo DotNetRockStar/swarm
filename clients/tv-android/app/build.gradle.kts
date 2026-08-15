@@ -81,6 +81,7 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.common)
     implementation(libs.media3.hls)
+    implementation(libs.media3.ui)
 
     // Room lands with local catalog persistence in a later pass — not
     // needed yet (no DAO/entity code exists), and pulling it in would need

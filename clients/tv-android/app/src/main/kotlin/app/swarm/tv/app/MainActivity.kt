@@ -18,11 +18,14 @@ import app.swarm.tv.app.data.AndroidTokenStore
 import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
 import app.swarm.tv.app.data.androidMachineId
+import app.swarm.tv.app.ui.screens.CatalogScreen
 import app.swarm.tv.app.ui.screens.PasscodeEntryScreen
+import app.swarm.tv.app.ui.screens.PlayerScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmTvTheme
+import app.swarm.tv.core.catalog.MergedEntry
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,10 +34,12 @@ class MainActivity : ComponentActivity() {
         val tokenStore = AndroidTokenStore(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val certFingerprint = AndroidDeviceIdentity.ensureFingerprint()
+        val certificate = AndroidDeviceIdentity.certificate()
+        val privateKey = AndroidDeviceIdentity.privateKey()
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint) as T
+                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey) as T
         }
 
         setContent {
@@ -42,7 +47,15 @@ class MainActivity : ComponentActivity() {
                 Box(modifier = Modifier.fillMaxSize().background(SwarmBackground)) {
                     val viewModel: SwarmViewModel = viewModel(factory = factory)
                     val state by viewModel.state.collectAsState()
-                    SwarmApp(state, viewModel::submitPasscode, viewModel::resync)
+                    SwarmApp(
+                        state = state,
+                        onSubmit = viewModel::submitPasscode,
+                        onResync = viewModel::resync,
+                        onBrowseCatalog = viewModel::browseCatalog,
+                        onPlay = viewModel::play,
+                        onStopPlayback = viewModel::stopPlayback,
+                        onBackToDashboard = viewModel::backToDashboard,
+                    )
                 }
             }
         }
@@ -54,6 +67,10 @@ private fun SwarmApp(
     state: UiState,
     onSubmit: (baseUrl: String, code: String, deviceName: String) -> Unit,
     onResync: () -> Unit,
+    onBrowseCatalog: () -> Unit,
+    onPlay: (MergedEntry) -> Unit,
+    onStopPlayback: () -> Unit,
+    onBackToDashboard: () -> Unit,
 ) {
     when (state) {
         is UiState.PasscodeEntry ->
@@ -63,6 +80,10 @@ private fun SwarmApp(
         is UiState.Error ->
             PasscodeEntryScreen(isSubmitting = false, errorMessage = state.message, onSubmit = onSubmit)
         is UiState.Dashboard ->
-            SwarmDashboardScreen(state.swarm, state.devices, state.resyncing, onResync)
+            SwarmDashboardScreen(state.swarm, state.devices, state.resyncing, onResync, onBrowseCatalog)
+        is UiState.Catalog ->
+            CatalogScreen(state.swarm, state.entries, state.loading, state.unreachable, onPlay, onBackToDashboard)
+        is UiState.Player ->
+            PlayerScreen(state.url, state.title, onStopPlayback)
     }
 }

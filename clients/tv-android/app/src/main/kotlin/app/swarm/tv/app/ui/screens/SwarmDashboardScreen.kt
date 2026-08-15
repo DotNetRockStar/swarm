@@ -1,9 +1,8 @@
 /**
- * Post-onboarding screen: the joined swarm and its device roster. This is
- * as far as the client goes until the peer QUIC transport lands — the
- * merged multi-server catalog and player screens (per the plan's Phase 3
- * scope) build directly on the [app.swarm.tv.core.rest.SwarmDevice] list
- * shown here, once each server can be dialed.
+ * Post-onboarding screen: the joined swarm and its device roster, plus the
+ * entry point into [app.swarm.tv.app.ui.screens.CatalogScreen] — which
+ * connects to these same servers via their self-reported `peer_addr` and
+ * merges their catalogs (see [app.swarm.tv.core.catalog.CatalogSession]).
  */
 package app.swarm.tv.app.ui.screens
 
@@ -35,6 +34,7 @@ import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.app.ui.theme.SwarmAccent
+import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmGreen
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
@@ -47,6 +47,7 @@ fun SwarmDashboardScreen(
     devices: List<SwarmDevice>,
     resyncing: Boolean,
     onResync: () -> Unit,
+    onBrowseCatalog: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
         Row(
@@ -58,12 +59,20 @@ fun SwarmDashboardScreen(
                 Text("SWARM", color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
                 Text(swarm.name, color = SwarmText, fontSize = 16.sp)
             }
-            Button(
-                onClick = onResync,
-                enabled = !resyncing,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) {
-                Text(if (resyncing) "Resyncing…" else "Resync")
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onBrowseCatalog,
+                    colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = SwarmBackground),
+                ) {
+                    Text("Browse library")
+                }
+                Button(
+                    onClick = onResync,
+                    enabled = !resyncing,
+                    colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+                ) {
+                    Text(if (resyncing) "Resyncing…" else "Resync")
+                }
             }
         }
         Spacer(Modifier.height(24.dp))

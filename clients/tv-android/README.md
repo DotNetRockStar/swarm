@@ -135,37 +135,54 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   for multi-server swarms specifically; the plan's quiche-JNI fallback is
   the mitigation path if it isn't fixed upstream first.
 
+## Catalog browsing and playback (`:app`)
+
+`SwarmDashboardScreen` now has a "Browse library" button that drives
+`SwarmViewModel.browseCatalog()` → `CatalogSession.refresh(...)` (real QUIC
+connections to every server with a usable `peer_addr`, off the main
+thread), landing on `CatalogScreen` — the merged catalog grouped into
+Movies/Shows/Music rows (`TvLazyRow`-style `Card`s, D-pad focusable),
+showing which servers weren't reachable rather than hiding the gap.
+Selecting an entry opens `PlayerScreen`, a Media3 `ExoPlayer`/`PlayerView`
+pointed at `CatalogSession.urlFor(serverId, "/media/<entryKey>")` — the
+exact proxy URL shape already proven end-to-end with a generic HTTP client
+in `PeerQuicClientInteropTest`, so this wiring is mechanical, not a new
+risk. `AndroidDeviceIdentity` now exposes `certificate()`/`privateKey()`
+(the private key is a non-exportable `AndroidKeyStore` handle — usable by
+any crypto API that signs through the provider, `getEncoded()` always
+null) alongside the existing `ensureFingerprint()`, so `MainActivity` can
+hand real device credentials to `SwarmViewModel` for the peer connections.
+`:app:compileDebugKotlin` and `:app:assembleDebug` both succeed with this
+wired in; manifest re-verified via `aapt dump badging` (still
+`LEANBACK_LAUNCHER`, touchscreen not required, and confirmed no
+Google-Play-Services string anywhere in the APK despite adding
+`media3-ui`).
+
 ## Deliberately not built yet
 
-- **Real hardware throughput.** The project plan's risk register asks for a
-  kwik throughput spike *on Fire TV hardware specifically* — no physical
-  device or Android emulator is available in this environment, so only the
-  loopback-over-localhost interop (above) could be verified here. Loopback
-  proves correctness, not throughput/latency under real wifi and a
-  constrained TV CPU.
-- **ExoPlayer wiring itself.** The proxy is proven with a generic HTTP
-  client; pointing an actual `MediaItem`/`ExoPlayer` at
-  `proxy.urlFor(serverId, peerPath)` and confirming playback is Android-UI
-  work that needs a device/emulator to see run.
-- **Merged multi-server catalog UI.** `CatalogSession` (see above) is the
-  data layer this needs and works for one server; the actual Compose screen
-  (rows, grid, focus handling) isn't built, and multi-server merging is
-  currently gated on the kwik concurrent-connection bug documented above —
-  worth resolving or working around before building UI that assumes it.
-- Resume/watched state, direct-play/transcode negotiation, diagnostics
+- **Real hardware throughput, and any visual verification at all.** No
+  physical Fire TV device or Android emulator is available in this
+  environment. Everything above compiles, packages into a real installable
+  APK, and is proven correct at the protocol/data layer against a real
+  Rust server over loopback QUIC — but nobody has watched `CatalogScreen`
+  render or a video actually play. Install
+  `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` on a real device or
+  `adb`-connected emulator to see any of it run, including whether kwik's
+  `clientCertificateKey(PrivateKey)` accepts a non-exportable
+  `AndroidKeyStore` handle the way it accepts the in-memory keys every test
+  here uses (untested either way, so this is a real open question, not an
+  assumed-fine detail).
+- Multi-server catalog merging is gated on the kwik concurrent-connection
+  bug documented above — today, `browseCatalog()` will reliably show
+  exactly one server's entries even in a swarm with several servers online,
+  because only the first connection `CatalogSession` opens survives.
+- Resume/watched state, direct-play/transcode negotiation, a diagnostics
   screen (NAT type, punch results, per-server RTT), the hole-punch candidate
-  exchange itself (this client dials a known host:port directly — or now, a
-  self-reported `peer_addr` on the same LAN; it doesn't yet gather/exchange
-  candidates over WSS signaling for the cross-network case) — all build on
-  the transport above but aren't wired up yet.
-- Getting `AndroidDeviceIdentity`'s cert/key into `connectToServer`.
-  `connectToServer`/`CatalogSession` take a plain `X509Certificate` +
-  `PrivateKey`; `AndroidDeviceIdentity` deliberately keeps the private key
-  non-exportable inside `AndroidKeyStore` (see its doc comment). Whether
-  kwik's `clientCertificateKey(PrivateKey)` works correctly with a
-  non-exportable AndroidKeyStore key handle — as opposed to an in-memory one
-  like every test here uses — is unverified; needs a device/emulator either
-  way, so it's untested regardless.
+  exchange for the cross-network case (this client currently only reaches
+  servers whose self-reported `peer_addr` is directly dialable — same LAN,
+  or a manually forwarded port; it doesn't yet gather/exchange candidates
+  over WSS signaling), artwork loading (the `/art/{key}/{kind}` peer route
+  exists server-side but `CatalogCard` shows title text only, no image).
 - Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
   wired into the Gradle build; adding it means also adding the KSP plugin.
 - Visual/on-device verification of the `:app` UI. The debug APK builds and

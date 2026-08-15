@@ -22,6 +22,8 @@ import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.PrivateKey
+import java.security.cert.X509Certificate
 import java.util.Date
 import javax.security.auth.x500.X500Principal
 
@@ -32,13 +34,26 @@ private val VALIDITY_YEARS = 20L
 object AndroidDeviceIdentity {
     /** Loads (or generates, on first run) the device identity and returns its fingerprint. */
     fun ensureFingerprint(): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(certificate().encoded)
+        return digest.joinToString(separator = "") { "%02x".format(it) }
+    }
+
+    /** The device's self-signed certificate — safe to hand to a peer during the mTLS handshake. */
+    fun certificate(): X509Certificate = keyStore().getCertificate(KEY_ALIAS) as X509Certificate
+
+    /**
+     * A non-exportable `AndroidKeyStore`-backed private key handle: usable by any Java crypto API
+     * that signs through the provider (what a `KeyManagerFactory`/TLS stack does), but
+     * `getEncoded()` on it always returns null — the raw key material never leaves the Keystore.
+     */
+    fun privateKey(): PrivateKey = keyStore().getKey(KEY_ALIAS, null) as PrivateKey
+
+    private fun keyStore(): KeyStore {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         if (!keyStore.containsAlias(KEY_ALIAS)) {
             generateKeyPair()
         }
-        val certificate = keyStore.getCertificate(KEY_ALIAS)
-        val digest = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
-        return digest.joinToString(separator = "") { "%02x".format(it) }
+        return keyStore
     }
 
     private fun generateKeyPair() {

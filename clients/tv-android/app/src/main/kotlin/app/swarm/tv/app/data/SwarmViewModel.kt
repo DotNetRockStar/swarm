@@ -2,38 +2,59 @@ package app.swarm.tv.app.data
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.swarm.tv.core.catalog.CatalogSession
+import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
+import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.core.token.TokenStore
+import java.security.PrivateKey
+import java.security.cert.X509Certificate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class UiState {
     data object PasscodeEntry : UiState()
     data object Registering : UiState()
     data class Dashboard(val swarm: SwarmSummary, val devices: List<SwarmDevice>, val resyncing: Boolean = false) : UiState()
+    data class Catalog(
+        val swarm: SwarmSummary,
+        val devices: List<SwarmDevice>,
+        val entries: List<MergedEntry> = emptyList(),
+        val loading: Boolean = true,
+        val unreachable: List<SwarmDevice> = emptyList(),
+    ) : UiState()
+    data class Player(val url: String, val title: String, val previous: Catalog) : UiState()
     data class Error(val message: String) : UiState()
 }
 
 /**
- * Onboarding + swarm-dashboard state. Registration itself is fully wired
- * (real network calls against a real STUN server, real encrypted token
- * storage, a real device identity fingerprint); the merged multi-server
- * catalog and P2P playback screens land once the peer QUIC transport does
- * (see `docs/PROTOCOL.md` and the risk register on kwik throughput) — this
- * ViewModel's `Dashboard` state exposes the swarm roster now so that piece
- * has something real to build on.
+ * Onboarding, swarm-dashboard, merged-catalog, and playback state.
+ * Registration is fully wired (real network calls against a real STUN
+ * server, real encrypted token storage, a real device identity
+ * fingerprint). [browseCatalog] connects to every server in the roster
+ * that has self-reported a `peer_addr` (see `CatalogSession`) over real
+ * peer QUIC and merges their catalogs; [play] streams the chosen entry
+ * through the same session's loopback proxy. `clientCertificate`/
+ * `clientKey` are this device's own identity — `AndroidDeviceIdentity`'s
+ * `AndroidKeyStore`-backed cert/key on the shipped app, an in-memory one in
+ * tests — the mTLS credential a peer's `RosterClientVerifier` checks
+ * against the swarm roster it already trusts.
  */
 class SwarmViewModel(
     private val tokenStore: TokenStore,
     private val machineId: String,
     private val certFingerprint: String,
+    private val clientCertificate: X509Certificate,
+    private val clientKey: PrivateKey,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -41,6 +62,9 @@ class SwarmViewModel(
     private var client: StunApiClient? = null
     private var accessToken: String? = null
     private var swarmId: String? = null
+
+    private val proxy = PeerLoopbackProxy.start()
+    private val catalogSession = CatalogSession(proxy)
 
     fun submitPasscode(baseUrl: String, code: String, deviceName: String) {
         val trimmedBaseUrl = baseUrl.trim()
@@ -86,6 +110,43 @@ class SwarmViewModel(
         _state.value = UiState.PasscodeEntry
     }
 
+    /** Connects to every reachable server in the roster and merges their catalogs — see [CatalogSession]. */
+    fun browseCatalog() {
+        val current = _state.value
+        if (current !is UiState.Dashboard) return
+        _state.value = UiState.Catalog(current.swarm, current.devices, loading = true)
+        viewModelScope.launch {
+            // CatalogSession.refresh blocks on real network I/O (connect + one
+            // request per server) — never run it on the Main dispatcher.
+            val result = withContext(Dispatchers.IO) {
+                catalogSession.refresh(current.devices, clientCertificate, clientKey)
+            }
+            val stateNow = _state.value
+            if (stateNow is UiState.Catalog) {
+                _state.value = stateNow.copy(entries = result.entries, loading = false, unreachable = result.unreachable)
+            }
+        }
+    }
+
+    /** Streams [entry] from whichever of its sources [CatalogSession] already holds a connection to. */
+    fun play(entry: MergedEntry) {
+        val current = _state.value
+        if (current !is UiState.Catalog) return
+        val serverId = entry.sources.first()
+        val url = catalogSession.urlFor(serverId, "/media/${entry.entry.entryKey}")
+        _state.value = UiState.Player(url, entry.entry.scrapedTitle ?: entry.entry.title, current)
+    }
+
+    fun stopPlayback() {
+        val current = _state.value
+        if (current is UiState.Player) _state.value = current.previous
+    }
+
+    fun backToDashboard() {
+        val current = _state.value
+        if (current is UiState.Catalog) _state.value = UiState.Dashboard(current.swarm, current.devices)
+    }
+
     private suspend fun loadRoster() {
         val api = client ?: return
         val token = accessToken ?: return
@@ -96,5 +157,10 @@ class SwarmViewModel(
         } catch (e: StunClientError) {
             _state.value = UiState.Error(e.message ?: "Could not load the swarm roster.")
         }
+    }
+
+    override fun onCleared() {
+        catalogSession.close()
+        proxy.close()
     }
 }
