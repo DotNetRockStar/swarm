@@ -28,6 +28,50 @@ pub struct EntryRecord {
     pub duration_secs: Option<f64>,
     pub video: Option<VideoStreamInfo>,
     pub audio: Option<AudioStreamInfo>,
+    /// Scraper overlay — display-only, never a grouping key (Drone rule).
+    pub scraped_title: Option<String>,
+    pub genres: Vec<String>,
+    pub artwork_version: u32,
+}
+
+/// Which artwork slot a downloaded image fills. Maps 1:1 onto the
+/// `/art/{entry_key}/{kind}` peer route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtworkKind {
+    Poster,
+    Backdrop,
+    Cover,
+    ArtistPhoto,
+}
+
+impl ArtworkKind {
+    pub fn route_segment(self) -> &'static str {
+        match self {
+            ArtworkKind::Poster => "poster",
+            ArtworkKind::Backdrop => "backdrop",
+            ArtworkKind::Cover => "cover",
+            ArtworkKind::ArtistPhoto => "artist",
+        }
+    }
+
+    pub fn parse(segment: &str) -> Option<Self> {
+        match segment {
+            "poster" => Some(ArtworkKind::Poster),
+            "backdrop" => Some(ArtworkKind::Backdrop),
+            "cover" => Some(ArtworkKind::Cover),
+            "artist" => Some(ArtworkKind::ArtistPhoto),
+            _ => None,
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            ArtworkKind::Poster => "poster_relative_path",
+            ArtworkKind::Backdrop => "backdrop_relative_path",
+            ArtworkKind::Cover => "cover_relative_path",
+            ArtworkKind::ArtistPhoto => "artist_art_relative_path",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,8 +119,7 @@ impl Library {
                 fingerprint TEXT NOT NULL,
                 artist TEXT, album TEXT, track_number INTEGER,
                 show_title TEXT, season INTEGER, episode INTEGER,
-                duration_secs REAL, video_json TEXT, audio_json TEXT,
-                scraped_title TEXT, genres_json TEXT, artwork_etag TEXT
+                duration_secs REAL, video_json TEXT, audio_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_entries_path ON library_entries(relative_path COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS deleted_library_entries (
@@ -93,6 +136,19 @@ impl Library {
         )
         .execute(&pool)
         .await?;
+        // Scraper/artwork columns, added the idempotent way (never bump the
+        // base CREATE TABLE in place — the Drone convention).
+        for (column, ddl_type) in [
+            ("scraped_title", "TEXT"),
+            ("genres_json", "TEXT"),
+            ("poster_relative_path", "TEXT"),
+            ("backdrop_relative_path", "TEXT"),
+            ("cover_relative_path", "TEXT"),
+            ("artist_art_relative_path", "TEXT"),
+            ("artwork_version", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            ensure_column(&pool, "library_entries", column, ddl_type).await?;
+        }
         Ok(Self { pool })
     }
 
@@ -243,11 +299,75 @@ impl Library {
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM library_entries").fetch_one(&self.pool).await?;
         Ok(count as u64)
     }
+
+    /// Entries a scraper has not yet resolved (`scraped_title IS NULL`),
+    /// oldest-added first isn't tracked — path order is deterministic enough
+    /// for a bulk job's iteration.
+    pub async fn missing_scrape(&self) -> sqlx::Result<Vec<EntryRecord>> {
+        let rows = sqlx::query_as::<_, EntryRow>(&format!("{ENTRY_SELECT} WHERE scraped_title IS NULL ORDER BY relative_path"))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
+    /// Record that a scrape attempt completed for this entry — whether or not
+    /// it found a match. `scraped_title` is a *display overlay*, never a
+    /// grouping key: `None` means "processed, no title override" (covers
+    /// both "no online match" and "matched but nothing to override," e.g.
+    /// music tracks, which get release-level genres without a title
+    /// override — see the runner). The sentinel is stored as `''` rather
+    /// than `NULL` specifically so [`Self::missing_scrape`]'s `IS NULL`
+    /// filter treats "processed" as done and never re-queues it.
+    pub async fn set_scrape_result(&self, entry_key: &str, scraped_title: Option<&str>, genres: &[String]) -> sqlx::Result<()> {
+        let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
+        sqlx::query("UPDATE library_entries SET scraped_title = ?, genres_json = ? WHERE entry_key = ?")
+            .bind(scraped_title.unwrap_or(""))
+            .bind(genres_json)
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Store a downloaded artwork image's path (relative to the media root,
+    /// alongside the source file) and bump the version that backs its etag.
+    pub async fn set_artwork(&self, entry_key: &str, kind: ArtworkKind, relative_path: &str) -> sqlx::Result<()> {
+        let sql = format!(
+            "UPDATE library_entries SET {} = ?, artwork_version = artwork_version + 1 WHERE entry_key = ?",
+            kind.column()
+        );
+        sqlx::query(&sql).bind(relative_path).bind(entry_key).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// The stored path and version (etag material) for one artwork slot, if
+    /// downloaded. One query, since `serve.rs` needs both together.
+    pub async fn artwork(&self, entry_key: &str, kind: ArtworkKind) -> sqlx::Result<Option<(String, u32)>> {
+        let sql = format!("SELECT {}, artwork_version FROM library_entries WHERE entry_key = ?", kind.column());
+        let row: Option<(Option<String>, i64)> = sqlx::query_as(&sql).bind(entry_key).fetch_optional(&self.pool).await?;
+        Ok(row.and_then(|(path, version)| path.map(|p| (p, version as u32))))
+    }
+}
+
+/// `ALTER TABLE ADD COLUMN IF NOT EXISTS` doesn't exist in SQLite; check
+/// `pragma_table_info` first so re-adding a column already present is a
+/// silent no-op instead of an error.
+async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl_type: &str) -> sqlx::Result<()> {
+    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await?;
+    if exists.0 == 0 {
+        sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")).execute(pool).await?;
+    }
+    Ok(())
 }
 
 const ENTRY_SELECT: &str =
     "SELECT entry_key, relative_path, kind, title, size, modified_time, fingerprint, artist, album, \
-     track_number, show_title, season, episode, duration_secs, video_json, audio_json FROM library_entries";
+     track_number, show_title, season, episode, duration_secs, video_json, audio_json, \
+     scraped_title, genres_json, artwork_version FROM library_entries";
 
 #[derive(sqlx::FromRow)]
 struct EntryRow {
@@ -267,6 +387,9 @@ struct EntryRow {
     duration_secs: Option<f64>,
     video_json: Option<String>,
     audio_json: Option<String>,
+    scraped_title: Option<String>,
+    genres_json: Option<String>,
+    artwork_version: i64,
 }
 
 impl From<EntryRow> for EntryRecord {
@@ -288,6 +411,11 @@ impl From<EntryRow> for EntryRecord {
             duration_secs: row.duration_secs,
             video: row.video_json.as_deref().and_then(|j| serde_json::from_str(j).ok()),
             audio: row.audio_json.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+            // Empty string is the "scraped, no match found" marker (see
+            // set_scrape_not_found) — surface it as no display overlay.
+            scraped_title: row.scraped_title.filter(|t| !t.is_empty()),
+            genres: row.genres_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
+            artwork_version: row.artwork_version as u32,
         }
     }
 }
@@ -307,11 +435,11 @@ impl EntryRecord {
             artist: self.artist.clone(),
             album: self.album.clone(),
             track_number: self.track_number,
-            scraped_title: None,
-            genres: Vec::new(),
+            scraped_title: self.scraped_title.clone(),
+            genres: self.genres.clone(),
             video: self.video.clone(),
             audio: self.audio.clone(),
-            artwork_etag: None,
+            artwork_etag: (self.artwork_version > 0).then(|| format!("v{}", self.artwork_version)),
         }
     }
 }

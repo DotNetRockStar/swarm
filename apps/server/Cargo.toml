@@ -17,12 +17,13 @@ required-features = ["gui"]
 
 [features]
 default = []
-gui = ["dep:tauri", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
 
 [dependencies]
 swarm-core = { workspace = true }
 swarm-p2p = { path = "../../crates/swarm-p2p" }
 swarm-media = { path = "../../crates/swarm-media" }
+swarm-stun-client = { path = "../../crates/swarm-stun-client" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -31,6 +32,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tauri = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }
@@ -38,3 +40,6 @@ tauri-build = { version = "2", optional = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+stun-server = { path = "../stun-server" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
+axum = "0.8"

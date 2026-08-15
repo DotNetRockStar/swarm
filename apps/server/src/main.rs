@@ -16,6 +16,22 @@ async fn main() {
     tracing::info!(added = report.added, updated = report.updated, removed = report.removed,
         unchanged = report.unchanged, "library scan complete");
     tracing::info!(addr = %core.listen_addr, "peer QUIC listener ready");
-    // The accept loop runs on spawned tasks; park the main task.
+
+    // One-shot join code, for headless deployments (Docker, a bare VPS) with
+    // no GUI to run the onboarding flow. Only fires when nothing is linked
+    // yet — a restart with the same env vars after a successful join is a
+    // no-op, since `register_with_stun` is never called again.
+    if core.stun_link().await.is_none() {
+        if let (Ok(base_url), Ok(code)) = (std::env::var("SWARM_STUN_URL"), std::env::var("SWARM_STUN_CODE")) {
+            let name = std::env::var("SWARM_DEVICE_NAME").unwrap_or_else(|_| "SWARM Server".into());
+            match core.register_with_stun(&base_url, &code, &name).await {
+                Ok(swarm) => tracing::info!(swarm = %swarm.name, "joined swarm via SWARM_STUN_CODE"),
+                Err(err) => tracing::error!(%err, "SWARM_STUN_CODE join failed; run again with a fresh code"),
+            }
+        }
+    }
+
+    // The accept loop and any roster-sync task run on spawned tasks; park
+    // the main task.
     std::future::pending::<()>().await;
 }

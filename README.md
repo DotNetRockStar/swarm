@@ -38,11 +38,16 @@ docs/                      PROTOCOL.md, recovered reference implementations
 ## Development
 
 ```bash
-cargo test --workspace      # contract round-trips, fingerprint byte-compat vectors
-cargo run -p stun-server    # (Phase 1) run the STUN server locally
+cargo test --workspace                              # everything except the Tauri GUI
+cargo test -p swarm-server --features gui            # include the GUI binary's own tests
+cargo run -p stun-server                              # run the STUN server locally
+SWARM_MEDIA_ROOT=/path/to/media cargo run -p swarm-server --bin swarm-serverd   # headless media server
+SWARM_MEDIA_ROOT=/path/to/media cargo run -p swarm-server --features gui --bin swarm-server-app  # desktop app
 ```
 
 The fingerprint tests pin byte-for-byte compatibility with the original Python `sample-fp-v1` implementation — do not change `fingerprint.rs` without regenerating vectors against `batocera.drone/app/common/fingerprint.py`.
+
+Server app env vars (headless daemon; the GUI persists the same settings to `<app data dir>/settings.json` instead): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
 
 ## Roadmap
 

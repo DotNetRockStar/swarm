@@ -5,6 +5,7 @@ Cargo.lock.orig
 *.sqlite-shm
 .DS_Store
 /openapi/generated/
+apps/server/gen/
 node_modules/
 clients/tv-android/.gradle/
 clients/tv-android/build/

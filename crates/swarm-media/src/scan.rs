@@ -76,6 +76,12 @@ pub async fn scan_root(library: &Library, root: &Path) -> Result<ScanReport, Sca
             duration_secs: media.as_ref().and_then(|m| m.duration_secs),
             video: media.as_ref().and_then(|m| m.video.clone()),
             audio: media.as_ref().and_then(|m| m.audio.clone()),
+            // Scraper/artwork fields are not written by `upsert` (a rescan
+            // must never clobber existing scrape results), so these values
+            // are unused placeholders on the write path.
+            scraped_title: None,
+            genres: Vec::new(),
+            artwork_version: 0,
         };
         library.upsert(&record).await?;
         if known.contains_key(&record.relative_path) {

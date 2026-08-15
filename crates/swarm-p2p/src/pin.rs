@@ -45,6 +45,19 @@ impl AllowedPeers {
     pub fn contains(&self, fingerprint: &str) -> bool {
         self.inner.read().unwrap().contains(fingerprint)
     }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A point-in-time copy of the set, for status/diagnostics display.
+    pub fn snapshot(&self) -> HashSet<String> {
+        self.inner.read().unwrap().clone()
+    }
 }
 
 fn provider() -> Arc<CryptoProvider> {

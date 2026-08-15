@@ -1,15 +1,20 @@
-//! Device-side STUN client (Phase 1+).
+//! Device-side STUN client.
 //!
-//! Planned modules:
-//! - `register` — join-code redemption + re-registration after 401 (the
-//!   recovered Overmind two-token recovery flow).
-//! - `session` — persistent WSS connection with capped-backoff reconnect
-//!   (port of the recovered `mux_client.py` runner shape), presence handling,
-//!   signal dispatch to `swarm-p2p`'s punch negotiator.
-//! - `machine_id` — stable machine identity (persisted NIC-MAC pattern from
-//!   `device_identity.py`, with macOS/Windows branches).
+//! - [`client`] — REST calls: register a device with a join code, join
+//!   additional swarms, fetch a swarm's device roster.
+//! - [`token_store`] — encrypted-at-rest access-token storage (OS keychain,
+//!   with a permission-restricted file fallback).
+//! - [`machine_id`] — stable per-install identity submitted at registration.
 //!
-//! Also the backbone of the headless test binaries used by the integration
-//! harness (Phase 1 exit criteria).
+//! Planned (Phase 4): a persistent WSS session (presence + hole-punch
+//! signal exchange), matching the shape of the recovered `mux_client.py`
+//! (capped-backoff reconnect, per-transfer channel demux).
+
+pub mod client;
+pub mod machine_id;
+pub mod token_store;
+
+pub use client::{StunClient, StunClientError};
+pub use token_store::{TokenStore, TokenStoreError};
 
 pub use swarm_core as core;

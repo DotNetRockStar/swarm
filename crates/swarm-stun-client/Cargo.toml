@@ -1,6 +1,6 @@
 [package]
 name = "swarm-stun-client"
-description = "Device-side client for the SWARM STUN server: registration, token storage hooks, WSS presence/signaling session."
+description = "Device-side client for the SWARM STUN server: registration, encrypted-at-rest token storage, machine identity, swarm roster fetch."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,3 +10,12 @@ swarm-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+keyring = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+axum = "0.8"

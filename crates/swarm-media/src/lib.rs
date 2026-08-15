@@ -11,15 +11,18 @@
 //! - [`probe`] — optional ffprobe codec/duration capture for direct-play
 //!   decisions.
 //! - [`range`] — HTTP-semantics byte-range resolution + content types.
-//! - [`serve`] — the peer-facing media service over QUIC streams.
+//! - [`serve`] — the peer-facing media service over QUIC streams, including
+//!   the `/art/*` route.
+//! - [`scrape`] — TMDb/MusicBrainz/Cover Art Archive/Wikimedia metadata and
+//!   artwork, with the inherited two-tier-error job discipline.
 //!
-//! Planned: scrapers (TMDb/MusicBrainz/CAA/Wikimedia) with the inherited job
-//! discipline, artwork storage, HLS transcode sessions (Phase 5).
+//! Planned: HLS transcode sessions (Phase 5).
 
 pub mod classify;
 pub mod probe;
 pub mod range;
 pub mod scan;
+pub mod scrape;
 pub mod serve;
 pub mod store;
 pub mod tags;

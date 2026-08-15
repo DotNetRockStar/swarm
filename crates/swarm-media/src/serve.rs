@@ -7,7 +7,7 @@
 //! media root) — never from request input.
 
 use crate::range::{content_type, resolve, ResolvedRange};
-use crate::store::Library;
+use crate::store::{ArtworkKind, Library};
 use std::path::PathBuf;
 use std::sync::Arc;
 use swarm_core::entry_key::is_valid_entry_key;
@@ -66,6 +66,11 @@ impl MediaService {
             path => {
                 if let Some(entry_key) = path.strip_prefix("/media/") {
                     self.media(entry_key, request).await
+                } else if let Some(rest) = path.strip_prefix("/art/") {
+                    let mut segments = rest.splitn(2, '/');
+                    let entry_key = segments.next().unwrap_or("");
+                    let kind = segments.next().unwrap_or("");
+                    self.art(entry_key, kind, request).await
                 } else {
                     status(404)
                 }
@@ -132,6 +137,68 @@ impl MediaService {
             }
             ResolvedRange::Unsatisfiable => status(416),
         }
+    }
+
+    /// `GET /art/{entry_key}/{poster|backdrop|cover|artist}` — the artwork a
+    /// scrape wrote, served the same way as media bytes (Range + etag), with
+    /// `if_none_match` short-circuiting to 304 when the client already has
+    /// the current version.
+    async fn art(&self, entry_key: &str, kind_segment: &str, request: &PeerRequest) -> Resolved {
+        if !is_valid_entry_key(entry_key) {
+            return status(404);
+        }
+        let Some(kind) = ArtworkKind::parse(kind_segment) else {
+            return status(404);
+        };
+        let Ok(Some((relative_path, version))) = self.library.artwork(entry_key, kind).await else {
+            return status(404);
+        };
+        let etag = format!("v{version}");
+        if request.if_none_match.as_deref() == Some(etag.as_str()) {
+            return Resolved {
+                header: PeerResponseHeader { status: 304, len: 0, content_type: None, content_range: None, etag: Some(etag) },
+                body: Body::Bytes(Vec::new()),
+            };
+        }
+        let path = self.media_root.join(&relative_path);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return status(404); // artwork file missing from disk since the scrape
+        };
+        let total = metadata.len();
+        match resolve(request.range, total) {
+            ResolvedRange::Full { len } => Resolved {
+                header: PeerResponseHeader {
+                    status: 200,
+                    len,
+                    content_type: Some(image_content_type(&relative_path).into()),
+                    content_range: None,
+                    etag: Some(etag),
+                },
+                body: Body::File { path, offset: 0, len },
+            },
+            ResolvedRange::Partial(content_range) => {
+                let len = content_range.end - content_range.start + 1;
+                Resolved {
+                    header: PeerResponseHeader {
+                        status: 206,
+                        len,
+                        content_type: Some(image_content_type(&relative_path).into()),
+                        content_range: Some(content_range),
+                        etag: Some(etag),
+                    },
+                    body: Body::File { path, offset: content_range.start, len },
+                }
+            }
+            ResolvedRange::Unsatisfiable => status(416),
+        }
+    }
+}
+
+fn image_content_type(relative_path: &str) -> &'static str {
+    match relative_path.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => "image/jpeg", // every scraper writes .jpg today
     }
 }
 
