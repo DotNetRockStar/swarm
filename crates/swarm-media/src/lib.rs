@@ -1,21 +1,27 @@
-//! Media library engine for the SWARM server app (Phase 2+).
+//! Media library engine for the SWARM server app.
 //!
-//! Planned modules, porting the Batocera.Drone movies/music store
-//! architecture (`movies_store.py` / `music_store.py`):
-//! - `scan` — extension-allowlist walk, (size, mtime, fingerprint) change
-//!   detection.
-//! - `store` — SQLite (sqlx) library cache: entries + pending-changes queue +
-//!   deleted-archive + whole-library thumbprint (the delta-sync primitive).
-//! - `tags` — embedded metadata via lofty (ID3/Vorbis/MP4) — display overlay
-//!   only; grouping keys stay path-derived.
-//! - `probe` — ffprobe codec/container capture at scan time (feeds
-//!   direct-play decisions).
-//! - `scrape` — TMDb (user key) + MusicBrainz/Cover Art Archive/Wikimedia
-//!   (keyless), with the inherited job discipline: NotFound(Unavailable)
-//!   two-tier errors, Retry-After capped, SQLite-row-backed one-shot bulk
-//!   jobs.
-//! - `serve` — Range-aware direct-play serving over peer QUIC streams.
-//! - `transcode` — ffmpeg HLS sessions with ABR ladder, seek-into-transcode,
-//!   janitor eviction (evolution of `cast_stream.py`).
+//! Implemented (Phase 2):
+//! - [`classify`] — extension allowlist + path-derived grouping (movie /
+//!   episode / track, artist/album, SxxEyy, disc-folder absorption).
+//! - [`store`] — SQLite library: entries + pending-changes queue +
+//!   deleted-archive + whole-library thumbprint (delta-sync primitive).
+//! - [`scan`] — walk → (size, mtime) change detection → sample-fp-v1 →
+//!   tags/probe enrichment → store reconciliation.
+//! - [`tags`] — embedded tags via lofty (display overlay only).
+//! - [`probe`] — optional ffprobe codec/duration capture for direct-play
+//!   decisions.
+//! - [`range`] — HTTP-semantics byte-range resolution + content types.
+//! - [`serve`] — the peer-facing media service over QUIC streams.
+//!
+//! Planned: scrapers (TMDb/MusicBrainz/CAA/Wikimedia) with the inherited job
+//! discipline, artwork storage, HLS transcode sessions (Phase 5).
+
+pub mod classify;
+pub mod probe;
+pub mod range;
+pub mod scan;
+pub mod serve;
+pub mod store;
+pub mod tags;
 
 pub use swarm_core as core;

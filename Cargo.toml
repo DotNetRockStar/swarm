@@ -6,6 +6,7 @@ members = [
     "crates/swarm-media",
     "crates/swarm-stun-client",
     "apps/stun-server",
+    "apps/server",
 ]
 
 [workspace.package]
@@ -24,5 +25,10 @@ hex = "0.4"
 thiserror = "2"
 utoipa = "5"
 tokio = { version = "1", features = ["full"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros"] }
+lofty = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
