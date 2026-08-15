@@ -8,9 +8,14 @@ Kotlin/JVM, no Android dependency) and `:app` (the Android application).
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17   # AGP needs 17, not whatever `java` defaults to
-./gradlew :core:test        # wire contracts, STUN client, catalog merger — JDK only, no SDK needed
+./gradlew :core:test         # wire contracts, STUN client, catalog merger, PeerQuicClient — JDK only, no SDK needed
+./gradlew :core:interopTest  # kwik <-> real Rust quinn server QUIC spike; needs a release swarm-serverd build (see below)
 ./gradlew :app:assembleDebug # full APK (armeabi-v7a + arm64-v8a splits); needs $ANDROID_HOME
 ```
+
+`:core:interopTest` needs `cargo build --release -p swarm-server --bin swarm-serverd` run first from the
+workspace root — it skips gracefully (not fails) if that binary isn't present, so it's a separate
+opt-in task rather than part of the default `:core:test`.
 
 `local.properties` (gitignored) must point `sdk.dir` at an installed Android SDK
 with `platforms;android-35` + `build-tools;35.0.0`.
@@ -57,24 +62,49 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
 - Registration end-to-end is real: passcode submission calls the actual STUN
   REST API, saves the returned token encrypted, and loads the swarm's device
   roster.
+- **`PeerQuicClient`** (`:core/transport`) — a kwik-based QUIC client mirroring
+  `swarm_p2p::endpoint::connect`/`send_request` (Rust): mTLS with a client
+  certificate, post-handshake fingerprint pinning (kwik's builder has no
+  CA-less pinning callback, so this verifies `getServerCertificateChain()`
+  itself and closes on mismatch — see the class doc), and the
+  one-request-per-QUIC-stream framing. **Proven against the real Rust server**,
+  not just compiled: `PeerQuicClientInteropTest` (`./gradlew :core:interopTest`)
+  spawns the actual release `swarm-serverd` binary and drives it from Kotlin
+  over loopback QUIC — a full session (thumbprint, manifest, a byte-exact
+  300 KB direct-play transfer, a seek Range, a suffix Range) passes
+  repeatedly with every byte verified, and a client whose certificate isn't
+  on the server's allow-list is correctly refused. See that test class's doc
+  comment for the one open finding: running the three interop tests back to
+  back is occasionally flaky (`IOException: Connection closed` on one of
+  several connections made in quick succession) even though every isolated
+  run and the full multi-request single-connection session are 100%
+  reliable — undiagnosed, flagged for follow-up before leaning on kwik for a
+  reconnect-heavy path (e.g. Phase 4's hole-punch retry loop), not blocking
+  the "kwik is a viable QUIC stack for this protocol" conclusion.
 
 ## Deliberately not built yet
 
-- **Peer QUIC transport.** No kwik integration, no loopback HTTP↔QUIC proxy,
-  no ExoPlayer wiring. This is explicitly the highest-risk item in the
-  project plan's risk register ("kwik (JVM QUIC) throughput on Fire TV
-  hardware unproven") — it needs a throughput spike on real hardware before
-  committing to the approach, and there's no Fire TV device or Android
-  emulator available in this environment to run that spike honestly. The
-  `:core` peer contracts (`PeerRequest`/`PeerResponseHeader`/`ByteRange`) are
-  ready and tested for whenever this lands.
+- **The loopback HTTP↔QUIC proxy and ExoPlayer wiring.** `PeerQuicClient`
+  moves bytes correctly; what's missing is the layer that makes a media
+  player able to use it — a local `127.0.0.1` HTTP server translating
+  ExoPlayer's requests (including `Range`) into `PeerQuicClient.request()`
+  calls, per `docs/PROTOCOL.md`'s loopback-proxy note. Mechanical work on top
+  of a now-proven transport, not a research question anymore.
+- **Real hardware throughput.** The project plan's risk register asks for a
+  kwik throughput spike *on Fire TV hardware specifically* — no physical
+  device or Android emulator is available in this environment, so only the
+  loopback-over-localhost interop (above) could be verified here. Loopback
+  proves correctness, not throughput/latency under real wifi and a
+  constrained TV CPU.
 - Merged multi-server catalog UI, resume/watched state, direct-play/transcode
-  negotiation, diagnostics screen (NAT type, punch results, per-server RTT) —
-  all depend on the transport above.
+  negotiation, diagnostics screen (NAT type, punch results, per-server RTT),
+  the hole-punch candidate exchange itself (this client dials a known
+  host:port directly; it doesn't yet gather/exchange candidates over WSS
+  signaling) — all build on the transport above but aren't wired up yet.
 - Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
   wired into the Gradle build; adding it means also adding the KSP plugin.
-- Visual/on-device verification. The debug APK builds and its manifest is
-  correct, but nobody has run it — no physical Fire TV and no emulator was
-  set up in this environment. Install `app/build/outputs/apk/debug/
-  app-arm64-v8a-debug.apk` on a real device or `adb`-connected emulator to
-  see it render.
+- Visual/on-device verification of the `:app` UI. The debug APK builds and
+  its manifest is correct, but nobody has run it — no physical Fire TV and
+  no emulator was set up in this environment. Install
+  `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` on a real device or
+  `adb`-connected emulator to see it render.

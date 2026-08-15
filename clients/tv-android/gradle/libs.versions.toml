@@ -14,6 +14,8 @@ security-crypto = "1.1.0-alpha06"
 junit = "5.11.3"
 mockwebserver = "4.12.0"
 coreKtx = "1.15.0"
+kwik = "0.10.3"
+bouncycastle = "1.79"
 
 [libraries]
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
@@ -44,6 +46,9 @@ room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
 security-crypto = { module = "androidx.security:security-crypto", version.ref = "security-crypto" }
 
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+kwik = { module = "tech.kwik:kwik", version.ref = "kwik" }
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-prov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

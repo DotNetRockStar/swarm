@@ -20,14 +20,51 @@ kotlin {
 
 dependencies {
     api(libs.okhttp) // StunApiClient's constructor exposes OkHttpClient to callers
+    api(libs.kwik)    // PeerQuicClient's constructor exposes kwik types to callers
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Test-only: generates a self-signed X.509 identity for the interop
+    // spike against the real Rust server. Production Android code uses
+    // AndroidKeyStore instead (see :app's AndroidDeviceIdentity) — this
+    // never ships.
+    testImplementation(libs.bouncycastle.pkix)
+    testImplementation(libs.bouncycastle.prov)
 }
 
 tasks.test {
     useJUnitPlatform()
+    // Interop tests spawn a real OS subprocess (the Rust swarm-serverd
+    // binary) and hold live QUIC/UDP resources — qualitatively different
+    // from the fast, dependency-free unit tests here. Kept out of the
+    // default suite; see the dedicated `interopTest` task below.
+    filter {
+        excludeTestsMatching("*InteropTest")
+    }
+}
+
+tasks.register<Test>("interopTest") {
+    description = "Kwik <-> real Rust quinn server QUIC interop spike. Needs a release swarm-serverd build " +
+        "(cargo build --release -p swarm-server --bin swarm-serverd) — skips gracefully if absent."
+    group = "verification"
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter {
+        includeTestsMatching("*InteropTest")
+    }
+    // Each test method gets a fresh JVM. Empirically, this suite is 100%
+    // reliable with one test per JVM but flaky when several run back to
+    // back in one JVM — a real, unresolved finding (not papered over): some
+    // kwik-side native/background resource from one connect/disconnect
+    // cycle appears to interfere with the next fresh QuicClientConnection
+    // in the same process. Real usage holds one long-lived connection, not
+    // rapid reconnect cycles, so this doesn't block the interop conclusion
+    // (see PeerQuicClientInteropTest's class doc), but it's worth deeper
+    // investigation before leaning on kwik for a reconnect-heavy path.
+    forkEvery = 1
+    maxParallelForks = 1
 }

@@ -24,7 +24,11 @@ async fn main() {
         return;
     }
 
+    // See swarm-server's main.rs for why this is explicit rather than left
+    // to tracing-subscriber's own (unreliable-in-practice) auto-detection.
+    use std::io::IsTerminal;
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,sqlx=warn".into()),

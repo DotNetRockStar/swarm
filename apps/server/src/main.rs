@@ -4,7 +4,14 @@
 
 #[tokio::main]
 async fn main() {
+    // ANSI color codes only help an interactive terminal; a piped/redirected
+    // stdout (Docker, systemd, a log file, a test harness parsing this
+    // output) should get plain text. tracing-subscriber's own default
+    // doesn't reliably auto-detect this in every environment, so check
+    // explicitly rather than assume.
+    use std::io::IsTerminal;
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()),
         )
