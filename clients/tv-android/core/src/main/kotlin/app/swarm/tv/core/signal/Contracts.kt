@@ -149,3 +149,6 @@ data class ReflectorResponse(val ip: String, val port: Int)
 
 /** Datagram body used during simultaneous hole punching. */
 val PUNCH_MAGIC: ByteArray = "swarm-punch-v1".toByteArray(Charsets.US_ASCII)
+
+/** Mirrors `swarm_core::PROTOCOL_VERSION` (Rust) — travels in every `hello`. */
+const val PROTOCOL_VERSION: Int = 1

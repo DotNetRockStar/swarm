@@ -59,7 +59,12 @@ async fn main() {
     let router = routes::build_router(state, static_dir.as_deref());
 
     let listener = tokio::net::TcpListener::bind(bind).await.expect("failed to bind HTTP listener");
-    tracing::info!(%bind, "swarm-stun-server listening (docs at /api/docs)");
+    // The *resolved* local address, not `bind` itself — with the common
+    // SWARM_HTTP_BIND=host:0 pattern (let the OS pick a port, e.g. for
+    // tests), logging the pre-bind config value would always show port 0,
+    // useless to anything trying to discover the real port from this line.
+    let local_addr = listener.local_addr().expect("bound listener has a local address");
+    tracing::info!(bind = %local_addr, "swarm-stun-server listening (docs at /api/docs)");
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .expect("server error");
