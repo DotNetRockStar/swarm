@@ -43,6 +43,27 @@ fn identity_material(identity: &DeviceIdentity) -> (Vec<CertificateDer<'static>>
     (chain, key)
 }
 
+fn server_config(identity: &DeviceIdentity, allowed: AllowedPeers) -> Result<quinn::ServerConfig, P2pError> {
+    let (chain, key) = identity_material(identity);
+    let mut tls = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(RosterClientVerifier::new(allowed))
+        .with_single_cert(chain, key)?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    let quic = QuicServerConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
+}
+
+fn client_config(identity: &DeviceIdentity, expected_fingerprint: &str) -> Result<quinn::ClientConfig, P2pError> {
+    let (chain, key) = identity_material(identity);
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(expected_fingerprint))
+        .with_client_auth_cert(chain, key)?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    let quic = QuicClientConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
+    Ok(quinn::ClientConfig::new(Arc::new(quic)))
+}
+
 /// Accepting endpoint for the server role: requires a client cert whose
 /// fingerprint is in `allowed` (the live swarm roster).
 pub fn listen(
@@ -50,14 +71,7 @@ pub fn listen(
     identity: &DeviceIdentity,
     allowed: AllowedPeers,
 ) -> Result<quinn::Endpoint, P2pError> {
-    let (chain, key) = identity_material(identity);
-    let mut tls = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(RosterClientVerifier::new(allowed))
-        .with_single_cert(chain, key)?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    let quic = QuicServerConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    Ok(quinn::Endpoint::server(server_config, bind)?)
+    Ok(quinn::Endpoint::server(server_config(identity, allowed)?, bind)?)
 }
 
 /// Dial a peer, verifying its certificate against `expected_fingerprint` and
@@ -67,17 +81,46 @@ pub async fn connect(
     identity: &DeviceIdentity,
     expected_fingerprint: &str,
 ) -> Result<quinn::Connection, P2pError> {
-    let (chain, key) = identity_material(identity);
-    let mut tls = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(PinnedServerVerifier::new(expected_fingerprint))
-        .with_client_auth_cert(chain, key)?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    let quic = QuicClientConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
     let bind: SocketAddr = if remote.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
     let mut endpoint = quinn::Endpoint::client(bind)?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic)));
+    endpoint.set_default_client_config(client_config(identity, expected_fingerprint)?);
     // SNI is irrelevant under pinning but rustls requires a name; use a fixed one.
+    let connection = endpoint
+        .connect(remote, "swarm-peer")
+        .map_err(|e| P2pError::Quic(e.to_string()))?
+        .await?;
+    Ok(connection)
+}
+
+/// Like [`listen`], but takes ownership of a socket the caller already used
+/// — a hole punch via [`crate::punch::punch`], most likely — instead of
+/// binding a fresh one. QUIC traffic then continues on the exact 4-tuple
+/// whatever NAT mapping the punch opened is valid for; a new socket would
+/// get a new local port and throw that mapping away.
+pub fn listen_on_socket(
+    socket: std::net::UdpSocket,
+    identity: &DeviceIdentity,
+    allowed: AllowedPeers,
+) -> Result<quinn::Endpoint, P2pError> {
+    Ok(quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config(identity, allowed)?),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?)
+}
+
+/// Like [`connect`], but dials from a socket the caller already used —
+/// see [`listen_on_socket`] for why this matters for a punched connection.
+pub async fn connect_on_socket(
+    socket: std::net::UdpSocket,
+    remote: SocketAddr,
+    identity: &DeviceIdentity,
+    expected_fingerprint: &str,
+) -> Result<quinn::Connection, P2pError> {
+    let mut endpoint =
+        quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+    endpoint.set_default_client_config(client_config(identity, expected_fingerprint)?);
     let connection = endpoint
         .connect(remote, "swarm-peer")
         .map_err(|e| P2pError::Quic(e.to_string()))?
