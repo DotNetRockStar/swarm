@@ -17,3 +17,6 @@ rustls = { workspace = true }
 rcgen = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+stun-server = { path = "../../apps/stun-server" }
