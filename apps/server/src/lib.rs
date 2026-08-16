@@ -4,6 +4,7 @@
 //! headless daemon (`swarm-serverd`) and the Tauri desktop shell
 //! (`swarm-server-app`) drive this same surface.
 
+pub mod punch_connect;
 mod stun_link;
 
 use std::collections::{BTreeMap, HashSet};
