@@ -16,6 +16,9 @@ reqwest = { workspace = true }
 keyring = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"
+stun-server = { path = "../../apps/stun-server" }

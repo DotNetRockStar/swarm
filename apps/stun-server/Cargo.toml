@@ -30,5 +30,5 @@ rand = "0.8"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-futures-util = "0.3"
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

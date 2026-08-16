@@ -4107,15 +4107,18 @@ name = "swarm-stun-client"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "hex",
  "keyring",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "stun-server",
  "swarm-core",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 
