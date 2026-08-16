@@ -236,6 +236,24 @@ pub async fn handle_stream(
     Ok(())
 }
 
+/// Serve every request stream an already-established connection sends,
+/// spawning a task per stream, until the peer closes it. Split out from
+/// [`accept_loop`] so a connection that arrived some other way — a punched
+/// connection from `apps/server`'s `punch_connect`, say, rather than
+/// `endpoint.accept()` — gets exactly the same per-stream serving behavior.
+pub async fn serve_connection(connection: quinn::Connection, service: Arc<MediaService>) {
+    tracing::info!(remote = %connection.remote_address(), "peer connected");
+    // Loop ends when accept_bi errors, i.e. the connection closed.
+    while let Ok((send, recv)) = connection.accept_bi().await {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            if let Err(err) = handle_stream(&service, send, recv).await {
+                tracing::debug!(error = %err, "stream failed");
+            }
+        });
+    }
+}
+
 /// Accept connections (already fingerprint-gated by the TLS layer) and spawn
 /// a task per request stream.
 pub async fn accept_loop(endpoint: quinn::Endpoint, service: Arc<MediaService>) {
@@ -249,16 +267,7 @@ pub async fn accept_loop(endpoint: quinn::Endpoint, service: Arc<MediaService>) 
                     return;
                 }
             };
-            tracing::info!(remote = %connection.remote_address(), "peer connected");
-            // Loop ends when accept_bi errors, i.e. the connection closed.
-            while let Ok((send, recv)) = connection.accept_bi().await {
-                let service = Arc::clone(&service);
-                tokio::spawn(async move {
-                    if let Err(err) = handle_stream(&service, send, recv).await {
-                        tracing::debug!(error = %err, "stream failed");
-                    }
-                });
-            }
+            serve_connection(connection, service).await;
         });
     }
 }

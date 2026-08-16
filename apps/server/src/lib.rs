@@ -13,14 +13,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmSummary};
+use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::scan::{scan_root, ScanReport};
 use swarm_media::scrape::{run_bulk_scrape, BulkScrapeReport, ScrapeConfig};
-use swarm_media::serve::{accept_loop, MediaService};
+use swarm_media::serve::{accept_loop, serve_connection, MediaService};
 use swarm_media::store::Library;
 use swarm_p2p::identity::DeviceIdentity;
 use swarm_p2p::pin::AllowedPeers;
-use swarm_stun_client::{StunClient, TokenStore};
+use swarm_stun_client::{SignalingClient, StunClient, TokenStore};
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+
+use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
 
 pub use stun_link::StunLinkRecord;
 
@@ -79,6 +83,7 @@ pub struct ServerCore {
     pub media_root: PathBuf,
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
+    service: Arc<MediaService>,
     data_dir: PathBuf,
     /// Fingerprints from `ServerConfig::allowed_fingerprints` — kept
     /// separate so a roster sync can rebuild `allowed` as
@@ -127,7 +132,7 @@ impl ServerCore {
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
         let service = Arc::new(MediaService::new(Arc::clone(&library), config.media_root.clone()));
-        tokio::spawn(accept_loop(endpoint, service));
+        tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
 
         let core = Arc::new(Self {
             identity,
@@ -135,6 +140,7 @@ impl ServerCore {
             media_root: config.media_root,
             allowed,
             listen_addr,
+            service,
             data_dir: config.data_dir,
             static_fingerprints,
             token_store_mode: config.token_store_mode,
@@ -216,6 +222,7 @@ impl ServerCore {
             StunLinkRecord { base_url, device_id: response.device_id.clone(), swarms: vec![response.swarm.clone()] };
         stun_link::save(&self.data_dir, &link)?;
 
+        self.establish_signaling(&link.base_url, &response.access_token, &link.device_id).await;
         *self.stun.lock().await =
             Some(StunContext { client, token_store, access_token: response.access_token, link });
         Arc::clone(self).spawn_roster_sync_loop();
@@ -273,12 +280,77 @@ impl ServerCore {
             }
         };
         let client = StunClient::new(link.base_url.clone());
+        self.establish_signaling(&link.base_url, &access_token, &link.device_id).await;
         *self.stun.lock().await = Some(StunContext { client, token_store, access_token, link });
         tracing::info!("restored STUN link, starting roster sync");
         Arc::clone(&self).spawn_roster_sync_loop();
         if let Err(err) = self.sync_roster().await {
             tracing::debug!(%err, "initial roster sync after restore failed; will retry on schedule");
         }
+    }
+
+    /// Opens a signaling session and, if that succeeds, resolves the
+    /// reflector's address and starts the punch-dispatch loop. Best-effort
+    /// and never fatal to the caller: a server with no working signaling
+    /// session still serves LAN direct-play peers via `peer_addr` just
+    /// fine, it just can't accept a connection from anyone off-LAN —
+    /// logged, not propagated as an error.
+    async fn establish_signaling(self: &Arc<Self>, base_url: &str, access_token: &str, device_id: &str) {
+        let (signaling, signal_rx) = match SignalingClient::connect(base_url, access_token, device_id, None).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(%err, "could not open a signaling session; hole-punch connections unavailable on this link");
+                return;
+            }
+        };
+        let Some(reflector_addr) = resolve_reflector_addr(base_url, &signaling.reflector_ports).await else {
+            tracing::warn!("could not resolve the reflector's address; hole-punch connections unavailable on this link");
+            return;
+        };
+        Arc::clone(self).spawn_punch_dispatch_loop(signaling, signal_rx, reflector_addr);
+    }
+
+    /// Owns the signaling receiver for as long as this link lives: reacts to
+    /// an incoming `Offer` from a swarm-mate by answering it, punching, and
+    /// — once mutually confirmed — serving the resulting QUIC connection
+    /// exactly like one accepted on the main listener. Everything else
+    /// (presence, stray signals) is ignored; nothing else on this server
+    /// reads from this receiver, so there's no contention to design around.
+    ///
+    /// Known limitation, not solved here: only one punch negotiation runs
+    /// at a time, since answering one offer borrows this receiver until
+    /// that attempt finishes or times out (see `punch_connect`'s module
+    /// doc). A second peer's offer arriving mid-negotiation sits in the
+    /// channel until the first attempt is done, rather than being handled
+    /// concurrently.
+    fn spawn_punch_dispatch_loop(
+        self: Arc<Self>,
+        signaling: SignalingClient,
+        mut signal_rx: mpsc::UnboundedReceiver<SignalMessage>,
+        reflector_addr: SocketAddr,
+    ) {
+        tokio::spawn(async move {
+            loop {
+                let message = match signal_rx.recv().await {
+                    Some(message) => message,
+                    None => {
+                        tracing::debug!("signaling session closed; no longer accepting hole-punched connections");
+                        return;
+                    }
+                };
+                let SignalMessage::Signal { from: Some(from), payload: SignalPayload::Offer { punch_id, candidates, cert_fingerprint }, .. } = message else {
+                    continue;
+                };
+                let offer = ReceivedOffer { from: from.clone(), punch_id, candidates, cert_fingerprint };
+                match respond_to_punch_offer(&signaling, &mut signal_rx, reflector_addr, offer, &self.identity, self.allowed.clone()).await {
+                    Ok(connection) => {
+                        tracing::info!(peer = %from, "hole-punched connection established");
+                        tokio::spawn(serve_connection(connection, Arc::clone(&self.service)));
+                    }
+                    Err(err) => tracing::debug!(peer = %from, %err, "hole-punch negotiation failed"),
+                }
+            }
+        });
     }
 
     fn spawn_roster_sync_loop(self: Arc<Self>) {
@@ -340,6 +412,18 @@ impl ServerCore {
         tracing::debug!(count, "allowed-peer set synced from swarm roster(s)");
         Ok(count)
     }
+}
+
+/// The reflector runs inside the STUN server process (`docs/PROTOCOL.md`),
+/// so its address is the STUN base URL's host plus whichever port
+/// `hello_ack` advertised as live — resolved via DNS since the host in a
+/// base URL is as likely to be a domain name as a literal IP.
+async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Option<SocketAddr> {
+    let port = *reflector_ports.first()?;
+    let without_scheme = base_url.strip_prefix("https://").or_else(|| base_url.strip_prefix("http://"))?;
+    let host_and_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let host = host_and_port.split(':').next().unwrap_or(host_and_port);
+    tokio::net::lookup_host((host, port)).await.ok()?.next()
 }
 
 /// Config sourced from env (shared by both binaries):
