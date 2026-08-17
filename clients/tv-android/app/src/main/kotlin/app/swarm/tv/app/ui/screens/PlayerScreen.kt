@@ -6,6 +6,16 @@
  * [app.swarm.tv.core.proxy.PeerLoopbackProxy] already speaks (proven with a
  * plain OkHttp client in `PeerQuicClientInteropTest`), so this screen is
  * mechanical: point it at the local proxy URL like any other HTTP stream.
+ *
+ * Resume/watched state: seeks to [resumePositionSecs] on prepare, and
+ * reports the final position back via [onPositionUpdate] when the screen
+ * is disposed (back pressed, or navigated away from) — this screen itself
+ * knows nothing about persistence, `SwarmViewModel` owns deciding what to
+ * do with that report. Deliberately save-on-exit only, not a periodic
+ * save while playing — simpler, and the only gap it leaves is losing the
+ * position on a crash mid-playback rather than on a normal exit, which
+ * isn't worth a repeating timer tied to Compose lifecycle for a first
+ * version.
  */
 package app.swarm.tv.app.ui.screens
 
@@ -19,24 +29,39 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 
 @Composable
-fun PlayerScreen(url: String, title: String, onBack: () -> Unit) {
+fun PlayerScreen(
+    url: String,
+    title: String,
+    resumePositionSecs: Double,
+    onBack: () -> Unit,
+    onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
+) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
 
     val player = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.Builder().setUri(Uri.parse(url)).setMediaId(title).build())
+            if (resumePositionSecs > 0) {
+                seekTo((resumePositionSecs * 1000).toLong())
+            }
             playWhenReady = true
             prepare()
         }
     }
     DisposableEffect(player) {
-        onDispose { player.release() }
+        onDispose {
+            val positionSecs = player.currentPosition / 1000.0
+            val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { it / 1000.0 } ?: 0.0
+            onPositionUpdate(positionSecs, durationSecs)
+            player.release()
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {

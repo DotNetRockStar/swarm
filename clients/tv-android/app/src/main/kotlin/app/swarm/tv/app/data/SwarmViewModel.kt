@@ -15,6 +15,8 @@ import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.core.token.TokenStore
+import app.swarm.tv.core.watch.WatchState
+import app.swarm.tv.core.watch.WatchStateStore
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.security.PrivateKey
@@ -37,7 +39,13 @@ sealed class UiState {
         val loading: Boolean = true,
         val unreachable: List<SwarmDevice> = emptyList(),
     ) : UiState()
-    data class Player(val url: String, val title: String, val previous: Catalog) : UiState()
+    data class Player(
+        val url: String,
+        val title: String,
+        val fingerprint: String,
+        val resumePositionSecs: Double,
+        val previous: Catalog,
+    ) : UiState()
     data class Error(val message: String) : UiState()
 }
 
@@ -57,7 +65,9 @@ sealed class UiState {
  * `clientKey` are this device's own identity — `AndroidDeviceIdentity`'s
  * `AndroidKeyStore`-backed cert/key on the shipped app, an in-memory one in
  * tests — the mTLS credential a peer's `RosterClientVerifier` checks
- * against the swarm roster it already trusts.
+ * against the swarm roster it already trusts. [watchStateStore] backs
+ * resume/watched state, keyed by each entry's cross-server fingerprint —
+ * see [play] and [savePlaybackPosition].
  */
 class SwarmViewModel(
     private val tokenStore: TokenStore,
@@ -65,6 +75,7 @@ class SwarmViewModel(
     private val certFingerprint: String,
     private val clientCertificate: X509Certificate,
     private val clientKey: PrivateKey,
+    private val watchStateStore: WatchStateStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -153,13 +164,25 @@ class SwarmViewModel(
         return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind")
     }
 
-    /** Streams [entry] from whichever of its sources [CatalogSession] already holds a connection to. */
+    /** Streams [entry] from whichever of its sources [CatalogSession] already holds a connection to, resuming where a previous watch left off unless it was already finished. */
     fun play(entry: MergedEntry) {
         val current = _state.value
         if (current !is UiState.Catalog) return
         val serverId = entry.sources.first()
         val url = catalogSession.urlFor(serverId, "/media/${entry.entry.entryKey}")
-        _state.value = UiState.Player(url, entry.entry.scrapedTitle ?: entry.entry.title, current)
+        val fingerprint = entry.entry.fingerprint
+        viewModelScope.launch {
+            val resumePositionSecs = watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs ?: 0.0
+            _state.value = UiState.Player(url, entry.entry.scrapedTitle ?: entry.entry.title, fingerprint, resumePositionSecs, current)
+        }
+    }
+
+    /** Called when [PlayerScreen] is disposed with where playback ended up — "watched" is a simple near-the-end heuristic, not a precise "credits rolled" signal. */
+    fun savePlaybackPosition(fingerprint: String, positionSecs: Double, durationSecs: Double) {
+        viewModelScope.launch {
+            val watched = durationSecs > 0 && positionSecs / durationSecs > 0.9
+            watchStateStore.set(fingerprint, WatchState(positionSecs, durationSecs, watched, System.currentTimeMillis()))
+        }
     }
 
     fun stopPlayback() {

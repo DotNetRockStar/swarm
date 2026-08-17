@@ -90,10 +90,19 @@ dependencies {
     // either (bundles OkHttp fetching by default).
     implementation(libs.coil.compose)
 
-    // Room lands with local catalog persistence in a later pass — not
-    // needed yet (no DAO/entity code exists), and pulling it in would need
-    // the KSP plugin for nothing.
+    // A local *catalog* cache (for offline/instant browsing) would still
+    // land as Room in a later pass if it turns out to be worth it — not
+    // needed yet (no DAO/entity code exists), and pulling in the KSP
+    // plugin for nothing isn't a trade worth making speculatively. Resume/
+    // watched state is a *separate* concern and deliberately does NOT use
+    // Room even when this does eventually — see AndroidWatchStateStore's
+    // doc comment for why a plain key/value store fits that data better.
     implementation(libs.security.crypto)
 
     implementation(libs.kotlinx.coroutines.android)
+    // AndroidWatchStateStore talks to kotlinx.serialization directly
+    // (encodeToString/decodeFromString) rather than only through :core's
+    // SwarmJson value — :core's own dependency on this is `implementation`,
+    // not exposed transitively, so :app needs it too.
+    implementation(libs.kotlinx.serialization.json)
 }

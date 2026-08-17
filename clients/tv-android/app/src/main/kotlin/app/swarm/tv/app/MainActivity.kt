@@ -15,6 +15,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.swarm.tv.app.data.AndroidDeviceIdentity
 import app.swarm.tv.app.data.AndroidTokenStore
+import app.swarm.tv.app.data.AndroidWatchStateStore
 import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
 import app.swarm.tv.app.data.androidMachineId
@@ -32,6 +33,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val tokenStore = AndroidTokenStore(applicationContext)
+        val watchStateStore = AndroidWatchStateStore(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val certFingerprint = AndroidDeviceIdentity.ensureFingerprint()
         val certificate = AndroidDeviceIdentity.certificate()
@@ -39,7 +41,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey) as T
+                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore) as T
         }
 
         setContent {
@@ -56,6 +58,7 @@ class MainActivity : ComponentActivity() {
                         onStopPlayback = viewModel::stopPlayback,
                         onBackToDashboard = viewModel::backToDashboard,
                         artworkUrl = viewModel::artworkUrl,
+                        onSavePlaybackPosition = viewModel::savePlaybackPosition,
                     )
                 }
             }
@@ -73,6 +76,7 @@ private fun SwarmApp(
     onStopPlayback: () -> Unit,
     onBackToDashboard: () -> Unit,
     artworkUrl: (MergedEntry) -> String?,
+    onSavePlaybackPosition: (fingerprint: String, positionSecs: Double, durationSecs: Double) -> Unit,
 ) {
     when (state) {
         is UiState.PasscodeEntry ->
@@ -86,6 +90,14 @@ private fun SwarmApp(
         is UiState.Catalog ->
             CatalogScreen(state.swarm, state.entries, state.loading, state.unreachable, artworkUrl, onPlay, onBackToDashboard)
         is UiState.Player ->
-            PlayerScreen(state.url, state.title, onStopPlayback)
+            PlayerScreen(
+                url = state.url,
+                title = state.title,
+                resumePositionSecs = state.resumePositionSecs,
+                onBack = onStopPlayback,
+                onPositionUpdate = { positionSecs, durationSecs ->
+                    onSavePlaybackPosition(state.fingerprint, positionSecs, durationSecs)
+                },
+            )
     }
 }
