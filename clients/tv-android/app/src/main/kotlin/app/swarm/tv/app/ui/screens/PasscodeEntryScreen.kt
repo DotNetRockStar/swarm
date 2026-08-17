@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -55,8 +57,18 @@ fun PasscodeEntryScreen(
     var code by remember { mutableStateOf("") }
     var deviceName by remember { mutableStateOf("Fire TV") }
 
+    // verticalScroll, not just Arrangement.Center: on a real 1080p Fire TV
+    // this screen's full content (title, both text fields, digit slots, and
+    // all 4 number-pad rows) is taller than the viewport. Without a scroll
+    // container the bottom rows (7/8/9, 0/backspace) render off-screen and
+    // are completely unreachable by D-pad — confirmed on real hardware:
+    // LEFT/RIGHT navigate fine, but DOWN past row 2 of the pad never moves
+    // focus at all, silently blocking entry of any passcode containing
+    // 7/8/9/0. Compose brings the focused item into view automatically as
+    // focus moves through a scrollable ancestor, so D-pad navigation alone
+    // now reaches every row.
     Column(
-        modifier = Modifier.fillMaxSize().padding(48.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(48.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
