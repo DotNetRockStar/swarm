@@ -100,8 +100,17 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         val unreachable = mutableListOf<SwarmDevice>()
 
         for (device in devices.filter { it.deviceType != DeviceType.CLIENT }) {
-            val connection = connectionFor(device, clientCertificate, clientKey)
-            val manifest = connection?.let { fetchManifest(device.deviceId, it) }
+            var connection = connectionFor(device, clientCertificate, clientKey)
+            var manifest = connection?.let { fetchManifest(device.deviceId, it) }
+            if (manifest == null && connection != null) {
+                // fetchManifest already evicted the dead connection it was just
+                // handed (peer restarted, or — confirmed live — a QUIC connection
+                // that sat idle long enough to be dropped) — one retry gets a
+                // fresh one in the same refresh, instead of leaving the device
+                // "unreachable" until a second, separate Browse Library press.
+                connection = connectionFor(device, clientCertificate, clientKey)
+                manifest = connection?.let { fetchManifest(device.deviceId, it) }
+            }
             if (manifest == null) unreachable += device else manifestsByServer[device.deviceId] = manifest
         }
 

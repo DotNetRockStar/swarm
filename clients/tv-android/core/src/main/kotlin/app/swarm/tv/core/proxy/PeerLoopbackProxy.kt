@@ -149,9 +149,18 @@ class PeerLoopbackProxy private constructor(
         val response = try {
             connection.request(peerPath, range, ifNoneMatch)
         } catch (e: PeerQuicError) {
+            e.printStackTrace()
+            connections.remove(serverId)
             writeStatusOnly(output, 500, "Internal Server Error")
             return
         } catch (e: IOException) {
+            // A cached connection can die after this proxy last used it (peer
+            // restarted, or the QUIC connection idled out) — confirmed live via
+            // kwik's own "not connected" on createStream. Evicting it here means
+            // the next play attempt at least gets a clean 404 (prompting a
+            // re-browse) instead of the same connection silently 500ing forever.
+            e.printStackTrace()
+            connections.remove(serverId)
             writeStatusOnly(output, 500, "Internal Server Error")
             return
         }
