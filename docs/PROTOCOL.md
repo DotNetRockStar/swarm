@@ -48,11 +48,39 @@ Routes:
 | `/catalog/thumbprint` | `CatalogThumbprint` | whole-library version token |
 | `/catalog/manifest[?since=<tp>]` | `CatalogManifest` | full or delta listing |
 | `/art/{entry_key}/{poster\|backdrop\|cover\|artist}` | image bytes | etag/`if_none_match` honored |
-| `/media/{entry_key}` | file bytes | direct play; Range → 206 + `content_range` |
-| `/hls/{entry_key}/master.m3u8` | playlist | ladder pruned by the client capability profile |
-| `/hls/{entry_key}/{rendition}/{segment}` | MPEG-TS bytes | transcode sessions; `?t=<secs>` on master = seek-into-transcode |
+| `/play/{entry_key}` | `PlaybackPlan` | request carries `PlaybackPreferences`; reserves upload and chooses direct/HLS |
+| `/stream/{session_id}/media` | file bytes | budgeted direct play; Range → 206 + `content_range` |
+| `/media/{entry_key}` | file bytes | legacy/unnegotiated direct play; globally upload-paced |
+| `/hls/{session_id}/master.m3u8` | multivariant playlist | ladder pruned by client limits and remaining server upload |
+| `/hls/{session_id}/{rendition}/{file}` | playlist/fMP4 bytes | four-second CMAF/fMP4 HLS; resume offset was supplied during `/play` |
 
-`entry_key` values must pass `entry_key::is_valid_entry_key` before any filesystem lookup. Status vocabulary: 200, 206, 304, 404, 416, 500.
+`entry_key` values must pass `entry_key::is_valid_entry_key` before any filesystem lookup. Session ids are random 128-bit values. Status vocabulary additionally uses 400 for missing playback preferences, 429 for exhausted session/upload capacity, and 503 for an unavailable/failed transcoder.
+
+### Playback negotiation and upload budget
+
+`PeerRequest.playback`, present only on `/play/*`, contains the client's
+`CapabilityProfile`, integer resume position, and direct-play preference. A
+successful `PlaybackPlan` returns `mode`, a session-scoped peer `path`, and
+the session's hard `max_bitrate`. Capabilities travel directly over pinned
+QUIC; the rendezvous service is not trusted with the playback decision.
+
+The server computes `usable_upload = max_upload × (100 - reserve_percent) / 100`.
+Every direct or HLS session reserves a conservative peak rate, and the sum of
+live reservations may not exceed that shared pool. Response bodies are paced
+to the reservation rather than bursting onto the uplink. Default ladder:
+
+| Name | Maximum dimensions | Average video | Peak video | Stereo AAC |
+|---|---:|---:|---:|---:|
+| 1080p | 1920×1080 | 6 Mbps | 8 Mbps | 192 kbps |
+| 720p | 1280×720 | 3 Mbps | 4 Mbps | 160 kbps |
+| 480p | 854×480 | 1.4 Mbps | 2 Mbps | 128 kbps |
+| 360p | 640×360 | 700 kbps | 1 Mbps | 96 kbps |
+
+Rungs above the source, client limits, or remaining upload are omitted. Video
+is H.264 High/4.1, yuv420p with aligned two-second keyframes; media segments
+target four seconds. Music direct-plays when compatible and otherwise uses a
+single 96–192 kbps stereo AAC HLS rendition. Idle sessions and their temporary
+segments expire after five minutes; active file transfers cannot expire.
 
 ## Catalog identity
 

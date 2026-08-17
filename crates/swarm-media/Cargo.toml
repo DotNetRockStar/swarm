@@ -19,6 +19,7 @@ hex = { workspace = true }
 lofty = { workspace = true }
 quinn = { workspace = true }
 reqwest = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"

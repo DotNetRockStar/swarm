@@ -56,7 +56,7 @@ fn client_identity(tag: &str) -> DeviceIdentity {
 }
 
 fn no_range(path: &str) -> PeerRequest {
-    PeerRequest { path: path.into(), range: None, if_none_match: None }
+    PeerRequest { path: path.into(), range: None, if_none_match: None, playback: None }
 }
 
 #[tokio::test]
@@ -95,6 +95,7 @@ async fn direct_play_with_seek_over_pinned_quic() {
         path: media_path.clone(),
         range: Some(ByteRange::FromTo { start: seek_offset, end: None }),
         if_none_match: None,
+        playback: None,
     };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 206);
@@ -109,6 +110,7 @@ async fn direct_play_with_seek_over_pinned_quic() {
         path: media_path.clone(),
         range: Some(ByteRange::FromTo { start: 100, end: Some(199) }),
         if_none_match: None,
+        playback: None,
     };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!((header.status, header.len), (206, 100));
@@ -118,6 +120,7 @@ async fn direct_play_with_seek_over_pinned_quic() {
         path: media_path.clone(),
         range: Some(ByteRange::Suffix { last: 64 }),
         if_none_match: None,
+        playback: None,
     };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!((header.status, header.len), (206, 64));
@@ -129,6 +132,7 @@ async fn direct_play_with_seek_over_pinned_quic() {
         path: media_path,
         range: Some(ByteRange::FromTo { start: u64::MAX, end: None }),
         if_none_match: None,
+        playback: None,
     };
     let (header, _) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 416);

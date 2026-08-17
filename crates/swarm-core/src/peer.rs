@@ -6,12 +6,13 @@
 //! HTTP-shaped so the loopback proxies in the TV client and the Tauri app are
 //! dumb translators.
 
+use crate::capability::CapabilityProfile;
 use serde::{Deserialize, Serialize};
 
 /// Request header line. `path` uses the fixed peer route vocabulary:
 /// `/catalog/thumbprint`, `/catalog/manifest`, `/art/{entry_key}/{kind}`,
-/// `/media/{entry_key}` (direct play, Range honored),
-/// `/hls/{entry_key}/{rendition}/{segment}` (transcode).
+/// `/play/{entry_key}` (playback negotiation), `/stream/{session}/media`
+/// (budgeted direct play), and `/hls/{session}/...` (transcode).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerRequest {
@@ -21,6 +22,47 @@ pub struct PeerRequest {
     /// Entity tag for conditional catalog/artwork fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_none_match: Option<String>,
+    /// Present only on `/play/{entry_key}`. Keeping playback negotiation in
+    /// the authenticated peer plane means the media server can make the
+    /// direct/remux/transcode decision without trusting the rendezvous tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<PlaybackPreferences>,
+}
+
+/// What a player can consume and where it wants playback to begin. The
+/// server intersects this with its own shared upload budget before returning
+/// a [`PlaybackPlan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaybackPreferences {
+    pub capabilities: CapabilityProfile,
+    #[serde(default)]
+    pub start_position_secs: u64,
+    #[serde(default = "default_true")]
+    pub prefer_direct: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackMode {
+    Direct,
+    Hls,
+}
+
+/// Body returned by `/play/{entry_key}`. `path` is another peer path, not a
+/// public URL; the client feeds it through its authenticated loopback proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaybackPlan {
+    pub mode: PlaybackMode,
+    pub path: String,
+    /// Hard server-side allocation for this session, including audio, in
+    /// bits/sec. The client also uses it as its conservative ABR ceiling.
+    pub max_bitrate: u64,
 }
 
 /// HTTP-style byte range. `Suffix(n)` = last `n` bytes (`bytes=-n`);
@@ -151,8 +193,12 @@ mod tests {
     fn request_roundtrip_with_range() {
         let req = PeerRequest {
             path: "/media/030fe19c72f2665e6efd018a".into(),
-            range: Some(ByteRange::FromTo { start: 1024, end: None }),
+            range: Some(ByteRange::FromTo {
+                start: 1024,
+                end: None,
+            }),
             if_none_match: None,
+            playback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(serde_json::from_str::<PeerRequest>(&json).unwrap(), req);
@@ -161,7 +207,34 @@ mod tests {
     #[test]
     fn suffix_range_roundtrip() {
         let json = serde_json::to_string(&ByteRange::Suffix { last: 500 }).unwrap();
-        assert_eq!(serde_json::from_str::<ByteRange>(&json).unwrap(), ByteRange::Suffix { last: 500 });
+        assert_eq!(
+            serde_json::from_str::<ByteRange>(&json).unwrap(),
+            ByteRange::Suffix { last: 500 }
+        );
+    }
+
+    #[test]
+    fn playback_negotiation_roundtrip() {
+        let request = PeerRequest {
+            path: "/play/030fe19c72f2665e6efd018a".into(),
+            range: None,
+            if_none_match: None,
+            playback: Some(PlaybackPreferences {
+                capabilities: crate::capability::CapabilityProfile::fire_tv_baseline(),
+                start_position_secs: 42,
+                prefer_direct: true,
+            }),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(serde_json::from_str::<PeerRequest>(&json).unwrap(), request);
+
+        let plan = PlaybackPlan {
+            mode: PlaybackMode::Hls,
+            path: "/hls/session/master.m3u8".into(),
+            max_bitrate: 4_160_000,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert_eq!(serde_json::from_str::<PlaybackPlan>(&json).unwrap(), plan);
     }
 
     #[test]
@@ -190,13 +263,20 @@ mod tests {
                     level: Some("4.1".into()),
                     bitrate: Some(8_000_000),
                 }),
-                audio: Some(AudioStreamInfo { codec: "aac".into(), channels: 6, bitrate: None }),
+                audio: Some(AudioStreamInfo {
+                    codec: "aac".into(),
+                    channels: 6,
+                    bitrate: None,
+                }),
                 artwork_etag: Some("v1".into()),
             }],
             removed: vec![],
         };
         let json = serde_json::to_string(&manifest).unwrap();
-        assert_eq!(serde_json::from_str::<CatalogManifest>(&json).unwrap(), manifest);
+        assert_eq!(
+            serde_json::from_str::<CatalogManifest>(&json).unwrap(),
+            manifest
+        );
     }
 
     #[test]
@@ -205,10 +285,17 @@ mod tests {
             status: 206,
             len: 1024,
             content_type: Some("video/x-matroska".into()),
-            content_range: Some(ContentRange { start: 0, end: 1023, total: 4_700_000_000 }),
+            content_range: Some(ContentRange {
+                start: 0,
+                end: 1023,
+                total: 4_700_000_000,
+            }),
             etag: None,
         };
         let json = serde_json::to_string(&header).unwrap();
-        assert_eq!(serde_json::from_str::<PeerResponseHeader>(&json).unwrap(), header);
+        assert_eq!(
+            serde_json::from_str::<PeerResponseHeader>(&json).unwrap(),
+            header
+        );
     }
 }

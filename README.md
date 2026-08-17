@@ -7,7 +7,7 @@ Three apps:
 | App | Where | Stack |
 |---|---|---|
 | **STUN server** (`apps/stun-server`) | hosted (Oracle Cloud free tier, Docker + Caddy on :443) | Rust, Axum, utoipa/Swagger, SQLite |
-| **Server app** (`apps/server`) | your macOS/Linux/Windows machine with the media | Tauri (Rust core + web UI), bundled ffmpeg |
+| **Server app** (`apps/server`) | your macOS/Linux/Windows machine with the media | Tauri (Rust core + web UI), FFmpeg/ffprobe runtime |
 | **TV client** (`clients/tv-android`) | Fire TV (first), Amazon Appstore | Kotlin, Compose for TV, Media3/ExoPlayer |
 
 ## How it works
@@ -47,7 +47,17 @@ SWARM_MEDIA_ROOT=/path/to/media cargo run -p swarm-server --features gui --bin s
 
 The fingerprint tests pin byte-for-byte compatibility with the original Python `sample-fp-v1` implementation — do not change `fingerprint.rs` without regenerating vectors against `batocera.drone/app/common/fingerprint.py`.
 
-Server app env vars (headless daemon; the GUI persists the same settings to `<app data dir>/settings.json` instead): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
+Server app env vars (headless daemon; the GUI persists media/scraper settings to `<app data dir>/settings.json`): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
+
+Streaming bandwidth is a server-wide reservation pool. `SWARM_MAX_UPLOAD_MBPS`
+(default `10`) is reduced by `SWARM_UPLOAD_RESERVE_PERCENT` (default `30`),
+and the peak rates reserved by every active playback must fit in the remainder.
+`SWARM_MAX_STREAMS` defaults to `2`; `SWARM_FFMPEG_PATH` selects the FFmpeg
+binary; `SWARM_TRANSCODING_DISABLED=1` disables HLS while retaining compatible
+direct play. Example: a 10 Mbps uplink leaves a 7 Mbps pool and therefore
+advertises at most the 720p rung to the first viewer.
+FFmpeg and ffprobe must be installed on the media server; set
+`SWARM_FFMPEG_PATH` when `ffmpeg` is not on `PATH`.
 
 TV client (`clients/tv-android`, Gradle — see its own README for the full build/test story and what's deliberately not built yet):
 
@@ -108,4 +118,4 @@ Appstore compliance, and `run_now.sh` serves plain (non-TLS) endpoints.
 
 ## Roadmap
 
-Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission. Phase 3 (TV client) has registration, encrypted token storage, and the swarm dashboard working end-to-end against a real STUN server; the peer QUIC transport (and everything downstream of it — merged catalog, playback) is next, gated on a kwik throughput spike per the risk register.
+Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission. Direct/punched QUIC playback and upload-budgeted HLS negotiation are implemented; real-device throughput/decoder validation and product-level server bandwidth controls remain before Appstore submission.

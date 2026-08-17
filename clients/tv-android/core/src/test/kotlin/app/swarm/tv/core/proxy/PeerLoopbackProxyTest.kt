@@ -12,6 +12,7 @@ package app.swarm.tv.core.proxy
 import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.ContentRange
 import app.swarm.tv.core.peer.PeerResponseHeader
+import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.transport.PeerConnection
 import app.swarm.tv.core.transport.PeerResponse
 import java.io.ByteArrayInputStream
@@ -30,7 +31,7 @@ private class FakePeerConnection(
     var lastRange: ByteRange? = null
     var lastIfNoneMatch: String? = null
 
-    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?): PeerResponse {
+    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?): PeerResponse {
         lastPath = path
         lastRange = range
         lastIfNoneMatch = ifNoneMatch
@@ -122,6 +123,16 @@ class PeerLoopbackProxyTest {
         http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/art/abc/poster")).header("If-None-Match", "\"v3\"").build())
             .execute().use { assertEquals(304, it.code) }
         assertEquals("v3", fake.lastIfNoneMatch)
+    }
+
+    @Test
+    fun `playlist query string is preserved on the peer request`() {
+        val fake = FakePeerConnection { _, _, _ -> bodyResponse(200, "#EXTM3U".toByteArray()) }
+        proxy.register("srv1", fake)
+
+        http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/hls/session/master.m3u8?token=abc")).build())
+            .execute().use { assertEquals(200, it.code) }
+        assertEquals("/hls/session/master.m3u8?token=abc", fake.lastPath)
     }
 
     @Test

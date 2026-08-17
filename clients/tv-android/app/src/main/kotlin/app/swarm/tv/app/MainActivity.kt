@@ -88,15 +88,30 @@ private fun SwarmApp(
         is UiState.Dashboard ->
             SwarmDashboardScreen(state.swarm, state.devices, state.resyncing, onResync, onBrowseCatalog)
         is UiState.Catalog ->
-            CatalogScreen(state.swarm, state.entries, state.loading, state.unreachable, artworkUrl, onPlay, onBackToDashboard)
+            CatalogScreen(
+                state.swarm,
+                state.entries,
+                state.loading,
+                state.unreachable,
+                state.playbackError,
+                artworkUrl,
+                onPlay,
+                onBackToDashboard,
+            )
         is UiState.Player ->
             PlayerScreen(
                 url = state.url,
                 title = state.title,
                 resumePositionSecs = state.resumePositionSecs,
+                positionOffsetSecs = state.positionOffsetSecs,
+                maxBitrate = state.maxBitrate,
                 onBack = onStopPlayback,
                 onPositionUpdate = { positionSecs, durationSecs ->
-                    onSavePlaybackPosition(state.fingerprint, positionSecs, durationSecs)
+                    onSavePlaybackPosition(
+                        state.fingerprint,
+                        positionSecs,
+                        state.mediaDurationSecs ?: durationSecs,
+                    )
                 },
             )
     }

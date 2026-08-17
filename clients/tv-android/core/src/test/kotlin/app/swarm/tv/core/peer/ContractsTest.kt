@@ -6,6 +6,7 @@
  */
 package app.swarm.tv.core.peer
 
+import app.swarm.tv.core.capability.CapabilityProfile
 import app.swarm.tv.core.rest.SwarmJson
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -73,5 +74,25 @@ class ContractsTest {
         assertEquals("video/x-matroska", header.contentType)
         assertEquals(ContentRange(0, 1023, 4_700_000_000L), header.contentRange)
         assertNull(header.etag)
+    }
+
+    @Test
+    fun `playback negotiation matches serde shape`() {
+        val request = PeerRequest(
+            path = "/play/030fe19c72f2665e6efd018a",
+            playback = PlaybackPreferences(
+                capabilities = CapabilityProfile.fireTvBaseline(),
+                startPositionSecs = 42,
+            ),
+        )
+        val encoded = SwarmJson.encodeToString(request)
+        assertEquals(
+            """{"path":"/play/030fe19c72f2665e6efd018a","playback":{"capabilities":{"containers":["mp4","hls"],"video_codecs":["h264:high@4.2"],"audio_codecs":["aac","ac3","mp3"],"max_width":1920,"max_height":1080,"max_bitrate":12000000,"hdr":false},"start_position_secs":42,"prefer_direct":true}}""",
+            encoded,
+        )
+        val plan = SwarmJson.decodeFromString<PlaybackPlan>(
+            """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000}""",
+        )
+        assertEquals(PlaybackPlan(PlaybackMode.HLS, "/hls/session/master.m3u8", 4_160_000), plan)
     }
 }

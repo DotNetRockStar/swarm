@@ -224,7 +224,7 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
         let _ = b_connection.closed().await;
     });
 
-    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None };
+    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None, playback: None };
     let (header, mut recv) = send_request(&a_connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

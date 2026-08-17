@@ -187,6 +187,8 @@ async function refreshStatusAndLibrary() {
     document.getElementById("statusGrid").innerHTML =
       stat("Entries", status.entry_count) +
       stat("Listening (QUIC)", status.listen_addr) +
+      stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps") +
+      stat("Active playback sessions", status.active_playback_sessions) +
       stat("Media root", status.media_root) +
       stat("Device fingerprint", status.fingerprint, true) +
       stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);

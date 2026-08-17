@@ -143,11 +143,13 @@ connections to every server with a usable `peer_addr`, off the main
 thread), landing on `CatalogScreen` — the merged catalog grouped into
 Movies/Shows/Music rows (`TvLazyRow`-style `Card`s, D-pad focusable),
 showing which servers weren't reachable rather than hiding the gap.
-Selecting an entry opens `PlayerScreen`, a Media3 `ExoPlayer`/`PlayerView`
-pointed at `CatalogSession.urlFor(serverId, "/media/<entryKey>")` — the
-exact proxy URL shape already proven end-to-end with a generic HTTP client
-in `PeerQuicClientInteropTest`, so this wiring is mechanical, not a new
-risk. `AndroidDeviceIdentity` now exposes `certificate()`/`privateKey()`
+Selecting an entry first calls `CatalogSession.preparePlayback(...)` over the
+pinned peer connection. The server reserves from its shared upload pool and
+returns either a paced direct-play session or a capability-pruned HLS master;
+`PlayerScreen` points Media3 at that session path through the existing
+loopback proxy. HLS starts with a conservative bandwidth estimate because the
+visible HTTP connection is loopback, then adapts from actual segment transfer
+timings. `AndroidDeviceIdentity` exposes `certificate()`/`privateKey()`
 (the private key is a non-exportable `AndroidKeyStore` handle — usable by
 any crypto API that signs through the provider, `getEncoded()` always
 null) alongside the existing `ensureFingerprint()`, so `MainActivity` can
@@ -191,11 +193,8 @@ here, not just the fallback.
   `AndroidKeyStore` handle the way it accepts the in-memory keys every test
   here uses (untested either way, so this is a real open question, not an
   assumed-fine detail).
-- Resume/watched state, direct-play/transcode negotiation, a diagnostics
-  screen (NAT type, punch results, per-server RTT), the hole-punch candidate
-  exchange for the cross-network case (this client currently only reaches
-  servers whose self-reported `peer_addr` is directly dialable — same LAN,
-  or a manually forwarded port; it doesn't yet gather/exchange candidates
-  over WSS signaling).
+- A diagnostics screen (NAT type, punch results, per-server RTT and current
+  upload allocation) and real-device validation of adaptive switching under
+  a shaped/variable uplink.
 - Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
   wired into the Gradle build; adding it means also adding the KSP plugin.

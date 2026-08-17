@@ -30,6 +30,7 @@ package app.swarm.tv.core.transport
 import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.PeerRequest
 import app.swarm.tv.core.peer.PeerResponseHeader
+import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.rest.SwarmJson
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -75,7 +76,12 @@ class PeerResponse(val header: PeerResponseHeader, val body: InputStream)
  * be tested against a fake, with no live QUIC connection required.
  */
 interface PeerConnection {
-    fun request(path: String, range: ByteRange? = null, ifNoneMatch: String? = null): PeerResponse
+    fun request(
+        path: String,
+        range: ByteRange? = null,
+        ifNoneMatch: String? = null,
+        playback: PlaybackPreferences? = null,
+    ): PeerResponse
 }
 
 class PeerQuicClient private constructor(private val connection: QuicClientConnection) : PeerConnection, AutoCloseable {
@@ -149,9 +155,9 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
      * across concurrent requests on the same connection).
      */
     @Throws(IOException::class)
-    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?): PeerResponse {
+    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?): PeerResponse {
         val stream: QuicStream = connection.createStream(true)
-        val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch)) + "\n"
+        val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback)) + "\n"
         stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }
 
         val input = stream.inputStream

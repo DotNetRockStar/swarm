@@ -1,6 +1,6 @@
 /**
- * Plays [url] — an `http://127.0.0.1:<port>/<serverId>/media/<entryKey>`
- * URL from [app.swarm.tv.core.catalog.CatalogSession.urlFor] — through a
+ * Plays [url] — a negotiated budgeted-direct or HLS URL from
+ * [app.swarm.tv.core.catalog.CatalogSession.preparePlayback] — through a
  * standard Media3 `ExoPlayer`/`PlayerView`. ExoPlayer's own HTTP data
  * source needs nothing more exotic than what
  * [app.swarm.tv.core.proxy.PeerLoopbackProxy] already speaks (proven with a
@@ -31,22 +31,35 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     url: String,
     title: String,
     resumePositionSecs: Double,
+    positionOffsetSecs: Double,
+    maxBitrate: Long,
     onBack: () -> Unit,
     onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
 
-    val player = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
+    val player = remember(url, maxBitrate) {
+        // The HTTP URL is loopback, so Media3's network-type-based initial
+        // estimate describes the TV's Wi-Fi rather than the media server's
+        // constrained uplink. Start conservatively; segment transfer samples
+        // will replace this estimate as playback proceeds.
+        val initialBitrate = maxBitrate.coerceIn(250_000L, 2_000_000L)
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
+            .setInitialBitrateEstimate(initialBitrate)
+            .build()
+        ExoPlayer.Builder(context).setBandwidthMeter(bandwidthMeter).build().apply {
             setMediaItem(MediaItem.Builder().setUri(Uri.parse(url)).setMediaId(title).build())
             if (resumePositionSecs > 0) {
                 seekTo((resumePositionSecs * 1000).toLong())
@@ -57,8 +70,8 @@ fun PlayerScreen(
     }
     DisposableEffect(player) {
         onDispose {
-            val positionSecs = player.currentPosition / 1000.0
-            val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { it / 1000.0 } ?: 0.0
+            val positionSecs = positionOffsetSecs + player.currentPosition / 1000.0
+            val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { positionOffsetSecs + it / 1000.0 } ?: 0.0
             onPositionUpdate(positionSecs, durationSecs)
             player.release()
         }

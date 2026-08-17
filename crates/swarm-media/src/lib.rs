@@ -16,7 +16,8 @@
 //! - [`scrape`] — TMDb/MusicBrainz/Cover Art Archive/Wikimedia metadata and
 //!   artwork, with the inherited two-tier-error job discipline.
 //!
-//! Planned: HLS transcode sessions (Phase 5).
+//! - [`transcode`] — upload-budgeted direct/HLS playback sessions backed by
+//!   FFmpeg, with an adaptive H.264/AAC ladder and idle cleanup.
 
 pub mod classify;
 pub mod probe;
@@ -26,5 +27,6 @@ pub mod scrape;
 pub mod serve;
 pub mod store;
 pub mod tags;
+pub mod transcode;
 
 pub use swarm_core as core;

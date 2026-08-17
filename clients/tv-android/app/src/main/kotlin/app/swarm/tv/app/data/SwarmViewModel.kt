@@ -10,6 +10,7 @@ import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
 import app.swarm.tv.core.peer.MediaKind
+import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
@@ -39,12 +40,16 @@ sealed class UiState {
         val entries: List<MergedEntry> = emptyList(),
         val loading: Boolean = true,
         val unreachable: List<SwarmDevice> = emptyList(),
+        val playbackError: String? = null,
     ) : UiState()
     data class Player(
         val url: String,
         val title: String,
         val fingerprint: String,
         val resumePositionSecs: Double,
+        val positionOffsetSecs: Double,
+        val maxBitrate: Long,
+        val mediaDurationSecs: Double?,
         val previous: Catalog,
     ) : UiState()
     data class Error(val message: String) : UiState()
@@ -169,16 +174,36 @@ class SwarmViewModel(
         return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind")
     }
 
-    /** Streams [entry] from whichever of its sources [CatalogSession] already holds a connection to, resuming where a previous watch left off unless it was already finished. */
+    /** Negotiates a budgeted direct/HLS session on the first connected source, resuming where a previous watch left off unless it was already finished. */
     fun play(entry: MergedEntry) {
         val current = _state.value
         if (current !is UiState.Catalog) return
         val serverId = entry.sources.first()
-        val url = catalogSession.urlFor(serverId, "/media/${entry.entry.entryKey}")
         val fingerprint = entry.entry.fingerprint
         viewModelScope.launch {
             val resumePositionSecs = watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs ?: 0.0
-            _state.value = UiState.Player(url, entry.entry.scrapedTitle ?: entry.entry.title, fingerprint, resumePositionSecs, current)
+            val selection = runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.preparePlayback(serverId, entry.entry.entryKey, resumePositionSecs.toLong())
+                }
+            }.getOrElse { error ->
+                Log.e(logTag, "playback negotiation failed", error)
+                if (_state.value is UiState.Catalog) {
+                    _state.value = current.copy(playbackError = error.message ?: "Could not prepare playback.")
+                }
+                return@launch
+            }
+            val isHls = selection.mode == PlaybackMode.HLS
+            _state.value = UiState.Player(
+                url = selection.url,
+                title = entry.entry.scrapedTitle ?: entry.entry.title,
+                fingerprint = fingerprint,
+                resumePositionSecs = if (isHls) 0.0 else resumePositionSecs,
+                positionOffsetSecs = if (isHls) resumePositionSecs else 0.0,
+                maxBitrate = selection.maxBitrate,
+                mediaDurationSecs = entry.entry.durationSecs,
+                previous = current.copy(playbackError = null),
+            )
         }
     }
 

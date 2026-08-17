@@ -16,7 +16,11 @@
 package app.swarm.tv.core.catalog
 
 import app.swarm.tv.core.client.SignalingClient
+import app.swarm.tv.core.capability.CapabilityProfile
 import app.swarm.tv.core.peer.CatalogManifest
+import app.swarm.tv.core.peer.PlaybackMode
+import app.swarm.tv.core.peer.PlaybackPlan
+import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
@@ -26,6 +30,7 @@ import app.swarm.tv.core.transport.PeerQuicClient
 import app.swarm.tv.core.transport.connectToServer
 import app.swarm.tv.core.transport.initiatePunchConnection
 import java.net.InetSocketAddress
+import java.io.IOException
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import kotlinx.coroutines.channels.ReceiveChannel
@@ -91,9 +96,40 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     var punchFallback: PunchFallback? = null
 
     data class Result(val entries: List<MergedEntry>, val unreachable: List<SwarmDevice>)
+    data class PlaybackSelection(val url: String, val mode: PlaybackMode, val maxBitrate: Long)
 
     /** The URL to hand a media player for `peerPath` on `serverId` — only live once that server appeared connected in a [refresh]. */
     fun urlFor(serverId: String, peerPath: String): String = proxy.urlFor(serverId, peerPath)
+
+    /**
+     * Reserve this server's shared upload budget and obtain either a paced
+     * direct-play path or a capability-pruned HLS master path. This request
+     * goes over the authenticated peer connection; the rendezvous server is
+     * not involved in playback policy.
+     */
+    @Throws(IOException::class)
+    fun preparePlayback(
+        serverId: String,
+        entryKey: String,
+        startPositionSecs: Long,
+        capabilities: CapabilityProfile = CapabilityProfile.fireTvBaseline(),
+    ): PlaybackSelection {
+        val connection = connections[serverId] ?: throw IOException("server is no longer connected")
+        val response = connection.request(
+            path = "/play/$entryKey",
+            playback = PlaybackPreferences(
+                capabilities = capabilities,
+                startPositionSecs = startPositionSecs,
+                preferDirect = true,
+            ),
+        )
+        val body = response.body.readBytes().decodeToString()
+        if (response.header.status != 200) {
+            throw IOException("server could not prepare playback (${response.header.status}): $body")
+        }
+        val plan = SwarmJson.decodeFromString<PlaybackPlan>(body)
+        return PlaybackSelection(proxy.urlFor(serverId, plan.path), plan.mode, plan.maxBitrate)
+    }
 
     suspend fun refresh(devices: List<SwarmDevice>, clientCertificate: X509Certificate, clientKey: PrivateKey): Result {
         val manifestsByServer = mutableMapOf<String, CatalogManifest>()

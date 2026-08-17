@@ -126,16 +126,18 @@ class PeerLoopbackProxy private constructor(
             writeStatusOnly(output, 405, "Method Not Allowed")
             return
         }
-        val fullPath = parts[1].substringBefore('?')
+        val requestTarget = parts[1]
+        val fullPath = requestTarget.substringBefore('?')
+        val query = requestTarget.substringAfter('?', missingDelimiterValue = "").takeIf { it.isNotEmpty() }
         val firstSlash = fullPath.indexOf('/', 1)
         val serverId: String
         val peerPath: String
         if (firstSlash < 0) {
             serverId = fullPath.removePrefix("/")
-            peerPath = "/"
+            peerPath = "/" + query?.let { "?$it" }.orEmpty()
         } else {
             serverId = fullPath.substring(1, firstSlash)
-            peerPath = fullPath.substring(firstSlash)
+            peerPath = fullPath.substring(firstSlash) + query?.let { "?$it" }.orEmpty()
         }
         val connection = connections[serverId]
         if (connection == null) {
@@ -250,7 +252,10 @@ private fun reasonPhrase(status: Int): String = when (status) {
     200 -> "OK"
     206 -> "Partial Content"
     304 -> "Not Modified"
+    400 -> "Bad Request"
     404 -> "Not Found"
+    429 -> "Too Many Requests"
     416 -> "Range Not Satisfiable"
+    503 -> "Service Unavailable"
     else -> "Internal Server Error"
 }

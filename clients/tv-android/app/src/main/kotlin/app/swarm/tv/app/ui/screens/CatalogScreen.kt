@@ -61,6 +61,7 @@ fun CatalogScreen(
     entries: List<MergedEntry>,
     loading: Boolean,
     unreachable: List<SwarmDevice>,
+    playbackError: String?,
     artworkUrl: (MergedEntry) -> String?,
     onPlay: (MergedEntry) -> Unit,
     onBack: () -> Unit,
@@ -89,6 +90,10 @@ fun CatalogScreen(
                 color = SwarmMuted,
                 fontSize = 12.sp,
             )
+        }
+        if (playbackError != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(playbackError, color = SwarmAccent, fontSize = 12.sp)
         }
         Spacer(Modifier.height(24.dp))
 

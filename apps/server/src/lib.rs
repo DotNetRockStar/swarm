@@ -18,6 +18,7 @@ use swarm_media::scan::{scan_root, ScanReport};
 use swarm_media::scrape::{run_bulk_scrape, BulkScrapeReport, ScrapeConfig};
 use swarm_media::serve::{accept_loop, serve_connection, MediaService};
 use swarm_media::store::Library;
+use swarm_media::transcode::TranscodeConfig;
 use swarm_p2p::identity::DeviceIdentity;
 use swarm_p2p::pin::AllowedPeers;
 use swarm_stun_client::{SignalingClient, StunClient, TokenStore};
@@ -68,6 +69,8 @@ pub struct ServerStatus {
     pub listen_addr: String,
     pub entry_count: u64,
     pub thumbprint: String,
+    pub streaming_upload_budget_bps: u64,
+    pub active_playback_sessions: usize,
 }
 
 struct StunContext {
@@ -131,7 +134,11 @@ impl ServerCore {
         allowed.replace(static_fingerprints.iter().cloned());
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
-        let service = Arc::new(MediaService::new(Arc::clone(&library), config.media_root.clone()));
+        let service = Arc::new(MediaService::with_transcoding(
+            Arc::clone(&library),
+            config.media_root.clone(),
+            transcode_config_from_env(&config.data_dir),
+        ));
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
 
         let core = Arc::new(Self {
@@ -162,6 +169,8 @@ impl ServerCore {
             listen_addr: self.listen_addr.to_string(),
             entry_count: self.library.entry_count().await?,
             thumbprint: self.library.thumbprint().await?,
+            streaming_upload_budget_bps: self.service.transcode_manager().config().usable_upload_bps(),
+            active_playback_sessions: self.service.transcode_manager().active_sessions(),
         })
     }
 
@@ -430,7 +439,10 @@ async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Opti
 /// `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`,
 /// `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a
 /// STUN server at all), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring —
-/// set this on headless boxes with no Secret Service).
+/// set this on headless boxes with no Secret Service). Streaming controls:
+/// `SWARM_MAX_UPLOAD_MBPS` (default 10), `SWARM_UPLOAD_RESERVE_PERCENT`
+/// (default 30), `SWARM_MAX_STREAMS` (default 2), `SWARM_FFMPEG_PATH`, and
+/// `SWARM_TRANSCODING_DISABLED`.
 pub fn config_from_env() -> Option<ServerConfig> {
     let media_root = PathBuf::from(std::env::var("SWARM_MEDIA_ROOT").ok()?);
     let file_only = std::env::var("SWARM_TOKEN_STORE_FILE_ONLY")
@@ -451,4 +463,38 @@ pub fn config_from_env() -> Option<ServerConfig> {
             .collect(),
         token_store_mode: if file_only { TokenStoreMode::FileOnly } else { TokenStoreMode::PreferKeyring },
     })
+}
+
+/// Shared daemon/GUI transcode settings. The usable streaming budget is
+/// `max_upload * (1 - reserve_percent)`; every negotiated playback session
+/// reserves from that one aggregate pool.
+pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig {
+    let max_upload_mbps = std::env::var("SWARM_MAX_UPLOAD_MBPS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(10.0);
+    let reserve_percent = std::env::var("SWARM_UPLOAD_RESERVE_PERCENT")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(30)
+        .min(90);
+    let max_sessions = std::env::var("SWARM_MAX_STREAMS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(2);
+    let disabled = std::env::var("SWARM_TRANSCODING_DISABLED")
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    TranscodeConfig {
+        enabled: !disabled,
+        ffmpeg_path: PathBuf::from(std::env::var("SWARM_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into())),
+        session_dir: data_dir.join("transcodes"),
+        max_upload_bps: (max_upload_mbps * 1_000_000.0) as u64,
+        reserve_percent,
+        max_sessions,
+        idle_timeout: std::time::Duration::from_secs(300),
+        segment_duration_secs: 4,
+    }
 }

@@ -9,6 +9,7 @@
  */
 package app.swarm.tv.core.peer
 
+import app.swarm.tv.core.capability.CapabilityProfile
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -138,6 +139,27 @@ data class PeerRequest(
     val path: String,
     val range: ByteRange? = null,
     val ifNoneMatch: String? = null,
+    val playback: PlaybackPreferences? = null,
+)
+
+@Serializable
+data class PlaybackPreferences(
+    val capabilities: CapabilityProfile,
+    val startPositionSecs: Long = 0,
+    val preferDirect: Boolean = true,
+)
+
+@Serializable
+enum class PlaybackMode {
+    @SerialName("direct") DIRECT,
+    @SerialName("hls") HLS,
+}
+
+@Serializable
+data class PlaybackPlan(
+    val mode: PlaybackMode,
+    val path: String,
+    val maxBitrate: Long,
 )
 
 @Serializable
