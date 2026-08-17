@@ -108,27 +108,40 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
      * not involved in playback policy.
      */
     @Throws(IOException::class)
-    fun preparePlayback(
-        serverId: String,
+    suspend fun preparePlayback(
+        device: SwarmDevice,
         entryKey: String,
         startPositionSecs: Long,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
         capabilities: CapabilityProfile = CapabilityProfile.fireTvBaseline(),
     ): PlaybackSelection {
-        val connection = connections[serverId] ?: throw IOException("server is no longer connected")
-        val response = connection.request(
-            path = "/play/$entryKey",
-            playback = PlaybackPreferences(
-                capabilities = capabilities,
-                startPositionSecs = startPositionSecs,
-                preferDirect = true,
-            ),
+        val preferences = PlaybackPreferences(
+            capabilities = capabilities,
+            startPositionSecs = startPositionSecs,
+            preferDirect = true,
         )
+        var connection = connectionFor(device, clientCertificate, clientKey)
+            ?: throw IOException("server is no longer connected")
+        val response = try {
+            connection.request(path = "/play/$entryKey", playback = preferences)
+        } catch (e: IOException) {
+            // A cached connection can die between browsing and pressing play
+            // — confirmed live: QUIC dropped it well under a minute after its
+            // last request. Evict and retry once with a fresh connection,
+            // same self-heal refresh()/fetchManifest already does for browse.
+            connections.remove(device.deviceId)
+            proxy.unregister(device.deviceId)
+            connection = connectionFor(device, clientCertificate, clientKey)
+                ?: throw IOException("server is no longer connected")
+            connection.request(path = "/play/$entryKey", playback = preferences)
+        }
         val body = response.body.readBytes().decodeToString()
         if (response.header.status != 200) {
             throw IOException("server could not prepare playback (${response.header.status}): $body")
         }
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(body)
-        return PlaybackSelection(proxy.urlFor(serverId, plan.path), plan.mode, plan.maxBitrate)
+        return PlaybackSelection(proxy.urlFor(device.deviceId, plan.path), plan.mode, plan.maxBitrate)
     }
 
     suspend fun refresh(devices: List<SwarmDevice>, clientCertificate: X509Certificate, clientKey: PrivateKey): Result {

@@ -179,12 +179,20 @@ class SwarmViewModel(
         val current = _state.value
         if (current !is UiState.Catalog) return
         val serverId = entry.sources.first()
+        val device = current.devices.find { it.deviceId == serverId }
         val fingerprint = entry.entry.fingerprint
         viewModelScope.launch {
             val resumePositionSecs = watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs ?: 0.0
             val selection = runCatching {
+                requireNotNull(device) { "server no longer in the swarm roster" }
                 withContext(Dispatchers.IO) {
-                    catalogSession.preparePlayback(serverId, entry.entry.entryKey, resumePositionSecs.toLong())
+                    catalogSession.preparePlayback(
+                        device,
+                        entry.entry.entryKey,
+                        resumePositionSecs.toLong(),
+                        clientCertificate,
+                        clientKey,
+                    )
                 }
             }.getOrElse { error ->
                 Log.e(logTag, "playback negotiation failed", error)

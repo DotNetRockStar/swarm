@@ -372,11 +372,15 @@ impl TranscodeManager {
         }
     }
 
+    // Bandwidth only — deliberately not gated on max_sessions here. This is
+    // called once at the top of plan() before direct-vs-HLS is decided, and
+    // max_sessions models concurrent *ffmpeg processes*, which a direct-play
+    // session never spawns. Gating it here blocked plain direct-play-eligible
+    // files (confirmed live: a music track that never needed a transcode at
+    // all got a flat 429 "transcode capacity is full" because two earlier,
+    // unrelated movie sessions hadn't hit their 5-minute idle expiry yet).
     fn available_bps(&self) -> Result<u64, TranscodeError> {
         let state = self.state.lock().unwrap();
-        if state.sessions.len() >= self.config.max_sessions.max(1) {
-            return Err(TranscodeError::Capacity);
-        }
         let reserved: u64 = state
             .sessions
             .values()
@@ -385,11 +389,11 @@ impl TranscodeManager {
         Ok(self.config.usable_upload_bps().saturating_sub(reserved))
     }
 
+    /// Only ever called for `SessionKind::Direct` (see `plan()`) — no
+    /// max_sessions check for the same reason as `available_bps()` above;
+    /// direct play is bandwidth-limited only, never process-limited.
     fn reserve(&self, kind: SessionKind, reserved_bps: u64) -> Result<String, TranscodeError> {
         let mut state = self.state.lock().unwrap();
-        if state.sessions.len() >= self.config.max_sessions.max(1) {
-            return Err(TranscodeError::Capacity);
-        }
         let already_reserved: u64 = state
             .sessions
             .values()
@@ -435,7 +439,15 @@ impl TranscodeManager {
 
         {
             let mut state = self.state.lock().unwrap();
-            if state.sessions.len() >= self.config.max_sessions.max(1) {
+            // Only count other Hls sessions here — a concurrently-open Direct
+            // session holds no ffmpeg process and shouldn't spend a slot of
+            // this specifically process/CPU-oriented limit.
+            let transcode_sessions = state
+                .sessions
+                .values()
+                .filter(|session| matches!(session.kind, SessionKind::Hls { .. }))
+                .count();
+            if transcode_sessions >= self.config.max_sessions.max(1) {
                 let _ = std::fs::remove_dir_all(&directory);
                 return Err(TranscodeError::Capacity);
             }
