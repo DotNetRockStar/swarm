@@ -92,6 +92,19 @@ SWARM_PUBLIC_URL="http://$LAN_IP:$STUN_PORT" \
     cargo run -q --bin swarm-stun-server &
 pids+=($!)
 
+# Real startup-order race, not theoretical: with SWARM_STUN_CODE set for
+# auto-registration, swarm-serverd's one registration attempt at startup
+# fired before swarm-stun-server had actually bound its listener yet
+# (both processes start ~simultaneously as background jobs) — a silent,
+# non-fatal "could not reach STUN server" that left the media server
+# running but unregistered, with no automatic retry. Block on real
+# readiness instead of guessing a sleep duration.
+echo "==> Waiting for the STUN server to be ready ..."
+for _ in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$STUN_PORT/health" && break
+    sleep 0.2
+done
+
 echo "==> Starting media server (peer QUIC on 0.0.0.0:$PEER_PORT, media root $RUN_DIR/media) ..."
 SWARM_MEDIA_ROOT="$RUN_DIR/media" \
 SWARM_DATA_DIR="$RUN_DIR/server-data" \
