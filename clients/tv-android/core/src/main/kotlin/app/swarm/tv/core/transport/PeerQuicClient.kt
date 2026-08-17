@@ -34,12 +34,15 @@ import app.swarm.tv.core.rest.SwarmJson
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import java.time.Duration
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import tech.kwik.core.DatagramSocketFactory
 import tech.kwik.core.QuicClientConnection
 import tech.kwik.core.QuicStream
 import tech.kwik.core.log.Logger
@@ -84,6 +87,18 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
          * `expectedServerFingerprint` (lowercase hex SHA-256) before
          * returning. Throws [PeerQuicError.FingerprintMismatch] — closing
          * the connection first — on any pin failure.
+         *
+         * [localSocketPort], when given, pins the connection's local UDP
+         * port — the hole-punch continuity trick: unlike quinn (Rust side),
+         * which takes literal ownership of an already-bound socket
+         * (`Endpoint::new`), kwik's only hook is
+         * `DatagramSocketFactory.createSocket`, which *creates a new*
+         * socket rather than accepting an existing one. Binding that new
+         * socket to the exact port a prior raw punch socket used — closed
+         * immediately before this call — is the closest equivalent
+         * available: it relies on the NAT mapping surviving that gap,
+         * true for typical endpoint-independent-mapping NATs, not
+         * guaranteed for every NAT type. See [PunchedSocketFactory].
          */
         @Throws(IOException::class)
         fun connect(
@@ -94,8 +109,9 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
             expectedServerFingerprint: String,
             connectTimeout: Duration = Duration.ofSeconds(5),
             logger: Logger = NullLogger(),
+            localSocketPort: Int? = null,
         ): PeerQuicClient {
-            val connection = QuicClientConnection.newBuilder()
+            val builder = QuicClientConnection.newBuilder()
                 .host(host)
                 .port(port)
                 .applicationProtocol(PEER_ALPN)
@@ -104,7 +120,10 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
                 .clientCertificateKey(clientKey)
                 .noServerCertificateCheck() // we verify by fingerprint below, not by CA chain
                 .logger(logger)
-                .build()
+            if (localSocketPort != null) {
+                builder.socketFactory(PunchedSocketFactory(localSocketPort))
+            }
+            val connection = builder.build()
             connection.connect()
 
             val presented = connection.serverCertificateChain.firstOrNull()
@@ -155,6 +174,16 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
         }
         return buffer.toString(Charsets.UTF_8)
     }
+}
+
+/**
+ * Binds a fresh [DatagramSocket] to [port] every time kwik asks for one —
+ * see [PeerQuicClient.connect]'s doc comment for why "fresh socket, same
+ * port" is the closest thing to quinn's real socket handoff that kwik's
+ * `DatagramSocketFactory` hook allows.
+ */
+private class PunchedSocketFactory(private val port: Int) : DatagramSocketFactory {
+    override fun createSocket(destination: InetAddress): DatagramSocket = DatagramSocket(port)
 }
 
 /** Reads at most `limit` bytes from `delegate`, then always reports EOF. */

@@ -59,6 +59,7 @@ import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmJson
 import java.io.BufferedReader
 import java.io.File
+import java.net.DatagramSocket
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
@@ -450,6 +451,49 @@ class PeerQuicClientInteropTest {
                         }
                 }
             }
+        }
+    }
+
+    /**
+     * The other half of the kwik socket-continuity question this project's
+     * memory already flags: unlike quinn (Rust side), which takes literal
+     * ownership of an already-bound socket for the punch-to-QUIC handoff
+     * (proven in `swarm-p2p`'s `punch_to_quic.rs` test), kwik's only hook —
+     * `DatagramSocketFactory` — creates a *new* socket per call rather than
+     * accepting an existing one. The closest equivalent is closing the raw
+     * punch socket and immediately binding a new one to the exact same
+     * local port, via `PeerQuicClient.connect`'s `localSocketPort`
+     * parameter (see its doc comment). This proves that mechanic works at
+     * all on this JVM/OS: bind a raw socket, note its port, close it, and
+     * dial a real Rust server with kwik pinned to that exact port. Loopback
+     * has no NAT, so this says nothing about whether a real NAT's mapping
+     * survives the close/rebind gap — an open question this environment
+     * has no way to test either way, documented rather than assumed away.
+     */
+    @Test
+    fun `a kwik client can dial from a port a raw socket previously held`() {
+        val client = TestIdentity.generate("port-continuity-client")
+        val movieBytes = Random.Default.nextBytes(10_000)
+        val server = startServer(client.fingerprint, movieBytes)
+        val (host, portStr) = server.addr.split(":")
+        val port = portStr.toInt()
+
+        val rawSocket = DatagramSocket(0)
+        val heldPort = rawSocket.localPort
+        rawSocket.close()
+
+        PeerQuicClient.connect(
+            host,
+            port,
+            client.certificate,
+            client.privateKey,
+            server.fingerprint,
+            localSocketPort = heldPort,
+        ).use { peer ->
+            val response = peer.request("/catalog/thumbprint")
+            assertEquals(200, response.header.status)
+            val thumbprint = SwarmJson.decodeFromString<CatalogThumbprint>(response.body.readBytes().decodeToString())
+            assertEquals(1L, thumbprint.entryCount)
         }
     }
 }
