@@ -1,6 +1,6 @@
 ---
 name: swarm-real-device-debugging
-description: Use when the Fire TV client crashes, misbehaves, has unreachable UI, or won't launch on a real device but looks fine in compile/unit-test verification — methodology for real-hardware Android debugging (including driving the app's D-pad-only UI via adb), plus two confirmed root causes (a ClassNotFoundException namespace mismatch, and an off-screen/unreachable-by-D-pad layout bug) and the dead ends that looked plausible first.
+description: Use when the Fire TV client crashes, misbehaves, has unreachable UI, silently fails to connect/play, or won't launch on a real device but looks fine in compile/unit-test verification — methodology for real-hardware Android debugging (including driving the app's D-pad-only UI via adb), plus five confirmed root causes (a ClassNotFoundException namespace mismatch, an off-screen/unreachable-by-D-pad layout bug, a missing-initial-focus bug on state-swap navigation, an API-33-only method silently NoSuchMethodError-ing on older real hardware, and an IPv6/IPv4 loopback-binding mismatch) and the dead ends that looked plausible first.
 ---
 
 # Debugging real-Fire-TV-only failures
@@ -116,6 +116,115 @@ scroll container or a real on-device visual check — `Arrangement.Center`
 alone silently clips overflow instead of erroring, and nothing in
 `:core:test`/`:core:interopTest` can catch this since neither renders a
 real Compose UI on a real screen size.
+
+## Bug #3: state-swap navigation never requests initial D-pad focus
+
+Found while testing the real end-to-end flow (real user media, real
+server, real Fire TV): the "Browse library" button on
+`SwarmDashboardScreen` never responded to any D-pad input — CENTER,
+TAB, nothing. Ruled out first, in order: adb input delivery (confirmed
+via `Input: injectKeyEvent` and Amazon's own
+`OZ-DCS:KeyPressReceiver` logs showing the OS genuinely received the
+key), wrong-element-focus (tested via TAB, still nothing), and a
+button-color-based focus assumption (the button's `containerColor` is
+static regardless of focus state, so it visually looks focused-ish
+even when nothing is). Root cause, found by reading source: this
+screen (and `CatalogScreen`, which has the identical problem) is
+reached via a `when`-based `UiState` swap in `SwarmApp`, not a real
+Navigation component — nothing ever calls `requestFocus()` on the new
+screen's content, so D-pad focus stays wherever it was (nowhere, on a
+freshly-composed screen) and every key press is silently a no-op.
+
+**Fix**: `val requester = remember { FocusRequester() }` +
+`LaunchedEffect(key) { requester.requestFocus() }`, with
+`Modifier.focusRequester(requester)` on whichever element should
+receive focus first — the primary action button on
+`SwarmDashboardScreen`, the first catalog card on `CatalogScreen`
+(computed as index 0 of the first non-empty kind row, passed down
+through `CatalogRow`/`CatalogCard`). Confirmed via
+`SwarmViewModel`'s existing click-handler logging: zero invocations
+before the fix, `browseCatalog() called` immediately after pressing
+CENTER post-fix.
+
+**General lesson**: any screen in this app reached via a `UiState`
+`when`-swap (check `SwarmApp` in `MainActivity.kt` for the full list)
+needs this same fix unless it's been explicitly verified to receive
+focus some other way. A visually-focused-looking button proves
+nothing — check the actual `colors()` call for a `focusedContainerColor`
+override before trusting a screenshot's appearance.
+
+## Bug #4: an API-33-only stdlib call throws NoSuchMethodError on this hardware, silently
+
+Found immediately after fixing Bug #3: "Browse library" now
+*responded*, but the catalog always came back `entries=0
+unreachable=1` even for a server proven reachable seconds earlier by a
+successful raw QUIC connection (`swarm_media::serve: peer connected`
+in the server log). `CatalogSession.connectionFor()`/`fetchManifest()`
+both swallow their connection attempt in `runCatching { ... }.getOrNull()`
+with no logging — by design, since one bad peer shouldn't block
+browsing the rest of the swarm, but that same design makes a real bug
+indistinguishable from an ordinary timeout. Added `.onFailure {
+it.printStackTrace() }` to both (kept permanently — see the code
+comment) and the real exception surfaced immediately:
+
+```
+java.lang.NoSuchMethodError: No virtual method toString(Ljava/nio/charset/Charset;)Ljava/lang/String; in class Ljava/io/ByteArrayOutputStream;
+	at app.swarm.tv.core.transport.PeerQuicClient.readHeaderLine(PeerQuicClient.kt:175)
+```
+
+`ByteArrayOutputStream.toString(Charset)` was added in API 33; this
+device runs an older Fire OS/Android version, so the method genuinely
+doesn't exist in `core-oj.jar` at runtime, even though it compiles
+fine (nothing in this project's toolchain runs a real API-level lint —
+`:app:lintDebug` is broken/ignored here, see `swarm-local-testing`).
+**Fix**: use the `toString(String)` overload instead
+(`buffer.toString(Charsets.UTF_8.name())`) — available since API 1,
+and already the correct pattern used one file over in
+`PeerLoopbackProxy.kt`, which is what made this an isolated mistake
+rather than a systemic one (confirmed via `grep -rn
+"\.toString(Charsets\.\|\.toString(Charset\b"` across the whole
+client — only the one bad call existed).
+
+**General lesson**: a `NoSuchMethodError` (not `ClassNotFoundException`)
+on a method from a common JDK class is the signature of an API-level
+gap — the class exists, the specific overload doesn't, on *this*
+device's real API level. `minSdk` in the Gradle config doesn't stop
+you from writing the call; it only documents that you're not supposed
+to. Nothing short of a real device below the target API (or a working
+lint pass) catches it before runtime.
+
+## Bug #5: loopback proxy binds IPv6, hardcoded URL is IPv4 — different sockets
+
+Found immediately after fixing Bug #4: the catalog now loaded for
+real, but selecting a title to play failed with ExoPlayer logging
+`ConnectException: Failed to connect to /127.0.0.1:<port>` even though
+`PeerLoopbackProxy`'s accept loop was demonstrably alive (it had
+already served the manifest fetch that populated the catalog, over
+the exact same proxy instance). Root cause:
+`PeerLoopbackProxy.start()` bound its `ServerSocket` via
+`InetAddress.getLoopbackAddress()`, which resolved to the **IPv6**
+loopback (`::1`) on this hardware's libcore, while `urlFor()` hands
+callers a hardcoded literal `"http://127.0.0.1:$port/..."` — two
+different addresses, so nothing was ever listening on the one the URL
+actually pointed at, despite the proxy being genuinely up and healthy
+on `::1`.
+
+**Fix**: bind the literal address instead of the ambiguous
+platform-dependent helper — `InetAddress.getByName("127.0.0.1")` —
+matching the hardcoded URL exactly. Confirmed: real video played,
+with `MediaCodecLogger` showing live hardware-decoded `avc`/`mp4a`
+bitrates and the frame visibly advancing across repeated screenshots.
+
+**General lesson**: `InetAddress.getLoopbackAddress()` is not
+guaranteed to mean "the IPv4 loopback" on every JVM/libcore
+implementation — if code elsewhere hardcodes `127.0.0.1` (as a URL, a
+cert SAN, an allowlist entry, etc.), bind with the same literal rather
+than a helper that might resolve to the IPv6 form on some real device.
+This class of bug produces a plain `ConnectException` (connection
+refused), not a more specific IPv6-related exception, so it looks
+identical to "nothing is listening" — check what's actually bound
+(the accept loop being alive is not proof of *which* address it's
+alive on) before assuming the server side crashed or never started.
 
 ## Driving the app's UI via adb for real-device testing
 
