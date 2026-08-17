@@ -4,6 +4,7 @@
 pub mod authn;
 pub mod config;
 pub mod db;
+pub mod email;
 pub mod error;
 pub mod hub;
 pub mod reflector;

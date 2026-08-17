@@ -1,6 +1,7 @@
 //! Shared application state handed to every route.
 
 use crate::config::Config;
+use crate::email::Mailer;
 use crate::hub::Hub;
 use crate::security::BruteForceBlocker;
 use sqlx::SqlitePool;
@@ -11,6 +12,7 @@ pub struct AppState {
     pub hub: Hub,
     pub config: Config,
     pub blocker: BruteForceBlocker,
+    pub mailer: Mailer,
 }
 
 pub type SharedState = Arc<AppState>;

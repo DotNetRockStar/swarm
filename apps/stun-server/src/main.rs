@@ -9,6 +9,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use stun_server::config::Config;
+use stun_server::email::Mailer;
 use stun_server::hub::Hub;
 use stun_server::security::BruteForceBlocker;
 use stun_server::state::AppState;
@@ -48,7 +49,11 @@ async fn main() {
     }
 
     let bind = config.http_bind;
-    let state = Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new() });
+    let mailer = Mailer::from_config(config.smtp.as_ref());
+    if config.smtp.is_none() {
+        tracing::warn!("SWARM_SMTP_HOST not set; verification/reset links will be logged, not emailed");
+    }
+    let state = Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new(), mailer });
     let static_dir = std::env::var("SWARM_STATIC_DIR").unwrap_or_else(|_| "static".into());
     let static_dir = if std::path::Path::new(&static_dir).join("index.html").exists() {
         Some(static_dir)

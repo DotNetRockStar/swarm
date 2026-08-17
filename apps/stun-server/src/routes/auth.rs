@@ -1,9 +1,10 @@
 //! Account routes: register, login/logout, session introspection, password
 //! change, email verification, and password reset.
 //!
-//! Email delivery is not wired yet: verification/reset tokens are minted and
-//! logged (visible in server logs / dev console). Accounts are usable before
-//! verification; the flag only gates a "verified" badge for now.
+//! Email delivery goes through `state.mailer` (see `email.rs`) — real SMTP
+//! when `SWARM_SMTP_HOST` is configured, logged instead otherwise (the
+//! zero-setup dev/test default). Accounts are usable before verification;
+//! the flag only gates a "verified" badge for now.
 
 use crate::authn::{require_csrf, require_session, session_user, CSRF_COOKIE, SESSION_COOKIE};
 use crate::db::now;
@@ -152,8 +153,8 @@ pub async fn register(
         .bind(now() + 24 * 3600)
         .execute(&state.db)
         .await?;
-    tracing::info!(email, verify_url = %format!("{}/#verify={verify_token}", state.config.public_url),
-        "verification link (email delivery not configured)");
+    let verify_url = format!("{}/#verify={verify_token}", state.config.public_url);
+    state.mailer.send_verification(&email, &verify_url).await;
     Ok((axum::http::StatusCode::CREATED, ok()))
 }
 
@@ -309,8 +310,8 @@ pub async fn request_reset(
             .bind(now() + 3600)
             .execute(&state.db)
             .await?;
-        tracing::info!(email, reset_url = %format!("{}/#reset={reset_token}", state.config.public_url),
-            "password reset link (email delivery not configured)");
+        let reset_url = format!("{}/#reset={reset_token}", state.config.public_url);
+        state.mailer.send_password_reset(&email, &reset_url).await;
     }
     Ok(ok())
 }

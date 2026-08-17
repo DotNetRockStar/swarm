@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use stun_server::config::Config as StunConfig;
+use stun_server::email::Mailer;
 use stun_server::hub::Hub;
 use stun_server::routes::build_router;
 use stun_server::security::BruteForceBlocker;
@@ -40,8 +41,10 @@ async fn spawn_stun_server_with_reflector() -> (String, SocketAddr) {
         public_url: "http://test.invalid".into(),
         session_ttl_secs: 3600,
         join_code_ttl_secs: 900,
+        smtp: None,
     };
-    let state = Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new() });
+    let state =
+        Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new(), mailer: Mailer::from_config(None) });
     let router = build_router(state, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

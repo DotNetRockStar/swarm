@@ -667,6 +667,7 @@
       },
       "MetadataPatchRequest": {
         "type": "object",
+        "description": "`PATCH /api/v1/devices/{device_id}/metadata` — a device updating its own\narbitrary key/value metadata (e.g. a server self-reporting the address\npeers should dial: `{\"peer_addr\": \"192.168.1.50:8543\"}`).",
         "required": [
           "metadata"
         ],
