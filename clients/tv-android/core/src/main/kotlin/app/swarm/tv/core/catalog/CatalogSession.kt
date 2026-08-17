@@ -47,8 +47,41 @@ class PunchFallback(
     val ownFingerprint: String,
 )
 
+/** Which method last got a connection to a given peer — see [CatalogSession]'s route-memory doc comment. */
+enum class ConnectionRoute { DIRECT, PUNCH }
+
+/**
+ * `docs/PROTOCOL.md`'s route memory ("persist the last successful
+ * candidate per peer and try it first next time — preference changes, the
+ * trusted candidate set never widens"), scoped down to what actually costs
+ * something to get wrong here: not *which* candidate within a punch
+ * attempt (that negotiation is already fast — signaling round trips, not a
+ * blocking timeout), but *whether to attempt the direct path at all*.
+ * `connectToServer` blocks for a full `connectTimeout` (default 5s) before
+ * failing when a peer's `peer_addr` isn't reachable, so remembering "punch
+ * worked last time" and skipping straight to it is the one memory that's
+ * actually worth the complexity right now.
+ *
+ * Deliberately in-memory only, not persisted to disk across app restarts
+ * despite the protocol doc saying "persist" — this project has no existing
+ * on-device storage pattern for this kind of cache yet (`TokenStore` is
+ * for one secret, not a per-peer map), and the win that matters — not
+ * re-trying a doomed direct connection *within one app session* while
+ * browsing/switching back and forth between servers — is fully captured
+ * without it. Revisit if cross-restart memory turns out to matter in
+ * practice.
+ */
+private class RouteMemory {
+    private val lastSuccessful = mutableMapOf<String, ConnectionRoute>()
+    fun record(deviceId: String, route: ConnectionRoute) {
+        lastSuccessful[deviceId] = route
+    }
+    fun preferred(deviceId: String): ConnectionRoute? = lastSuccessful[deviceId]
+}
+
 class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     private val connections = mutableMapOf<String, PeerQuicClient>()
+    private val routeMemory = RouteMemory()
 
     /**
      * Set once a signaling session is available (typically right after
@@ -78,8 +111,9 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
         connections[device.deviceId]?.let { return it }
 
-        val direct = runCatching { connectToServer(device, clientCertificate, clientKey) }.getOrNull()
-        val connection = direct ?: punchFallback?.let { fallback ->
+        suspend fun tryDirect(): PeerQuicClient? =
+            runCatching { connectToServer(device, clientCertificate, clientKey) }.getOrNull()
+        suspend fun tryPunch(): PeerQuicClient? = punchFallback?.let { fallback ->
             runCatching {
                 initiatePunchConnection(
                     signaling = fallback.signaling,
@@ -92,8 +126,20 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
                     expectedFingerprint = device.certFingerprint,
                 )
             }.getOrNull()
+        }
+
+        // Route memory only ever changes which method is tried *first* —
+        // the trusted fingerprint being dialed never changes, so this
+        // can't widen trust, only save the wasted wait on a connectToServer
+        // attempt already known to time out for this peer.
+        val preferPunch = routeMemory.preferred(device.deviceId) == ConnectionRoute.PUNCH
+        val (connection, route) = if (preferPunch) {
+            tryPunch()?.let { it to ConnectionRoute.PUNCH } ?: (tryDirect()?.let { it to ConnectionRoute.DIRECT })
+        } else {
+            tryDirect()?.let { it to ConnectionRoute.DIRECT } ?: (tryPunch()?.let { it to ConnectionRoute.PUNCH })
         } ?: return null
 
+        routeMemory.record(device.deviceId, route)
         connections[device.deviceId] = connection
         proxy.register(device.deviceId, connection)
         return connection

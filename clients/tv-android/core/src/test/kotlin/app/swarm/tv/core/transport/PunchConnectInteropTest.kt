@@ -38,6 +38,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 
@@ -314,6 +315,86 @@ class PunchConnectInteropTest {
                     assertEquals(emptyList<Any>(), result.unreachable)
                     assertEquals(1, result.entries.size)
                 }
+            }
+            signaling.close()
+        }
+    }
+
+    /**
+     * `docs/PROTOCOL.md`'s route memory: `connectToServer` blocks for a
+     * full `connectTimeout` (5s default) before failing against this
+     * test's deliberately unreachable `peer_addr`, so the *first*
+     * connection is slow (times out, then punches). Once
+     * `CatalogSession` has recorded that punching is what worked for this
+     * peer, a second connection attempt should skip straight to punching
+     * — proven here by timing, not by inspecting private state: well
+     * under the 5s direct timeout is only possible if the direct attempt
+     * was skipped entirely, not just fast.
+     *
+     * `session.close()` between the two `refresh` calls clears the cached
+     * *connection* (so the second call actually reconnects instead of
+     * reusing the cache) without touching route memory — `close()` never
+     * resets that, on purpose, since remembering the route is exactly the
+     * point of the timing this test is measuring. Not a claim that
+     * `close()` mid-session is normal usage generally, just the most
+     * direct way to observe route memory through the public API alone.
+     */
+    @Test
+    fun `CatalogSession remembers a punched route and skips the doomed direct attempt next time`() {
+        assumeTrue(stunServerBinary() != null, "swarm-stun-server release binary not found")
+        assumeTrue(mediaServerBinary() != null, "swarm-serverd release binary not found")
+
+        runBlocking {
+            val reflectorPort = freeUdpPort()
+            val stunBase = startStunServer(reflectorPort)
+            val browser = Browser(stunBase, OkHttpClient())
+            browser.loginFreshAccount("kt-route-memory-${Random.nextInt()}@example.test")
+            val swarmId = browser.createSwarm("Home")
+
+            val clientIdentity = TestIdentity.generate("route-memory-client")
+            val clientCode = browser.createCode(swarmId)
+            val clientReg = StunApiClient(stunBase).registerDevice(
+                clientCode,
+                DeviceRegistration(
+                    name = "client",
+                    deviceType = DeviceType.CLIENT,
+                    machineId = "machine-client",
+                    certFingerprint = clientIdentity.fingerprint,
+                    platform = "test",
+                    appVersion = "0.1.0",
+                ),
+            )
+            val (signaling, signalRx) = SignalingClient.connect(stunBase, clientReg.accessToken, clientReg.deviceId)
+            val reflectorAddr = InetSocketAddress("127.0.0.1", reflectorPort)
+
+            val serverCode = browser.createCode(swarmId)
+            val serverFingerprint = startMediaServer(stunBase, serverCode)
+            val serverDeviceId = browser.deviceIdFor(swarmId, serverFingerprint)
+
+            val device = SwarmDevice(
+                deviceId = serverDeviceId,
+                name = "server",
+                deviceType = DeviceType.SERVER,
+                certFingerprint = serverFingerprint,
+                online = true,
+                metadata = mapOf("peer_addr" to "192.0.2.1:1"), // RFC 5737 TEST-NET-1, always unreachable
+            )
+
+            PeerLoopbackProxy.start().use { proxy ->
+                val session = CatalogSession(proxy)
+                session.punchFallback = PunchFallback(signaling, signalRx, reflectorAddr, clientIdentity.fingerprint)
+
+                val first = session.refresh(listOf(device), clientIdentity.certificate, clientIdentity.privateKey)
+                assertEquals(emptyList<Any>(), first.unreachable)
+
+                session.close() // drops the cached connection only — see doc comment above
+                val start = System.currentTimeMillis()
+                val second = session.refresh(listOf(device), clientIdentity.certificate, clientIdentity.privateKey)
+                val elapsedMs = System.currentTimeMillis() - start
+
+                assertEquals(emptyList<Any>(), second.unreachable)
+                assertTrue(elapsedMs < 3000, "expected the remembered-punch route to skip the 5s direct timeout, took ${elapsedMs}ms")
+                session.close()
             }
             signaling.close()
         }
