@@ -1,6 +1,6 @@
 ---
 name: swarm-real-device-debugging
-description: Use when the Fire TV client crashes, misbehaves, or won't launch on a real device but looks fine in compile/unit-test verification — methodology for real-hardware Android debugging, plus a specific ClassNotFoundException root cause and the dead ends that looked plausible first.
+description: Use when the Fire TV client crashes, misbehaves, has unreachable UI, or won't launch on a real device but looks fine in compile/unit-test verification — methodology for real-hardware Android debugging (including driving the app's D-pad-only UI via adb), plus two confirmed root causes (a ClassNotFoundException namespace mismatch, and an off-screen/unreachable-by-D-pad layout bug) and the dead ends that looked plausible first.
 ---
 
 # Debugging real-Fire-TV-only failures
@@ -86,6 +86,99 @@ once the manifest name was correct. If a future crash genuinely does turn
 out to be about dex placement (verify with `dexdump`, don't assume), this
 is the path that worked; don't reach for it before ruling out a name
 mismatch first, given how long the false trail was here.
+
+## Bug #2: off-screen content is unreachable by D-pad (no scroll container)
+
+Found *after* the ClassNotFoundException fix above, while actually
+driving the passcode screen end to end: `PasscodeEntryScreen.kt`'s outer
+`Column` used `Modifier.fillMaxSize()` with `verticalArrangement =
+Arrangement.Center` and no scroll modifier. Its full content (title, two
+text fields, 8 digit slots, and all 4 number-pad rows) is taller than a
+real 1080p Fire TV viewport. Symptom: `LEFT`/`RIGHT` navigate the number
+pad fine, but `DOWN` past row 2 (`4 5 6`) never moves focus at all —
+rows 3–4 (`7 8 9` / `0 ⌫`) render below the visible screen and Compose's
+focus-search can't reach them. This isn't cosmetic: passcodes are random
+8-digit codes, so this silently blocked entry of virtually every real
+code, on **every** Fire TV at this resolution, not just one unit.
+
+**Fix**: wrap the outer `Column` in `Modifier.verticalScroll(rememberScrollState())`.
+Compose auto-scrolls a scrollable ancestor to keep the focused item in
+view as focus moves, so D-pad-only navigation then reaches every row with
+no other change needed. Confirmed on two different real Fire TVs (a
+4-Series 65" and a second, different model) after the fix: full 8-digit
+entry via D-pad, "Join swarm" enabled and reachable, real STUN
+registration succeeded, confirmed both on-device and via
+`GET /api/v1/me/devices` server-side.
+
+**General lesson**: any full-screen Compose layout in this app that
+isn't obviously short (a single button, a short form) needs either a
+scroll container or a real on-device visual check — `Arrangement.Center`
+alone silently clips overflow instead of erroring, and nothing in
+`:core:test`/`:core:interopTest` can catch this since neither renders a
+real Compose UI on a real screen size.
+
+## Driving the app's UI via adb for real-device testing
+
+No touch/tap works on this app's custom TV widgets (`adb shell input tap
+x y` on the number-pad buttons and digit slots produces zero visible
+effect — this app is D-pad/focus-driven only, consistent with the "no
+touchscreen required" Fire TV design goal). Real technique, developed the
+hard way:
+
+- **`adb shell input text "..."`** works for the two real `OutlinedTextField`s
+  (STUN URL, device name) — it injects into whichever field currently has
+  focus, no need to open the on-screen keyboard first.
+- **`adb shell input keyevent KEYCODE_TAB`** moves focus forward between
+  the two text fields reliably. `KEYCODE_DPAD_DOWN` from a focused text
+  field instead opens the on-screen keyboard for that field (a real
+  Fire OS behavior, not a bug) — use TAB to move between fields, not DOWN.
+- **The number pad has no touch/text-input path at all** — `DigitSlot`
+  and the pad buttons are plain `Box`/`Button` composables with no
+  backing `TextField`, so `input text` has nothing to attach to. The only
+  way in is D-pad: `KEYCODE_DPAD_UP/DOWN/LEFT/RIGHT` + `KEYCODE_DPAD_CENTER`
+  to press the focused button. Read `NumberPad`'s `padRows` in
+  `PasscodeEntryScreen.kt` to get the exact grid layout
+  (`1 2 3 / 4 5 6 / 7 8 9 / _ 0 ⌫`) and compute a navigation path by hand
+  — don't guess it from a screenshot alone (see the glyph-rendering note
+  below).
+- **Batching more than ~2 keyevents in one `adb shell` round trip risks
+  silently dropping one** — confirmed twice: a 4-key batch
+  (`DOWN,DOWN,RIGHT,CENTER`, 0.4–1.5s apart) landed on the wrong button at
+  least once each time, entering a wrong digit without any error. A
+  single key + `sleep 1.5` + screenshot-verify, every time, was 100%
+  reliable across dozens of presses. Slower, but the only way that didn't
+  need backtracking. This got much less finicky (2–3 keys per call became
+  reliable) once the Bug #2 scroll fix landed — worth retrying a slightly
+  larger batch size after that fix if speed matters, but always verify
+  the *result*, not just trust the batch executed.
+- **A stray key can navigate clean out of the app.** During one attempt a
+  batch ended up focused on something that opened the Amazon Appstore
+  (`com.amazon.venezia`) instead of our app — confirmed via `adb shell
+  dumpsys activity activities | grep mResumedActivity`. Recover with
+  `adb shell input keyevent KEYCODE_HOME` then relaunch
+  (`am start -n app.swarm.tv/app.swarm.tv.app.MainActivity`) rather than
+  trying to navigate back manually.
+- **`adb exec-out screencap -p` can prepend stray bytes on this hardware**
+  — one capture had a literal log line (`Init wrapper sys mutex
+  successful. Pid:2160`) stuck in front of the real PNG data, making it
+  fail to decode. Always find the real PNG magic bytes and slice from
+  there rather than trusting the raw stream:
+  ```python
+  data = open(path, 'rb').read()
+  idx = data.find(b'\x89PNG\r\n\x1a\n')
+  open(fixed_path, 'wb').write(data[idx:] if idx > 0 else data)
+  ```
+- **Glyph rendering can look broken when it's actually just off-screen/
+  unfocused.** Before the Bug #2 fix, unfocused number-pad buttons in the
+  clipped region rendered as tiny illegible marks that looked like a font
+  problem — they weren't; the real digits (`4 5 6` etc.) were there all
+  along, just barely visible pre-fix. Don't chase a font/glyph theory
+  before checking whether it's actually a layout/scroll issue.
+- **A device can reboot mid-session** (e.g. if the user power-cycles it
+  after seeing something odd like the Appstore launching unexpectedly).
+  `adb`'s TCP connection silently goes stale; `adb disconnect <ip>:5555 &&
+  adb connect <ip>:5555` before the next command re-establishes it — a
+  `get-state` check first confirms it's really back.
 
 ## Verification methodology: don't trust a short sleep window
 
