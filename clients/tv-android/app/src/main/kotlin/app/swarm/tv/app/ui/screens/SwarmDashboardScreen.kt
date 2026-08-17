@@ -20,9 +20,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +53,17 @@ fun SwarmDashboardScreen(
     onResync: () -> Unit,
     onBrowseCatalog: () -> Unit,
 ) {
+    // This screen is reached by swapping UiState branches (see SwarmApp's
+    // `when`), not a real navigation component — nothing else ever moves
+    // D-pad focus onto its content. Confirmed on real hardware: without an
+    // explicit request here, no element on this screen ever receives
+    // focus at all, so D-pad input is silently a no-op forever (the
+    // buttons still render as if focused thanks to their static accent
+    // color, making this invisible from a screenshot — only proven by
+    // instrumenting the click handlers and seeing them never fire).
+    val browseLibraryFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { browseLibraryFocusRequester.requestFocus() }
+
     Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -62,6 +77,7 @@ fun SwarmDashboardScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = onBrowseCatalog,
+                    modifier = Modifier.focusRequester(browseLibraryFocusRequester),
                     colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = SwarmBackground),
                 ) {
                     Text("Browse library")

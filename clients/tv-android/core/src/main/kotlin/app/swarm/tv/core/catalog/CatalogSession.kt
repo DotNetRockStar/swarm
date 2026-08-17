@@ -111,8 +111,14 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
         connections[device.deviceId]?.let { return it }
 
+        // Failures here fail open (device just ends up in Result.unreachable)
+        // by design, but that previously made a real bug — a NoSuchMethodError
+        // from an API-33-only call — indistinguishable from an ordinary
+        // network timeout. Logging beats a second silent-failure debugging session.
         suspend fun tryDirect(): PeerQuicClient? =
-            runCatching { connectToServer(device, clientCertificate, clientKey) }.getOrNull()
+            runCatching { connectToServer(device, clientCertificate, clientKey) }
+                .onFailure { it.printStackTrace() }
+                .getOrNull()
         suspend fun tryPunch(): PeerQuicClient? = punchFallback?.let { fallback ->
             runCatching {
                 initiatePunchConnection(
@@ -149,7 +155,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         val manifest = runCatching {
             val response = connection.request("/catalog/manifest")
             SwarmJson.decodeFromString<CatalogManifest>(response.body.readBytes().decodeToString())
-        }.getOrNull()
+        }.onFailure { it.printStackTrace() }.getOrNull()
         if (manifest == null) {
             // Stale connection (peer restarted, network dropped) — drop it so the next refresh reconnects.
             connections.remove(serverId)

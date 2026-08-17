@@ -172,7 +172,7 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
             buffer.write(b)
             if (buffer.size() > MAX_HEADER_LINE_BYTES) throw PeerQuicError.HeaderTooLong
         }
-        return buffer.toString(Charsets.UTF_8)
+        return buffer.toString(Charsets.UTF_8.name())
     }
 }
 

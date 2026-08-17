@@ -1,5 +1,6 @@
 package app.swarm.tv.app.data
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.swarm.tv.core.catalog.CatalogSession
@@ -78,6 +79,7 @@ class SwarmViewModel(
     private val watchStateStore: WatchStateStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
+    private val logTag = "SwarmViewModel"
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var client: StunApiClient? = null
@@ -124,6 +126,7 @@ class SwarmViewModel(
 
     fun resync() {
         val current = _state.value
+        Log.i(logTag, "resync() called, current state=${current::class.simpleName}")
         if (current !is UiState.Dashboard) return
         _state.value = current.copy(resyncing = true)
         viewModelScope.launch { loadRoster() }
@@ -136,6 +139,7 @@ class SwarmViewModel(
     /** Connects to every reachable server in the roster and merges their catalogs — see [CatalogSession]. */
     fun browseCatalog() {
         val current = _state.value
+        Log.i(logTag, "browseCatalog() called, current state=${current::class.simpleName}")
         if (current !is UiState.Dashboard) return
         _state.value = UiState.Catalog(current.swarm, current.devices, loading = true)
         viewModelScope.launch {
@@ -144,6 +148,7 @@ class SwarmViewModel(
             val result = withContext(Dispatchers.IO) {
                 catalogSession.refresh(current.devices, clientCertificate, clientKey)
             }
+            Log.i(logTag, "browseCatalog() refresh done: entries=${result.entries.size} unreachable=${result.unreachable.size}")
             val stateNow = _state.value
             if (stateNow is UiState.Catalog) {
                 _state.value = stateNow.copy(entries = result.entries, loading = false, unreachable = result.unreachable)

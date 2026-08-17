@@ -22,14 +22,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -93,11 +97,22 @@ fun CatalogScreen(
                 CircularProgressIndicator(color = SwarmAccent)
             }
             entries.isEmpty() -> Text("Nothing in the catalog yet.", color = SwarmMuted, fontSize = 14.sp)
-            else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(32.dp)) {
-                for ((kind, label) in KIND_ROWS) {
-                    val row = entries.filter { it.entry.kind == kind }
-                    if (row.isNotEmpty()) {
-                        item { CatalogRow(label, row, artworkUrl, onPlay) }
+            else -> {
+                // Reached via a UiState swap (see SwarmDashboardScreen's doc
+                // comment for the same fix) — nothing else ever requests
+                // D-pad focus here, so without this the first card is
+                // visible but silently unreachable by remote.
+                val firstCardFocusRequester = remember { FocusRequester() }
+                LaunchedEffect(entries) { firstCardFocusRequester.requestFocus() }
+                val firstNonEmptyLabel = KIND_ROWS.firstOrNull { (kind, _) -> entries.any { it.entry.kind == kind } }?.second
+
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(32.dp)) {
+                    for ((kind, label) in KIND_ROWS) {
+                        val row = entries.filter { it.entry.kind == kind }
+                        if (row.isNotEmpty()) {
+                            val requester = if (label == firstNonEmptyLabel) firstCardFocusRequester else null
+                            item { CatalogRow(label, row, artworkUrl, onPlay, requester) }
+                        }
                     }
                 }
             }
@@ -106,19 +121,37 @@ fun CatalogScreen(
 }
 
 @Composable
-private fun CatalogRow(label: String, entries: List<MergedEntry>, artworkUrl: (MergedEntry) -> String?, onPlay: (MergedEntry) -> Unit) {
+private fun CatalogRow(
+    label: String,
+    entries: List<MergedEntry>,
+    artworkUrl: (MergedEntry) -> String?,
+    onPlay: (MergedEntry) -> Unit,
+    firstCardFocusRequester: FocusRequester?,
+) {
     Column {
         Text(label, color = SwarmMuted, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            items(entries) { entry -> CatalogCard(entry, artworkUrl(entry), onClick = { onPlay(entry) }) }
+            itemsIndexed(entries) { index, entry ->
+                CatalogCard(
+                    entry,
+                    artworkUrl(entry),
+                    onClick = { onPlay(entry) },
+                    focusRequester = if (index == 0) firstCardFocusRequester else null,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun CatalogCard(merged: MergedEntry, artworkUrl: String?, onClick: () -> Unit) {
-    Card(onClick = onClick, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = Modifier.width(160.dp)) {
+private fun CatalogCard(merged: MergedEntry, artworkUrl: String?, onClick: () -> Unit, focusRequester: FocusRequester?) {
+    val focusModifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.colors(containerColor = SwarmSurface),
+        modifier = focusModifier.width(160.dp),
+    ) {
         Column {
             if (artworkUrl != null) {
                 AsyncImage(

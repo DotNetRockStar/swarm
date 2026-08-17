@@ -55,7 +55,12 @@ class PeerLoopbackProxy private constructor(
 
     companion object {
         fun start(): PeerLoopbackProxy {
-            val serverSocket = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+            // Bind the literal IPv4 loopback, not InetAddress.getLoopbackAddress()
+            // — on this project's real Fire TV hardware that resolved to the
+            // IPv6 loopback (::1), a socket urlFor()'s hardcoded "127.0.0.1"
+            // URL can never reach, so every player request failed with
+            // ConnectException despite the proxy being alive and listening.
+            val serverSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
             val executor = Executors.newCachedThreadPool { runnable ->
                 Thread(runnable, "swarm-peer-proxy").apply { isDaemon = true }
             }
