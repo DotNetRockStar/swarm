@@ -64,6 +64,7 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 import kotlin.random.Random
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -337,7 +338,7 @@ class PeerQuicClientInteropTest {
      * unreachable device is skipped, not fatal.
      */
     @Test
-    fun `CatalogSession connects to a server via peer_addr and streams through the proxy`() {
+    fun `CatalogSession connects to a server via peer_addr and streams through the proxy`() = runBlocking {
         val client = TestIdentity.generate("catalog-client")
         val movieBytes = Random.Default.nextBytes(50_000)
         val server = startServer(client.fingerprint, movieBytes)
@@ -411,7 +412,7 @@ class PeerQuicClientInteropTest {
      * dependency stayed on 0.10.3 — the fix was never about the version.
      */
     @Test
-    fun `CatalogSession connects to two servers concurrently via peer_addr and merges their catalogs`() {
+    fun `CatalogSession connects to two servers concurrently via peer_addr and merges their catalogs`() = runBlocking {
         val client = TestIdentity.generate("catalog-client")
         val firstBytes = Random.Default.nextBytes(50_000)
         val secondBytes = Random.Default.nextBytes(60_000)

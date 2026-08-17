@@ -12,10 +12,14 @@
  */
 package app.swarm.tv.core.transport
 
+import app.swarm.tv.core.catalog.CatalogSession
+import app.swarm.tv.core.catalog.PunchFallback
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
+import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
+import app.swarm.tv.core.rest.SwarmDevice
 import java.io.BufferedReader
 import java.io.File
 import java.net.DatagramSocket
@@ -100,6 +104,10 @@ class PunchConnectInteropTest {
         val dataDir = File.createTempFile("swarm-punchconnect-data", "").apply { delete(); mkdirs() }
         tempDirs += mediaRoot
         tempDirs += dataDir
+        // One real file, scanned at startup, so a caller can tell "connected
+        // to an empty library" apart from "the catalog actually came through."
+        File(mediaRoot, "movies/Interop (2026)").mkdirs()
+        File(mediaRoot, "movies/Interop (2026)/Interop.2026.mkv").writeBytes(Random.nextBytes(10_000))
         val builder = ProcessBuilder(binary.absolutePath).redirectErrorStream(true)
         builder.environment().apply {
             put("SWARM_MEDIA_ROOT", mediaRoot.absolutePath)
@@ -240,6 +248,72 @@ class PunchConnectInteropTest {
             peer.use {
                 val response = it.request("/catalog/thumbprint")
                 assertEquals(200, response.header.status)
+            }
+            signaling.close()
+        }
+    }
+
+    /**
+     * The other half of wiring hole-punch into the real app: proves
+     * [CatalogSession] itself — not just `initiatePunchConnection` in
+     * isolation — reaches for the punch fallback when a server's
+     * self-reported `peer_addr` isn't actually reachable. The roster entry
+     * here is deliberately synthetic (real `certFingerprint`, garbage
+     * `peer_addr`) rather than fetched from the real roster, since on one
+     * loopback machine the real `peer_addr` would always be directly
+     * reachable and there'd be nothing to fall back from.
+     */
+    @Test
+    fun `CatalogSession falls back to hole-punching when peer_addr is unreachable`() {
+        assumeTrue(stunServerBinary() != null, "swarm-stun-server release binary not found")
+        assumeTrue(mediaServerBinary() != null, "swarm-serverd release binary not found")
+
+        runBlocking {
+            val reflectorPort = freeUdpPort()
+            val stunBase = startStunServer(reflectorPort)
+            val browser = Browser(stunBase, OkHttpClient())
+            browser.loginFreshAccount("kt-catalog-fallback-${Random.nextInt()}@example.test")
+            val swarmId = browser.createSwarm("Home")
+
+            val clientIdentity = TestIdentity.generate("catalog-fallback-client")
+            val clientCode = browser.createCode(swarmId)
+            val clientReg = StunApiClient(stunBase).registerDevice(
+                clientCode,
+                DeviceRegistration(
+                    name = "client",
+                    deviceType = DeviceType.CLIENT,
+                    machineId = "machine-client",
+                    certFingerprint = clientIdentity.fingerprint,
+                    platform = "test",
+                    appVersion = "0.1.0",
+                ),
+            )
+            val (signaling, signalRx) = SignalingClient.connect(stunBase, clientReg.accessToken, clientReg.deviceId)
+            val reflectorAddr = InetSocketAddress("127.0.0.1", reflectorPort)
+
+            val serverCode = browser.createCode(swarmId)
+            val serverFingerprint = startMediaServer(stunBase, serverCode)
+            val serverDeviceId = browser.deviceIdFor(swarmId, serverFingerprint)
+
+            val device = SwarmDevice(
+                deviceId = serverDeviceId,
+                name = "server",
+                deviceType = DeviceType.SERVER,
+                certFingerprint = serverFingerprint,
+                online = true,
+                // RFC 5737 TEST-NET-1 — guaranteed non-routable, so the
+                // direct connectToServer attempt fails and this exercises
+                // the punch fallback, not the LAN path.
+                metadata = mapOf("peer_addr" to "192.0.2.1:1"),
+            )
+
+            PeerLoopbackProxy.start().use { proxy ->
+                CatalogSession(proxy).use { session ->
+                    session.punchFallback = PunchFallback(signaling, signalRx, reflectorAddr, clientIdentity.fingerprint)
+                    val result = session.refresh(listOf(device), clientIdentity.certificate, clientIdentity.privateKey)
+                    assertEquals(emptyList<Any>(), result.unreachable)
+                    assertEquals(1, result.entries.size)
+                }
             }
             signaling.close()
         }

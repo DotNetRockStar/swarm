@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.swarm.tv.core.catalog.CatalogSession
 import app.swarm.tv.core.catalog.MergedEntry
+import app.swarm.tv.core.catalog.PunchFallback
+import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
 import app.swarm.tv.core.peer.MediaKind
@@ -13,6 +15,8 @@ import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.core.token.TokenStore
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import kotlinx.coroutines.Dispatchers
@@ -41,10 +45,15 @@ sealed class UiState {
  * Onboarding, swarm-dashboard, merged-catalog, and playback state.
  * Registration is fully wired (real network calls against a real STUN
  * server, real encrypted token storage, a real device identity
- * fingerprint). [browseCatalog] connects to every server in the roster
- * that has self-reported a `peer_addr` (see `CatalogSession`) over real
- * peer QUIC and merges their catalogs; [play] streams the chosen entry
- * through the same session's loopback proxy. `clientCertificate`/
+ * fingerprint). Right after registration, also opens a [SignalingClient]
+ * session and wires it into [catalogSession] as a [PunchFallback] —
+ * best-effort, same as `ServerCore`'s `establish_signaling` (Rust): a
+ * device with no working signaling session still reaches LAN servers via
+ * `peer_addr` fine, it just can't fall back to a hole-punched connection
+ * for one that isn't directly reachable. [browseCatalog] connects to every
+ * server in the roster (direct first, punched fallback second — see
+ * `CatalogSession`) and merges their catalogs; [play] streams the chosen
+ * entry through the same session's loopback proxy. `clientCertificate`/
  * `clientKey` are this device's own identity — `AndroidDeviceIdentity`'s
  * `AndroidKeyStore`-backed cert/key on the shipped app, an in-memory one in
  * tests — the mTLS credential a peer's `RosterClientVerifier` checks
@@ -63,6 +72,7 @@ class SwarmViewModel(
     private var client: StunApiClient? = null
     private var accessToken: String? = null
     private var swarmId: String? = null
+    private var signaling: SignalingClient? = null
 
     private val proxy = PeerLoopbackProxy.start()
     private val catalogSession = CatalogSession(proxy)
@@ -93,6 +103,7 @@ class SwarmViewModel(
                 client = api
                 accessToken = response.accessToken
                 swarmId = response.swarm.id
+                establishSignaling(trimmedBaseUrl, response.accessToken, response.deviceId)
                 loadRoster()
             } catch (e: StunClientError) {
                 _state.value = UiState.Error(e.message ?: "Could not join that swarm.")
@@ -161,6 +172,35 @@ class SwarmViewModel(
         if (current is UiState.Catalog) _state.value = UiState.Dashboard(current.swarm, current.devices)
     }
 
+    /**
+     * Opens a signaling session and, if that succeeds, resolves the
+     * reflector's address and wires [catalogSession]'s [PunchFallback].
+     * Best-effort and never fatal — see the class doc.
+     */
+    private suspend fun establishSignaling(baseUrl: String, accessToken: String, deviceId: String) {
+        val (signalingClient, signalRx) = try {
+            SignalingClient.connect(baseUrl, accessToken, deviceId)
+        } catch (e: Exception) {
+            return
+        }
+        val reflectorAddr = resolveReflectorAddr(baseUrl, signalingClient.reflectorPorts)
+        if (reflectorAddr == null) {
+            signalingClient.close()
+            return
+        }
+        signaling = signalingClient
+        catalogSession.punchFallback = PunchFallback(signalingClient, signalRx, reflectorAddr, certFingerprint)
+    }
+
+    /** The reflector runs inside the STUN server process, so its address is the STUN host plus whichever port `hello_ack` advertised as live. */
+    private suspend fun resolveReflectorAddr(baseUrl: String, reflectorPorts: List<Int>): InetSocketAddress? {
+        val port = reflectorPorts.firstOrNull() ?: return null
+        val host = baseUrl.removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':')
+        return withContext(Dispatchers.IO) {
+            runCatching { InetSocketAddress(InetAddress.getByName(host), port) }.getOrNull()
+        }
+    }
+
     private suspend fun loadRoster() {
         val api = client ?: return
         val token = accessToken ?: return
@@ -174,6 +214,7 @@ class SwarmViewModel(
     }
 
     override fun onCleared() {
+        signaling?.close()
         catalogSession.close()
         proxy.close()
     }
