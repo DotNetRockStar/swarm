@@ -41,7 +41,14 @@ impl AppState {
                 let config = ServerConfig {
                     media_root: PathBuf::from(media_root),
                     data_dir: dir,
-                    bind: "0.0.0.0:8543".parse().unwrap(),
+                    // Same SWARM_PEER_BIND convention as the headless binary
+                    // (see config_from_env) — lets the GUI run on a different
+                    // port than a headless instance for side-by-side testing,
+                    // since both otherwise default to the identical 8543.
+                    bind: std::env::var("SWARM_PEER_BIND")
+                        .unwrap_or_else(|_| "0.0.0.0:8543".into())
+                        .parse()
+                        .expect("SWARM_PEER_BIND must be host:port"),
                     allowed_fingerprints: vec![],
                     token_store_mode: TokenStoreMode::PreferKeyring,
                 };
