@@ -18,6 +18,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // Well above the 65536 method limit (Compose + Media3 + kwik +
+        // coroutines + BouncyCastle land 16 dex files), so this is
+        // required for the build to link at all.
+        multiDexEnabled = true
     }
 
     buildTypes {

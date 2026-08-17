@@ -20,7 +20,6 @@
     <!-- No microphone/camera features are declared or used. -->
 
     <application
-        android:name=".SwarmTvApplication"
         android:allowBackup="false"
         android:banner="@drawable/tv_banner"
         android:icon="@drawable/ic_launcher"
@@ -28,8 +27,20 @@
         android:theme="@style/Theme.SwarmTv"
         android:usesCleartextTraffic="false">
 
+        <!-- Fully qualified, not ".MainActivity": `namespace` above is
+             "app.swarm.tv" but this module's actual Kotlin package is
+             "app.swarm.tv.app" (one segment deeper) — a relative name
+             here resolves against `namespace`, landing on the
+             nonexistent "app.swarm.tv.MainActivity" and throwing
+             ClassNotFoundException at launch even though the real class
+             is right there in the APK. Confirmed the hard way on a real
+             Fire TV 4-Series: this alone was the entire crash, unrelated
+             to multidex/dex-sharding despite how that looked at first —
+             see swarm-real-device-debugging skill for the full story
+             before spending time on dex placement for a class-not-found
+             crash again. -->
         <activity
-            android:name=".MainActivity"
+            android:name="app.swarm.tv.app.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="landscape"

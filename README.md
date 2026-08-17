@@ -58,6 +58,54 @@ cd clients/tv-android
 ./gradlew :app:assembleDebug  # full APK; needs local.properties -> an Android SDK
 ```
 
+## Manual end-to-end testing (STUN + server + real Fire TV)
+
+Two repo-root scripts drive the full stack for hands-on testing — no
+mocks, the same real binaries every automated test spawns as subprocesses
+(see `.claude/skills/swarm-interop-test/`), just left running so you can
+point a browser or a real device at them.
+
+**1. Start the STUN server + media server:**
+```bash
+./run_now.sh
+```
+Builds and runs `swarm-stun-server` + `swarm-serverd`, bound to `0.0.0.0`
+(not just loopback) so a real device on your LAN can reach them. Prints
+two URLs — always use the **LAN** one (e.g. `http://192.168.x.x:8080`),
+not `127.0.0.1`, for anything other than a browser on this same machine.
+If the LAN IP printed looks wrong, this machine likely has a VPN active;
+see `.claude/skills/swarm-local-testing/` for why and how the script
+already works around it.
+
+Open the local URL in a browser, register an account, create a swarm,
+and mint an 8-digit join code. Link the media server to it either through
+the Tauri GUI (`cargo run -p swarm-server --features gui --bin
+swarm-server-app`) or by restarting with `SWARM_STUN_URL`/`SWARM_STUN_CODE`
+set (printed in the script's own output). Drop real media files into
+`.run/media/` — that's the server's scanned media root.
+
+**2. Install the TV client on a real Fire TV:**
+```bash
+./deploy_tv.sh 192.168.0.148   # your Fire TV's IP — Settings -> My Fire TV -> About -> Network
+```
+First time: enable Developer Options on the TV (**Settings → My Fire TV →
+About**, click the device name row ~7 times), then turn on **ADB
+debugging** under the new **Developer Options** entry, and accept the
+one-time "Allow USB debugging?" prompt on the TV screen when it appears.
+
+`deploy_tv.sh` rebuilds the debug APK, installs it via adb, force-stops
+any previous run, launches it, and polls for up to 16s to verify it
+actually stayed up (checks for `FATAL EXCEPTION` in logcat and confirms
+the process is still alive) rather than just trusting a successful
+install — this is what caught a real launch crash on first real-hardware
+use (see `.claude/skills/swarm-real-device-debugging/` for the full
+story). Add `-f` to tail logcat afterward. On the TV, enter the **LAN**
+STUN URL from step 1 plus the join code on the passcode screen.
+
+Building against a real device specifically needs the **debug** build —
+the release manifest intentionally disables cleartext HTTP/WS traffic for
+Appstore compliance, and `run_now.sh` serves plain (non-TLS) endpoints.
+
 ## Roadmap
 
 Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission. Phase 3 (TV client) has registration, encrypted token storage, and the swarm dashboard working end-to-end against a real STUN server; the peer QUIC transport (and everything downstream of it — merged catalog, playback) is next, gated on a kwik throughput spike per the risk register.
