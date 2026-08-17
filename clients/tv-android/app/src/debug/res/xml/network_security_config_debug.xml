@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only. run_now.sh serves plain http/ws for local manual testing
+  against a real device — production STUN deployments are TLS-terminated
+  by Caddy, so this exception has no bearing on the real service. Release
+  builds don't include this source set, so android:usesCleartextTraffic
+  ="false" in the main manifest still governs Appstore submissions.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
