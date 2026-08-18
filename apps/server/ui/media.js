@@ -11,6 +11,24 @@ let openManageKey = null;
 let pickedArtworkPath = null;
 let mediaSection = "browse"; // "browse" | "table"
 let browsePath = { kind: "root" }; // breadcrumb state — see renderBrowse()
+let searchQuery = "";
+let kindFilter = "all"; // "all" | "movie" | "episode" | "track"
+
+// Applies to both the Browse root view and the All-entries table. Matches
+// against every identifying name field, not just title, so searching a
+// show/artist name keeps every episode/track under it (their show_title/
+// artist is stable across all of them, even though the episode/track's own
+// title might not mention it).
+function filteredEntries() {
+  const q = searchQuery.trim().toLowerCase();
+  return libraryEntries.filter(e => {
+    if (kindFilter !== "all" && e.kind !== kindFilter) return false;
+    if (!q) return true;
+    return [e.scraped_title, e.title, e.artist, e.album, e.show_title]
+      .filter(Boolean)
+      .some(field => field.toLowerCase().includes(q));
+  });
+}
 
 async function refreshMedia() {
   await refreshLibrary();
@@ -27,11 +45,32 @@ async function refreshLibrary() {
   renderMediaTab();
 }
 
+// Re-renders just the current view's results (Browse or the flat table),
+// never the toggle/search row itself — called on every search keystroke and
+// filter change, so the search <input> is never destroyed/recreated (which
+// would drop keyboard focus and cursor position mid-type).
+function renderMediaResults() {
+  if (mediaSection === "table") {
+    renderLibrary();
+  } else {
+    renderBrowse();
+  }
+}
+
 function renderMediaTab() {
   const container = document.getElementById("library");
   const toggle = `<div class="row" style="margin-bottom:14px">
     <button class="${mediaSection === "browse" ? "" : "secondary"}" id="mediaSectionBrowseBtn" style="flex:0 0 auto">Browse</button>
     <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto">All entries</button>
+  </div>
+  <div class="row" style="margin-bottom:14px">
+    <input id="mediaSearchInput" placeholder="Search title, artist, show…" value="${esc(searchQuery)}" style="flex:2">
+    <select id="mediaKindFilter" style="flex:0 0 140px; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
+      <option value="all">All kinds</option>
+      <option value="movie">Movies</option>
+      <option value="episode">Shows</option>
+      <option value="track">Music</option>
+    </select>
   </div>`;
   container.innerHTML = toggle + `<div id="mediaSectionBody"></div>`;
   document.getElementById("mediaSectionBrowseBtn").addEventListener("click", () => {
@@ -43,11 +82,19 @@ function renderMediaTab() {
     mediaSection = "table";
     renderMediaTab();
   });
-  if (mediaSection === "table") {
-    renderLibrary();
-  } else {
-    renderBrowse();
-  }
+  document.getElementById("mediaSearchInput").addEventListener("input", (event) => {
+    searchQuery = event.target.value;
+    if (mediaSection === "browse") browsePath = { kind: "root" };
+    renderMediaResults();
+  });
+  const kindFilterSelect = document.getElementById("mediaKindFilter");
+  kindFilterSelect.value = kindFilter;
+  kindFilterSelect.addEventListener("change", (event) => {
+    kindFilter = event.target.value;
+    if (mediaSection === "browse") browsePath = { kind: "root" };
+    renderMediaResults();
+  });
+  renderMediaResults();
 }
 
 // ---- pure grouping helpers (no DOM) ----------------------------------------
@@ -158,9 +205,10 @@ function wireBreadcrumb(container, parts) {
 }
 
 function renderBrowseRoot(body) {
-  const movies = libraryEntries.filter(e => e.kind === "movie");
-  const tracks = groupTracks(libraryEntries);
-  const shows = groupEpisodes(libraryEntries);
+  const entries = filteredEntries();
+  const movies = entries.filter(e => e.kind === "movie");
+  const tracks = groupTracks(entries);
+  const shows = groupEpisodes(entries);
 
   const movieCards = movies.map(m => `
     <div class="media-card" data-movie="${esc(m.entry_key)}">
@@ -185,16 +233,18 @@ function renderBrowseRoot(body) {
     </div>`;
   }).join("");
 
-  // Netflix-style horizontally-scrolling shelves, one per kind — matches
-  // the TV client's CatalogScreen (Movies/Shows/Music LazyRow shelves)
-  // rather than a browsed-folder grid. Deeper drill-down views (an artist's
-  // albums, a show's seasons, etc.) stay as wrapping .media-grid — shelves
-  // are specifically the top-level "what kinds of media do I have" view.
+  // One .shelf-section per kind, each a full wrapping grid (no horizontal
+  // scroll — every tile visible). Deeper drill-down views (an artist's
+  // albums, a show's seasons, etc.) stay as plain .media-grid too.
+  const nothingMatched = !movies.length && !tracks.size && !shows.size;
+  const emptyMessage = searchQuery.trim() || kindFilter !== "all"
+    ? "No matches for the current search/filter."
+    : "No movies, music, or shows found yet.";
   body.innerHTML = `
     ${movies.length ? `<div class="shelf-section"><h2 style="margin-top:0">Movies</h2><div class="media-grid">${movieCards}</div></div>` : ""}
     ${shows.size ? `<div class="shelf-section"><h2>Shows</h2><div class="media-grid">${showCards}</div></div>` : ""}
     ${tracks.size ? `<div class="shelf-section"><h2>Music</h2><div class="media-grid">${artistCards}</div></div>` : ""}
-    ${!movies.length && !tracks.size && !shows.size ? `<span class="muted">No movies, music, or shows found yet.</span>` : ""}
+    ${nothingMatched ? `<span class="muted">${emptyMessage}</span>` : ""}
   `;
 
   body.querySelectorAll("[data-movie]").forEach(el => el.addEventListener("click", () => {
@@ -397,9 +447,14 @@ function renderLibrary() {
     library.innerHTML = `<span class="muted">No media found under the configured media roots.</span>`;
     return;
   }
+  const entries = filteredEntries();
+  if (!entries.length) {
+    library.innerHTML = `<span class="muted">No matches for the current search/filter.</span>`;
+    return;
+  }
   library.innerHTML = `<div class="table-scroll"><table>
     <thead><tr><th>Title</th><th>Kind</th><th>Genres</th><th>Art</th><th>Path</th><th>Size</th><th></th></tr></thead>
-    <tbody>` + libraryEntries.map(e => `
+    <tbody>` + entries.map(e => `
       <tr data-entry-row="${esc(e.entry_key)}">
         <td>${esc(e.scraped_title || e.title)}</td>
         <td>${esc(e.kind)}</td>
