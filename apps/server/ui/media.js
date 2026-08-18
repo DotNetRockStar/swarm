@@ -165,13 +165,13 @@ function renderBrowseRoot(body) {
   const movieCards = movies.map(m => `
     <div class="media-card" data-movie="${esc(m.entry_key)}">
       ${artImg(m.entry_key, "poster", "card-art")}
-      <div class="card-title">${esc(m.scraped_title || m.title)}${m.year ? ` <span class="muted">(${m.year})</span>` : ""}</div>
+      <div class="card-title" title="${esc(m.scraped_title || m.title)}">${esc(m.scraped_title || m.title)}${m.year ? ` <span class="muted">(${m.year})</span>` : ""}</div>
     </div>`).join("");
 
   const artistCards = [...tracks.keys()].sort().map(artist => `
     <div class="media-card" data-artist="${esc(artist)}">
       <div class="card-art art-placeholder round"></div>
-      <div class="card-title">${esc(artist)}</div>
+      <div class="card-title" title="${esc(artist)}">${esc(artist)}</div>
       <div class="muted" style="font-size:.75rem">${tracks.get(artist).size} album${tracks.get(artist).size === 1 ? "" : "s"}</div>
     </div>`).join("");
 
@@ -180,7 +180,7 @@ function renderBrowseRoot(body) {
     return `
     <div class="media-card" data-show="${esc(show)}">
       ${first ? artImg(first.entry_key, "poster", "card-art") : `<div class="card-art art-placeholder"></div>`}
-      <div class="card-title">${esc(show)}</div>
+      <div class="card-title" title="${esc(show)}">${esc(show)}</div>
       <div class="muted" style="font-size:.75rem">${shows.get(show).size} season${shows.get(show).size === 1 ? "" : "s"}</div>
     </div>`;
   }).join("");
@@ -270,7 +270,7 @@ function renderArtist(body, artist) {
   const cards = [...albums.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([album, tracks]) => `
     <div class="media-card" data-album="${esc(album)}">
       ${artImg(tracks[0].entry_key, "cover", "card-art")}
-      <div class="card-title">${esc(album)}</div>
+      <div class="card-title" title="${esc(album)}">${esc(album)}</div>
       <div class="muted" style="font-size:.75rem">${tracks.length} track${tracks.length === 1 ? "" : "s"}</div>
     </div>`).join("");
   body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
@@ -356,7 +356,7 @@ function renderSeason(body, show, season) {
   const cards = episodes.map(ep => `
     <div class="media-card" data-episode="${esc(ep.entry_key)}">
       ${artImg(ep.entry_key, "poster", "card-art")}
-      <div class="card-title">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
+      <div class="card-title" title="${esc(ep.scraped_title || ep.title)}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
     </div>`).join("");
   body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
   wireBreadcrumb(body, crumbs);
