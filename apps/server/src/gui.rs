@@ -331,7 +331,7 @@ async fn get_artwork_bytes(
 const SCRAPE_PROGRESS_EVENT: &str = "scrape-progress";
 
 #[tauri::command]
-async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<BulkScrapeReport, String> {
+async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>, force: bool) -> Result<BulkScrapeReport, String> {
     let core = state.core(&app).await?;
     let tmdb_api_key = settings::load(&app_data_dir(&app)?).tmdb_api_key;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -344,7 +344,7 @@ async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>) ->
             let _ = emitter.emit(SCRAPE_PROGRESS_EVENT, event);
         }
     });
-    let result = core.run_scrape(ScrapeConfig { tmdb_api_key, ..Default::default() }, Some(tx)).await;
+    let result = core.run_scrape(ScrapeConfig { tmdb_api_key, ..Default::default() }, Some(tx), force).await;
     // Dropping the last sender (above) closes the channel, so `forward`
     // exits its loop on its own — awaiting it here just makes sure every
     // already-queued event is actually emitted before this command returns

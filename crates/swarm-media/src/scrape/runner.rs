@@ -170,9 +170,15 @@ pub async fn run_bulk_scrape(
     config: &ScrapeConfig,
     cancel: &AtomicBool,
     progress_tx: Option<UnboundedSender<ScrapeProgressEvent>>,
+    force: bool,
 ) -> sqlx::Result<BulkScrapeReport> {
     let mut report = BulkScrapeReport::default();
-    let entries = library.missing_scrape().await?;
+    // `force` re-scrapes everything, overwriting whatever's already there —
+    // `scrape_videos`/`scrape_tracks` below always overwrite unconditionally
+    // per entry regardless of prior state, so simply widening which entries
+    // are handed in is the whole difference; no separate "overwrite" branch
+    // needed in the per-entry scraping logic itself.
+    let entries = if force { library.list().await? } else { library.missing_scrape().await? };
     let (videos, tracks): (Vec<EntryRecord>, Vec<EntryRecord>) =
         entries.into_iter().partition(|e| matches!(e.kind, MediaKind::Movie | MediaKind::Episode));
     let progress = progress_tx.map(|sender| ScrapeProgress::new(sender, (videos.len() + tracks.len()) as u64));
@@ -638,7 +644,7 @@ mod tests {
         scan_root(&library, &root).await.unwrap();
 
         let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None).await.unwrap();
+            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None, false).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
         // Skipped entries stay unscraped so a later run (with a key) retries them.
         assert_eq!(library.missing_scrape().await.unwrap().len(), 1);
@@ -675,7 +681,7 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}/img")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 1, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entry = &library.list().await.unwrap()[0];
@@ -711,7 +717,7 @@ mod tests {
             ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
 
         // First pass: bulk scrape matches the wrong title (simulating a bad match).
-        run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
+        run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
         let entry = library.list().await.unwrap().into_iter().next().unwrap();
         assert_eq!(entry.scraped_title.as_deref(), Some("Wrong Match"));
 
@@ -725,6 +731,37 @@ mod tests {
         let updated = library.get(&entry.entry_key).await.unwrap().unwrap();
         assert_eq!(updated.scraped_title.as_deref(), Some("Heat"));
         assert_eq!(updated.genres, vec!["Crime"]);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn bulk_scrape_force_rescrapes_already_processed_entries() {
+        let (root, db_path) = fixture_dirs("bulk-force-rescrape");
+        std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
+        std::fs::write(root.join("movies/Heat (1995)/Heat.1995.mkv"), vec![0u8; 10]).unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
+            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": []})) }));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config =
+            ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
+
+        let first = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        assert_eq!(first.matched, 1);
+        assert!(library.missing_scrape().await.unwrap().is_empty(), "must be marked processed");
+
+        // Default (force: false) must not touch an already-processed entry.
+        let second = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        assert_eq!(second, BulkScrapeReport::default(), "nothing left to do without force");
+
+        // force: true must re-scrape it anyway, even though it's already processed.
+        let third = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, true).await.unwrap();
+        assert_eq!(third.matched, 1, "force must re-scrape an already-processed entry");
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -842,7 +879,7 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
         assert_eq!(report.matched, 0);
         assert_eq!(report.not_found, 1);
         assert_eq!(report.failed, 0);
@@ -892,7 +929,7 @@ mod tests {
             coverart_base: Some(ca_base),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entries = library.list().await.unwrap();
@@ -917,7 +954,7 @@ mod tests {
         scan_root(&library, &root).await.unwrap();
 
         let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None).await.unwrap();
+            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None, false).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
@@ -959,7 +996,7 @@ mod tests {
             ..Default::default()
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), Some(tx)).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), Some(tx), false).await.unwrap();
         assert_eq!(report.matched, 3);
 
         let mut events = Vec::new();

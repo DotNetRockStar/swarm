@@ -592,7 +592,8 @@ document.getElementById("scrapeBtn").addEventListener("click", async () => {
     patchEntryLive(payload);
   });
   try {
-    const r = await invoke("run_scrape");
+    const force = document.getElementById("forceScrapeCheck").checked;
+    const r = await invoke("run_scrape", { force });
     note.textContent = `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`;
     renderScrapeIssues(r.issues);
     // A final full refresh as a safety net (picks up anything not visible

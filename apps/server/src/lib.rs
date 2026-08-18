@@ -318,16 +318,19 @@ impl ServerCore {
     /// when given, receives one [`ScrapeProgressEvent`] per entry as it
     /// completes — entirely optional so this method still works exactly as
     /// before for any caller that doesn't need live updates.
+    /// `force`: re-scrape and overwrite every entry, not just ones missing a
+    /// scrape result — the UI's "redownload / override existing" checkbox.
     pub async fn run_scrape(
         &self,
         config: ScrapeConfig,
         progress_tx: Option<mpsc::UnboundedSender<ScrapeProgressEvent>>,
+        force: bool,
     ) -> Result<BulkScrapeReport, ServerError> {
         if self.scraping.swap(true, Ordering::AcqRel) {
             return Err(ServerError::ScrapeInProgress);
         }
         let cancel = AtomicBool::new(false);
-        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel, progress_tx).await;
+        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel, progress_tx, force).await;
         self.scraping.store(false, Ordering::Release);
         Ok(result?)
     }
