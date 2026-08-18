@@ -33,6 +33,7 @@ button {
 button:hover { filter: brightness(1.15); }
 button.secondary { background: var(--surface-muted); color: var(--text); border: 1px solid var(--border); }
 button.danger { background: var(--surface-muted); color: #ff8db4; border: 1px solid #6b3348; }
+button i.bi, .tabnav button i.bi, .checkbox-label i.bi { margin-right: 6px; }
 label { display: block; font-size: .75rem; color: var(--muted); margin: 10px 0 4px; }
 input {
   width: 100%; background: var(--surface-muted); border: 1px solid var(--border); color: var(--text);

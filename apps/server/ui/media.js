@@ -61,8 +61,8 @@ function renderMediaResults() {
 function renderMediaTab() {
   const container = document.getElementById("library");
   const toggle = `<div class="row" style="margin-bottom:14px">
-    <button class="${mediaSection === "browse" ? "" : "secondary"}" id="mediaSectionBrowseBtn" style="flex:0 0 auto">Browse</button>
-    <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto">All entries</button>
+    <button class="${mediaSection === "browse" ? "" : "secondary"}" id="mediaSectionBrowseBtn" style="flex:0 0 auto"><i class="bi bi-grid"></i>Browse</button>
+    <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto"><i class="bi bi-list-ul"></i>All entries</button>
   </div>
   <div class="row" style="margin-bottom:14px; align-items:center">
     <input id="mediaSearchInput" class="search-input" placeholder="Search title, artist, show…" value="${esc(searchQuery)}" style="flex:2">
@@ -298,7 +298,7 @@ function wireDetailManage(entry) {
   if (!target) return;
   const wasOpen = openManageKey === entry.entry_key;
   target.innerHTML = `<div class="row" style="margin-top:14px">
-    <button class="secondary" data-detail-manage="${esc(entry.entry_key)}">${wasOpen ? "Close" : "Manage metadata / artwork / rescrape"}</button>
+    <button class="secondary" data-detail-manage="${esc(entry.entry_key)}">${wasOpen ? '<i class="bi bi-x-lg"></i>Close' : '<i class="bi bi-sliders"></i>Manage metadata / artwork / rescrape'}</button>
   </div>${wasOpen ? manageRow(entry) : ""}`;
   target.querySelector("[data-detail-manage]").addEventListener("click", () => {
     openManageKey = wasOpen ? null : entry.entry_key;
@@ -355,7 +355,7 @@ function renderAlbum(body, artist, album) {
       <td class="mono">${t.track_number ?? "—"}</td>
       <td>${esc(t.scraped_title || t.title)}</td>
       <td>${t.duration_secs ? formatDuration(t.duration_secs) : "—"}</td>
-      <td><button class="secondary" data-manage="${esc(t.entry_key)}">${openManageKey === t.entry_key ? "Close" : "Manage"}</button></td>
+      <td><button class="secondary" data-manage="${esc(t.entry_key)}">${openManageKey === t.entry_key ? '<i class="bi bi-x-lg"></i>Close' : '<i class="bi bi-sliders"></i>Manage'}</button></td>
     </tr>
     ${openManageKey === t.entry_key ? `<tr><td colspan="4">${manageRow(t)}</td></tr>` : ""}
   `).join("");
@@ -475,7 +475,7 @@ function renderLibrary() {
         <td>${e.has_artwork ? "✓" : "—"}</td>
         <td class="mono" title="${esc(e.relative_path)}">${esc(e.relative_path)}</td>
         <td>${(e.size / 1048576).toFixed(1)} MB</td>
-        <td><button class="secondary" data-manage="${esc(e.entry_key)}">${openManageKey === e.entry_key ? "Close" : "Manage"}</button></td>
+        <td><button class="secondary" data-manage="${esc(e.entry_key)}">${openManageKey === e.entry_key ? '<i class="bi bi-x-lg"></i>Close' : '<i class="bi bi-sliders"></i>Manage'}</button></td>
       </tr>
       ${openManageKey === e.entry_key ? `<tr><td colspan="7">${manageRow(e)}</td></tr>` : ""}
     `).join("") + `</tbody></table></div>`;
@@ -505,7 +505,7 @@ function manageRow(entry) {
       <label>Genres (comma-separated)</label>
       <input id="editGenresInput" value="${esc(entry.genres.join(", "))}">
       <div class="row" style="margin-top:10px">
-        <button id="editSaveBtn">Save metadata</button>
+        <button id="editSaveBtn"><i class="bi bi-check-lg"></i>Save metadata</button>
       </div>
       <p id="editError" class="error"></p>
 
@@ -518,8 +518,8 @@ function manageRow(entry) {
           <option value="cover">Cover</option>
           <option value="artist_photo">Artist photo</option>
         </select>
-        <button id="pickArtworkBtn" class="secondary">Choose image…</button>
-        <button id="uploadArtworkBtn">Upload</button>
+        <button id="pickArtworkBtn" class="secondary"><i class="bi bi-image"></i>Choose image…</button>
+        <button id="uploadArtworkBtn"><i class="bi bi-upload"></i>Upload</button>
       </div>
       <p class="muted" id="artworkPickedNote">${pickedArtworkPath ? esc(pickedArtworkPath) : "No file chosen."}</p>
       <p id="artworkError" class="error"></p>
@@ -528,9 +528,9 @@ function manageRow(entry) {
       <label>TMDb URL override (optional — leave blank to search normally)</label>
       <input id="rescrapeUrlInput" placeholder="https://www.themoviedb.org/movie/27205-inception">
       <div class="row" style="margin-top:10px">
-        <button id="rescrapeBtn" class="secondary">Rescrape this entry</button>
+        <button id="rescrapeBtn" class="secondary"><i class="bi bi-arrow-repeat"></i>Rescrape this entry</button>
         ${entry.scraped_title || entry.genres.length || entry.has_artwork
-          ? `<button id="revertScrapeBtn" class="danger">Revert to unscraped</button>`
+          ? `<button id="revertScrapeBtn" class="danger"><i class="bi bi-arrow-counterclockwise"></i>Revert to unscraped</button>`
           : ""}
       </div>
       <p id="rescrapeError" class="error"></p>

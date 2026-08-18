@@ -51,7 +51,7 @@ async function refreshMediaRoots() {
     list.innerHTML = roots.map(r => `
       <div class="row" style="align-items:center">
         <div class="mono muted" style="flex:2">${esc(r.label)}: ${esc(r.path)}</div>
-        <button class="danger" data-remove-root="${esc(r.label)}" ${roots.length <= 1 ? "disabled" : ""}>Remove</button>
+        <button class="danger" data-remove-root="${esc(r.label)}" ${roots.length <= 1 ? "disabled" : ""}><i class="bi bi-trash"></i>Remove</button>
       </div>`).join("");
     list.querySelectorAll("[data-remove-root]").forEach(btn => {
       btn.addEventListener("click", async () => {

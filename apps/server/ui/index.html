@@ -24,7 +24,7 @@
     <h2>Welcome to SWARM</h2>
     <p class="tagline centered">Stream Whatever, Anywhere — Remote Media</p>
     <p class="muted">Choose the folder with your music and video. SWARM will scan it and can stream from it to devices in your swarm.</p>
-    <button id="chooseFolderBtn" style="margin-top:14px">Choose media folder…</button>
+    <button id="chooseFolderBtn" style="margin-top:14px"><i class="bi bi-folder2-open"></i>Choose media folder…</button>
     <p id="folderError" class="error"></p>
   </div>
 </div>
@@ -40,8 +40,8 @@
     <label>Device name</label>
     <input id="onboardDeviceName" value="SWARM Server">
     <div class="row" style="margin-top:14px">
-      <button id="onboardJoinBtn">Join swarm</button>
-      <button id="onboardSkipBtn" class="secondary">Skip for now</button>
+      <button id="onboardJoinBtn"><i class="bi bi-box-arrow-in-right"></i>Join swarm</button>
+      <button id="onboardSkipBtn" class="secondary"><i class="bi bi-skip-forward"></i>Skip for now</button>
     </div>
     <p id="onboardError" class="error"></p>
   </div>
@@ -49,9 +49,9 @@
 
 <div id="dashView" class="d-none">
   <div class="tabnav">
-    <button id="tabBtn-details" class="tab-active">Details</button>
-    <button id="tabBtn-swarm">Swarm</button>
-    <button id="tabBtn-media">Media</button>
+    <button id="tabBtn-details" class="tab-active"><i class="bi bi-speedometer2"></i>Details</button>
+    <button id="tabBtn-swarm"><i class="bi bi-diagram-3"></i>Swarm</button>
+    <button id="tabBtn-media"><i class="bi bi-collection-play"></i>Media</button>
   </div>
 
   <div id="tabPanel-details">
@@ -66,8 +66,8 @@
       <div class="row" style="margin-top:14px">
         <input id="addRootLabel" placeholder="Label (e.g. nas-movies)">
         <input id="addRootPath" placeholder="/path/to/media or a mounted network share">
-        <button id="chooseAddRootBtn" class="secondary">Browse…</button>
-        <button id="addRootBtn">Add root</button>
+        <button id="chooseAddRootBtn" class="secondary"><i class="bi bi-folder2-open"></i>Browse…</button>
+        <button id="addRootBtn"><i class="bi bi-plus-lg"></i>Add root</button>
       </div>
       <p id="mediaRootsError" class="error"></p>
     </div>
@@ -77,7 +77,7 @@
       <p class="muted">Enables movie/TV metadata and artwork lookups from the Media tab. Get a free key at themoviedb.org.</p>
       <div class="row">
         <input id="tmdbKeyInput" placeholder="TMDb API key">
-        <button id="saveTmdbKeyBtn" class="secondary">Save key</button>
+        <button id="saveTmdbKeyBtn" class="secondary"><i class="bi bi-key"></i>Save key</button>
       </div>
       <p id="tmdbKeyStatus" class="note"></p>
     </div>
@@ -97,9 +97,9 @@
         <div class="card-head-actions">
           <span id="scanNote" class="note"></span>
           <label class="checkbox-label"><input type="checkbox" id="forceScrapeCheck"> Redownload / override existing</label>
-          <button id="scrapeBtn" class="secondary">Scrape metadata</button>
-          <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects">Fix classifications</button>
-          <button id="rescanBtn">Rescan</button>
+          <button id="scrapeBtn" class="secondary"><i class="bi bi-cloud-download"></i>Scrape metadata</button>
+          <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects"><i class="bi bi-tools"></i>Fix classifications</button>
+          <button id="rescanBtn"><i class="bi bi-arrow-clockwise"></i>Rescan</button>
         </div>
       </div>
       <div id="scrapeProgress" class="scrape-progress d-none">

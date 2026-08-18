@@ -23,7 +23,7 @@ async function refreshSwarm() {
       <div class="row">
         <input id="joinBaseUrl" placeholder="https://swarm.example.com">
         <input id="joinCode" placeholder="12345678" maxlength="8">
-        <button id="joinBtn">Join swarm</button>
+        <button id="joinBtn"><i class="bi bi-box-arrow-in-right"></i>Join swarm</button>
       </div>
       <p id="joinError" class="error"></p>`;
     document.getElementById("joinBtn").addEventListener("click", async () => {
@@ -54,8 +54,8 @@ async function refreshSwarm() {
     <div id="swarmList" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px">
       <input id="moreCode" placeholder="Join code for another swarm" maxlength="8">
-      <button id="joinMoreBtn" class="secondary">Join another swarm</button>
-      <button id="resyncBtn" class="secondary">Resync now</button>
+      <button id="joinMoreBtn" class="secondary"><i class="bi bi-box-arrow-in-right"></i>Join another swarm</button>
+      <button id="resyncBtn" class="secondary"><i class="bi bi-arrow-repeat"></i>Resync now</button>
     </div>
     <p id="swarmActionError" class="error"></p>`;
 
@@ -64,7 +64,7 @@ async function refreshSwarm() {
     <div class="card" style="background:var(--surface-muted); margin-bottom:10px">
       <div class="card-head">
         <strong>${esc(s.name)}</strong>
-        <button class="danger" data-leave-swarm="${esc(s.id)}">Leave</button>
+        <button class="danger" data-leave-swarm="${esc(s.id)}"><i class="bi bi-box-arrow-right"></i>Leave</button>
       </div>
       <div id="roster-${esc(s.id)}" class="muted">Loading roster…</div>
     </div>`).join("");
