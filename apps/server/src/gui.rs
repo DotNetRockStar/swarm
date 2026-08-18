@@ -19,7 +19,7 @@ use std::sync::Arc;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
 use swarm_server::{ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::OnceCell;
 
@@ -325,11 +325,33 @@ async fn get_artwork_bytes(
     }
 }
 
+/// `scrape-progress` event name emitted to the webview during
+/// [`run_scrape`] — one per entry, payload shape is `ScrapeProgressEvent`.
+/// The frontend listens via `window.__TAURI__.event.listen`.
+const SCRAPE_PROGRESS_EVENT: &str = "scrape-progress";
+
 #[tauri::command]
 async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<BulkScrapeReport, String> {
     let core = state.core(&app).await?;
     let tmdb_api_key = settings::load(&app_data_dir(&app)?).tmdb_api_key;
-    core.run_scrape(ScrapeConfig { tmdb_api_key, ..Default::default() }).await.map_err(|e| e.to_string())
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    // Forwarding task: relays each progress event to the webview as it
+    // arrives, independent of `run_scrape` itself, which is only awaited
+    // for its final report below.
+    let forward = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = emitter.emit(SCRAPE_PROGRESS_EVENT, event);
+        }
+    });
+    let result = core.run_scrape(ScrapeConfig { tmdb_api_key, ..Default::default() }, Some(tx)).await;
+    // Dropping the last sender (above) closes the channel, so `forward`
+    // exits its loop on its own — awaiting it here just makes sure every
+    // already-queued event is actually emitted before this command returns
+    // its final report, so the frontend can't see "done" before the last
+    // per-entry update.
+    let _ = forward.await;
+    result.map_err(|e| e.to_string())
 }
 
 /// Pinpoint rescrape of one entry, optionally against a manual TMDb id/URL

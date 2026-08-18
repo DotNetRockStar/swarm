@@ -18,7 +18,8 @@ use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_roots, ScanReport};
 use swarm_media::scrape::{
-    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError, TmdbOverride,
+    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError,
+    ScrapeProgressEvent, TmdbOverride,
 };
 use swarm_media::serve::{accept_loop, serve_connection, MediaService};
 use swarm_media::store::Library;
@@ -220,13 +221,20 @@ impl ServerCore {
 
     /// Scrape metadata/artwork for entries that don't have any yet. Rejects
     /// a concurrent call rather than racing two bulk jobs against the same
-    /// library (the Drone's module-level-lock discipline).
-    pub async fn run_scrape(&self, config: ScrapeConfig) -> Result<BulkScrapeReport, ServerError> {
+    /// library (the Drone's module-level-lock discipline). `progress_tx`,
+    /// when given, receives one [`ScrapeProgressEvent`] per entry as it
+    /// completes — entirely optional so this method still works exactly as
+    /// before for any caller that doesn't need live updates.
+    pub async fn run_scrape(
+        &self,
+        config: ScrapeConfig,
+        progress_tx: Option<mpsc::UnboundedSender<ScrapeProgressEvent>>,
+    ) -> Result<BulkScrapeReport, ServerError> {
         if self.scraping.swap(true, Ordering::AcqRel) {
             return Err(ServerError::ScrapeInProgress);
         }
         let cancel = AtomicBool::new(false);
-        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel).await;
+        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel, progress_tx).await;
         self.scraping.store(false, Ordering::Release);
         Ok(result?)
     }

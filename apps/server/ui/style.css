@@ -61,6 +61,10 @@ td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--
 .issue-list .issue-title { color: var(--text); }
 .issue-list .issue-reason { color: #ff8db4; }
 
+.scrape-progress { margin-bottom: 14px; }
+.progress-bar { width: 100%; height: 6px; border-radius: 4px; background: var(--surface-muted); overflow: hidden; margin-bottom: 4px; }
+.progress-bar-fill { height: 100%; background: var(--accent); transition: width .15s ease-out; }
+
 /* Tab nav (Phase 3) */
 .tabnav { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
 .tabnav button {

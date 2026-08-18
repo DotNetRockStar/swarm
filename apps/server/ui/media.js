@@ -386,7 +386,7 @@ function renderLibrary() {
   library.innerHTML = `<table>
     <thead><tr><th>Title</th><th>Kind</th><th>Genres</th><th>Art</th><th>Path</th><th>Size</th><th></th></tr></thead>
     <tbody>` + libraryEntries.map(e => `
-      <tr>
+      <tr data-entry-row="${esc(e.entry_key)}">
         <td>${esc(e.scraped_title || e.title)}</td>
         <td>${esc(e.kind)}</td>
         <td>${e.genres.map(esc).join(", ") || "—"}</td>
@@ -529,16 +529,76 @@ function renderScrapeIssues(issues) {
     .join("");
 }
 
+// Applies one `scrape-progress` event immediately, without waiting for the
+// scrape to finish or doing a full `refreshLibrary()` re-fetch — this is
+// what makes a match visibly "land" the moment it's pulled and written,
+// instead of every card appearing to freeze until the whole run completes
+// and then all re-render/re-fetch-artwork at once.
+function patchEntryLive(p) {
+  const entry = libraryEntries.find(e => e.entry_key === p.entry_key);
+  if (entry) {
+    if (p.scraped_title) entry.scraped_title = p.scraped_title;
+    if (p.genres && p.genres.length) entry.genres = p.genres;
+    if (p.cast && p.cast.length) entry.cast = p.cast;
+    if (p.outcome === "matched") entry.has_artwork = true;
+  }
+  const title = (p.scraped_title || entry?.title || p.title) + (entry?.year ? ` (${entry.year})` : "");
+
+  // Flat "All entries" table row, if rendered.
+  const row = document.querySelector(`tr[data-entry-row="${p.entry_key}"]`);
+  if (row) {
+    const cells = row.querySelectorAll("td");
+    if (cells[0]) cells[0].textContent = p.scraped_title || entry?.title || p.title;
+    if (cells[2] && p.genres && p.genres.length) cells[2].textContent = p.genres.join(", ");
+    if (cells[3] && p.outcome === "matched") cells[3].textContent = "✓";
+  }
+
+  // Browse grid's movie card, if rendered.
+  const movieCard = document.querySelector(`[data-movie="${p.entry_key}"] .card-title`);
+  if (movieCard) movieCard.textContent = title;
+
+  // Any rendered artwork placeholder for this entry, in whichever view is
+  // currently open (root grid, detail view, album cover, etc.) — re-trigger
+  // the load now that the bytes may actually exist on disk.
+  if (p.outcome === "matched") {
+    document.querySelectorAll(
+      `img[id^="art-poster-${p.entry_key}-"], img[id^="art-backdrop-${p.entry_key}-"], img[id^="art-cover-${p.entry_key}-"]`,
+    ).forEach(img => {
+      const kind = img.id.startsWith("art-poster-") ? "poster" : img.id.startsWith("art-backdrop-") ? "backdrop" : "cover";
+      loadArtworkInto(img, p.entry_key, kind);
+    });
+  }
+}
+
 document.getElementById("scrapeBtn").addEventListener("click", async () => {
   const note = document.getElementById("scanNote");
-  note.textContent = "Scraping…";
+  const progressBox = document.getElementById("scrapeProgress");
+  const progressFill = document.getElementById("scrapeProgressFill");
+  const progressText = document.getElementById("scrapeProgressText");
+  note.textContent = "";
   renderScrapeIssues(null);
+  progressFill.style.width = "0%";
+  progressText.textContent = "Starting…";
+  progressBox.classList.remove("d-none");
+
+  const unlisten = await listen("scrape-progress", ({ payload }) => {
+    progressFill.style.width = `${Math.round((payload.processed / payload.total) * 100)}%`;
+    progressText.textContent = `Scraping ${payload.processed} of ${payload.total} — ${payload.scraped_title || payload.title}`;
+    patchEntryLive(payload);
+  });
   try {
     const r = await invoke("run_scrape");
     note.textContent = `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`;
     renderScrapeIssues(r.issues);
+    // A final full refresh as a safety net (picks up anything not visible
+    // in the current view during the run) — most of what it would show is
+    // already on screen from live patching by this point, so it no longer
+    // reads as content suddenly appearing out of nowhere.
     await refreshLibrary();
   } catch (err) {
     note.textContent = String(err);
+  } finally {
+    unlisten();
+    progressBox.classList.add("d-none");
   }
 });

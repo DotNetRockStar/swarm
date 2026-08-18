@@ -18,10 +18,11 @@ use crate::scrape::coverart::{CoverArtClient, CoverArtError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
 use crate::scrape::tmdb::{ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
 use crate::scrape::wikimedia::WikimediaClient;
-use crate::store::{ArtworkKind, EntryRecord, Library};
+use crate::store::{ArtworkKind, CastMember, EntryRecord, Library};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use swarm_core::peer::MediaKind;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Default)]
 pub struct ScrapeConfig {
@@ -62,20 +63,123 @@ pub struct BulkScrapeReport {
     pub issues: Vec<ScrapeIssue>,
 }
 
+/// One entry's outcome, for [`ScrapeProgressEvent`] — a superset of what
+/// [`BulkScrapeReport`]'s counters track (adds `Skipped` so `processed`
+/// reliably reaches `total` even for entries the report only ever counts in
+/// bulk, e.g. every video when no TMDb key is configured).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrapeOutcome {
+    Matched,
+    NotFound,
+    Failed,
+    Skipped,
+}
+
+/// Live per-entry progress, emitted as each entry (or, for a music album
+/// group, each track within it) finishes — carries the freshly-written
+/// `scraped_title`/`genres`/`cast` directly (not just a "something changed"
+/// signal) so a listener can patch its own rendering immediately, with no
+/// extra round trip back to the library for the data that just changed.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ScrapeProgressEvent {
+    pub entry_key: String,
+    /// The entry's original (path-derived) title — stable identification
+    /// even before/without a scrape match, unlike `scraped_title` below.
+    pub title: String,
+    pub processed: u64,
+    pub total: u64,
+    pub outcome: ScrapeOutcome,
+    /// Set for `NotFound`/`Failed` — the same human-readable reason
+    /// [`ScrapeIssue`] carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Set for a `Matched` movie/episode only — tracks never get a
+    /// `scraped_title` (see `scrape_one_album_group`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scraped_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<CastMember>,
+}
+
+/// Optional live progress side-channel for [`run_bulk_scrape`] — a plain
+/// `mpsc` sender, not a Tauri type, so this crate stays usable by the
+/// headless daemon with zero UI dependency; the GUI layer is what turns
+/// received events into `app.emit(...)` calls. `total` is fixed once at
+/// construction (the entry count already known before the loop starts);
+/// `processed` counts up via an atomic since [`ScrapeProgress::emit`] is
+/// called from sequential `.await` points, not concurrently, but a plain
+/// `Cell` wouldn't be `Send` across them.
+pub struct ScrapeProgress {
+    sender: UnboundedSender<ScrapeProgressEvent>,
+    total: u64,
+    processed: AtomicU64,
+}
+
+impl ScrapeProgress {
+    fn new(sender: UnboundedSender<ScrapeProgressEvent>, total: u64) -> Self {
+        Self { sender, total, processed: AtomicU64::new(0) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        &self,
+        entry_key: &str,
+        title: &str,
+        outcome: ScrapeOutcome,
+        reason: Option<String>,
+        scraped_title: Option<String>,
+        genres: Vec<String>,
+        cast: Vec<CastMember>,
+    ) {
+        let processed = self.processed.fetch_add(1, Ordering::Relaxed) + 1;
+        // A closed receiver (nothing currently listening, or the listener
+        // was dropped) just means no one's watching this run — never fail
+        // the scrape itself over it.
+        let _ = self.sender.send(ScrapeProgressEvent {
+            entry_key: entry_key.to_string(),
+            title: title.to_string(),
+            processed,
+            total: self.total,
+            outcome,
+            reason,
+            scraped_title,
+            genres,
+            cast,
+        });
+    }
+
+    fn matched(&self, entry_key: &str, title: &str, scraped_title: Option<String>, genres: Vec<String>, cast: Vec<CastMember>) {
+        self.emit(entry_key, title, ScrapeOutcome::Matched, None, scraped_title, genres, cast);
+    }
+
+    fn issue(&self, entry_key: &str, title: &str, outcome: ScrapeOutcome, reason: String) {
+        self.emit(entry_key, title, outcome, Some(reason), None, vec![], vec![]);
+    }
+
+    fn skipped(&self, entry_key: &str, title: &str) {
+        self.emit(entry_key, title, ScrapeOutcome::Skipped, None, None, vec![], vec![]);
+    }
+}
+
 pub async fn run_bulk_scrape(
     library: &Library,
     roots: &SharedRootResolver,
     config: &ScrapeConfig,
     cancel: &AtomicBool,
+    progress_tx: Option<UnboundedSender<ScrapeProgressEvent>>,
 ) -> sqlx::Result<BulkScrapeReport> {
     let mut report = BulkScrapeReport::default();
     let entries = library.missing_scrape().await?;
     let (videos, tracks): (Vec<EntryRecord>, Vec<EntryRecord>) =
         entries.into_iter().partition(|e| matches!(e.kind, MediaKind::Movie | MediaKind::Episode));
+    let progress = progress_tx.map(|sender| ScrapeProgress::new(sender, (videos.len() + tracks.len()) as u64));
 
-    scrape_videos(library, roots, config, &videos, cancel, &mut report).await?;
+    scrape_videos(library, roots, config, &videos, cancel, &mut report, progress.as_ref()).await?;
     if !cancel.load(Ordering::Relaxed) {
-        scrape_tracks(library, roots, config, &tracks, cancel, &mut report).await?;
+        scrape_tracks(library, roots, config, &tracks, cancel, &mut report, progress.as_ref()).await?;
     }
     Ok(report)
 }
@@ -124,9 +228,15 @@ async fn scrape_videos(
     entries: &[EntryRecord],
     cancel: &AtomicBool,
     report: &mut BulkScrapeReport,
+    progress: Option<&ScrapeProgress>,
 ) -> sqlx::Result<()> {
     let Some(api_key) = &config.tmdb_api_key else {
         report.skipped += entries.len() as u64;
+        if let Some(p) = progress {
+            for entry in entries {
+                p.skipped(&entry.entry_key, &entry.title);
+            }
+        }
         return Ok(());
     };
     let tmdb = match (&config.tmdb_api_base, &config.tmdb_image_base) {
@@ -165,20 +275,26 @@ async fn scrape_videos(
                     save_video_artwork(library, roots, entry, ArtworkKind::Backdrop, "backdrop", url).await;
                 }
                 report.matched += 1;
+                if let Some(p) = progress {
+                    p.matched(&entry.entry_key, &entry.title, Some(scraped.title.clone()), scraped.genres.clone(), scraped.cast.clone());
+                }
             }
             Err(TmdbError::NotFound) => {
                 library.set_scrape_result(&entry.entry_key, None, &[], &[]).await?;
                 report.not_found += 1;
-                report.issues.push(ScrapeIssue {
-                    entry_key: entry.entry_key.clone(),
-                    title: entry.title.clone(),
-                    reason: "no match found on TMDb".into(),
-                });
+                let reason = "no match found on TMDb".to_string();
+                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason: reason.clone() });
+                if let Some(p) = progress {
+                    p.issue(&entry.entry_key, &entry.title, ScrapeOutcome::NotFound, reason);
+                }
             }
             Err(TmdbError::Unavailable(reason)) => {
                 tracing::warn!(entry = %entry.entry_key, %reason, "tmdb unavailable, will retry next run");
                 report.failed += 1;
-                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason });
+                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason: reason.clone() });
+                if let Some(p) = progress {
+                    p.issue(&entry.entry_key, &entry.title, ScrapeOutcome::Failed, reason);
+                }
             }
         }
     }
@@ -226,6 +342,7 @@ async fn scrape_tracks(
     entries: &[EntryRecord],
     cancel: &AtomicBool,
     report: &mut BulkScrapeReport,
+    progress: Option<&ScrapeProgress>,
 ) -> sqlx::Result<()> {
     let scrapers = MusicScrapers::from_config(config);
 
@@ -235,7 +352,12 @@ async fn scrape_tracks(
             (Some(artist), Some(album)) if !artist.is_empty() && !album.is_empty() => {
                 groups.entry((artist.clone(), album.clone())).or_default().push(entry);
             }
-            _ => report.skipped += 1,
+            _ => {
+                report.skipped += 1;
+                if let Some(p) = progress {
+                    p.skipped(&entry.entry_key, &entry.title);
+                }
+            }
         }
     }
 
@@ -243,7 +365,7 @@ async fn scrape_tracks(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        scrape_one_album_group(library, roots, &scrapers, &artist, &album, &group, report).await?;
+        scrape_one_album_group(library, roots, &scrapers, &artist, &album, &group, report, progress).await?;
     }
     Ok(())
 }
@@ -254,6 +376,7 @@ async fn scrape_tracks(
 /// the bulk loop above and [`scrape_one_track`]'s pinpoint path so a single
 /// manually-triggered rescrape of one track re-syncs its whole album, same
 /// as a bulk run would.
+#[allow(clippy::too_many_arguments)]
 async fn scrape_one_album_group(
     library: &Library,
     roots: &SharedRootResolver,
@@ -262,17 +385,18 @@ async fn scrape_one_album_group(
     album: &str,
     group: &[&EntryRecord],
     report: &mut BulkScrapeReport,
+    progress: Option<&ScrapeProgress>,
 ) -> sqlx::Result<()> {
     let MusicScrapers { mb, coverart, wikimedia } = scrapers;
     match mb.search_release(artist, album).await {
         Err(MbError::NotFound) => {
             for track in group {
                 library.set_scrape_result(&track.entry_key, None, &[], &[]).await?;
-                report.issues.push(ScrapeIssue {
-                    entry_key: track.entry_key.clone(),
-                    title: track.title.clone(),
-                    reason: format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\""),
-                });
+                let reason = format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\"");
+                report.issues.push(ScrapeIssue { entry_key: track.entry_key.clone(), title: track.title.clone(), reason: reason.clone() });
+                if let Some(p) = progress {
+                    p.issue(&track.entry_key, &track.title, ScrapeOutcome::NotFound, reason.clone());
+                }
             }
             report.not_found += group.len() as u64;
         }
@@ -280,6 +404,9 @@ async fn scrape_one_album_group(
             tracing::warn!(%artist, %album, %reason, "musicbrainz unavailable, will retry next run");
             for track in group {
                 report.issues.push(ScrapeIssue { entry_key: track.entry_key.clone(), title: track.title.clone(), reason: reason.clone() });
+                if let Some(p) = progress {
+                    p.issue(&track.entry_key, &track.title, ScrapeOutcome::Failed, reason.clone());
+                }
             }
             report.failed += group.len() as u64;
         }
@@ -311,6 +438,15 @@ async fn scrape_one_album_group(
                             }
                         }
                     }
+                }
+            }
+
+            // Emitted after every write above (metadata + best-effort
+            // artwork) completes, so a listener that reacts to this event by
+            // re-fetching artwork bytes actually finds something there.
+            if let Some(p) = progress {
+                for track in group {
+                    p.matched(&track.entry_key, &track.title, None, genres.clone(), vec![]);
                 }
             }
         }
@@ -383,7 +519,7 @@ pub async fn scrape_one_track(
     let group: Vec<&EntryRecord> = siblings.iter().collect();
     let scrapers = MusicScrapers::from_config(config);
     let mut report = BulkScrapeReport::default();
-    scrape_one_album_group(library, roots, &scrapers, artist, album, &group, &mut report).await?;
+    scrape_one_album_group(library, roots, &scrapers, artist, album, &group, &mut report, None).await?;
     Ok(report)
 }
 
@@ -484,7 +620,7 @@ mod tests {
         scan_root(&library, &root).await.unwrap();
 
         let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false)).await.unwrap();
+            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
         // Skipped entries stay unscraped so a later run (with a key) retries them.
         assert_eq!(library.missing_scrape().await.unwrap().len(), 1);
@@ -521,7 +657,7 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}/img")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 1, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entry = &library.list().await.unwrap()[0];
@@ -557,7 +693,7 @@ mod tests {
             ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
 
         // First pass: bulk scrape matches the wrong title (simulating a bad match).
-        run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
+        run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
         let entry = library.list().await.unwrap().into_iter().next().unwrap();
         assert_eq!(entry.scraped_title.as_deref(), Some("Wrong Match"));
 
@@ -688,7 +824,7 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
         assert_eq!(report.matched, 0);
         assert_eq!(report.not_found, 1);
         assert_eq!(report.failed, 0);
@@ -738,7 +874,7 @@ mod tests {
             coverart_base: Some(ca_base),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entries = library.list().await.unwrap();
@@ -763,8 +899,72 @@ mod tests {
         scan_root(&library, &root).await.unwrap();
 
         let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false)).await.unwrap();
+            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None).await.unwrap();
         assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn progress_events_stream_one_per_entry_with_correct_data_and_running_total() {
+        // 1 movie (matched) + 1 album of 2 tracks (matched) = 3 entries, so
+        // exactly 3 progress events, `processed` 1..=3, `total` fixed at 3
+        // throughout — this is the whole property a progress bar depends on.
+        let (root, db_path) = fixture_dirs("progress-events");
+        std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
+        std::fs::write(root.join("movies/Heat (1995)/Heat.1995.mkv"), vec![0u8; 10]).unwrap();
+        std::fs::create_dir_all(root.join("music/Pink Floyd/The Wall")).unwrap();
+        std::fs::write(root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"), vec![1u8; 10]).unwrap();
+        std::fs::write(root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"), vec![2u8; 10]).unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+        assert_eq!(library.list().await.unwrap().len(), 3);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
+            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": [{"name": "Crime"}]})) }))
+            .route("/mb/release/", get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }))
+            .route(
+                "/mb/release/rel-1",
+                get(|| async { Json(json!({"genres": [{"name": "Rock"}], "artist-credit": []})) }),
+            )
+            .route("/ca/release/rel-1", get(|| async { Json(json!({"images": []})) }));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}/img")),
+            musicbrainz_base: Some(format!("http://{addr}/mb")),
+            coverart_base: Some(format!("http://{addr}/ca")),
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), Some(tx)).await.unwrap();
+        assert_eq!(report.matched, 3);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(events.len(), 3, "one progress event per entry, got {events:?}");
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event.processed, (i + 1) as u64, "processed must increment 1..=total in emission order");
+            assert_eq!(event.total, 3, "total must stay fixed at the entry count known before the loop started");
+            assert_eq!(event.outcome, ScrapeOutcome::Matched);
+        }
+        let movie_event = events.iter().find(|e| e.title.starts_with("Heat")).expect("movie event present");
+        assert_eq!(movie_event.scraped_title.as_deref(), Some("Heat"));
+        assert_eq!(movie_event.genres, vec!["Crime"]);
+        let track_events: Vec<_> = events.iter().filter(|e| e.entry_key != movie_event.entry_key).collect();
+        assert_eq!(track_events.len(), 2, "one event per track, not one per album group");
+        for track_event in track_events {
+            // Tracks never get a scraped_title (see scrape_one_album_group) —
+            // only genres change.
+            assert_eq!(track_event.scraped_title, None);
+            assert_eq!(track_event.genres, vec!["Rock"]);
+        }
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }
