@@ -134,23 +134,34 @@ fun SwarmSettingsScreen(
 
 @Composable
 private fun SwarmRow(swarm: SwarmSummary, isActive: Boolean, busy: Boolean, onSelect: () -> Unit, onLeave: () -> Unit) {
-    Card(onClick = onSelect, colors = CardDefaults.colors(containerColor = if (isActive) SwarmSurfaceMuted else SwarmSurface)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+    // Two independently-reachable D-pad targets, not one Card wrapping a
+    // nested Button — a clickable Card's own focus/click semantics swallow
+    // D-pad traversal to children nested inside it, making the inner
+    // control unreachable (confirmed on real hardware: RIGHT/UP/DOWN off
+    // the Card never focused the nested "Leave" button). Both the select
+    // surface and the Leave button are direct children of this Row instead,
+    // so LEFT/RIGHT between them works via normal 2D focus search.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Card(
+            onClick = onSelect,
+            modifier = Modifier.weight(1f),
+            colors = CardDefaults.colors(containerColor = if (isActive) SwarmSurfaceMuted else SwarmSurface),
         ) {
-            Column {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
                 Text(swarm.name, color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 if (isActive) Text("active", color = SwarmGreen, fontSize = 12.sp)
             }
-            Button(
-                onClick = onLeave,
-                enabled = !busy,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmAccentHot),
-            ) {
-                Text("Leave")
-            }
+        }
+        Button(
+            onClick = onLeave,
+            enabled = !busy,
+            colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmAccentHot),
+        ) {
+            Text("Leave")
         }
     }
 }

@@ -47,7 +47,11 @@ async fn scan_add_modify_rename_delete() {
     assert_eq!(entries.len(), 2);
     let movie = entries.iter().find(|e| e.kind == MediaKind::Movie).unwrap();
     let track = entries.iter().find(|e| e.kind == MediaKind::Track).unwrap();
-    assert_eq!(movie.title, "Heat 1995");
+    // "1995" is a standalone dot-delimited token, captured into `year` and
+    // stripped from the title the same way a bracketed year already is —
+    // see classify.rs's extract_bare_year_token.
+    assert_eq!(movie.title, "Heat");
+    assert_eq!(movie.year, Some(1995));
     assert_eq!(track.artist.as_deref(), Some("Artist"));
     assert_eq!(track.track_number, Some(1));
     let thumbprint_v1 = fx.library.thumbprint().await.unwrap();

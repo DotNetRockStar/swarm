@@ -84,12 +84,19 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // Bracketed release-group/resolution/codec tags (`[1080p]`, `(x264)`,
     // `{YIFY}`) are decorative and stripped from the title outright; a bare
     // 4-digit year inside one is the sole exception — meaningful signal for
-    // TMDb search, kept even though its brackets are still removed. Movies
+    // TMDb search, kept even though its brackets are still removed. The
+    // dominant real-world scene-release convention has no brackets at all
+    // though (`10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv`) — a
+    // standalone dot/underscore-delimited year token is just as meaningful
+    // a signal and just as wrong left sitting in the middle of a title, so
+    // it's captured and stripped the same way once no bracket year was
+    // found (bracket wins on the rare filename that somehow has both — a
+    // deliberately bracketed year is a more deliberate signal). Movies
     // often only carry the year on the enclosing folder, not the filename
-    // (`Inception (2010)/Inception.1080p.mkv`), so fall back there.
-    let (stem_clean, mut year) = extract_bracket_tags(stem);
+    // (`Inception (2010)/Inception.1080p.mkv`), so fall back there too.
+    let (stem_clean, mut year) = extract_year_and_strip(stem);
     if year.is_none() {
-        year = dirs.last().and_then(|dir| extract_bracket_tags(dir).1);
+        year = dirs.last().and_then(|dir| extract_year_and_strip(dir).1);
     }
 
     if let Some((season, episode, title_prefix)) = parse_episode_marker(&stem_clean) {
@@ -227,6 +234,56 @@ fn parse_bare_year(inner: &str) -> Option<u32> {
     }
 }
 
+/// Try a bracketed year first (the more deliberate signal), then a
+/// standalone unbracketed year token — see [extract_bracket_tags] and
+/// [extract_bare_year_token] respectively.
+fn extract_year_and_strip(text: &str) -> (String, Option<u32>) {
+    let (stripped, year) = extract_bracket_tags(text);
+    if year.is_some() {
+        return (stripped, year);
+    }
+    extract_bare_year_token(&stripped)
+}
+
+/// Find and remove a standalone `1900..=2099` year token from `text`, where
+/// tokens are separated by `.`/`_` (the same separators [clean_title]
+/// collapses to spaces) or sit at the string's start/end — the dominant
+/// real-world scene-release convention for an unbracketed year
+/// (`10.Cloverfield.Lane.2016.1080p...`). Only a digit run bounded by a
+/// separator or the string's start/end counts, so a year embedded in a
+/// longer digit run (a resolution/bitrate number) is never mistaken for
+/// one. The matched token is removed but surrounding separators are left in
+/// place; [clean_title]'s run-collapsing already turns the resulting
+/// doubled separator into a single space.
+fn extract_bare_year_token(text: &str) -> (String, Option<u32>) {
+    let bytes = text.as_bytes();
+    let is_sep = |b: u8| b == b'.' || b == b'_';
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut end = i;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            let at_start = start == 0 || is_sep(bytes[start - 1]);
+            let at_end = end == bytes.len() || is_sep(bytes[end]);
+            if end - start == 4 && at_start && at_end {
+                if let Some(year) = parse_bare_year(&text[start..end]) {
+                    let mut out = String::with_capacity(text.len() - 4);
+                    out.push_str(&text[..start]);
+                    out.push_str(&text[end..]);
+                    return (out, Some(year));
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    (text.to_string(), None)
+}
+
 /// Normalize separators for display: dots/underscores to spaces, collapse runs.
 fn clean_title(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -294,9 +351,15 @@ mod tests {
 
     #[test]
     fn movie_title_cleanup() {
+        // "2010" is a standalone dot-delimited token in the filename, so
+        // extract_bare_year_token now captures and strips it — same
+        // treatment a bracketed year already got. See year_captured_and_
+        // stripped_from_bare_unbracketed_filename_token below for the
+        // dedicated year-focused assertions on this exact pattern.
         let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
-        assert_eq!(entry.title, "Inception 2010 1080p");
+        assert_eq!(entry.year, Some(2010));
+        assert_eq!(entry.title, "Inception 1080p");
     }
 
     #[test]
@@ -310,12 +373,41 @@ mod tests {
 
     #[test]
     fn bracket_year_falls_back_to_the_enclosing_folder() {
-        // The existing filename-only cleanup test (movie_title_cleanup) has
-        // no brackets in the filename at all — the year lives only on the
-        // folder, a very common real-world layout.
-        let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
+        // No year anywhere in the filename (bracketed or bare) — this is
+        // the case that genuinely needs the folder fallback, a common
+        // real-world layout.
+        let entry = classify("movies/Inception (2010)/Inception.1080p.mkv").unwrap();
         assert_eq!(entry.year, Some(2010));
-        assert_eq!(entry.title, "Inception 2010 1080p", "folder-derived year must not change the filename-derived title");
+        assert_eq!(entry.title, "Inception 1080p", "folder-derived year must not change the filename-derived title");
+    }
+
+    #[test]
+    fn year_captured_and_stripped_from_bare_unbracketed_filename_token() {
+        // The dominant real-world scene-release convention has no brackets
+        // at all — found live on real hardware: year stayed NULL for
+        // exactly this pattern before this fix.
+        let cloverfield = classify("movies/10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv").unwrap();
+        assert_eq!(cloverfield.year, Some(2016));
+        assert_eq!(cloverfield.title, "10 Cloverfield Lane 1080p BluRay x264-GROUP");
+
+        let days_later = classify("movies/28.Days.Later.2002.1080p.BluRay.x264-GROUP.mkv").unwrap();
+        assert_eq!(days_later.year, Some(2002));
+        assert_eq!(days_later.title, "28 Days Later 1080p BluRay x264-GROUP");
+    }
+
+    #[test]
+    fn bare_year_token_must_be_separator_bounded_not_embedded_in_a_longer_run() {
+        // A 4-digit run that's part of a longer digit sequence (a bitrate/
+        // resolution-adjacent number) must never be mistaken for a year.
+        let entry = classify("movies/Movie.19004.mkv").unwrap();
+        assert_eq!(entry.year, None);
+        assert_eq!(entry.title, "Movie 19004");
+    }
+
+    #[test]
+    fn bracket_year_takes_precedence_over_a_bare_token_year() {
+        let entry = classify("movies/Movie.2016.[2010].mkv").unwrap();
+        assert_eq!(entry.year, Some(2010), "a deliberately bracketed year is the more deliberate signal");
     }
 
     #[test]
