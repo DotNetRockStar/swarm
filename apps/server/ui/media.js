@@ -13,6 +13,7 @@ let mediaSection = "browse"; // "browse" | "table"
 let browsePath = { kind: "root" }; // breadcrumb state — see renderBrowse()
 let searchQuery = "";
 let kindFilter = "all"; // "all" | "movie" | "episode" | "track"
+const KIND_FILTER_LABELS = { all: "Filter: all kinds", movie: "Filter: Movies", episode: "Filter: Shows", track: "Filter: Music" };
 
 // Applies to both the Browse root view and the All-entries table. Matches
 // against every identifying name field, not just title, so searching a
@@ -63,9 +64,9 @@ function renderMediaTab() {
     <button class="${mediaSection === "browse" ? "" : "secondary"}" id="mediaSectionBrowseBtn" style="flex:0 0 auto">Browse</button>
     <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto">All entries</button>
   </div>
-  <div class="row" style="margin-bottom:14px">
-    <input id="mediaSearchInput" placeholder="Search title, artist, show…" value="${esc(searchQuery)}" style="flex:2">
-    <select id="mediaKindFilter" style="flex:0 0 140px; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
+  <div class="row" style="margin-bottom:14px; align-items:center">
+    <input id="mediaSearchInput" class="search-input" placeholder="Search title, artist, show…" value="${esc(searchQuery)}" style="flex:2">
+    <select id="mediaKindFilter" class="icon-select${kindFilter !== "all" ? " icon-select-active" : ""}" title="${KIND_FILTER_LABELS[kindFilter]}">
       <option value="all">All kinds</option>
       <option value="movie">Movies</option>
       <option value="episode">Shows</option>
@@ -91,6 +92,8 @@ function renderMediaTab() {
   kindFilterSelect.value = kindFilter;
   kindFilterSelect.addEventListener("change", (event) => {
     kindFilter = event.target.value;
+    kindFilterSelect.title = KIND_FILTER_LABELS[kindFilter];
+    kindFilterSelect.classList.toggle("icon-select-active", kindFilter !== "all");
     if (mediaSection === "browse") browsePath = { kind: "root" };
     renderMediaResults();
   });
