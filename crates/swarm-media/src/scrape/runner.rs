@@ -172,7 +172,6 @@ pub async fn run_bulk_scrape(
     progress_tx: Option<UnboundedSender<ScrapeProgressEvent>>,
     force: bool,
 ) -> sqlx::Result<BulkScrapeReport> {
-    let mut report = BulkScrapeReport::default();
     // `force` re-scrapes everything, overwriting whatever's already there —
     // `scrape_videos`/`scrape_tracks` below always overwrite unconditionally
     // per entry regardless of prior state, so simply widening which entries
@@ -183,11 +182,38 @@ pub async fn run_bulk_scrape(
         entries.into_iter().partition(|e| matches!(e.kind, MediaKind::Movie | MediaKind::Episode));
     let progress = progress_tx.map(|sender| ScrapeProgress::new(sender, (videos.len() + tracks.len()) as u64));
 
-    scrape_videos(library, roots, config, &videos, cancel, &mut report, progress.as_ref()).await?;
-    if !cancel.load(Ordering::Relaxed) {
-        scrape_tracks(library, roots, config, &tracks, cancel, &mut report, progress.as_ref()).await?;
-    }
-    Ok(report)
+    // Movies/episodes (TMDb) and music (MusicBrainz/Cover Art Archive/
+    // Wikimedia) hit entirely independent external services with
+    // independent rate limits, so run them concurrently rather than
+    // sequentially — one waiting on a TMDb response no longer blocks the
+    // other's MusicBrainz request (and vice versa). `tokio::join!` (not
+    // `spawn`) is enough for this: these are I/O-bound, so cooperative
+    // concurrency on one task already lets both make progress while the
+    // other's request is in flight, and it avoids the `Send`/`'static`
+    // bounds `spawn` would force onto every borrowed argument here. A
+    // shared `&mut BulkScrapeReport` isn't expressible across two
+    // concurrently-polled futures, so each accumulates its own and the two
+    // are merged once both finish; `scrape_tracks` no longer needs the
+    // explicit pre-flight cancel check the old sequential call had — its
+    // own loop already checks `cancel` before every iteration, so a
+    // cancellation set during the video half still stops the track half on
+    // its very first iteration either way.
+    let mut video_report = BulkScrapeReport::default();
+    let mut track_report = BulkScrapeReport::default();
+    let (video_result, track_result) = tokio::join!(
+        scrape_videos(library, roots, config, &videos, cancel, &mut video_report, progress.as_ref()),
+        scrape_tracks(library, roots, config, &tracks, cancel, &mut track_report, progress.as_ref()),
+    );
+    video_result?;
+    track_result?;
+
+    Ok(BulkScrapeReport {
+        matched: video_report.matched + track_report.matched,
+        not_found: video_report.not_found + track_report.not_found,
+        failed: video_report.failed + track_report.failed,
+        skipped: video_report.skipped + track_report.skipped,
+        issues: [video_report.issues, track_report.issues].concat(),
+    })
 }
 
 /// Scene-release tags that routinely survive `classify::clean_title` (which
@@ -891,6 +917,83 @@ mod tests {
         assert!(library.missing_scrape().await.unwrap().is_empty());
         let entry = &library.list().await.unwrap()[0];
         assert_eq!(entry.scraped_title, None);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn bulk_scrape_hits_tmdb_and_musicbrainz_concurrently_not_sequentially() {
+        // Records the instant each service's *first* request lands, rather
+        // than comparing total wall-clock time — MusicBrainzClient
+        // self-enforces a real ~1.05s minimum interval between its own
+        // requests (respecting MusicBrainz's real rate limit), which would
+        // swamp any timing budget based on total duration regardless of
+        // whether the two scrapes ran concurrently or not. Whether the two
+        // *started* within a tight window of each other is what actually
+        // distinguishes concurrent (tokio::join!) from sequential (movies
+        // fully finish, including any of their own delay, before music
+        // starts at all) — sequential would show a gap of at least DELAY.
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let tmdb_hit_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
+        let mb_hit_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
+
+        let (root, db_path) = fixture_dirs("concurrent-scrape");
+        std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
+        std::fs::write(root.join("movies/Heat (1995)/Heat.1995.mkv"), vec![0u8; 10]).unwrap();
+        std::fs::create_dir_all(root.join("music/Artist/Album")).unwrap();
+        std::fs::write(root.join("music/Artist/Album/01 - Song.flac"), vec![1u8; 10]).unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+        assert_eq!(library.list().await.unwrap().len(), 2);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tmdb_recorder, mb_recorder) = (tmdb_hit_at.clone(), mb_hit_at.clone());
+        let router = Router::new()
+            .route(
+                "/search/movie",
+                get(move || {
+                    let recorder = tmdb_recorder.clone();
+                    async move {
+                        *recorder.lock().unwrap() = Some(started.elapsed());
+                        tokio::time::sleep(DELAY).await;
+                        Json(json!({"results": [{"id": 1}]}))
+                    }
+                }),
+            )
+            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": []})) }))
+            .route(
+                "/mb/release/",
+                get(move || {
+                    let recorder = mb_recorder.clone();
+                    async move {
+                        *recorder.lock().unwrap() = Some(started.elapsed());
+                        Json(json!({"releases": [{"id": "rel-1"}]}))
+                    }
+                }),
+            )
+            .route("/mb/release/rel-1", get(|| async { Json(json!({"genres": [], "artist-credit": []})) }));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}")),
+            musicbrainz_base: Some(format!("http://{addr}/mb")),
+            ..Default::default()
+        };
+        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+
+        assert_eq!(report.matched, 2, "both must still actually succeed: {report:?}");
+        let tmdb_at = tmdb_hit_at.lock().unwrap().expect("TMDb search must have been hit");
+        let mb_at = mb_hit_at.lock().unwrap().expect("MusicBrainz search must have been hit");
+        let gap = tmdb_at.abs_diff(mb_at);
+        assert!(
+            gap < DELAY,
+            "TMDb hit at {tmdb_at:?}, MusicBrainz hit at {mb_at:?} — a {gap:?} gap means they did not start \
+             concurrently (sequential would show a gap of at least the {DELAY:?} TMDb delay, since MusicBrainz \
+             would only start once the video scrape, including its delay, fully finished)"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
