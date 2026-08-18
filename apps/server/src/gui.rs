@@ -242,6 +242,21 @@ async fn rescan(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     })
 }
 
+/// Re-derives every entry's classification from its already-stored path —
+/// repairs entries a `classify()` bug already misfiled (wrong kind/show/
+/// season/episode) without needing the underlying file to change, which a
+/// plain Rescan can't do (it only re-classifies new/modified files — see
+/// `Library::reclassify_all`'s doc comment). Clears stale scrape data for
+/// whatever it actually corrects; run a normal Scrape metadata afterward to
+/// pick those back up under their now-correct classification.
+#[tauri::command]
+async fn reclassify_library(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<swarm_media::store::ReclassifyReport, String> {
+    state.core(&app).await?.library.reclassify_all().await.map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct EntrySummary {
     entry_key: String,
@@ -535,6 +550,7 @@ fn main() {
             set_tmdb_api_key,
             get_status,
             rescan,
+            reclassify_library,
             list_entries,
             get_artwork_bytes,
             run_scrape,

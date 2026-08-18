@@ -387,6 +387,16 @@ function formatDuration(secs) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+// Season 0 is the real-world Plex/Kodi/TheTVDB convention for a show's
+// bonus/extra content (featurettes, interviews, deleted scenes...) — a
+// single show-level bucket, not tied to any one season. -1 means classify()
+// genuinely found no season signal at all, a different, unrelated case.
+function seasonLabel(season) {
+  if (season === -1) return "Unknown Season";
+  if (season === 0) return "Specials";
+  return `Season ${season}`;
+}
+
 // ---- browse: shows (show → season → episodes) ------------------------------
 
 function renderShow(body, show) {
@@ -396,7 +406,7 @@ function renderShow(body, show) {
   const cards = [...seasons.entries()].sort(([a], [b]) => a - b).map(([season, episodes]) => `
     <div class="media-card" data-season="${season}">
       ${artImg(episodes[0].entry_key, "poster", "card-art")}
-      <div class="card-title">${season === -1 ? "Unknown Season" : `Season ${season}`}</div>
+      <div class="card-title">${seasonLabel(season)}</div>
       <div class="muted" style="font-size:.75rem">${episodes.length} episode${episodes.length === 1 ? "" : "s"}</div>
     </div>`).join("");
   body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
@@ -413,7 +423,7 @@ function renderSeason(body, show, season) {
   const crumbs = [
     { label: "Media", onClick: () => browsePath = { kind: "root" } },
     { label: show, onClick: () => browsePath = { kind: "show", show } },
-    { label: season === -1 ? "Unknown Season" : `Season ${season}` },
+    { label: seasonLabel(season) },
   ];
   const cards = episodes.map(ep => `
     <div class="media-card" data-episode="${esc(ep.entry_key)}">
@@ -600,6 +610,18 @@ document.getElementById("rescanBtn").addEventListener("click", async () => {
   try {
     const r = await invoke("rescan");
     note.textContent = `+${r.added} added, ${r.updated} updated, ${r.removed} removed`;
+    await refreshLibrary();
+  } catch (err) {
+    note.textContent = String(err);
+  }
+});
+
+document.getElementById("reclassifyBtn").addEventListener("click", async () => {
+  const note = document.getElementById("scanNote");
+  try {
+    const r = await invoke("reclassify_library");
+    note.textContent = `${r.changed} corrected, ${r.unchanged} already correct` +
+      (r.changed ? " — run Scrape metadata again to re-match the corrected entries." : "");
     await refreshLibrary();
   } catch (err) {
     note.textContent = String(err);

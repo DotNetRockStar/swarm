@@ -100,15 +100,12 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     }
 
     if let Some((season, episode, title_prefix)) = parse_episode_marker(&stem_clean) {
-        // Show title: prefer the text before the SxxEyy marker, else the
-        // grandparent/parent directory (Show/Season 1/file layout).
+        // Show title: prefer the text before the SxxEyy marker, else an
+        // ancestor season folder (either shape — see find_ancestor_season),
+        // else the older plain-directory fallback (Show/Season 1/file).
         let from_stem = clean_title(title_prefix);
         let show_title = if from_stem.is_empty() {
-            dirs.iter()
-                .rev()
-                .map(|d| clean_title(d))
-                .find(|name| !name.is_empty() && !is_season_folder(name))
-                .unwrap_or_default()
+            find_ancestor_season(&dirs).map(|(name, _, _)| name).unwrap_or_else(|| show_title_from_ancestors(&dirs))
         } else {
             from_stem
         };
@@ -125,6 +122,30 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         });
     }
 
+    // No SxxEyy anywhere in the filename itself, but the file sits somewhere
+    // under a real season folder — bonus/extra content (a featurette,
+    // interview, deleted scene, blooper reel, behind-the-scenes clip...).
+    // The specific containing subfolder name isn't matched against a list of
+    // known synonyms (too fragile — it varies by uploader); the structural
+    // signal alone (nested under a season folder, no episode marker of its
+    // own) is what matters. `season: Some(0)` is the real-world Plex/Kodi/
+    // TheTVDB convention for "Specials" — deliberately a single show-level
+    // bucket rather than per-season, since bonus content isn't numbered
+    // against any one season the way real episodes are.
+    if let Some((show_title, _season, folder_year)) = find_ancestor_season(&dirs) {
+        return Some(Classified {
+            kind: MediaKind::Episode,
+            title: clean_title(&stem_clean),
+            artist: None,
+            album: None,
+            track_number: None,
+            show_title: Some(show_title),
+            season: Some(0),
+            episode: None,
+            year: year.or(folder_year),
+        });
+    }
+
     Some(Classified {
         kind: MediaKind::Movie,
         title: clean_title(&stem_clean),
@@ -138,9 +159,80 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     })
 }
 
+/// The pre-existing show-name fallback (kept as its own function since it's
+/// now used from two places): nearest-to-furthest, the first ancestor
+/// directory that isn't itself a season folder.
+fn show_title_from_ancestors(dirs: &[&str]) -> String {
+    dirs.iter().rev().map(|d| clean_title(d)).find(|name| !name.is_empty() && !is_season_folder(name)).unwrap_or_default()
+}
+
+/// A season-indicating folder, either shape: a literal `"Season N"`, or
+/// `is_season_suffix_folder` — see that function. `is_season_folder` treats
+/// both as "skip this while hunting for a plain show-name ancestor".
 fn is_season_folder(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower.strip_prefix("season").map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit())).unwrap_or(false)
+    let literal = lower.strip_prefix("season").map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit())).unwrap_or(false);
+    literal || parse_season_suffix_folder(name).is_some()
+}
+
+/// A folder name ending in `" SNN"` (a space, a case-insensitive `S`, then
+/// 1-3 digits, at the very end) — e.g. `"Dexter (2006) S03"`,
+/// `"Lost (2004) S03"`. Returns `(season, text before the suffix)` on
+/// match. Deliberately conservative (the space before `S` is required, and
+/// the text before it must be non-empty) — a false positive here would
+/// misclassify a real movie as show content, a strictly worse failure than
+/// the bonus-content-mistaken-for-a-movie bug this exists to fix.
+fn parse_season_suffix_folder(name: &str) -> Option<(u32, &str)> {
+    let bytes = name.as_bytes();
+    let end = bytes.len();
+    let mut digit_start = end;
+    while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
+        digit_start -= 1;
+    }
+    if digit_start == end || end - digit_start > 3 {
+        return None;
+    }
+    if digit_start == 0 || !bytes[digit_start - 1].eq_ignore_ascii_case(&b's') {
+        return None;
+    }
+    let s_pos = digit_start - 1;
+    if s_pos == 0 || bytes[s_pos - 1] != b' ' {
+        return None;
+    }
+    let season: u32 = name[digit_start..end].parse().ok()?;
+    let show_part = name[..s_pos].trim_end();
+    (!show_part.is_empty()).then_some((season, show_part))
+}
+
+/// Walk `dirs` nearest-to-furthest looking for the first ancestor that's a
+/// season folder, either shape, and derive `(show_title, season, year)`:
+/// - `"<Show Name> (<year>) SNN"` is self-contained — the show name and an
+///   optional year both live in the same folder (run through the existing
+///   [extract_year_and_strip] + [clean_title] pipeline, same as everywhere
+///   else a folder/filename gets turned into a display name).
+/// - a literal `"Season N"` has no show name of its own — it comes from the
+///   next real ancestor above it (skipping further season/disc folders),
+///   same fallback [show_title_from_ancestors] already used elsewhere.
+fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
+    for (idx, dir) in dirs.iter().enumerate().rev() {
+        if let Some((season, show_part)) = parse_season_suffix_folder(dir) {
+            let (stripped, year) = extract_year_and_strip(show_part);
+            let show_title = clean_title(&stripped);
+            if !show_title.is_empty() {
+                return Some((show_title, season, year));
+            }
+        } else {
+            let lower = dir.to_lowercase();
+            let Some(season) = lower.strip_prefix("season").and_then(|rest| rest.trim().parse().ok()) else {
+                continue;
+            };
+            let show_title = show_title_from_ancestors(&dirs[..idx]);
+            if !show_title.is_empty() {
+                return Some((show_title, season, None));
+            }
+        }
+    }
+    None
 }
 
 /// Find an `SxxEyy` marker (case-insensitive); returns (season, episode, text
@@ -430,5 +522,88 @@ mod tests {
         assert!(classify("movies/Inception (2010)/poster.jpg").is_none());
         assert!(classify("movies/Inception (2010)/Inception.nfo").is_none());
         assert!(classify("movies/readme.txt").is_none());
+    }
+
+    // --- ancestor-season-folder-aware bonus/extra-content classification ---
+    // Real bug: bonus content nested under a show's season folder had no
+    // SxxEyy marker of its own, so it fell all the way through to
+    // MediaKind::Movie and got scraped against a totally unrelated TMDb
+    // movie. Confirmed live in the user's real library: this exact path got
+    // matched to "The Interview" (2014), a real but completely wrong film.
+
+    #[test]
+    fn bonus_content_under_a_name_year_season_folder_is_attributed_to_the_show() {
+        let entry = classify(
+            "Batocera-movies-shows/Shows/Lost (2004)/Lost (2004) S03/Featurettes/Access - Granted/11. hostiles-others.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("Lost"));
+        assert_eq!(entry.season, Some(0), "bonus content is a single show-level bucket, not per-season");
+        assert_eq!(entry.episode, None);
+        assert_eq!(entry.year, Some(2004), "year falls back to the season folder's own (year)");
+        assert_eq!(entry.title, "11 hostiles-others");
+    }
+
+    #[test]
+    fn bonus_content_multiple_subfolders_deep_still_finds_the_season_folder() {
+        // Same shape, deeper nesting (Featurettes/Interviews/), and the show
+        // folder appears twice (plain "Dexter", then "Dexter (2006) S03") —
+        // the nearest season-shaped ancestor wins, not the plain one above it.
+        let entry =
+            classify("Batocera-movies-shows/Shows/Dexter/Dexter (2006) S03/Featurettes/Interviews/Michael C. Hall.mkv")
+                .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("Dexter"));
+        assert_eq!(entry.season, Some(0));
+        assert_eq!(entry.episode, None);
+        assert_eq!(entry.year, Some(2006));
+        assert_eq!(entry.title, "Michael C Hall");
+    }
+
+    #[test]
+    fn real_numbered_episode_under_the_name_year_season_folder_shape_is_unaffected() {
+        // The new folder shape must not steal season/episode numbers away
+        // from a real SxxEyy filename marker — that's still the primary,
+        // authoritative signal when present.
+        let entry = classify("Shows/Dexter/Dexter (2006) S03/Dexter.S03E01.Our Father.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("Dexter"));
+        assert_eq!(entry.season, Some(3));
+        assert_eq!(entry.episode, Some(1));
+    }
+
+    #[test]
+    fn real_numbered_episode_with_no_stem_prefix_falls_back_to_the_season_folder_for_show_title() {
+        // Filename has no text before the SxxEyy marker at all — show_title
+        // must now also try the new folder shape, not just the old
+        // plain-directory fallback.
+        let entry = classify("Shows/Dexter/Dexter (2006) S03/S03E01.Our Father.mkv").unwrap();
+        assert_eq!(entry.show_title.as_deref(), Some("Dexter"));
+        assert_eq!(entry.season, Some(3));
+        assert_eq!(entry.episode, Some(1));
+    }
+
+    #[test]
+    fn deeply_nested_movie_with_no_season_folder_anywhere_is_not_reclassified() {
+        // Regression guard: the new ancestor walk must never fire for a
+        // plain movie just because it happens to be nested a few folders
+        // deep with no season-folder signal anywhere in its ancestry.
+        let entry = classify("movies/Action/Best Of/Really Good Movie (2020)/Really Good Movie.2020.1080p.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.show_title, None);
+    }
+
+    #[test]
+    fn season_suffix_folder_parsing_is_conservative_about_false_positives() {
+        // No space before the "S" — must not match (a false positive here
+        // would misclassify a real movie, worse than the bug being fixed).
+        assert_eq!(parse_season_suffix_folder("MarsS03"), None);
+        // Nothing before the "S" at all.
+        assert_eq!(parse_season_suffix_folder("S03"), None);
+        // Trailing digits with no "S" before them.
+        assert_eq!(parse_season_suffix_folder("Volume 03"), None);
+        // A real, valid match, no parenthetical year needed.
+        assert_eq!(parse_season_suffix_folder("Show S03"), Some((3, "Show")));
     }
 }

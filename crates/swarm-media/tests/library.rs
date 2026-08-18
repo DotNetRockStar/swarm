@@ -239,3 +239,101 @@ async fn thumbprint_is_order_independent_and_content_sensitive() {
     scan_root(&fx_b.library, &fx_b.root).await.unwrap();
     assert_eq!(fx_a.library.thumbprint().await.unwrap(), fx_b.library.thumbprint().await.unwrap());
 }
+
+#[tokio::test]
+async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_untouched() {
+    // scan_root always runs the CURRENT classify(), so it can't be used to
+    // manufacture a stale pre-fix state — write the DB row directly instead,
+    // exactly as the old buggy classify() would have (filed as a Movie, with
+    // real-looking-but-wrong scraped data), matching the real bug this
+    // guards: bonus content under a show's season folder scraped as if it
+    // were a completely unrelated standalone movie.
+    use swarm_media::classify::classify;
+    use swarm_media::store::{ArtworkKind, EntryRecord};
+
+    let fx = fixture("reclassify").await;
+
+    let wrong_relative = "Shows/Dexter/Dexter (2006) S03/Featurettes/Interviews/Michael C. Hall.mkv";
+    let wrong_entry = EntryRecord {
+        entry_key: entry_key(wrong_relative),
+        relative_path: wrong_relative.to_string(),
+        kind: MediaKind::Movie,
+        title: "Michael C Hall".to_string(),
+        size: 10,
+        modified_time: 0,
+        fingerprint: "fp1".to_string(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: None,
+        video: None,
+        audio: None,
+        scraped_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+    };
+    fx.library.upsert(&wrong_entry).await.unwrap();
+    // upsert() deliberately never writes scrape/artwork columns (a rescan
+    // must never clobber existing scrape results) — set the "already
+    // (wrongly) scraped" state the way a real scrape actually would.
+    fx.library.set_scrape_result(&wrong_entry.entry_key, Some("The Interview"), &["Comedy".to_string()], &[]).await.unwrap();
+    fx.library
+        .set_artwork(&wrong_entry.entry_key, ArtworkKind::Poster, "Shows/Dexter/Dexter (2006) S03/images/wrong-poster.jpg")
+        .await
+        .unwrap();
+
+    // A genuinely correct entry — a real numbered episode — that reclassify
+    // must leave completely untouched, including its existing scrape data.
+    let correct_relative = "Shows/Dexter/Dexter (2006) S03/Dexter.S03E01.Our Father.mkv";
+    let correct_classified = classify(correct_relative).unwrap();
+    let correct_entry = EntryRecord {
+        entry_key: entry_key(correct_relative),
+        relative_path: correct_relative.to_string(),
+        kind: correct_classified.kind,
+        title: correct_classified.title.clone(),
+        size: 20,
+        modified_time: 0,
+        fingerprint: "fp2".to_string(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: correct_classified.show_title.clone(),
+        season: correct_classified.season,
+        episode: correct_classified.episode,
+        year: correct_classified.year,
+        duration_secs: None,
+        video: None,
+        audio: None,
+        scraped_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+    };
+    fx.library.upsert(&correct_entry).await.unwrap();
+    fx.library.set_scrape_result(&correct_entry.entry_key, Some("Dexter"), &["Drama".to_string()], &[]).await.unwrap();
+
+    let report = fx.library.reclassify_all().await.unwrap();
+    assert_eq!(report.changed, 1);
+    assert_eq!(report.unchanged, 1);
+
+    let fixed = fx.library.get(&wrong_entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(fixed.kind, MediaKind::Episode);
+    assert_eq!(fixed.show_title.as_deref(), Some("Dexter"));
+    assert_eq!(fixed.season, Some(0));
+    assert_eq!(fixed.episode, None);
+    assert_eq!(fixed.scraped_title, None, "stale wrong scrape data must be cleared, not just relabeled");
+    assert!(fixed.genres.is_empty());
+    assert!(
+        fx.library.artwork(&fixed.entry_key, ArtworkKind::Poster).await.unwrap().is_none(),
+        "the wrong movie's artwork must be cleared too"
+    );
+
+    let untouched = fx.library.get(&correct_entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(untouched.scraped_title.as_deref(), Some("Dexter"), "already-correct entries must be left completely untouched");
+    assert_eq!(untouched.genres, vec!["Drama".to_string()]);
+}

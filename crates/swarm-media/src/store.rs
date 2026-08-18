@@ -451,6 +451,73 @@ impl Library {
         .await?;
         Ok(cleared_paths)
     }
+
+    /// Re-derives every entry's classification (`kind`/`title`/`artist`/
+    /// `album`/`track_number`/`show_title`/`season`/`episode`/`year`) from
+    /// its already-stored `relative_path` alone — no filesystem access, so
+    /// this is fast even against a large library and safe to run any time.
+    ///
+    /// `scan_roots` only ever calls `classify()` for a file it hasn't seen
+    /// before or whose size/mtime changed (see its `unchanged` fast path) —
+    /// an already-known, on-disk-unchanged file is never re-classified, so a
+    /// `classify()` bug fix alone never repairs already-scanned entries.
+    /// This exists specifically to repair them, on demand, without needing
+    /// the underlying file to change.
+    ///
+    /// An entry is left completely untouched (including its existing scrape
+    /// data) unless its `kind`/`show_title`/`season`/`episode` actually
+    /// differ from what it's currently stored as. When they do differ, the
+    /// old scrape result can no longer be trusted (it was very possibly
+    /// produced by searching under the wrong classification entirely — e.g.
+    /// bonus content scraped as if it were a standalone movie) — this reuses
+    /// [`Self::clear_scrape_result`] for exactly those entries, so they come
+    /// out the other side freshly eligible for a correct re-scrape.
+    pub async fn reclassify_all(&self) -> sqlx::Result<ReclassifyReport> {
+        type ReclassifyRow = (String, String, String, Option<String>, Option<i64>, Option<i64>);
+        let mut report = ReclassifyReport::default();
+        let rows: Vec<ReclassifyRow> = sqlx::query_as(
+            "SELECT entry_key, relative_path, kind, show_title, season, episode FROM library_entries",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for (entry_key, relative_path, old_kind, old_show_title, old_season, old_episode) in rows {
+            let Some(classified) = crate::classify::classify(&relative_path) else { continue };
+            let new_kind = kind_str(classified.kind);
+            let new_season = classified.season.map(i64::from);
+            let new_episode = classified.episode.map(i64::from);
+            if new_kind == old_kind && classified.show_title == old_show_title && new_season == old_season && new_episode == old_episode {
+                report.unchanged += 1;
+                continue;
+            }
+
+            sqlx::query(
+                "UPDATE library_entries SET kind = ?, title = ?, artist = ?, album = ?, track_number = ?, \
+                 show_title = ?, season = ?, episode = ?, year = ? WHERE entry_key = ?",
+            )
+            .bind(new_kind)
+            .bind(&classified.title)
+            .bind(&classified.artist)
+            .bind(&classified.album)
+            .bind(classified.track_number.map(i64::from))
+            .bind(&classified.show_title)
+            .bind(new_season)
+            .bind(new_episode)
+            .bind(classified.year.map(i64::from))
+            .bind(&entry_key)
+            .execute(&self.pool)
+            .await?;
+            self.clear_scrape_result(&entry_key).await?;
+            report.changed += 1;
+        }
+        Ok(report)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReclassifyReport {
+    pub changed: u64,
+    pub unchanged: u64,
 }
 
 /// `ALTER TABLE ADD COLUMN IF NOT EXISTS` doesn't exist in SQLite; check

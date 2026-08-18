@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SWARM Server — Stream Whatever, Anywhere</title>
+<link rel="stylesheet" href="vendor/bootstrap-icons/bootstrap-icons.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -97,6 +98,7 @@
           <span id="scanNote" class="note"></span>
           <label class="checkbox-label"><input type="checkbox" id="forceScrapeCheck"> Redownload / override existing</label>
           <button id="scrapeBtn" class="secondary">Scrape metadata</button>
+          <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects">Fix classifications</button>
           <button id="rescanBtn">Rescan</button>
         </div>
       </div>

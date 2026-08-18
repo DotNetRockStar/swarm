@@ -87,7 +87,7 @@ private fun SeasonList(show: ShowGroup, onOpenSeason: (SeasonGroup) -> Unit, onB
                 val focusModifier = if (index == 0) Modifier.focusRequester(firstRowFocusRequester) else Modifier
                 Card(onClick = { onOpenSeason(season) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                     Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(season.season?.let { "Season $it" } ?: "Unnumbered episodes", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(seasonLabel(season.season), color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         Text("${season.episodes.size} episode" + if (season.episodes.size == 1) "" else "s", color = SwarmMuted, fontSize = 13.sp)
                     }
                 }
@@ -109,7 +109,7 @@ private fun EpisodeGrid(
 
     Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("${show.show} — " + (season.season?.let { "Season $it" } ?: "Unnumbered"), color = SwarmAccent, fontSize = 20.sp, fontWeight = FontWeight.Black)
+            Text("${show.show} — " + seasonLabel(season.season), color = SwarmAccent, fontSize = 20.sp, fontWeight = FontWeight.Black)
             Button(onClick = onBack, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)) { Text("Back") }
         }
         Spacer(Modifier.height(24.dp))
@@ -139,4 +139,16 @@ private fun EpisodeGrid(
             }
         }
     }
+}
+
+/**
+ * Season 0 is the real-world Plex/Kodi/TheTVDB convention for a show's
+ * bonus/extra content (featurettes, interviews, deleted scenes...) — a
+ * single show-level bucket, not tied to any one real season. `null` means
+ * classify() found no season signal at all, a different, unrelated case.
+ */
+private fun seasonLabel(season: Int?): String = when (season) {
+    null -> "Unnumbered"
+    0 -> "Specials"
+    else -> "Season $season"
 }
