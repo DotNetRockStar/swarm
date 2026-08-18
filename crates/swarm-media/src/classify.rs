@@ -166,13 +166,15 @@ fn show_title_from_ancestors(dirs: &[&str]) -> String {
     dirs.iter().rev().map(|d| clean_title(d)).find(|name| !name.is_empty() && !is_season_folder(name)).unwrap_or_default()
 }
 
-/// A season-indicating folder, either shape: a literal `"Season N"`, or
-/// `is_season_suffix_folder` — see that function. `is_season_folder` treats
-/// both as "skip this while hunting for a plain show-name ancestor".
+/// A season-indicating folder, any of three shapes: a literal `"Season N"`,
+/// `parse_season_suffix_folder`'s `"<name> SNN"`, or a bare `"SNN"`
+/// ([parse_bare_season_folder]) — see those functions. `is_season_folder`
+/// treats all three as "skip this while hunting for a plain show-name
+/// ancestor".
 fn is_season_folder(name: &str) -> bool {
     let lower = name.to_lowercase();
     let literal = lower.strip_prefix("season").map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit())).unwrap_or(false);
-    literal || parse_season_suffix_folder(name).is_some()
+    literal || parse_season_suffix_folder(name).is_some() || parse_bare_season_folder(name).is_some()
 }
 
 /// A folder name ending in `" SNN"` (a space, a case-insensitive `S`, then
@@ -204,15 +206,40 @@ fn parse_season_suffix_folder(name: &str) -> Option<(u32, &str)> {
     (!show_part.is_empty()).then_some((season, show_part))
 }
 
+/// A folder whose entire name is just a case-insensitive `S` followed by 1-2
+/// digits and nothing else (e.g. `"S06"`, `"S6"`) — an abbreviated
+/// alternative to the literal `"Season N"` folder, with an identical
+/// relationship to its parent: the show name lives in the *next* real
+/// ancestor above it, not in this folder itself (unlike
+/// [parse_season_suffix_folder], which requires non-empty show-name text
+/// *before* the "S" in the same folder — the two never both match the same
+/// name). Deliberately whole-string, not a prefix/suffix match, so a folder
+/// like `"S06E01"` (a real convention some rips use to flatten one episode
+/// directly under a combined season+episode folder name) can never
+/// misfire here — the trailing `"E01"` isn't all-digits, so it fails the
+/// all-digit check below.
+fn parse_bare_season_folder(name: &str) -> Option<u32> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || !bytes[0].eq_ignore_ascii_case(&b's') {
+        return None;
+    }
+    let digits = &bytes[1..];
+    if digits.is_empty() || digits.len() > 2 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    name[1..].parse().ok()
+}
+
 /// Walk `dirs` nearest-to-furthest looking for the first ancestor that's a
-/// season folder, either shape, and derive `(show_title, season, year)`:
+/// season folder, any of three shapes, and derive `(show_title, season, year)`:
 /// - `"<Show Name> (<year>) SNN"` is self-contained — the show name and an
 ///   optional year both live in the same folder (run through the existing
 ///   [extract_year_and_strip] + [clean_title] pipeline, same as everywhere
 ///   else a folder/filename gets turned into a display name).
-/// - a literal `"Season N"` has no show name of its own — it comes from the
-///   next real ancestor above it (skipping further season/disc folders),
-///   same fallback [show_title_from_ancestors] already used elsewhere.
+/// - a literal `"Season N"` or a bare `"SNN"` ([parse_bare_season_folder])
+///   has no show name of its own — it comes from the next real ancestor
+///   above it (skipping further season/disc folders), same fallback
+///   [show_title_from_ancestors] already used elsewhere.
 fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
     for (idx, dir) in dirs.iter().enumerate().rev() {
         if let Some((season, show_part)) = parse_season_suffix_folder(dir) {
@@ -221,23 +248,32 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
             if !show_title.is_empty() {
                 return Some((show_title, season, year));
             }
-        } else {
-            let lower = dir.to_lowercase();
-            let Some(season) = lower.strip_prefix("season").and_then(|rest| rest.trim().parse().ok()) else {
-                continue;
-            };
-            let show_title = show_title_from_ancestors(&dirs[..idx]);
-            if !show_title.is_empty() {
-                return Some((show_title, season, None));
-            }
+            continue;
+        }
+        let lower = dir.to_lowercase();
+        let literal_season = lower.strip_prefix("season").and_then(|rest| rest.trim().parse().ok());
+        let Some(season) = literal_season.or_else(|| parse_bare_season_folder(dir)) else {
+            continue;
+        };
+        let show_title = show_title_from_ancestors(&dirs[..idx]);
+        if !show_title.is_empty() {
+            return Some((show_title, season, None));
         }
     }
     None
 }
 
+/// Find an episode marker in `stem`, either shape — `SxxEyy` tried first
+/// (unchanged priority/behavior for every filename that already worked),
+/// `NxNN` (see [parse_nxnn_marker]) as a fallback when that finds nothing.
+/// Both return (season, episode, text before the marker).
+fn parse_episode_marker(stem: &str) -> Option<(u32, u32, &str)> {
+    parse_sxxeyy_marker(stem).or_else(|| parse_nxnn_marker(stem))
+}
+
 /// Find an `SxxEyy` marker (case-insensitive); returns (season, episode, text
 /// before the marker).
-fn parse_episode_marker(stem: &str) -> Option<(u32, u32, &str)> {
+fn parse_sxxeyy_marker(stem: &str) -> Option<(u32, u32, &str)> {
     let bytes = stem.as_bytes();
     for start in 0..bytes.len() {
         if !bytes[start].eq_ignore_ascii_case(&b's') {
@@ -262,6 +298,47 @@ fn parse_episode_marker(stem: &str) -> Option<(u32, u32, &str)> {
         let season = stem[season_start..i].parse().ok()?;
         let episode = stem[episode_start..j].parse().ok()?;
         return Some((season, episode, &stem[..start]));
+    }
+    None
+}
+
+/// Find an `NxNN` marker (e.g. `6x09` = season 6, episode 9) — a common
+/// real-world alternate to `SxxEyy` in manual/scene rips. Case-insensitive
+/// on the `x`. Both digit runs must be genuinely bounded — string start/end,
+/// or a non-alphanumeric byte on either side — so this can never match
+/// inside a longer word or a real title that happens to contain a lowercase
+/// "x" adjacent to digits (same bounding discipline as
+/// [extract_bare_year_token]). Season is capped at 2 digits, episode at 3,
+/// matching real-world shows' actual numbering ranges and keeping this from
+/// false-positiving on an unrelated longer digit run.
+fn parse_nxnn_marker(stem: &str) -> Option<(u32, u32, &str)> {
+    let bytes = stem.as_bytes();
+    let is_boundary_before = |i: usize| i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+    let is_boundary_at = |i: usize| i == bytes.len() || !bytes[i].is_ascii_alphanumeric();
+    for x_pos in 0..bytes.len() {
+        if !bytes[x_pos].eq_ignore_ascii_case(&b'x') {
+            continue;
+        }
+        let mut season_start = x_pos;
+        while season_start > 0 && bytes[season_start - 1].is_ascii_digit() {
+            season_start -= 1;
+        }
+        let season_len = x_pos - season_start;
+        if season_len == 0 || season_len > 2 || !is_boundary_before(season_start) {
+            continue;
+        }
+        let episode_start = x_pos + 1;
+        let mut episode_end = episode_start;
+        while episode_end < bytes.len() && bytes[episode_end].is_ascii_digit() {
+            episode_end += 1;
+        }
+        let episode_len = episode_end - episode_start;
+        if episode_len == 0 || episode_len > 3 || !is_boundary_at(episode_end) {
+            continue;
+        }
+        let season = stem[season_start..x_pos].parse().ok()?;
+        let episode = stem[episode_start..episode_end].parse().ok()?;
+        return Some((season, episode, &stem[..season_start]));
     }
     None
 }
@@ -605,5 +682,84 @@ mod tests {
         assert_eq!(parse_season_suffix_folder("Volume 03"), None);
         // A real, valid match, no parenthetical year needed.
         assert_eq!(parse_season_suffix_folder("Show S03"), Some((3, "Show")));
+    }
+
+    // --- NxNN episode markers and bare SNN season folders ---
+    // Real bug, reported after the ancestor-season-folder fix above landed:
+    // neither an "NxNN" episode marker nor a bare "S06" season folder (just
+    // the abbreviation, no show name attached — that lives in the parent
+    // folder) was recognized at all, so a real, correctly-numbered episode
+    // still fell through to MediaKind::Movie.
+
+    #[test]
+    fn nxnn_episode_marker_under_a_bare_season_folder_is_recognized() {
+        let entry = classify(
+            "Batocera-movies-shows/Shows/Law & Order SVU/S06/Law & Order Special Victims Unit - 6x09 - Weak.mp4",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.season, Some(6));
+        assert_eq!(entry.episode, Some(9));
+        // The filename's own text before the "6x09" marker is non-empty
+        // ("Law & Order Special Victims Unit"), so per the exact same
+        // precedence every SxxEyy filename already uses (stem prefix wins
+        // over any folder fallback when non-empty — see
+        // `real_numbered_episode_under_the_name_year_season_folder_shape_is_unaffected`
+        // above), that's the derived show_title, not the folder's
+        // abbreviated "Law & Order SVU" — the two name the same real show.
+        assert_eq!(entry.show_title.as_deref(), Some("Law & Order Special Victims Unit"));
+    }
+
+    #[test]
+    fn nxnn_marker_show_title_falls_back_to_the_bare_season_folders_parent_when_stem_has_no_prefix() {
+        // No text at all before the "6x09" marker — show_title must fall
+        // back through find_ancestor_season, which for a bare "S06" folder
+        // (no show name of its own) takes the name from the *parent* folder
+        // above it, the same relationship a literal "Season N" folder has.
+        let entry = classify("Shows/Law & Order SVU/S06/6x09.mp4").unwrap();
+        assert_eq!(entry.season, Some(6));
+        assert_eq!(entry.episode, Some(9));
+        assert_eq!(entry.show_title.as_deref(), Some("Law & Order SVU"));
+    }
+
+    #[test]
+    fn nxnn_marker_is_conservative_about_false_positives() {
+        // No digits before the "x" at all.
+        assert_eq!(parse_nxnn_marker("Show - x09 - Title"), None);
+        // No digits after the "x" at all.
+        assert_eq!(parse_nxnn_marker("Show - 6x - Title"), None);
+        // Digits before "x" exist and are the right count, but the run
+        // isn't left-bounded — "23" is preceded directly by "m" (from
+        // "Item"), not a separator, so this is part of a longer
+        // alphanumeric run, not a real marker — must not misfire.
+        assert_eq!(parse_nxnn_marker("Item23x09"), None);
+        // A real, valid match with mixed case "X".
+        assert_eq!(parse_nxnn_marker("Show - 6X09 - Title"), Some((6, 9, "Show - ")));
+    }
+
+    #[test]
+    fn bare_season_folder_parsing_is_conservative_about_false_positives() {
+        // A combined season+episode folder name ("S06E01") is a different
+        // real convention (one episode flattened directly under a folder
+        // naming both numbers) — must not be misread as a bare season
+        // folder just because it starts with "S" + digits.
+        assert_eq!(parse_bare_season_folder("S06E01"), None);
+        // Nothing after the "S" at all.
+        assert_eq!(parse_bare_season_folder("S"), None);
+        // Doesn't start with "S".
+        assert_eq!(parse_bare_season_folder("06"), None);
+        // Real, valid matches, both digit widths, case-insensitive.
+        assert_eq!(parse_bare_season_folder("S06"), Some(6));
+        assert_eq!(parse_bare_season_folder("s6"), Some(6));
+    }
+
+    #[test]
+    fn nxnn_marker_does_not_steal_priority_from_an_existing_sxxeyy_marker() {
+        // A filename with a real SxxEyy marker must keep using it even if
+        // an NxNN-shaped substring could also coincidentally be found —
+        // SxxEyy is tried first, unconditionally, unchanged from before.
+        let entry = classify("Shows/The Expanse/Season 2/The.Expanse.S02E05.Home.mkv").unwrap();
+        assert_eq!(entry.season, Some(2));
+        assert_eq!(entry.episode, Some(5));
     }
 }
