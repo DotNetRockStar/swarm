@@ -185,10 +185,15 @@ function renderBrowseRoot(body) {
     </div>`;
   }).join("");
 
+  // Netflix-style horizontally-scrolling shelves, one per kind — matches
+  // the TV client's CatalogScreen (Movies/Shows/Music LazyRow shelves)
+  // rather than a browsed-folder grid. Deeper drill-down views (an artist's
+  // albums, a show's seasons, etc.) stay as wrapping .media-grid — shelves
+  // are specifically the top-level "what kinds of media do I have" view.
   body.innerHTML = `
-    ${movies.length ? `<h2 style="margin-top:0">Movies</h2><div class="media-grid">${movieCards}</div>` : ""}
-    ${tracks.size ? `<h2>Music</h2><div class="media-grid">${artistCards}</div>` : ""}
-    ${shows.size ? `<h2>Shows</h2><div class="media-grid">${showCards}</div>` : ""}
+    ${movies.length ? `<h2 style="margin-top:0">Movies</h2><div class="shelf-row">${movieCards}</div>` : ""}
+    ${shows.size ? `<h2>Shows</h2><div class="shelf-row">${showCards}</div>` : ""}
+    ${tracks.size ? `<h2>Music</h2><div class="shelf-row">${artistCards}</div>` : ""}
     ${!movies.length && !tracks.size && !shows.size ? `<span class="muted">No movies, music, or shows found yet.</span>` : ""}
   `;
 

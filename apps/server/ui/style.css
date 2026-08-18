@@ -92,6 +92,12 @@ td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--
 .media-card:hover .card-art { outline: 2px solid var(--accent); }
 .card-art { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; background: var(--surface-muted); display: block; }
 .card-art.round { border-radius: 50%; aspect-ratio: 1/1; }
+
+/* Media tab: root-level Movies/Shows/Music shelves — horizontally-scrolling
+   rows, one per kind, matching the TV client's CatalogScreen shelves rather
+   than a wrapping folder-style grid. */
+.shelf-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 8px; scrollbar-width: thin; }
+.shelf-row .media-card { flex: 0 0 150px; }
 .art-placeholder { background: linear-gradient(135deg, var(--surface-muted), var(--border)); }
 .card-title { font-size: .82rem; font-weight: 700; margin-top: 6px; line-height: 1.3; }
 
