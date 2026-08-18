@@ -65,6 +65,16 @@
       </div>
       <p id="mediaRootsError" class="error"></p>
     </div>
+
+    <div class="card">
+      <h2>TMDb scraping</h2>
+      <p class="muted">Enables movie/TV metadata and artwork lookups from the Media tab. Get a free key at themoviedb.org — either the v3 API key or the v4 Read Access Token works.</p>
+      <div class="row">
+        <input id="tmdbKeyInput" placeholder="TMDb API key">
+        <button id="saveTmdbKeyBtn" class="secondary">Save key</button>
+      </div>
+      <p id="tmdbKeyStatus" class="note"></p>
+    </div>
   </div>
 
   <div id="tabPanel-swarm" class="d-none">
@@ -83,10 +93,6 @@
           <button id="scrapeBtn" class="secondary">Scrape metadata</button>
           <button id="rescanBtn">Rescan</button>
         </div>
-      </div>
-      <div class="row" style="margin-bottom:14px">
-        <input id="tmdbKeyInput" placeholder="TMDb API key — optional, enables movie/TV scraping">
-        <button id="saveTmdbKeyBtn" class="secondary">Save key</button>
       </div>
       <ul id="scrapeIssues" class="issue-list d-none"></ul>
       <div id="library">Loading…</div>

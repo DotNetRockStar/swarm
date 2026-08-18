@@ -1,8 +1,28 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField()]);
 }
+
+async function refreshTmdbKeyField() {
+  const settings = await invoke("get_settings");
+  const status = document.getElementById("tmdbKeyStatus");
+  status.textContent = settings.has_tmdb_key ? "A key is saved. Scraping is enabled." : "No key saved yet — scraping is disabled until one is added.";
+  status.classList.toggle("error", !settings.has_tmdb_key);
+}
+
+document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => {
+  const input = document.getElementById("tmdbKeyInput");
+  const status = document.getElementById("tmdbKeyStatus");
+  try {
+    await invoke("set_tmdb_api_key", { key: input.value });
+    input.value = "";
+    await refreshTmdbKeyField();
+  } catch (err) {
+    status.classList.add("error");
+    status.textContent = String(err);
+  }
+});
 
 async function refreshStatus() {
   const grid = document.getElementById("statusGrid");

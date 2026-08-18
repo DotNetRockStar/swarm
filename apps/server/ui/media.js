@@ -13,7 +13,7 @@ let mediaSection = "browse"; // "browse" | "table"
 let browsePath = { kind: "root" }; // breadcrumb state — see renderBrowse()
 
 async function refreshMedia() {
-  await Promise.all([refreshLibrary(), refreshTmdbKeyField()]);
+  await refreshLibrary();
 }
 
 async function refreshLibrary() {
@@ -540,22 +540,5 @@ document.getElementById("scrapeBtn").addEventListener("click", async () => {
     await refreshLibrary();
   } catch (err) {
     note.textContent = String(err);
-  }
-});
-
-async function refreshTmdbKeyField() {
-  const settings = await invoke("get_settings");
-  document.getElementById("tmdbKeyInput").placeholder =
-    settings.has_tmdb_key ? "key saved — enter a new one to replace it" : "TMDb API key — optional, enables movie/TV scraping";
-}
-
-document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => {
-  const input = document.getElementById("tmdbKeyInput");
-  try {
-    await invoke("set_tmdb_api_key", { key: input.value });
-    input.value = "";
-    await refreshTmdbKeyField();
-  } catch (err) {
-    document.getElementById("scanNote").textContent = String(err);
   }
 });
