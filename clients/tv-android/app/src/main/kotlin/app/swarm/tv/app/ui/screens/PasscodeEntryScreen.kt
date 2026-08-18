@@ -73,6 +73,7 @@ fun PasscodeEntryScreen(
         verticalArrangement = Arrangement.Center,
     ) {
         Text("SWARM", color = SwarmAccent, fontSize = 32.sp, fontWeight = FontWeight.Black)
+        Text("Stream Whatever, Anywhere — Remote Media", color = SwarmMuted, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
         Text("Join a swarm to stream from your servers", color = SwarmMuted, fontSize = 16.sp)
         Spacer(Modifier.height(32.dp))
