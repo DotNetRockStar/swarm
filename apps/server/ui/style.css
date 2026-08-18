@@ -11,8 +11,8 @@ body {
     linear-gradient(90deg, rgba(0,194,255,.04) 1px, transparent 1px);
   background-size: 42px 42px;
 }
-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-.brand-mark { width: 40px; height: 40px; object-fit: contain; filter: drop-shadow(0 0 8px rgba(0,194,255,.5)); }
+header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.brand-mark { width: 84px; height: 84px; object-fit: contain; filter: drop-shadow(0 0 8px rgba(0,194,255,.5)); }
 .brand-text { display: flex; flex-direction: column; gap: 1px; }
 h1 { font-size: 1.3rem; letter-spacing: .12em; font-weight: 800; line-height: 1.1; }
 .tagline { font-size: .68rem; color: var(--muted); letter-spacing: .02em; }
