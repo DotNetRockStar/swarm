@@ -65,13 +65,19 @@ function renderMediaTab() {
     <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto"><i class="bi bi-list-ul"></i>All entries</button>
   </div>
   <div class="row" style="margin-bottom:14px; align-items:center">
-    <input id="mediaSearchInput" class="search-input" placeholder="Search title, artist, show…" value="${esc(searchQuery)}" style="flex:2">
-    <select id="mediaKindFilter" class="icon-select${kindFilter !== "all" ? " icon-select-active" : ""}" title="${KIND_FILTER_LABELS[kindFilter]}">
-      <option value="all">All kinds</option>
-      <option value="movie">Movies</option>
-      <option value="episode">Shows</option>
-      <option value="track">Music</option>
-    </select>
+    <div class="search-input-wrap" style="flex:2">
+      <i class="bi bi-search search-input-icon"></i>
+      <input id="mediaSearchInput" class="search-input" placeholder="Search title, artist, show…" value="${esc(searchQuery)}">
+    </div>
+    <div class="icon-select-wrap">
+      <select id="mediaKindFilter" class="icon-select${kindFilter !== "all" ? " icon-select-active" : ""}" title="${KIND_FILTER_LABELS[kindFilter]}">
+        <option value="all">All kinds</option>
+        <option value="movie">Movies</option>
+        <option value="episode">Shows</option>
+        <option value="track">Music</option>
+      </select>
+      <i class="bi bi-funnel icon-select-icon"></i>
+    </div>
   </div>`;
   container.innerHTML = toggle + `<div id="mediaSectionBody"></div>`;
   document.getElementById("mediaSectionBrowseBtn").addEventListener("click", () => {
