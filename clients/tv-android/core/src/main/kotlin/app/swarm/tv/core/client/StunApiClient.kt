@@ -21,6 +21,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonElement
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -52,6 +53,11 @@ class StunApiClient(
     suspend fun swarmDevices(accessToken: String, swarmId: String): SwarmDevicesResponse =
         getJson("/api/v1/swarms/$swarmId/devices", bearer = accessToken)
 
+    /** Leave one swarm this device belongs to, keeping the rest of its memberships and its access token intact. */
+    suspend fun leaveSwarm(accessToken: String, swarmId: String, deviceId: String) {
+        deleteJson<JsonElement>("/api/v1/swarms/$swarmId/devices/$deviceId", bearer = accessToken)
+    }
+
     private suspend inline fun <reified Req, reified Resp> postJson(
         path: String,
         body: Req,
@@ -65,6 +71,12 @@ class StunApiClient(
 
     private suspend inline fun <reified Resp> getJson(path: String, bearer: String?): Resp {
         val builder = Request.Builder().url("$base$path").get()
+        bearer?.let { builder.header("Authorization", "Bearer $it") }
+        return execute(builder.build())
+    }
+
+    private suspend inline fun <reified Resp> deleteJson(path: String, bearer: String?): Resp {
+        val builder = Request.Builder().url("$base$path").delete()
         bearer?.let { builder.header("Authorization", "Bearer $it") }
         return execute(builder.build())
     }

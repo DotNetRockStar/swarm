@@ -48,6 +48,7 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         show_title: None,
         season: None,
         episode: None,
+        year: None,
         duration_secs: Some(10.0),
         video: Some(VideoStreamInfo {
             codec: "h264".into(),
@@ -64,6 +65,7 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         scraped_title: None,
         genres: vec![],
         artwork_version: 0,
+        cast: vec![],
     };
     library.upsert(&entry).await.unwrap();
 
@@ -162,6 +164,7 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             show_title: None,
             season: None,
             episode: None,
+            year: None,
             duration_secs: Some(180.0),
             video: None,
             audio: Some(AudioStreamInfo {
@@ -172,6 +175,7 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             scraped_title: None,
             genres: vec![],
             artwork_version: 0,
+            cast: vec![],
         };
         library.upsert(&entry).await.unwrap();
         entry_keys.push(entry_key);

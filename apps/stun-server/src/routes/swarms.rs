@@ -226,3 +226,27 @@ pub async fn devices(
         .collect();
     Ok(Json(SwarmDevicesResponse { swarm, devices }))
 }
+
+/// A device leaves one swarm it belongs to, without touching its other
+/// memberships or its access token — symmetric with `devices::join_swarm`.
+/// Self-only (mirrors `devices::patch_metadata`'s own-resource check): a
+/// device cannot be kicked from a swarm by another device, only by the
+/// swarm's owner deleting the whole swarm (`delete`, above).
+#[utoipa::path(delete, path = "/api/v1/swarms/{swarm_id}/devices/{device_id}",
+    responses((status = 200, body = super::auth::StatusResponse)), security(("bearerAuth" = [])), tag = "swarms")]
+pub async fn leave(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((swarm_id, device_id)): Path<(String, String)>,
+) -> ApiResult<Json<super::auth::StatusResponse>> {
+    let device = require_device(&state, &headers).await?;
+    if device.device_id != device_id {
+        return Err(AppError::forbidden("a device may only remove its own swarm membership"));
+    }
+    sqlx::query("DELETE FROM swarm_devices WHERE swarm_id = ? AND device_id = ?")
+        .bind(&swarm_id)
+        .bind(&device_id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(super::auth::StatusResponse { status: "ok".into() }))
+}

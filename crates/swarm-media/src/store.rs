@@ -25,6 +25,11 @@ pub struct EntryRecord {
     pub show_title: Option<String>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    /// Path/filename-derived release year (see `classify::extract_bracket_tags`)
+    /// — same "never a grouping key, just a signal" status as everything
+    /// else in this struct that isn't scraper overlay; used to disambiguate
+    /// a TMDb search, not stored as scraper output itself.
+    pub year: Option<u32>,
     pub duration_secs: Option<f64>,
     pub video: Option<VideoStreamInfo>,
     pub audio: Option<AudioStreamInfo>,
@@ -32,6 +37,18 @@ pub struct EntryRecord {
     pub scraped_title: Option<String>,
     pub genres: Vec<String>,
     pub artwork_version: u32,
+    /// Scraper overlay, movies/episodes only — empty for tracks (music has
+    /// no cast concept).
+    pub cast: Vec<CastMember>,
+}
+
+/// One TMDb credits-list entry, capped to roughly the first ten (billing
+/// order) at scrape time. Same status as `scraped_title`/`genres` — display
+/// overlay only, never a grouping key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CastMember {
+    pub name: String,
+    pub character: Option<String>,
 }
 
 /// Which artwork slot a downloaded image fills. Maps 1:1 onto the
@@ -141,6 +158,8 @@ impl Library {
         for (column, ddl_type) in [
             ("scraped_title", "TEXT"),
             ("genres_json", "TEXT"),
+            ("cast_json", "TEXT"),
+            ("year", "INTEGER"),
             ("poster_relative_path", "TEXT"),
             ("backdrop_relative_path", "TEXT"),
             ("cover_relative_path", "TEXT"),
@@ -171,15 +190,15 @@ impl Library {
             INSERT INTO library_entries
                 (entry_key, relative_path, kind, title, size, modified_time, fingerprint,
                  artist, album, track_number, show_title, season, episode,
-                 duration_secs, video_json, audio_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 duration_secs, video_json, audio_json, year)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entry_key) DO UPDATE SET
                 relative_path = excluded.relative_path, kind = excluded.kind, title = excluded.title,
                 size = excluded.size, modified_time = excluded.modified_time, fingerprint = excluded.fingerprint,
                 artist = excluded.artist, album = excluded.album, track_number = excluded.track_number,
                 show_title = excluded.show_title, season = excluded.season, episode = excluded.episode,
                 duration_secs = excluded.duration_secs, video_json = excluded.video_json,
-                audio_json = excluded.audio_json
+                audio_json = excluded.audio_json, year = excluded.year
             "#,
         )
         .bind(&record.entry_key)
@@ -198,6 +217,7 @@ impl Library {
         .bind(record.duration_secs)
         .bind(record.video.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
         .bind(record.audio.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default()))
+        .bind(record.year.map(|n| n as i64))
         .execute(&self.pool)
         .await?;
         sqlx::query(
@@ -262,6 +282,20 @@ impl Library {
         Ok(rows.into_iter().map(EntryRecord::from).collect())
     }
 
+    /// Every track sharing exactly this (artist, album) pair — the sibling
+    /// set a pinpoint music rescrape re-syncs together, matching bulk
+    /// scrape's per-album (not per-track) grouping.
+    pub async fn entries_by_artist_album(&self, artist: &str, album: &str) -> sqlx::Result<Vec<EntryRecord>> {
+        let rows = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE artist = ? AND album = ? ORDER BY relative_path"
+        ))
+        .bind(artist)
+        .bind(album)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
     pub async fn pending_changes(&self) -> sqlx::Result<Vec<PendingChange>> {
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT entry_key, operation FROM library_changes ORDER BY entry_key")
@@ -318,14 +352,55 @@ impl Library {
     /// override — see the runner). The sentinel is stored as `''` rather
     /// than `NULL` specifically so [`Self::missing_scrape`]'s `IS NULL`
     /// filter treats "processed" as done and never re-queues it.
-    pub async fn set_scrape_result(&self, entry_key: &str, scraped_title: Option<&str>, genres: &[String]) -> sqlx::Result<()> {
+    pub async fn set_scrape_result(
+        &self,
+        entry_key: &str,
+        scraped_title: Option<&str>,
+        genres: &[String],
+        cast: &[CastMember],
+    ) -> sqlx::Result<()> {
         let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
-        sqlx::query("UPDATE library_entries SET scraped_title = ?, genres_json = ? WHERE entry_key = ?")
+        let cast_json = serde_json::to_string(cast).unwrap_or_else(|_| "[]".into());
+        sqlx::query("UPDATE library_entries SET scraped_title = ?, genres_json = ?, cast_json = ? WHERE entry_key = ?")
             .bind(scraped_title.unwrap_or(""))
             .bind(genres_json)
+            .bind(cast_json)
             .bind(entry_key)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Manually override the display-only `scraped_title`/`genres_json`
+    /// overlay — a GUI-driven correction, distinct from [`Self::set_scrape_result`]
+    /// (scraper-only, always writes both together plus cast). `None` for
+    /// either parameter means "leave that field's current value untouched",
+    /// not "clear it" — a caller that wants to clear a title passes
+    /// `Some("")`. Never touches `artist`/`album`/`track_number`/
+    /// `show_title`/`season`/`episode` — those stay path-derived, the same
+    /// grouping-key invariant the scraper itself is bound by (see
+    /// `classify` module docs).
+    pub async fn set_manual_metadata(
+        &self,
+        entry_key: &str,
+        title: Option<&str>,
+        genres: Option<&[String]>,
+    ) -> sqlx::Result<()> {
+        if let Some(title) = title {
+            sqlx::query("UPDATE library_entries SET scraped_title = ? WHERE entry_key = ?")
+                .bind(title)
+                .bind(entry_key)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(genres) = genres {
+            let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
+            sqlx::query("UPDATE library_entries SET genres_json = ? WHERE entry_key = ?")
+                .bind(genres_json)
+                .bind(entry_key)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -367,7 +442,7 @@ async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl_type: &
 const ENTRY_SELECT: &str =
     "SELECT entry_key, relative_path, kind, title, size, modified_time, fingerprint, artist, album, \
      track_number, show_title, season, episode, duration_secs, video_json, audio_json, \
-     scraped_title, genres_json, artwork_version FROM library_entries";
+     scraped_title, genres_json, artwork_version, year, cast_json FROM library_entries";
 
 #[derive(sqlx::FromRow)]
 struct EntryRow {
@@ -390,6 +465,8 @@ struct EntryRow {
     scraped_title: Option<String>,
     genres_json: Option<String>,
     artwork_version: i64,
+    year: Option<i64>,
+    cast_json: Option<String>,
 }
 
 impl From<EntryRow> for EntryRecord {
@@ -416,6 +493,8 @@ impl From<EntryRow> for EntryRecord {
             scraped_title: row.scraped_title.filter(|t| !t.is_empty()),
             genres: row.genres_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
             artwork_version: row.artwork_version as u32,
+            year: row.year.map(|n| n as u32),
+            cast: row.cast_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
         }
     }
 }
@@ -440,6 +519,8 @@ impl EntryRecord {
             video: self.video.clone(),
             audio: self.audio.clone(),
             artwork_etag: (self.artwork_version > 0).then(|| format!("v{}", self.artwork_version)),
+            year: self.year,
+            cast: self.cast.iter().map(|c| swarm_core::peer::CastMember { name: c.name.clone(), character: c.character.clone() }).collect(),
         }
     }
 }

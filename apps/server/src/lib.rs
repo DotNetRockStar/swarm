@@ -12,10 +12,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmSummary};
+use swarm_core::peer::MediaKind;
+use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmDevicesResponse, SwarmSummary};
 use swarm_core::signal::{SignalMessage, SignalPayload};
-use swarm_media::scan::{scan_root, ScanReport};
-use swarm_media::scrape::{run_bulk_scrape, BulkScrapeReport, ScrapeConfig};
+use swarm_media::roots::{MediaRoot, RootResolver};
+use swarm_media::scan::{scan_roots, ScanReport};
+use swarm_media::scrape::{
+    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError, TmdbOverride,
+};
 use swarm_media::serve::{accept_loop, serve_connection, MediaService};
 use swarm_media::store::Library;
 use swarm_media::transcode::TranscodeConfig;
@@ -51,7 +55,11 @@ pub enum TokenStoreMode {
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub media_root: PathBuf,
+    /// One or more library roots. A single root behaves exactly as before
+    /// (its `label` is never written onto `relative_path`); 2+ roots are
+    /// distinguished on-disk by a `{label}/` prefix — see
+    /// `swarm_media::roots`.
+    pub media_roots: Vec<MediaRoot>,
     pub data_dir: PathBuf,
     pub bind: SocketAddr,
     /// Fingerprints allowed to connect regardless of STUN membership — for
@@ -65,7 +73,9 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServerStatus {
     pub fingerprint: String,
-    pub media_root: String,
+    /// `"label: /absolute/path"` per configured root (single-root installs
+    /// still get one entry here, just with no prefix applied on-disk).
+    pub media_roots: Vec<String>,
     pub listen_addr: String,
     pub entry_count: u64,
     pub thumbprint: String,
@@ -83,7 +93,7 @@ struct StunContext {
 pub struct ServerCore {
     pub identity: DeviceIdentity,
     pub library: Arc<Library>,
-    pub media_root: PathBuf,
+    pub media_roots: RootResolver,
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
     service: Arc<MediaService>,
@@ -115,6 +125,10 @@ pub enum ServerError {
     TokenStore(#[from] swarm_stun_client::TokenStoreError),
     #[error("a scrape is already running")]
     ScrapeInProgress,
+    #[error("scrape error: {0}")]
+    Scrape(#[from] ScrapeOneError),
+    #[error("no library entry with that key")]
+    EntryNotFound,
 }
 
 impl ServerCore {
@@ -126,7 +140,8 @@ impl ServerCore {
         let library = Arc::new(
             Library::open(config.data_dir.join("library.sqlite").to_str().unwrap_or_default()).await?,
         );
-        let report = scan_root(&library, &config.media_root).await?;
+        let report = scan_roots(&library, &config.media_roots).await?;
+        let media_roots = RootResolver::new(config.media_roots);
 
         let static_fingerprints: Vec<String> =
             config.allowed_fingerprints.iter().map(|f| f.trim().to_lowercase()).collect();
@@ -134,9 +149,9 @@ impl ServerCore {
         allowed.replace(static_fingerprints.iter().cloned());
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
-        let service = Arc::new(MediaService::with_transcoding(
+        let service = Arc::new(MediaService::with_roots(
             Arc::clone(&library),
-            config.media_root.clone(),
+            media_roots.clone(),
             transcode_config_from_env(&config.data_dir),
         ));
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
@@ -144,7 +159,7 @@ impl ServerCore {
         let core = Arc::new(Self {
             identity,
             library,
-            media_root: config.media_root,
+            media_roots,
             allowed,
             listen_addr,
             service,
@@ -159,13 +174,18 @@ impl ServerCore {
     }
 
     pub async fn rescan(&self) -> Result<ScanReport, ServerError> {
-        Ok(scan_root(&self.library, &self.media_root).await?)
+        Ok(scan_roots(&self.library, self.media_roots.roots()).await?)
     }
 
     pub async fn status(&self) -> Result<ServerStatus, ServerError> {
         Ok(ServerStatus {
             fingerprint: self.identity.fingerprint.clone(),
-            media_root: self.media_root.display().to_string(),
+            media_roots: self
+                .media_roots
+                .roots()
+                .iter()
+                .map(|root| format!("{}: {}", root.label, root.path.display()))
+                .collect(),
             listen_addr: self.listen_addr.to_string(),
             entry_count: self.library.entry_count().await?,
             thumbprint: self.library.thumbprint().await?,
@@ -182,9 +202,34 @@ impl ServerCore {
             return Err(ServerError::ScrapeInProgress);
         }
         let cancel = AtomicBool::new(false);
-        let result = run_bulk_scrape(&self.library, &self.media_root, &config, &cancel).await;
+        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel).await;
         self.scraping.store(false, Ordering::Release);
         Ok(result?)
+    }
+
+    /// Pinpoint rescrape of one entry — unlike [`Self::run_scrape`], this
+    /// succeeds even on an already-scraped entry (correcting a wrong match
+    /// is the whole point) and is not gated by the bulk-scrape-in-progress
+    /// guard, since it's a single targeted lookup rather than a library-wide
+    /// job. `tmdb_override` is ignored for music entries (no TMDb concept
+    /// there); a track rescrape always re-syncs its whole (artist, album)
+    /// group, matching bulk behavior.
+    pub async fn rescrape_entry(
+        &self,
+        entry_key: &str,
+        config: ScrapeConfig,
+        tmdb_override: Option<TmdbOverride>,
+    ) -> Result<(), ServerError> {
+        let entry = self.library.get(entry_key).await?.ok_or(ServerError::EntryNotFound)?;
+        match entry.kind {
+            MediaKind::Track => {
+                scrape_one_track(&self.library, &self.media_roots, &config, &entry).await?;
+            }
+            MediaKind::Movie | MediaKind::Episode => {
+                scrape_one_video(&self.library, &self.media_roots, &config, &entry, tmdb_override).await?;
+            }
+        }
+        Ok(())
     }
 
     fn token_store(&self) -> Result<TokenStore, ServerError> {
@@ -255,9 +300,39 @@ impl ServerCore {
         Ok(swarm)
     }
 
+    /// Leave one swarm this server belongs to, keeping the STUN link (and
+    /// its other swarm memberships) intact — symmetric with
+    /// `join_additional_swarm`. Shrinks `allowed` via the roster resync
+    /// that follows.
+    pub async fn leave_swarm(&self, swarm_id: &str) -> Result<(), ServerError> {
+        {
+            let mut guard = self.stun.lock().await;
+            let ctx = guard.as_mut().ok_or(ServerError::Stun(swarm_stun_client::StunClientError::Network(
+                "not linked to a STUN server yet".into(),
+            )))?;
+            ctx.client.leave_swarm(&ctx.access_token, swarm_id, &ctx.link.device_id).await?;
+            ctx.link.swarms.retain(|s| s.id != swarm_id);
+            stun_link::save(&self.data_dir, &ctx.link)?;
+        }
+        self.sync_roster().await?;
+        Ok(())
+    }
+
     /// The currently-linked STUN server and swarms, if any.
     pub async fn stun_link(&self) -> Option<StunLinkRecord> {
         self.stun.lock().await.as_ref().map(|ctx| ctx.link.clone())
+    }
+
+    /// One joined swarm's device roster — a straight passthrough to the STUN
+    /// server's own view, for display in a GUI. Unlike `sync_roster`, this
+    /// never touches `allowed`; it's read-only from this device's
+    /// perspective.
+    pub async fn swarm_devices(&self, swarm_id: &str) -> Result<SwarmDevicesResponse, ServerError> {
+        let guard = self.stun.lock().await;
+        let ctx = guard.as_ref().ok_or(ServerError::Stun(swarm_stun_client::StunClientError::Network(
+            "not linked to a STUN server yet".into(),
+        )))?;
+        Ok(ctx.client.swarm_devices(&ctx.access_token, swarm_id).await?)
     }
 
     /// Manually trigger a roster re-sync (a GUI "Resync" button, or a test
@@ -436,7 +511,10 @@ async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Opti
 }
 
 /// Config sourced from env (shared by both binaries):
-/// `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`,
+/// `SWARM_MEDIA_ROOT` (a single unlabeled root — required unless
+/// `SWARM_MEDIA_ROOTS` is set instead), `SWARM_MEDIA_ROOTS` (multi-root
+/// form, `label=path,label2=path2` — takes precedence over
+/// `SWARM_MEDIA_ROOT` if both are set), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`,
 /// `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a
 /// STUN server at all), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring —
 /// set this on headless boxes with no Secret Service). Streaming controls:
@@ -444,12 +522,21 @@ async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Opti
 /// (default 30), `SWARM_MAX_STREAMS` (default 2), `SWARM_FFMPEG_PATH`, and
 /// `SWARM_TRANSCODING_DISABLED`.
 pub fn config_from_env() -> Option<ServerConfig> {
-    let media_root = PathBuf::from(std::env::var("SWARM_MEDIA_ROOT").ok()?);
+    let media_roots = match std::env::var("SWARM_MEDIA_ROOTS").ok().filter(|v| !v.trim().is_empty()) {
+        Some(value) => {
+            let roots = swarm_media::roots::parse_roots_env(&value);
+            if roots.is_empty() {
+                return None;
+            }
+            roots
+        }
+        None => vec![MediaRoot { label: "local".to_string(), path: PathBuf::from(std::env::var("SWARM_MEDIA_ROOT").ok()?) }],
+    };
     let file_only = std::env::var("SWARM_TOKEN_STORE_FILE_ONLY")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
     Some(ServerConfig {
-        media_root,
+        media_roots,
         data_dir: PathBuf::from(std::env::var("SWARM_DATA_DIR").unwrap_or_else(|_| "swarm-server-data".into())),
         bind: std::env::var("SWARM_PEER_BIND")
             .unwrap_or_else(|_| "0.0.0.0:8543".into())

@@ -21,6 +21,7 @@ use swarm_core::peer::{CatalogThumbprint, PeerRequest};
 use swarm_core::rest::{DeviceRegistration, DeviceType};
 use swarm_p2p::endpoint::{read_body, send_request};
 use swarm_p2p::identity::ensure_identity;
+use swarm_media::roots::MediaRoot;
 use swarm_server::punch_connect::initiate_punch_connection;
 use swarm_server::{ServerConfig, ServerCore, TokenStoreMode};
 use swarm_stun_client::{SignalingClient, StunClient};
@@ -140,7 +141,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
     let media_root = base.join("media");
     std::fs::create_dir_all(&media_root).unwrap();
     let config = ServerConfig {
-        media_root,
+        media_roots: vec![MediaRoot { label: "local".to_string(), path: media_root }],
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],

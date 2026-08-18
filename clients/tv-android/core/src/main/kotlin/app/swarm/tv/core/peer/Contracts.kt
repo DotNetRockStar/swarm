@@ -51,6 +51,13 @@ data class AudioStreamInfo(
     val bitrate: Long? = null,
 )
 
+/** One TMDb credits-list entry — display overlay only, never a grouping key. */
+@Serializable
+data class CastMember(
+    val name: String,
+    val character: String? = null,
+)
+
 /** One asset as advertised by a server. Merge key across servers is [fingerprint]. */
 @Serializable
 data class CatalogEntry(
@@ -71,6 +78,8 @@ data class CatalogEntry(
     val video: VideoStreamInfo? = null,
     val audio: AudioStreamInfo? = null,
     val artworkEtag: String? = null,
+    val year: Int? = null,
+    val cast: List<CastMember> = emptyList(),
 )
 
 @Serializable

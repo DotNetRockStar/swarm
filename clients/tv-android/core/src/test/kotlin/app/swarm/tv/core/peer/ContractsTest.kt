@@ -22,7 +22,8 @@ class ContractsTest {
             """"fingerprint":"704ac5a4284267953aab77855e0e32aa","kind":"movie","title":"Inception",""" +
             """"size":4700000000,"duration_secs":8880.0,"scraped_title":"Inception (2010)","genres":["Sci-Fi"],""" +
             """"video":{"codec":"h264","width":1920,"height":1080,"level":"4.1","bitrate":8000000},""" +
-            """"audio":{"codec":"aac","channels":6},"artwork_etag":"v1"}],"removed":[]}"""
+            """"audio":{"codec":"aac","channels":6},"artwork_etag":"v1","year":2010,""" +
+            """"cast":[{"name":"Leonardo DiCaprio","character":"Cobb"},{"name":"Ellen Page"}]}],"removed":[]}"""
         val manifest = SwarmJson.decodeFromString<CatalogManifest>(json)
         assertEquals(1, manifest.entries.size)
         val entry = manifest.entries[0]
@@ -38,6 +39,16 @@ class ContractsTest {
         assertEquals(AudioStreamInfo("aac", 6, null), entry.audio)
         assertNull(entry.showTitle)
         assertNull(entry.artist)
+        assertEquals(2010, entry.year)
+        assertEquals(listOf(CastMember("Leonardo DiCaprio", "Cobb"), CastMember("Ellen Page", null)), entry.cast)
+    }
+
+    @Test
+    fun `catalog entry with no year or cast decodes to empty defaults`() {
+        val json = """{"entry_key":"k","fingerprint":"f","kind":"track","title":"Song","size":1}"""
+        val entry = SwarmJson.decodeFromString<CatalogEntry>(json)
+        assertNull(entry.year)
+        assertEquals(emptyList<CastMember>(), entry.cast)
     }
 
     @Test

@@ -22,6 +22,7 @@
 pub mod classify;
 pub mod probe;
 pub mod range;
+pub mod roots;
 pub mod scan;
 pub mod scrape;
 pub mod serve;

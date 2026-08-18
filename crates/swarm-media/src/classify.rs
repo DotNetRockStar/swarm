@@ -38,6 +38,7 @@ pub struct Classified {
     pub show_title: Option<String>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    pub year: Option<u32>,
 }
 
 pub fn media_extension(relative_path: &str) -> Option<(&'static str, bool)> {
@@ -76,10 +77,22 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             show_title: None,
             season: None,
             episode: None,
+            year: None,
         });
     }
 
-    if let Some((season, episode, title_prefix)) = parse_episode_marker(stem) {
+    // Bracketed release-group/resolution/codec tags (`[1080p]`, `(x264)`,
+    // `{YIFY}`) are decorative and stripped from the title outright; a bare
+    // 4-digit year inside one is the sole exception — meaningful signal for
+    // TMDb search, kept even though its brackets are still removed. Movies
+    // often only carry the year on the enclosing folder, not the filename
+    // (`Inception (2010)/Inception.1080p.mkv`), so fall back there.
+    let (stem_clean, mut year) = extract_bracket_tags(stem);
+    if year.is_none() {
+        year = dirs.last().and_then(|dir| extract_bracket_tags(dir).1);
+    }
+
+    if let Some((season, episode, title_prefix)) = parse_episode_marker(&stem_clean) {
         // Show title: prefer the text before the SxxEyy marker, else the
         // grandparent/parent directory (Show/Season 1/file layout).
         let from_stem = clean_title(title_prefix);
@@ -94,25 +107,27 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         };
         return Some(Classified {
             kind: MediaKind::Episode,
-            title: clean_title(stem),
+            title: clean_title(&stem_clean),
             artist: None,
             album: None,
             track_number: None,
             show_title: (!show_title.is_empty()).then_some(show_title),
             season: Some(season),
             episode: Some(episode),
+            year,
         });
     }
 
     Some(Classified {
         kind: MediaKind::Movie,
-        title: clean_title(stem),
+        title: clean_title(&stem_clean),
         artist: None,
         album: None,
         track_number: None,
         show_title: None,
         season: None,
         episode: None,
+        year,
     })
 }
 
@@ -165,6 +180,51 @@ fn split_track_number(stem: &str) -> (Option<u32>, String) {
         return (None, clean_title(stem));
     }
     (digits.parse().ok(), clean_title(trimmed))
+}
+
+/// Remove every top-level `[...]`, `(...)`, `{...}` span from `text`
+/// (mismatched/unterminated brackets are left as literal text, and a nested
+/// span is swallowed whole by its enclosing one — non-nested filenames are
+/// the only case that matters in practice), returning the stripped text and
+/// the first bare 4-digit `1900..=2099` year found inside any span.
+fn extract_bracket_tags(text: &str) -> (String, Option<u32>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut year = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let opener = chars[i];
+        let closer = match opener {
+            '[' => Some(']'),
+            '(' => Some(')'),
+            '{' => Some('}'),
+            _ => None,
+        };
+        if let Some(closer) = closer {
+            if let Some(offset) = chars[i + 1..].iter().position(|&c| c == closer) {
+                let end = i + 1 + offset;
+                if year.is_none() {
+                    let inner: String = chars[i + 1..end].iter().collect();
+                    year = parse_bare_year(&inner);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(opener);
+        i += 1;
+    }
+    (out, year)
+}
+
+fn parse_bare_year(inner: &str) -> Option<u32> {
+    let trimmed = inner.trim();
+    if trimmed.len() == 4 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        let year: u32 = trimmed.parse().ok()?;
+        (1900..=2099).contains(&year).then_some(year)
+    } else {
+        None
+    }
 }
 
 /// Normalize separators for display: dots/underscores to spaces, collapse runs.
@@ -237,6 +297,40 @@ mod tests {
         let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.title, "Inception 2010 1080p");
+    }
+
+    #[test]
+    fn bracket_year_extracted_and_stripped_from_filename() {
+        let entry = classify("movies/Interstellar (2014) [1080p].mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.year, Some(2014));
+        assert!(!entry.title.contains('('), "brackets must not survive into the title: {}", entry.title);
+        assert!(!entry.title.contains('['), "brackets must not survive into the title: {}", entry.title);
+    }
+
+    #[test]
+    fn bracket_year_falls_back_to_the_enclosing_folder() {
+        // The existing filename-only cleanup test (movie_title_cleanup) has
+        // no brackets in the filename at all — the year lives only on the
+        // folder, a very common real-world layout.
+        let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
+        assert_eq!(entry.year, Some(2010));
+        assert_eq!(entry.title, "Inception 2010 1080p", "folder-derived year must not change the filename-derived title");
+    }
+
+    #[test]
+    fn decorative_bracket_tags_are_discarded_without_setting_a_year() {
+        let entry = classify("movies/Heat [x264] (YIFY) {web-dl}.mkv").unwrap();
+        assert_eq!(entry.year, None);
+        assert_eq!(entry.title, "Heat");
+    }
+
+    #[test]
+    fn bracket_content_without_a_year_is_still_stripped() {
+        let entry = classify("tv/Severance/Season 1/Severance.S01E01 [Good News About Hell].mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.year, None);
+        assert!(!entry.title.contains('['));
     }
 
     #[test]

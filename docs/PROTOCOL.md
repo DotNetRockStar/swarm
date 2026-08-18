@@ -82,6 +82,14 @@ target four seconds. Music direct-plays when compatible and otherwise uses a
 single 96–192 kbps stereo AAC HLS rendition. Idle sessions and their temporary
 segments expire after five minutes; active file transfers cannot expire.
 
+H.264 High/4.1 + AAC and fMP4/CMAF HLS were chosen specifically because every
+target client (Fire TV's `MediaCodec`, ExoPlayer's HLS demuxer) hardware- or
+natively-decodes them with no additional negotiation beyond this
+`CapabilityProfile`/`PlaybackPlan` exchange — there is no separate
+lower-bandwidth/faster-decode codec question left open. Validated end-to-end
+on real Fire TV hardware: direct play and forced-HLS transcode both produce
+correct, low-latency playback.
+
 ## Catalog identity
 
 - `entry_key = sha256(lowercase(relative_path with / separators))[:24]` — per-server key.

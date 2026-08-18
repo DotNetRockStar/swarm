@@ -18,6 +18,7 @@ use stun_server::state::AppState;
 use swarm_core::peer::PeerRequest;
 use swarm_p2p::endpoint::{connect, send_request};
 use swarm_p2p::identity::DeviceIdentity;
+use swarm_media::roots::MediaRoot;
 use swarm_server::{ServerConfig, ServerCore, TokenStoreMode};
 
 async fn spawn_stun_server() -> String {
@@ -141,7 +142,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
     let media_root = base.join("media");
     std::fs::create_dir_all(&media_root).unwrap();
     let config = ServerConfig {
-        media_root,
+        media_roots: vec![MediaRoot { label: "local".to_string(), path: media_root }],
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
@@ -242,7 +243,7 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
     let media_root = base.join("media");
     std::fs::create_dir_all(&media_root).unwrap();
     let config = ServerConfig {
-        media_root: media_root.clone(),
+        media_roots: vec![MediaRoot { label: "local".to_string(), path: media_root.clone() }],
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
@@ -267,6 +268,43 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
     // restore_stun_link's initial sync races the test; resync deterministically.
     second_run.resync().await.unwrap();
     assert!(second_run.allowed.contains(&peer.identity.fingerprint));
+}
+
+/// A server that belongs to two swarms leaves one and keeps the other:
+/// `allowed` shrinks to drop only the peer reachable solely through the
+/// left swarm, and the persisted link's `swarms` list shrinks to match.
+#[tokio::test]
+async fn leave_swarm_shrinks_allowed_peers_and_link() {
+    let stun_base = spawn_stun_server().await;
+    let browser = Browser::login_fresh_account(&stun_base, "leave-swarm@example.com").await;
+    let home_id = browser.create_swarm("Home").await;
+    let cabin_id = browser.create_swarm("Cabin").await;
+
+    let server = spawn_media_server("leaver").await;
+    let peer_home = spawn_media_server("home-peer").await;
+    let peer_cabin = spawn_media_server("cabin-peer").await;
+
+    let code_home = browser.create_code(&home_id).await;
+    server.register_with_stun(&stun_base, &code_home, "Leaver").await.unwrap();
+    let code_cabin = browser.create_code(&cabin_id).await;
+    server.join_additional_swarm(&code_cabin).await.unwrap();
+
+    let peer_home_code = browser.create_code(&home_id).await;
+    peer_home.register_with_stun(&stun_base, &peer_home_code, "Home Peer").await.unwrap();
+    let peer_cabin_code = browser.create_code(&cabin_id).await;
+    peer_cabin.register_with_stun(&stun_base, &peer_cabin_code, "Cabin Peer").await.unwrap();
+
+    server.resync().await.unwrap();
+    assert!(server.allowed.contains(&peer_home.identity.fingerprint));
+    assert!(server.allowed.contains(&peer_cabin.identity.fingerprint));
+    assert_eq!(server.stun_link().await.unwrap().swarms.len(), 2);
+
+    server.leave_swarm(&cabin_id).await.unwrap();
+    assert!(server.allowed.contains(&peer_home.identity.fingerprint), "Home membership must be untouched");
+    assert!(!server.allowed.contains(&peer_cabin.identity.fingerprint), "Cabin peer must drop out of allowed");
+    let link = server.stun_link().await.unwrap();
+    assert_eq!(link.swarms.len(), 1);
+    assert_eq!(link.swarms[0].id, home_id);
 }
 
 /// A server self-reports where it can be dialed (`peer_addr` metadata) —

@@ -162,6 +162,22 @@ pub struct CatalogEntry {
     /// Changes when artwork changes; clients cache art against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artwork_etag: Option<String>,
+    /// Path/filename-derived release year, if a meaningful one was found —
+    /// same path-derived, never-scraped status as the grouping fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u32>,
+    /// Scraper overlay, movies/episodes only — empty for tracks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<CastMember>,
+}
+
+/// One TMDb credits-list entry, capped to roughly the first ten (billing
+/// order) at scrape time — display-only, never a grouping key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastMember {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
 }
 
 /// ffprobe-derived stream facts captured at scan time; feeds the direct-play
@@ -269,6 +285,11 @@ mod tests {
                     bitrate: None,
                 }),
                 artwork_etag: Some("v1".into()),
+                year: Some(2010),
+                cast: vec![
+                    CastMember { name: "Leonardo DiCaprio".into(), character: Some("Cobb".into()) },
+                    CastMember { name: "Ellen Page".into(), character: None },
+                ],
             }],
             removed: vec![],
         };

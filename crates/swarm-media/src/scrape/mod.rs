@@ -10,4 +10,7 @@ pub mod runner;
 pub mod tmdb;
 pub mod wikimedia;
 
-pub use runner::{run_bulk_scrape, BulkScrapeReport, ScrapeConfig};
+pub use runner::{
+    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError,
+};
+pub use tmdb::{TmdbOverride, TmdbOverrideError};

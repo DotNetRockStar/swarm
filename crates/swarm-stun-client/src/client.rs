@@ -67,6 +67,21 @@ impl StunClient {
         self.get_json(&format!("/api/v1/swarms/{swarm_id}/devices"), Some(access_token)).await
     }
 
+    /// Leave one swarm this device belongs to, without touching its other
+    /// memberships or its access token — the client-side half of the
+    /// STUN server's `swarms::leave`.
+    pub async fn leave_swarm(
+        &self,
+        access_token: &str,
+        swarm_id: &str,
+        device_id: &str,
+    ) -> Result<(), StunClientError> {
+        let _: serde_json::Value = self
+            .delete_json(&format!("/api/v1/swarms/{swarm_id}/devices/{device_id}"), Some(access_token))
+            .await?;
+        Ok(())
+    }
+
     /// Update the device's own arbitrary key/value metadata — a server uses
     /// this to self-report the address peers should dial (key
     /// `peer_addr`, value `host:port`), since the STUN roster otherwise
@@ -106,6 +121,19 @@ impl StunClient {
         bearer: Option<&str>,
     ) -> Result<Resp, StunClientError> {
         let mut request = self.http.patch(format!("{}{path}", self.base_url)).json(body);
+        if let Some(token) = bearer {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        Self::parse_response(response).await
+    }
+
+    async fn delete_json<Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> Result<Resp, StunClientError> {
+        let mut request = self.http.delete(format!("{}{path}", self.base_url));
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }

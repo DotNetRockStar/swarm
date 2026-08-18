@@ -3,64 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>SWARM Server</title>
-<style>
-:root {
-  --bg: #101828; --surface: #151f32; --surface-muted: #1f2a44; --border: #31405f;
-  --accent: #00c2ff; --green: #34d399; --text: #ecf6ff; --muted: #9fb0c9;
-}
-* { box-sizing: border-box; margin: 0; }
-body {
-  background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
-  font-family: "Nunito", system-ui, sans-serif;
-  background-image:
-    linear-gradient(rgba(0,194,255,.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,194,255,.04) 1px, transparent 1px);
-  background-size: 42px 42px;
-}
-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-.brand-mark {
-  width: 36px; height: 36px; border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, var(--accent), #05386b);
-  box-shadow: 0 0 12px rgba(0,194,255,.7);
-}
-h1 { font-size: 1.3rem; letter-spacing: .12em; font-weight: 800; }
-h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 12px; }
-p { line-height: 1.5; }
-.tag { font-size: .7rem; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: var(--muted); }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-.stat { background: var(--surface-muted); border-radius: 10px; padding: 12px 14px; }
-.stat .label { font-size: .72rem; color: var(--muted); }
-.stat .value { font-size: 1.05rem; font-weight: 700; word-break: break-all; }
-.stat .value.mono { font-family: ui-monospace, monospace; font-size: .8rem; }
-button {
-  background: var(--accent); color: #04263a; border: 0; border-radius: 8px;
-  padding: 8px 16px; font-weight: 700; font-family: inherit; cursor: pointer; white-space: nowrap;
-}
-button:hover { filter: brightness(1.15); }
-button.secondary { background: var(--surface-muted); color: var(--text); border: 1px solid var(--border); }
-label { display: block; font-size: .75rem; color: var(--muted); margin: 10px 0 4px; }
-input {
-  width: 100%; background: var(--surface-muted); border: 1px solid var(--border); color: var(--text);
-  border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: .9rem;
-}
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
-th { text-align: left; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 6px 8px; }
-td { padding: 6px 8px; border-top: 1px solid var(--border); }
-td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--muted); }
-.error { color: #ff8db4; font-size: .85rem; margin-top: 8px; min-height: 1em; }
-.note { color: var(--green); font-size: .8rem; }
-.muted { color: var(--muted); }
-.d-none { display: none; }
-.centered-card { max-width: 480px; margin: 60px auto; }
-.row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-.row > * { flex: 1; min-width: 140px; }
-.row > button { flex: 0 0 auto; }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-.card-head h2 { margin-bottom: 0; }
-.card-head-actions { display: flex; gap: 8px; align-items: center; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
@@ -99,252 +42,62 @@ td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--
 </div>
 
 <div id="dashView" class="d-none">
-  <div class="card">
-    <h2>Status</h2>
-    <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+  <div class="tabnav">
+    <button id="tabBtn-details" class="tab-active">Details</button>
+    <button id="tabBtn-swarm">Swarm</button>
+    <button id="tabBtn-media">Media</button>
   </div>
 
-  <div class="card">
-    <h2>Swarm</h2>
-    <div id="swarmContent">Loading…</div>
-  </div>
+  <div id="tabPanel-details">
+    <div class="card">
+      <h2>Status</h2>
+      <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+    </div>
 
-  <div class="card">
-    <div class="card-head">
-      <h2>Library</h2>
-      <div class="card-head-actions">
-        <span id="scanNote" class="note"></span>
-        <button id="scrapeBtn" class="secondary">Scrape metadata</button>
-        <button id="rescanBtn">Rescan</button>
+    <div class="card">
+      <h2>Media roots</h2>
+      <div id="mediaRootsList">Loading…</div>
+      <div class="row" style="margin-top:14px">
+        <input id="addRootLabel" placeholder="Label (e.g. nas-movies)">
+        <input id="addRootPath" placeholder="/path/to/media or a mounted network share">
+        <button id="chooseAddRootBtn" class="secondary">Browse…</button>
+        <button id="addRootBtn">Add root</button>
       </div>
+      <p id="mediaRootsError" class="error"></p>
     </div>
-    <div class="row" style="margin-bottom:14px">
-      <input id="tmdbKeyInput" placeholder="TMDb API key — optional, enables movie/TV scraping">
-      <button id="saveTmdbKeyBtn" class="secondary">Save key</button>
+  </div>
+
+  <div id="tabPanel-swarm" class="d-none">
+    <div class="card">
+      <h2>Swarm</h2>
+      <div id="swarmContent">Loading…</div>
     </div>
-    <div id="library">Loading…</div>
+  </div>
+
+  <div id="tabPanel-media" class="d-none">
+    <div class="card">
+      <div class="card-head">
+        <h2>Library</h2>
+        <div class="card-head-actions">
+          <span id="scanNote" class="note"></span>
+          <button id="scrapeBtn" class="secondary">Scrape metadata</button>
+          <button id="rescanBtn">Rescan</button>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <input id="tmdbKeyInput" placeholder="TMDb API key — optional, enables movie/TV scraping">
+        <button id="saveTmdbKeyBtn" class="secondary">Save key</button>
+      </div>
+      <div id="library">Loading…</div>
+    </div>
   </div>
 </div>
 
 </main>
 
-<script>
-const invoke = window.__TAURI__.core.invoke;
-
-function esc(v) {
-  return String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-
-function stat(label, value, mono) {
-  return `<div class="stat"><div class="label">${esc(label)}</div><div class="value${mono ? " mono" : ""}">${esc(value)}</div></div>`;
-}
-
-function show(id) {
-  for (const el of document.querySelectorAll("#onboardFolderView, #onboardSwarmView, #dashView")) {
-    el.classList.toggle("d-none", el.id !== id);
-  }
-}
-
-// ---- onboarding: media folder ---------------------------------------------
-
-document.getElementById("chooseFolderBtn").addEventListener("click", async () => {
-  const errorEl = document.getElementById("folderError");
-  errorEl.textContent = "";
-  try {
-    const path = await invoke("choose_media_folder");
-    if (path) {
-      show("onboardSwarmView");
-    }
-  } catch (err) {
-    errorEl.textContent = String(err);
-  }
-});
-
-// ---- onboarding: optional swarm join ---------------------------------------
-
-document.getElementById("onboardJoinBtn").addEventListener("click", async () => {
-  const errorEl = document.getElementById("onboardError");
-  errorEl.textContent = "";
-  try {
-    await invoke("join_swarm", {
-      baseUrl: document.getElementById("onboardBaseUrl").value,
-      code: document.getElementById("onboardCode").value,
-      deviceName: document.getElementById("onboardDeviceName").value || "SWARM Server",
-    });
-    await enterDashboard();
-  } catch (err) {
-    errorEl.textContent = String(err);
-  }
-});
-
-document.getElementById("onboardSkipBtn").addEventListener("click", enterDashboard);
-
-// ---- dashboard: status + library -------------------------------------------
-
-async function refreshStatusAndLibrary() {
-  try {
-    const status = await invoke("get_status");
-    document.getElementById("statusGrid").innerHTML =
-      stat("Entries", status.entry_count) +
-      stat("Listening (QUIC)", status.listen_addr) +
-      stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps") +
-      stat("Active playback sessions", status.active_playback_sessions) +
-      stat("Media root", status.media_root) +
-      stat("Device fingerprint", status.fingerprint, true) +
-      stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);
-
-    const entries = await invoke("list_entries");
-    const library = document.getElementById("library");
-    if (!entries.length) {
-      library.innerHTML = `<span class="muted">No media found under the media root.</span>`;
-    } else {
-      library.innerHTML = `<table>
-        <thead><tr><th>Title</th><th>Kind</th><th>Genres</th><th>Art</th><th>Path</th><th>Size</th></tr></thead>
-        <tbody>` + entries.map(e => `<tr>
-          <td>${esc(e.scraped_title || e.title)}</td>
-          <td>${esc(e.kind)}</td>
-          <td>${e.genres.map(esc).join(", ") || "—"}</td>
-          <td>${e.has_artwork ? "✓" : "—"}</td>
-          <td class="mono">${esc(e.relative_path)}</td>
-          <td>${(e.size / 1048576).toFixed(1)} MB</td>
-        </tr>`).join("") + `</tbody></table>`;
-    }
-  } catch (err) {
-    document.getElementById("statusGrid").innerHTML =
-      `<div class="stat"><div class="label error">Error</div><div class="value">${esc(err)}</div></div>`;
-    document.getElementById("library").textContent = "";
-  }
-}
-
-document.getElementById("rescanBtn").addEventListener("click", async () => {
-  const note = document.getElementById("scanNote");
-  try {
-    const r = await invoke("rescan");
-    note.textContent = `+${r.added} added, ${r.updated} updated, ${r.removed} removed`;
-    await refreshStatusAndLibrary();
-  } catch (err) {
-    note.textContent = String(err);
-  }
-});
-
-document.getElementById("scrapeBtn").addEventListener("click", async () => {
-  const note = document.getElementById("scanNote");
-  note.textContent = "Scraping…";
-  try {
-    const r = await invoke("run_scrape");
-    note.textContent = `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`;
-    await refreshStatusAndLibrary();
-  } catch (err) {
-    note.textContent = String(err);
-  }
-});
-
-async function refreshTmdbKeyField() {
-  const settings = await invoke("get_settings");
-  document.getElementById("tmdbKeyInput").placeholder =
-    settings.has_tmdb_key ? "key saved — enter a new one to replace it" : "TMDb API key — optional, enables movie/TV scraping";
-}
-
-document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => {
-  const input = document.getElementById("tmdbKeyInput");
-  try {
-    await invoke("set_tmdb_api_key", { key: input.value });
-    input.value = "";
-    await refreshTmdbKeyField();
-  } catch (err) {
-    document.getElementById("scanNote").textContent = String(err);
-  }
-});
-
-// ---- dashboard: swarm -------------------------------------------------------
-
-async function refreshSwarm() {
-  const content = document.getElementById("swarmContent");
-  let link;
-  try {
-    link = await invoke("get_swarm_link");
-  } catch (err) {
-    content.innerHTML = `<p class="error">${esc(err)}</p>`;
-    return;
-  }
-
-  if (!link) {
-    content.innerHTML = `
-      <p class="muted">Not linked to a STUN server yet.</p>
-      <div class="row">
-        <input id="joinBaseUrl" placeholder="https://swarm.example.com">
-        <input id="joinCode" placeholder="12345678" maxlength="8">
-        <button id="joinBtn">Join swarm</button>
-      </div>
-      <p id="joinError" class="error"></p>`;
-    document.getElementById("joinBtn").addEventListener("click", async () => {
-      const errorEl = document.getElementById("joinError");
-      try {
-        await invoke("join_swarm", {
-          baseUrl: document.getElementById("joinBaseUrl").value,
-          code: document.getElementById("joinCode").value,
-          deviceName: "SWARM Server",
-        });
-        await refreshSwarm();
-      } catch (err) {
-        errorEl.textContent = String(err);
-      }
-    });
-    return;
-  }
-
-  content.innerHTML = `
-    <div class="grid">
-      ${stat("STUN server", link.base_url)}
-      ${stat("Swarms", link.swarms.map(s => s.name).join(", ") || "—")}
-      ${stat("Trusted peers", link.allowed_peer_count)}
-    </div>
-    <div class="row" style="margin-top:12px">
-      <input id="moreCode" placeholder="Join code for another swarm" maxlength="8">
-      <button id="joinMoreBtn" class="secondary">Join another swarm</button>
-      <button id="resyncBtn" class="secondary">Resync now</button>
-    </div>
-    <p id="swarmActionError" class="error"></p>`;
-  document.getElementById("joinMoreBtn").addEventListener("click", async () => {
-    const errorEl = document.getElementById("swarmActionError");
-    try {
-      await invoke("join_additional_swarm", { code: document.getElementById("moreCode").value });
-      await refreshSwarm();
-    } catch (err) {
-      errorEl.textContent = String(err);
-    }
-  });
-  document.getElementById("resyncBtn").addEventListener("click", async () => {
-    const errorEl = document.getElementById("swarmActionError");
-    try {
-      await invoke("resync_swarm");
-      await refreshSwarm();
-    } catch (err) {
-      errorEl.textContent = String(err);
-    }
-  });
-}
-
-// ---- boot -------------------------------------------------------------------
-
-async function enterDashboard() {
-  show("dashView");
-  await Promise.all([refreshStatusAndLibrary(), refreshSwarm(), refreshTmdbKeyField()]);
-}
-
-async function boot() {
-  const settings = await invoke("get_settings");
-  if (!settings.media_root) {
-    show("onboardFolderView");
-    return;
-  }
-  await enterDashboard();
-}
-
-boot().catch(err => {
-  document.getElementById("folderError").textContent = String(err);
-  show("onboardFolderView");
-});
-</script>
+<script src="app.js"></script>
+<script src="details.js"></script>
+<script src="swarm.js"></script>
+<script src="media.js"></script>
 </body>
 </html>

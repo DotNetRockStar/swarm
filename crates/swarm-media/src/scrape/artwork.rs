@@ -4,7 +4,7 @@
 //! folder, e.g. `S01E01.mkv`/`S01E02.mkv`, must not collide); music uses
 //! fixed names shared by every track in the album folder.
 
-use std::path::Path;
+use crate::roots::RootResolver;
 
 pub fn sanitize_stem(stem: &str) -> String {
     let cleaned: String =
@@ -19,28 +19,31 @@ pub fn file_stem(relative_path: &str) -> &str {
 }
 
 /// Write `bytes` into `<folder containing relative_path>/images/<filename>`
-/// and return the artwork's own path relative to `media_root` (forward
-/// slashes), for storage via `Library::set_artwork`.
+/// and return the artwork's own stored `relative_path` (resolved through the
+/// same root that owns `relative_path`, and re-labeled the same way — see
+/// `crate::roots::RootResolver`), for storage via `Library::set_artwork`.
 pub async fn save_artwork(
-    media_root: &Path,
+    roots: &RootResolver,
     relative_path: &str,
     filename: &str,
     bytes: &[u8],
 ) -> std::io::Result<String> {
-    let source_path = media_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let parent = source_path.parent().unwrap_or(media_root);
+    let (root_path, rest) = roots.split(relative_path);
+    let source_path = root_path.join(rest.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let parent = source_path.parent().unwrap_or(&root_path);
     let images_dir = parent.join("images");
     tokio::fs::create_dir_all(&images_dir).await?;
     let target = images_dir.join(filename);
     tokio::fs::write(&target, bytes).await?;
-    let relative = target
-        .strip_prefix(media_root)
+    let relative_under_root = target
+        .strip_prefix(&root_path)
         .unwrap_or(&target)
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/");
-    Ok(relative)
+    let label = roots.label_for(relative_path);
+    Ok(roots.compose(&label, &relative_under_root))
 }
 
 #[cfg(test)]
@@ -65,11 +68,31 @@ mod tests {
         let root = std::env::temp_dir().join(format!("swarm-artwork-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("movies/Foo (2020)")).unwrap();
-        let relative = save_artwork(&root, "movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
+        let roots = RootResolver::single(root.clone());
+        let relative = save_artwork(&roots, "movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
             .await
             .unwrap();
         assert_eq!(relative, "movies/Foo (2020)/images/foo-tmdb-poster.jpg");
         assert_eq!(std::fs::read(root.join(&relative)).unwrap(), b"bytes");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn multi_root_artwork_is_written_under_the_owning_root_and_relabeled() {
+        let base = std::env::temp_dir().join(format!("swarm-artwork-multiroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let nas_root = base.join("nas");
+        std::fs::create_dir_all(nas_root.join("movies/Foo (2020)")).unwrap();
+        let roots = RootResolver::new(vec![
+            crate::roots::MediaRoot { label: "local".into(), path: base.join("local") },
+            crate::roots::MediaRoot { label: "nas".into(), path: nas_root.clone() },
+        ]);
+        let relative =
+            save_artwork(&roots, "nas/movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
+                .await
+                .unwrap();
+        assert_eq!(relative, "nas/movies/Foo (2020)/images/foo-tmdb-poster.jpg");
+        assert_eq!(std::fs::read(nas_root.join("movies/Foo (2020)/images/foo-tmdb-poster.jpg")).unwrap(), b"bytes");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

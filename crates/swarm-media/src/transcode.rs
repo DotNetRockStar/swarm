@@ -873,6 +873,7 @@ mod tests {
             show_title: None,
             season: None,
             episode: None,
+            year: None,
             duration_secs: Some(7_200.0),
             video: Some(VideoStreamInfo {
                 codec: "h264".into(),
@@ -889,6 +890,7 @@ mod tests {
             scraped_title: None,
             genres: vec![],
             artwork_version: 0,
+            cast: vec![],
         }
     }
 

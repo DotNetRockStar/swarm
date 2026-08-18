@@ -3,8 +3,10 @@
 //! pending-changes queue, the deleted-archive, and the thumbprint.
 
 use std::path::{Path, PathBuf};
+use swarm_core::entry_key::entry_key;
 use swarm_core::peer::MediaKind;
-use swarm_media::scan::scan_root;
+use swarm_media::roots::MediaRoot;
+use swarm_media::scan::{scan_root, scan_roots};
 use swarm_media::store::Library;
 
 struct Fixture {
@@ -106,6 +108,85 @@ async fn scan_add_modify_rename_delete() {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].operation, "delete");
     assert_eq!(changes[0].entry_key, track.entry_key);
+}
+
+#[tokio::test]
+async fn single_root_scan_roots_matches_scan_root_byte_for_byte() {
+    // Backward-compat guarantee: scan_root (single PathBuf) must still
+    // produce the exact relative_path/entry_key values it always has, since
+    // it's a thin wrapper over scan_roots with one implicit "local" root
+    // that scan_roots never prefixes when there's only one root configured.
+    let fx = fixture("single-root-parity").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entries = fx.library.list().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].relative_path, "movies/Heat (1995)/Heat.1995.mkv");
+    assert_eq!(entries[0].entry_key, entry_key("movies/Heat (1995)/Heat.1995.mkv"));
+}
+
+#[tokio::test]
+async fn two_roots_with_the_same_relative_path_get_distinct_entry_keys() {
+    let base = std::env::temp_dir().join(format!("swarm-lib-two-roots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root_a = base.join("root-a");
+    let root_b = base.join("root-b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let library = Library::open(base.join("library.sqlite").to_str().unwrap()).await.unwrap();
+
+    // Same sub-path under both roots — must not collide.
+    write(&root_a, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(&root_b, "movies/Heat (1995)/Heat.1995.mkv", &vec![2u8; 4096]);
+
+    let roots = [
+        MediaRoot { label: "local".to_string(), path: root_a.clone() },
+        MediaRoot { label: "nas".to_string(), path: root_b.clone() },
+    ];
+    let report = scan_roots(&library, &roots).await.unwrap();
+    assert_eq!(report.added, 2);
+
+    let entries = library.list().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    let paths: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
+    assert!(paths.contains(&"local/movies/Heat (1995)/Heat.1995.mkv"));
+    assert!(paths.contains(&"nas/movies/Heat (1995)/Heat.1995.mkv"));
+    assert_ne!(entries[0].entry_key, entries[1].entry_key);
+    assert_ne!(entries[0].fingerprint, entries[1].fingerprint); // distinct content too
+}
+
+#[tokio::test]
+async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_untouched() {
+    let fx = fixture("manual-metadata").await;
+    write(&fx.root, "music/Artist/Album/01 - Song.flac", b"fake flac bytes");
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(entry.artist.as_deref(), Some("Artist"));
+    assert_eq!(entry.album.as_deref(), Some("Album"));
+
+    // Only title provided — genres must stay untouched (None means "leave
+    // unchanged", not "clear").
+    fx.library.set_manual_metadata(&entry.entry_key, Some("Manual Title"), None).await.unwrap();
+    let after_title = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(after_title.scraped_title.as_deref(), Some("Manual Title"));
+    assert!(after_title.genres.is_empty());
+    // Grouping fields are never touched by a manual edit.
+    assert_eq!(after_title.artist.as_deref(), Some("Artist"));
+    assert_eq!(after_title.album.as_deref(), Some("Album"));
+
+    // A title having been set marks the entry as "processed" for the bulk
+    // scraper's purposes, same as a real scrape result would.
+    assert!(fx.library.missing_scrape().await.unwrap().is_empty());
+
+    // Now set genres too, and clear the title explicitly via Some("").
+    fx.library
+        .set_manual_metadata(&entry.entry_key, Some(""), Some(&["Electronic".to_string()]))
+        .await
+        .unwrap();
+    let after_genres = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(after_genres.scraped_title, None); // empty string is the "no title override" sentinel
+    assert_eq!(after_genres.genres, vec!["Electronic"]);
+    assert_eq!(after_genres.artist.as_deref(), Some("Artist"));
 }
 
 #[tokio::test]

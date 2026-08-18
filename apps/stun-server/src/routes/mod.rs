@@ -22,7 +22,7 @@ use utoipa::{Modify, OpenApi};
     paths(
         auth::register, auth::login, auth::logout, auth::session, auth::change_password,
         auth::verify_email, auth::request_reset, auth::reset_password,
-        swarms::list, swarms::create, swarms::delete, swarms::create_code, swarms::devices,
+        swarms::list, swarms::create, swarms::delete, swarms::create_code, swarms::devices, swarms::leave,
         devices::register, devices::join_swarm, devices::my_devices, devices::revoke, devices::patch_metadata,
     ),
     components(schemas(
@@ -72,6 +72,7 @@ pub fn build_router(state: SharedState, static_dir: Option<&str>) -> Router {
         .route("/swarms/{swarm_id}", delete(swarms::delete))
         .route("/swarms/{swarm_id}/codes", post(swarms::create_code))
         .route("/swarms/{swarm_id}/devices", get(swarms::devices))
+        .route("/swarms/{swarm_id}/devices/{device_id}", delete(swarms::leave))
         .route("/devices/register", post(devices::register))
         .route("/me/devices", get(devices::my_devices))
         .route("/devices/{device_id}", delete(devices::revoke))

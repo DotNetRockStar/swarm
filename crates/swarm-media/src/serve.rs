@@ -7,6 +7,7 @@
 //! media root) — never from request input.
 
 use crate::range::{content_type, resolve, ResolvedRange};
+use crate::roots::RootResolver;
 use crate::store::{ArtworkKind, Library};
 use crate::transcode::{
     hls_content_type, SessionRateLimiter, TranscodeConfig, TranscodeError, TranscodeManager,
@@ -20,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub struct MediaService {
     library: Arc<Library>,
-    media_root: PathBuf,
+    roots: RootResolver,
     transcodes: Arc<TranscodeManager>,
 }
 
@@ -82,9 +83,14 @@ impl MediaService {
         media_root: PathBuf,
         config: TranscodeConfig,
     ) -> Self {
+        Self::with_roots(library, RootResolver::single(media_root), config)
+    }
+
+    /// Multi-root variant of [`Self::with_transcoding`] — see `crate::roots`.
+    pub fn with_roots(library: Arc<Library>, roots: RootResolver, config: TranscodeConfig) -> Self {
         Self {
             library,
-            media_root,
+            roots,
             transcodes: TranscodeManager::new(config),
         }
     }
@@ -176,7 +182,7 @@ impl MediaService {
         session_id: Option<String>,
         rate_limiters: Vec<Arc<SessionRateLimiter>>,
     ) -> Resolved {
-        let path = self.media_root.join(&entry.relative_path);
+        let path = self.roots.resolve(&entry.relative_path);
         let Ok(metadata) = std::fs::metadata(&path) else {
             return status(404); // deleted since last scan
         };
@@ -231,7 +237,7 @@ impl MediaService {
         let Ok(Some(entry)) = self.library.get(entry_key).await else {
             return status(404);
         };
-        let media_path = self.media_root.join(&entry.relative_path);
+        let media_path = self.roots.resolve(&entry.relative_path);
         if !media_path.is_file() {
             return status(404);
         }
@@ -354,7 +360,7 @@ impl MediaService {
                 session_id: None,
             };
         }
-        let path = self.media_root.join(&relative_path);
+        let path = self.roots.resolve(&relative_path);
         let Ok(metadata) = std::fs::metadata(&path) else {
             return status(404); // artwork file missing from disk since the scrape
         };

@@ -52,6 +52,7 @@ fun SwarmDashboardScreen(
     resyncing: Boolean,
     onResync: () -> Unit,
     onBrowseCatalog: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     // This screen is reached by swapping UiState branches (see SwarmApp's
     // `when`), not a real navigation component — nothing else ever moves
@@ -88,6 +89,12 @@ fun SwarmDashboardScreen(
                     colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
                 ) {
                     Text(if (resyncing) "Resyncing…" else "Resync")
+                }
+                Button(
+                    onClick = onOpenSettings,
+                    colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+                ) {
+                    Text("Settings")
                 }
             }
         }

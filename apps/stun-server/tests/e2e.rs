@@ -241,6 +241,127 @@ async fn full_phase1_flow() {
 }
 
 #[tokio::test]
+async fn leave_swarm_removes_only_that_membership() {
+    let base = spawn_server().await;
+    let browser = Browser::login_fresh_account(&base, "multi-swarm@example.com").await;
+    let anon = reqwest::Client::new();
+
+    // Two swarms owned by the same account, one join code each.
+    let mut swarm_ids = Vec::new();
+    let mut codes = Vec::new();
+    for name in ["Home", "Cabin"] {
+        let swarm: serde_json::Value = browser
+            .request(reqwest::Method::POST, "/api/v1/swarms")
+            .json(&serde_json::json!({"name": name}))
+            .send().await.unwrap().error_for_status().unwrap()
+            .json().await.unwrap();
+        swarm_ids.push(swarm["id"].as_str().unwrap().to_string());
+        let code: serde_json::Value = browser
+            .request(reqwest::Method::POST, &format!("/api/v1/swarms/{}/codes", swarm_ids.last().unwrap()))
+            .json(&serde_json::json!({}))
+            .send().await.unwrap().error_for_status().unwrap()
+            .json().await.unwrap();
+        codes.push(code["code"].as_str().unwrap().to_string());
+    }
+
+    // Register into the first swarm, then join the second with the device's own token.
+    let registered: RegisterDeviceResponse = anon
+        .post(format!("{base}/api/v1/devices/register"))
+        .json(&RegisterDeviceRequest { code: codes[0].clone(), device: registration("Roamer", DeviceType::Both, "roam1", "dd") })
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    anon.post(format!("{base}/api/v1/swarms/join"))
+        .bearer_auth(&registered.access_token)
+        .json(&serde_json::json!({"code": codes[1]}))
+        .send().await.unwrap().error_for_status().unwrap();
+
+    let devices_before: serde_json::Value = browser
+        .request(reqwest::Method::GET, "/api/v1/me/devices")
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    let swarms_before = devices_before["devices"][0]["swarms"].as_array().unwrap();
+    assert_eq!(swarms_before.len(), 2, "device should be in both swarms before leaving either");
+
+    // Leave the first swarm only.
+    let left = anon
+        .delete(format!("{base}/api/v1/swarms/{}/devices/{}", swarm_ids[0], registered.device_id))
+        .bearer_auth(&registered.access_token)
+        .send().await.unwrap();
+    assert_eq!(left.status(), 200);
+
+    let devices_after: serde_json::Value = browser
+        .request(reqwest::Method::GET, "/api/v1/me/devices")
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    let swarms_after = devices_after["devices"][0]["swarms"].as_array().unwrap();
+    assert_eq!(swarms_after.len(), 1, "leaving one swarm must not touch the other membership");
+    assert_eq!(swarms_after[0]["id"].as_str().unwrap(), swarm_ids[1]);
+
+    // Leaving again is a harmless no-op, not an error.
+    let repeat = anon
+        .delete(format!("{base}/api/v1/swarms/{}/devices/{}", swarm_ids[0], registered.device_id))
+        .bearer_auth(&registered.access_token)
+        .send().await.unwrap();
+    assert_eq!(repeat.status(), 200);
+
+    // The device can no longer see the roster of a swarm it left.
+    let denied = anon
+        .get(format!("{base}/api/v1/swarms/{}/devices", swarm_ids[0]))
+        .bearer_auth(&registered.access_token)
+        .send().await.unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
+async fn leave_swarm_is_self_only() {
+    let base = spawn_server().await;
+    let browser = Browser::login_fresh_account(&base, "self-only@example.com").await;
+    let anon = reqwest::Client::new();
+
+    let swarm: serde_json::Value = browser
+        .request(reqwest::Method::POST, "/api/v1/swarms")
+        .json(&serde_json::json!({"name": "Shared"}))
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    let swarm_id = swarm["id"].as_str().unwrap().to_string();
+    let mut codes = Vec::new();
+    for _ in 0..2 {
+        let code: serde_json::Value = browser
+            .request(reqwest::Method::POST, &format!("/api/v1/swarms/{swarm_id}/codes"))
+            .json(&serde_json::json!({}))
+            .send().await.unwrap().error_for_status().unwrap()
+            .json().await.unwrap();
+        codes.push(code["code"].as_str().unwrap().to_string());
+    }
+
+    let device_a: RegisterDeviceResponse = anon
+        .post(format!("{base}/api/v1/devices/register"))
+        .json(&RegisterDeviceRequest { code: codes[0].clone(), device: registration("A", DeviceType::Client, "a1", "ee") })
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    let device_b: RegisterDeviceResponse = anon
+        .post(format!("{base}/api/v1/devices/register"))
+        .json(&RegisterDeviceRequest { code: codes[1].clone(), device: registration("B", DeviceType::Client, "b1", "ff") })
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+
+    // A tries to remove B's membership using A's own token — forbidden.
+    let denied = anon
+        .delete(format!("{base}/api/v1/swarms/{swarm_id}/devices/{}", device_b.device_id))
+        .bearer_auth(&device_a.access_token)
+        .send().await.unwrap();
+    assert_eq!(denied.status(), 403);
+
+    // B is still in the roster.
+    let roster: swarm_core::rest::SwarmDevicesResponse = anon
+        .get(format!("{base}/api/v1/swarms/{swarm_id}/devices"))
+        .bearer_auth(&device_b.access_token)
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    assert!(roster.devices.iter().any(|d| d.device_id == device_b.device_id));
+}
+
+#[tokio::test]
 async fn ws_rejects_bad_token_and_wrong_protocol() {
     let base = spawn_server().await;
     let ws_url = base.replace("http://", "ws://") + "/api/v1/ws";

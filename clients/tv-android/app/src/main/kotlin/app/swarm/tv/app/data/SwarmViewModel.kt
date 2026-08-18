@@ -3,9 +3,12 @@ package app.swarm.tv.app.data
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.swarm.tv.core.catalog.ArtistGroup
+import app.swarm.tv.core.catalog.CatalogGrouping
 import app.swarm.tv.core.catalog.CatalogSession
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.PunchFallback
+import app.swarm.tv.core.catalog.ShowGroup
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
@@ -33,7 +36,19 @@ import kotlinx.coroutines.withContext
 sealed class UiState {
     data object PasscodeEntry : UiState()
     data object Registering : UiState()
-    data class Dashboard(val swarm: SwarmSummary, val devices: List<SwarmDevice>, val resyncing: Boolean = false) : UiState()
+    data class Dashboard(
+        val swarm: SwarmSummary,
+        val devices: List<SwarmDevice>,
+        val resyncing: Boolean = false,
+        val allSwarms: List<SwarmSummary> = emptyList(),
+    ) : UiState()
+    /** [activeSwarmId] is null only once every swarm has been left — the device is still registered, just not a member of anything yet. */
+    data class Settings(
+        val allSwarms: List<SwarmSummary>,
+        val activeSwarmId: String?,
+        val busy: Boolean = false,
+        val error: String? = null,
+    ) : UiState()
     data class Catalog(
         val swarm: SwarmSummary,
         val devices: List<SwarmDevice>,
@@ -42,6 +57,18 @@ sealed class UiState {
         val unreachable: List<SwarmDevice> = emptyList(),
         val playbackError: String? = null,
     ) : UiState()
+    /** Music: Music row -> here (grouped, replacing the old flat-track shelf) -> [ArtistAlbums]. */
+    data class ArtistShelf(val catalog: Catalog, val artists: List<ArtistGroup>) : UiState()
+    /** One artist's albums; [AlbumScreen] handles the album-grid<->track-list sub-navigation locally. */
+    data class ArtistAlbums(val catalog: Catalog, val artists: List<ArtistGroup>, val artist: ArtistGroup) : UiState()
+    /** Movies: Movies row -> here (detail before play) -> [Player]. */
+    data class MovieDetail(val catalog: Catalog, val entry: MergedEntry) : UiState()
+    /** Shows: Shows row -> here (grouped, replacing the old flat-episode shelf) -> [ShowSeasons]. */
+    data class ShowShelf(val catalog: Catalog, val shows: List<ShowGroup>) : UiState()
+    /** One show's seasons; [SeasonScreen] handles the season-list<->episode-grid sub-navigation locally. */
+    data class ShowSeasons(val catalog: Catalog, val shows: List<ShowGroup>, val show: ShowGroup) : UiState()
+    /** One episode's detail before play. */
+    data class EpisodeDetail(val catalog: Catalog, val shows: List<ShowGroup>, val show: ShowGroup, val entry: MergedEntry) : UiState()
     data class Player(
         val url: String,
         val title: String,
@@ -50,6 +77,10 @@ sealed class UiState {
         val positionOffsetSecs: Double,
         val maxBitrate: Long,
         val mediaDurationSecs: Double?,
+        /** The entry actually playing — needed by [nextEpisode]-driven Continue/autoplay. */
+        val entry: MergedEntry,
+        /** Precomputed at negotiation time: the next episode if [entry] is an Episode and one follows it, else null. */
+        val nextEntry: MergedEntry?,
         val previous: Catalog,
     ) : UiState()
     data class Error(val message: String) : UiState()
@@ -82,6 +113,7 @@ class SwarmViewModel(
     private val clientCertificate: X509Certificate,
     private val clientKey: PrivateKey,
     private val watchStateStore: WatchStateStore,
+    private val membershipStore: AndroidSwarmMembershipStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
     private val logTag = "SwarmViewModel"
@@ -89,8 +121,11 @@ class SwarmViewModel(
 
     private var client: StunApiClient? = null
     private var accessToken: String? = null
+    private var deviceId: String? = null
     private var swarmId: String? = null
     private var signaling: SignalingClient? = null
+    /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidSwarmMembershipStore]'s doc comment. */
+    private var cachedSwarms: List<SwarmSummary> = emptyList()
 
     private val proxy = PeerLoopbackProxy.start()
     private val catalogSession = CatalogSession(proxy)
@@ -120,7 +155,10 @@ class SwarmViewModel(
                 tokenStore.save(response.accessToken)
                 client = api
                 accessToken = response.accessToken
+                deviceId = response.deviceId
                 swarmId = response.swarm.id
+                cachedSwarms = listOf(response.swarm)
+                viewModelScope.launch { membershipStore.set(cachedSwarms) }
                 establishSignaling(trimmedBaseUrl, response.accessToken, response.deviceId)
                 loadRoster()
             } catch (e: StunClientError) {
@@ -139,6 +177,94 @@ class SwarmViewModel(
 
     fun dismissError() {
         _state.value = UiState.PasscodeEntry
+    }
+
+    fun openSettings() {
+        val current = _state.value
+        if (current !is UiState.Dashboard) return
+        _state.value = UiState.Settings(allSwarms = current.allSwarms, activeSwarmId = current.swarm.id)
+    }
+
+    /** Redeems an additional join code against this device's existing STUN session — same server, a new swarm on it. */
+    fun joinAdditionalSwarm(code: String) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        val api = client ?: return
+        val token = accessToken ?: return
+        val trimmedCode = code.trim()
+        if (trimmedCode.length != 8) {
+            _state.value = current.copy(error = "Enter the 8-digit join code.")
+            return
+        }
+        _state.value = current.copy(busy = true, error = null)
+        viewModelScope.launch {
+            try {
+                val joined = withContext(Dispatchers.IO) { api.joinSwarm(token, trimmedCode) }
+                cachedSwarms = (cachedSwarms + joined).distinctBy { it.id }
+                membershipStore.set(cachedSwarms)
+                val stateNow = _state.value
+                if (stateNow is UiState.Settings) {
+                    _state.value = stateNow.copy(allSwarms = cachedSwarms, busy = false)
+                }
+            } catch (e: StunClientError) {
+                val stateNow = _state.value
+                if (stateNow is UiState.Settings) {
+                    _state.value = stateNow.copy(busy = false, error = e.message ?: "Could not join that swarm.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Leaves one swarm, keeping this device's registration and its other
+     * memberships intact. If the swarm left was the active one, the first
+     * remaining swarm becomes active; if none remain, [Settings.activeSwarmId]
+     * goes null — the device stays registered, just in zero swarms, and
+     * [backFromSettings] falls back to [UiState.PasscodeEntry] in that case
+     * rather than a broken Dashboard with nothing to show.
+     */
+    fun leaveSwarm(swarmIdToLeave: String) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        val api = client ?: return
+        val token = accessToken ?: return
+        val device = deviceId ?: return
+        _state.value = current.copy(busy = true, error = null)
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { api.leaveSwarm(token, swarmIdToLeave, device) }
+                cachedSwarms = cachedSwarms.filterNot { it.id == swarmIdToLeave }
+                membershipStore.set(cachedSwarms)
+                val newActiveId = if (current.activeSwarmId == swarmIdToLeave) cachedSwarms.firstOrNull()?.id else current.activeSwarmId
+                swarmId = newActiveId
+                val stateNow = _state.value
+                if (stateNow is UiState.Settings) {
+                    _state.value = stateNow.copy(allSwarms = cachedSwarms, activeSwarmId = newActiveId, busy = false)
+                }
+            } catch (e: StunClientError) {
+                val stateNow = _state.value
+                if (stateNow is UiState.Settings) {
+                    _state.value = stateNow.copy(busy = false, error = e.message ?: "Could not leave that swarm.")
+                }
+            }
+        }
+    }
+
+    fun switchActiveSwarm(newSwarmId: String) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        swarmId = newSwarmId
+        _state.value = current.copy(activeSwarmId = newSwarmId)
+    }
+
+    fun backFromSettings() {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        if (current.activeSwarmId == null) {
+            _state.value = UiState.PasscodeEntry
+            return
+        }
+        viewModelScope.launch { loadRoster() }
     }
 
     /** Connects to every reachable server in the roster and merges their catalogs — see [CatalogSession]. */
@@ -174,12 +300,54 @@ class SwarmViewModel(
         return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind")
     }
 
-    /** Negotiates a budgeted direct/HLS session on the first connected source, resuming where a previous watch left off unless it was already finished. */
+    /** Movie/episode backdrop art for detail screens — best-effort, same gate as [artworkUrl]; a 404 (backdrop never scraped) just fails the image load silently, same as this app's existing artwork handling. */
+    fun backdropUrl(entry: MergedEntry): String? {
+        if (entry.entry.artworkEtag == null) return null
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/backdrop")
+    }
+
+    /**
+     * Negotiates a budgeted direct/HLS session on the first connected
+     * source, resuming where a previous watch left off unless it was
+     * already finished. Callable from the top-level [Catalog] screen or
+     * from any of the hierarchical browse/detail screens built on top of
+     * it (they all carry their originating [Catalog] — see [playEntry]).
+     */
     fun play(entry: MergedEntry) {
+        val catalog = when (val current = _state.value) {
+            is UiState.Catalog -> current
+            is UiState.ArtistAlbums -> current.catalog
+            is UiState.MovieDetail -> current.catalog
+            is UiState.EpisodeDetail -> current.catalog
+            else -> return
+        }
+        playEntry(entry, catalog)
+    }
+
+    /** Finds and plays the episode after [UiState.Player.entry] — see [CatalogGrouping.nextEpisode]. No-op if there isn't one. */
+    fun playNext() {
         val current = _state.value
-        if (current !is UiState.Catalog) return
+        if (current !is UiState.Player) return
+        val next = current.nextEntry ?: return
+        playEntry(next, current.previous)
+    }
+
+    /**
+     * The actual negotiation, shared by [play] and [playNext]. A failed
+     * negotiation always surfaces on the top-level [catalog] screen (same
+     * recovery behavior this had before hierarchical browsing existed,
+     * just now reachable from more places that navigate through it) —
+     * pressing play three levels deep in Artist/Album/Episode browsing and
+     * having it fail will visibly return to the flat catalog with an error
+     * shown, rather than staying on the nested screen. A known rough edge,
+     * not a silent one: acceptable for now since it can't lose any state
+     * (browsing this deep is cheap to redo) and matches this codebase's
+     * existing single-error-surface convention rather than adding
+     * per-screen error UI to every new detail/list screen.
+     */
+    private fun playEntry(entry: MergedEntry, catalog: UiState.Catalog) {
         val serverId = entry.sources.first()
-        val device = current.devices.find { it.deviceId == serverId }
+        val device = catalog.devices.find { it.deviceId == serverId }
         val fingerprint = entry.entry.fingerprint
         viewModelScope.launch {
             val resumePositionSecs = watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs ?: 0.0
@@ -196,12 +364,15 @@ class SwarmViewModel(
                 }
             }.getOrElse { error ->
                 Log.e(logTag, "playback negotiation failed", error)
-                if (_state.value is UiState.Catalog) {
-                    _state.value = current.copy(playbackError = error.message ?: "Could not prepare playback.")
-                }
+                _state.value = catalog.copy(playbackError = error.message ?: "Could not prepare playback.")
                 return@launch
             }
             val isHls = selection.mode == PlaybackMode.HLS
+            val nextEntry = if (entry.entry.kind == MediaKind.EPISODE) {
+                CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
+            } else {
+                null
+            }
             _state.value = UiState.Player(
                 url = selection.url,
                 title = entry.entry.scrapedTitle ?: entry.entry.title,
@@ -210,9 +381,89 @@ class SwarmViewModel(
                 positionOffsetSecs = if (isHls) resumePositionSecs else 0.0,
                 maxBitrate = selection.maxBitrate,
                 mediaDurationSecs = entry.entry.durationSecs,
-                previous = current.copy(playbackError = null),
+                entry = entry,
+                nextEntry = nextEntry,
+                previous = catalog.copy(playbackError = null),
             )
         }
+    }
+
+    // --- Hierarchical browsing: Music (Artist -> Album -> Track) ---
+
+    fun openArtistShelf() {
+        val current = _state.value
+        if (current !is UiState.Catalog) return
+        _state.value = UiState.ArtistShelf(current, CatalogGrouping.groupTracksByArtistAlbum(current.entries))
+    }
+
+    fun openArtistAlbums(artist: ArtistGroup) {
+        val (catalog, artists) = when (val current = _state.value) {
+            is UiState.Catalog -> current to CatalogGrouping.groupTracksByArtistAlbum(current.entries)
+            is UiState.ArtistShelf -> current.catalog to current.artists
+            else -> return
+        }
+        _state.value = UiState.ArtistAlbums(catalog, artists, artist)
+    }
+
+    fun backFromArtistShelf() {
+        val current = _state.value
+        if (current is UiState.ArtistShelf) _state.value = current.catalog
+    }
+
+    fun backFromArtistAlbums() {
+        val current = _state.value
+        if (current is UiState.ArtistAlbums) _state.value = UiState.ArtistShelf(current.catalog, current.artists)
+    }
+
+    // --- Hierarchical browsing: Movies (flat, just a detail step before play) ---
+
+    fun openMovieDetail(entry: MergedEntry) {
+        val current = _state.value
+        if (current !is UiState.Catalog) return
+        _state.value = UiState.MovieDetail(current, entry)
+    }
+
+    fun backFromMovieDetail() {
+        val current = _state.value
+        if (current is UiState.MovieDetail) _state.value = current.catalog
+    }
+
+    // --- Hierarchical browsing: Shows (Show -> Season -> Episode) ---
+
+    fun openShowShelf() {
+        val current = _state.value
+        if (current !is UiState.Catalog) return
+        _state.value = UiState.ShowShelf(current, CatalogGrouping.groupEpisodesByShowSeason(current.entries))
+    }
+
+    fun openShowSeasons(show: ShowGroup) {
+        val (catalog, shows) = when (val current = _state.value) {
+            is UiState.Catalog -> current to CatalogGrouping.groupEpisodesByShowSeason(current.entries)
+            is UiState.ShowShelf -> current.catalog to current.shows
+            else -> return
+        }
+        _state.value = UiState.ShowSeasons(catalog, shows, show)
+    }
+
+    fun backFromShowShelf() {
+        val current = _state.value
+        if (current is UiState.ShowShelf) _state.value = current.catalog
+    }
+
+    fun backFromShowSeasons() {
+        val current = _state.value
+        if (current is UiState.ShowSeasons) _state.value = UiState.ShowShelf(current.catalog, current.shows)
+    }
+
+    fun openEpisodeDetail(entry: MergedEntry) {
+        val current = _state.value
+        if (current !is UiState.ShowSeasons) return
+        _state.value = UiState.EpisodeDetail(current.catalog, current.shows, current.show, entry)
+    }
+
+    fun backFromEpisodeDetail() {
+        val current = _state.value
+        if (current is UiState.EpisodeDetail) _state.value = UiState.ShowSeasons(current.catalog, current.shows, current.show)
     }
 
     /** Called when [PlayerScreen] is disposed with where playback ended up — "watched" is a simple near-the-end heuristic, not a precise "credits rolled" signal. */
@@ -230,7 +481,7 @@ class SwarmViewModel(
 
     fun backToDashboard() {
         val current = _state.value
-        if (current is UiState.Catalog) _state.value = UiState.Dashboard(current.swarm, current.devices)
+        if (current is UiState.Catalog) _state.value = UiState.Dashboard(current.swarm, current.devices, allSwarms = cachedSwarms)
     }
 
     /**
@@ -268,7 +519,7 @@ class SwarmViewModel(
         val id = swarmId ?: return
         try {
             val roster = api.swarmDevices(token, id)
-            _state.value = UiState.Dashboard(roster.swarm, roster.devices)
+            _state.value = UiState.Dashboard(roster.swarm, roster.devices, allSwarms = cachedSwarms)
         } catch (e: StunClientError) {
             _state.value = UiState.Error(e.message ?: "Could not load the swarm roster.")
         }
