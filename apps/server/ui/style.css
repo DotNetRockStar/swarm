@@ -97,16 +97,13 @@ td.mono {
 .card-art { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; background: var(--surface-muted); display: block; }
 .card-art.round { border-radius: 50%; aspect-ratio: 1/1; }
 
-/* Media tab: root-level Movies/Shows/Music shelves — horizontally-scrolling
-   rows, one per kind, matching the TV client's CatalogScreen shelves rather
-   than a wrapping folder-style grid. Each category is a tightly-stacked
-   .shelf-section (heading + row) so Movies/Shows/Music read as distinct,
-   adjacent categories rather than floating apart. */
+/* Media tab: root-level Movies/Shows/Music sections — each a full wrapping
+   grid (no horizontal scroll, every tile visible), tightly stacked via
+   .shelf-section so the three categories read as distinct, adjacent
+   sections rather than floating apart. */
 .shelf-section { margin-bottom: 20px; }
 .shelf-section:last-child { margin-bottom: 0; }
 .shelf-section h2 { margin-bottom: 8px; }
-.shelf-row { display: flex; align-items: flex-start; gap: 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
-.shelf-row .media-card { flex: 0 0 150px; }
 .art-placeholder { background: linear-gradient(135deg, var(--surface-muted), var(--border)); }
 .card-title {
   font-size: .82rem; font-weight: 700; margin-top: 6px; line-height: 1.3;

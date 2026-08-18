@@ -191,9 +191,9 @@ function renderBrowseRoot(body) {
   // albums, a show's seasons, etc.) stay as wrapping .media-grid — shelves
   // are specifically the top-level "what kinds of media do I have" view.
   body.innerHTML = `
-    ${movies.length ? `<div class="shelf-section"><h2 style="margin-top:0">Movies</h2><div class="shelf-row">${movieCards}</div></div>` : ""}
-    ${shows.size ? `<div class="shelf-section"><h2>Shows</h2><div class="shelf-row">${showCards}</div></div>` : ""}
-    ${tracks.size ? `<div class="shelf-section"><h2>Music</h2><div class="shelf-row">${artistCards}</div></div>` : ""}
+    ${movies.length ? `<div class="shelf-section"><h2 style="margin-top:0">Movies</h2><div class="media-grid">${movieCards}</div></div>` : ""}
+    ${shows.size ? `<div class="shelf-section"><h2>Shows</h2><div class="media-grid">${showCards}</div></div>` : ""}
+    ${tracks.size ? `<div class="shelf-section"><h2>Music</h2><div class="media-grid">${artistCards}</div></div>` : ""}
     ${!movies.length && !tracks.size && !shows.size ? `<span class="muted">No movies, music, or shows found yet.</span>` : ""}
   `;
 
