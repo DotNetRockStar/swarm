@@ -58,7 +58,7 @@ impl AppState {
                     allowed_fingerprints: vec![],
                     token_store_mode: TokenStoreMode::PreferKeyring,
                 };
-                let (core, _report) = ServerCore::start(config).await.map_err(|e| e.to_string())?;
+                let core = ServerCore::start(config).await.map_err(|e| e.to_string())?;
                 Ok(core)
             })
             .await

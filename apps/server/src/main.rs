@@ -2,6 +2,8 @@
 //! for the environment contract; the Tauri shell (`swarm-server-app`) wraps
 //! the same [`swarm_server::ServerCore`].
 
+use std::sync::Arc;
+
 #[tokio::main]
 async fn main() {
     // ANSI color codes only help an interactive terminal; a piped/redirected
@@ -18,11 +20,22 @@ async fn main() {
         .init();
 
     let config = swarm_server::config_from_env().expect("set SWARM_MEDIA_ROOT to your media folder");
-    let (core, report) = swarm_server::ServerCore::start(config).await.expect("server failed to start");
+    let core = swarm_server::ServerCore::start(config).await.expect("server failed to start");
     tracing::info!(fingerprint = %core.identity.fingerprint, "device identity ready");
-    tracing::info!(added = report.added, updated = report.updated, removed = report.removed,
-        unchanged = report.unchanged, "library scan complete");
     tracing::info!(addr = %core.listen_addr, "peer QUIC listener ready");
+    // The initial scan runs in the background (see ServerCore::start's doc
+    // comment) so a large library doesn't delay the listener coming up;
+    // this just logs once it actually finishes, same info as before, later.
+    tokio::spawn({
+        let core = Arc::clone(&core);
+        async move {
+            match core.wait_for_scan().await {
+                Ok(report) => tracing::info!(added = report.added, updated = report.updated,
+                    removed = report.removed, unchanged = report.unchanged, "library scan complete"),
+                Err(err) => tracing::error!(%err, "library scan failed"),
+            }
+        }
+    });
 
     // One-shot join code, for headless deployments (Docker, a bare VPS) with
     // no GUI to run the onboarding flow. Only fires when nothing is linked

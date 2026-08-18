@@ -82,6 +82,10 @@ pub struct ServerStatus {
     pub thumbprint: String,
     pub streaming_upload_budget_bps: u64,
     pub active_playback_sessions: usize,
+    /// True while a scan (initial, rescan, or a root change) is in
+    /// progress — the library reflects whatever's been found so far either
+    /// way, this is purely informational for a "still scanning…" indicator.
+    pub scanning: bool,
 }
 
 struct StunContext {
@@ -106,6 +110,27 @@ pub struct ServerCore {
     token_store_mode: TokenStoreMode,
     stun: Mutex<Option<StunContext>>,
     scraping: AtomicBool,
+    /// Serializes every full scan (the initial background one, `rescan`, and
+    /// `update_media_roots`) — `scan_roots` snapshots known entries then
+    /// walks and reconciles based on that snapshot, so two overlapping scans
+    /// of the same root set could race each other's reconciliation and
+    /// resurrect/delete entries incorrectly. A later caller simply waits its
+    /// turn rather than being rejected.
+    scan_lock: tokio::sync::Mutex<()>,
+    scan_status: tokio::sync::watch::Sender<ScanState>,
+}
+
+/// The current/last outcome of `ServerCore`'s background or on-demand
+/// scanning — see [`ServerCore::start`]'s doc comment for why the initial
+/// scan doesn't block startup, and [`ServerCore::wait_for_scan`] for how a
+/// caller that specifically needs completion (tests, mainly) can get it.
+#[derive(Debug, Clone, Default)]
+pub enum ScanState {
+    #[default]
+    NotStarted,
+    Scanning,
+    Done(ScanReport),
+    Failed(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,15 +160,23 @@ pub enum ServerError {
 }
 
 impl ServerCore {
-    /// Establish identity, open + scan the library, start serving peers, and
-    /// restore any previously-established STUN link.
-    pub async fn start(config: ServerConfig) -> Result<(Arc<Self>, ScanReport), ServerError> {
+    /// Establish identity, open the library, start serving peers, and
+    /// restore any previously-established STUN link — all synchronously.
+    /// The initial library scan is spawned in the background rather than
+    /// awaited here: a real user's library can be tens of thousands of
+    /// files on a network share, taking many minutes to walk, and every
+    /// Tauri command touches this same `Arc<ServerCore>` — awaiting the scan
+    /// inline meant the very first command after launch (and, since the GUI
+    /// builds this core lazily behind a `OnceCell`, therefore *every*
+    /// command from *every* tab) blocked on the entire scan before the app
+    /// could respond to anything at all. Callers that specifically need the
+    /// initial scan's result (mainly tests) can await [`Self::wait_for_scan`].
+    pub async fn start(config: ServerConfig) -> Result<Arc<Self>, ServerError> {
         std::fs::create_dir_all(&config.data_dir)?;
         let identity = swarm_p2p::identity::ensure_identity(&config.data_dir)?;
         let library = Arc::new(
             Library::open(config.data_dir.join("library.sqlite").to_str().unwrap_or_default()).await?,
         );
-        let report = scan_roots(&library, &config.media_roots).await?;
         let media_roots = SharedRootResolver::new(RootResolver::new(config.media_roots));
 
         let static_fingerprints: Vec<String> =
@@ -171,13 +204,72 @@ impl ServerCore {
             token_store_mode: config.token_store_mode,
             stun: Mutex::new(None),
             scraping: AtomicBool::new(false),
+            scan_lock: tokio::sync::Mutex::new(()),
+            scan_status: tokio::sync::watch::Sender::new(ScanState::NotStarted),
         });
         Arc::clone(&core).restore_stun_link().await;
-        Ok((core, report))
+
+        // Mark Scanning synchronously, before returning, so a caller that
+        // calls wait_for_scan() immediately after start() can never observe
+        // the pre-scan NotStarted default and return early.
+        core.scan_status.send_modify(|s| *s = ScanState::Scanning);
+        let scan_core = Arc::clone(&core);
+        tokio::spawn(async move {
+            let roots = scan_core.media_roots.roots();
+            match scan_core.run_scan(&roots).await {
+                Ok(report) => tracing::info!(added = report.added, updated = report.updated,
+                    removed = report.removed, unchanged = report.unchanged, "initial library scan complete"),
+                Err(err) => tracing::error!(%err, "initial library scan failed"),
+            }
+        });
+
+        Ok(core)
+    }
+
+    /// Runs one full scan, serialized against every other scan on this core
+    /// (initial, rescan, or a root change) via `scan_lock` — see the lock's
+    /// doc comment on `Self` for why concurrent scans of the same root set
+    /// would be unsafe, not just wasteful. Updates `scan_status` throughout.
+    async fn run_scan(&self, roots: &[MediaRoot]) -> Result<ScanReport, ServerError> {
+        let _guard = self.scan_lock.lock().await;
+        self.scan_status.send_modify(|s| *s = ScanState::Scanning);
+        match scan_roots(&self.library, roots).await {
+            Ok(report) => {
+                self.scan_status.send_modify(|s| *s = ScanState::Done(report.clone()));
+                Ok(report)
+            }
+            Err(err) => {
+                self.scan_status.send_modify(|s| *s = ScanState::Failed(err.to_string()));
+                Err(err.into())
+            }
+        }
+    }
+
+    /// The current/last scan outcome — see [`ScanState`].
+    pub fn scan_status(&self) -> ScanState {
+        self.scan_status.borrow().clone()
+    }
+
+    /// Blocks until the current or next scan to complete (or fail) finishes,
+    /// returning its report. Mainly for tests that need deterministic
+    /// post-scan assertions — regular callers should just read whatever the
+    /// library currently has via `scan_status()`/`library.list()` and let it
+    /// catch up live, the same way the scrape-progress UI already does.
+    pub async fn wait_for_scan(&self) -> Result<ScanReport, String> {
+        let mut rx = self.scan_status.subscribe();
+        loop {
+            match &*rx.borrow() {
+                ScanState::Done(report) => return Ok(report.clone()),
+                ScanState::Failed(err) => return Err(err.clone()),
+                ScanState::NotStarted | ScanState::Scanning => {}
+            }
+            rx.changed().await.expect("ServerCore dropped its own scan_status sender");
+        }
     }
 
     pub async fn rescan(&self) -> Result<ScanReport, ServerError> {
-        Ok(scan_roots(&self.library, &self.media_roots.roots()).await?)
+        let roots = self.media_roots.roots();
+        self.run_scan(&roots).await
     }
 
     /// Live-swap the configured media roots and immediately reconcile the
@@ -199,7 +291,7 @@ impl ServerCore {
             return Err(ServerError::NoMediaRoots);
         }
         self.media_roots.replace(roots.clone());
-        Ok(scan_roots(&self.library, &roots).await?)
+        self.run_scan(&roots).await
     }
 
     pub async fn status(&self) -> Result<ServerStatus, ServerError> {
@@ -216,6 +308,7 @@ impl ServerCore {
             thumbprint: self.library.thumbprint().await?,
             streaming_upload_budget_bps: self.service.transcode_manager().config().usable_upload_bps(),
             active_playback_sessions: self.service.transcode_manager().active_sessions(),
+            scanning: matches!(&*self.scan_status.borrow(), ScanState::Scanning),
         })
     }
 

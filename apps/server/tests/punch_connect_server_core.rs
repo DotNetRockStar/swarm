@@ -147,7 +147,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
     };
-    let (core, _report) = ServerCore::start(config).await.unwrap();
+    let core = ServerCore::start(config).await.unwrap();
     core
 }
 

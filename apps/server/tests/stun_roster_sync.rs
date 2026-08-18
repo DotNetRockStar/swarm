@@ -150,7 +150,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
         // automated test — see swarm_stun_client::TokenStore::file_only.
         token_store_mode: TokenStoreMode::FileOnly,
     };
-    let (core, _report) = ServerCore::start(config).await.unwrap();
+    let core = ServerCore::start(config).await.unwrap();
     core
 }
 
@@ -249,7 +249,7 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
     };
-    let (first_run, _report) = ServerCore::start(config.clone()).await.unwrap();
+    let first_run = ServerCore::start(config.clone()).await.unwrap();
     let code = browser.create_code(&swarm_id).await;
     first_run.register_with_stun(&stun_base, &code, "Restartable").await.unwrap();
     let fingerprint_before_restart = first_run.identity.fingerprint.clone();
@@ -262,7 +262,7 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
     // "Restart": start a new ServerCore over the same data_dir. It must
     // restore the identity (same fingerprint), the STUN link, and — after
     // its restore-time sync — the peer that joined while it was down.
-    let (second_run, _report) = ServerCore::start(config).await.unwrap();
+    let second_run = ServerCore::start(config).await.unwrap();
     assert_eq!(second_run.identity.fingerprint, fingerprint_before_restart);
     assert!(second_run.stun_link().await.is_some());
     // restore_stun_link's initial sync races the test; resync deterministically.

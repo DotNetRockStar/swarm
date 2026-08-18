@@ -54,7 +54,11 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
         allowed_fingerprints: vec![client_identity.fingerprint.clone()],
         token_store_mode: TokenStoreMode::FileOnly,
     };
-    let (core, start_report) = ServerCore::start(config).await.unwrap();
+    let core = ServerCore::start(config).await.unwrap();
+    // The initial scan now runs in the background (see ServerCore::start's
+    // doc comment) — wait for it explicitly so the assertions below are
+    // deterministic instead of racing a real filesystem walk.
+    let start_report = core.wait_for_scan().await.unwrap();
     assert_eq!(start_report.added, 1, "root A's one file should be scanned at start");
     assert_eq!(core.library.entry_count().await.unwrap(), 1);
 
