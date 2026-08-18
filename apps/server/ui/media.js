@@ -191,9 +191,9 @@ function renderBrowseRoot(body) {
   // albums, a show's seasons, etc.) stay as wrapping .media-grid — shelves
   // are specifically the top-level "what kinds of media do I have" view.
   body.innerHTML = `
-    ${movies.length ? `<h2 style="margin-top:0">Movies</h2><div class="shelf-row">${movieCards}</div>` : ""}
-    ${shows.size ? `<h2>Shows</h2><div class="shelf-row">${showCards}</div>` : ""}
-    ${tracks.size ? `<h2>Music</h2><div class="shelf-row">${artistCards}</div>` : ""}
+    ${movies.length ? `<div class="shelf-section"><h2 style="margin-top:0">Movies</h2><div class="shelf-row">${movieCards}</div></div>` : ""}
+    ${shows.size ? `<div class="shelf-section"><h2>Shows</h2><div class="shelf-row">${showCards}</div></div>` : ""}
+    ${tracks.size ? `<div class="shelf-section"><h2>Music</h2><div class="shelf-row">${artistCards}</div></div>` : ""}
     ${!movies.length && !tracks.size && !shows.size ? `<span class="muted">No movies, music, or shows found yet.</span>` : ""}
   `;
 
@@ -388,7 +388,7 @@ function renderLibrary() {
     library.innerHTML = `<span class="muted">No media found under the configured media roots.</span>`;
     return;
   }
-  library.innerHTML = `<table>
+  library.innerHTML = `<div class="table-scroll"><table>
     <thead><tr><th>Title</th><th>Kind</th><th>Genres</th><th>Art</th><th>Path</th><th>Size</th><th></th></tr></thead>
     <tbody>` + libraryEntries.map(e => `
       <tr data-entry-row="${esc(e.entry_key)}">
@@ -396,12 +396,12 @@ function renderLibrary() {
         <td>${esc(e.kind)}</td>
         <td>${e.genres.map(esc).join(", ") || "—"}</td>
         <td>${e.has_artwork ? "✓" : "—"}</td>
-        <td class="mono">${esc(e.relative_path)}</td>
+        <td class="mono" title="${esc(e.relative_path)}">${esc(e.relative_path)}</td>
         <td>${(e.size / 1048576).toFixed(1)} MB</td>
         <td><button class="secondary" data-manage="${esc(e.entry_key)}">${openManageKey === e.entry_key ? "Close" : "Manage"}</button></td>
       </tr>
       ${openManageKey === e.entry_key ? `<tr><td colspan="7">${manageRow(e)}</td></tr>` : ""}
-    `).join("") + `</tbody></table>`;
+    `).join("") + `</tbody></table></div>`;
 
   library.querySelectorAll("[data-manage]").forEach(btn => {
     btn.addEventListener("click", () => {

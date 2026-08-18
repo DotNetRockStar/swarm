@@ -40,10 +40,14 @@ input {
   border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: .9rem;
 }
 input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 th { text-align: left; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 6px 8px; }
 td { padding: 6px 8px; border-top: 1px solid var(--border); }
-td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--muted); }
+td.mono {
+  font-family: ui-monospace, monospace; font-size: .75rem; color: var(--muted);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .error { color: #ff8db4; font-size: .85rem; margin-top: 8px; min-height: 1em; }
 .note { color: var(--green); font-size: .8rem; }
 .muted { color: var(--muted); }
@@ -95,8 +99,13 @@ td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--
 
 /* Media tab: root-level Movies/Shows/Music shelves — horizontally-scrolling
    rows, one per kind, matching the TV client's CatalogScreen shelves rather
-   than a wrapping folder-style grid. */
-.shelf-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 8px; scrollbar-width: thin; }
+   than a wrapping folder-style grid. Each category is a tightly-stacked
+   .shelf-section (heading + row) so Movies/Shows/Music read as distinct,
+   adjacent categories rather than floating apart. */
+.shelf-section { margin-bottom: 20px; }
+.shelf-section:last-child { margin-bottom: 0; }
+.shelf-section h2 { margin-bottom: 8px; }
+.shelf-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
 .shelf-row .media-card { flex: 0 0 150px; }
 .art-placeholder { background: linear-gradient(135deg, var(--surface-muted), var(--border)); }
 .card-title { font-size: .82rem; font-weight: 700; margin-top: 6px; line-height: 1.3; }
