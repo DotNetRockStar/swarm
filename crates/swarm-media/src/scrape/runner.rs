@@ -200,6 +200,15 @@ const SEARCH_QUERY_NOISE_TOKENS: &[&str] = &[
     "480p", "720p", "1080p", "2160p", "4k", "bluray", "blu-ray", "webrip", "web-dl", "webdl",
     "hdtv", "dvdrip", "brrip", "bdrip", "x264", "x265", "h264", "h265", "hevc", "avc", "xvid",
     "10bit", "8bit", "ddp5", "ddp", "dts", "aac", "ac3", "atmos",
+    // Scene-release qualifier tags — describe the *release*, not the movie,
+    // but (unlike the codec/resolution tags above) don't reliably follow
+    // right after the title: "Proper" can sit between the title and the
+    // resolution tag (e.g. "28 Years Later Proper 1080p..."), which used to
+    // survive into the search query and broke an otherwise-correct match.
+    "proper", "repack", "rerip", "internal", "limited", "unrated", "extended", "remastered",
+    "theatrical", "directors.cut", "uncut", "retail", "readnfo", "nfofix", "subbed", "dubbed",
+    // Streaming-service source tags, same reasoning.
+    "amzn", "nf", "dsnp", "hulu", "hmax", "atvp", "pcok",
 ];
 
 /// See [`SEARCH_QUERY_NOISE_TOKENS`]. Splits on whitespace, drops every
@@ -581,6 +590,15 @@ mod tests {
         assert_eq!(
             search_query_for("28 Days Later 1080p BluRay DDP5 1 x265 10bit-GalaxyRG265"),
             "28 Days Later"
+        );
+        // A scene-release qualifier tag ("Proper") sitting between the title
+        // and the resolution tag used to survive into the query and broke
+        // an otherwise-correct match — confirmed live: TMDb returns zero
+        // results for "28 Years Later Proper" but one correct result (id
+        // 1100988) for "28 Years Later".
+        assert_eq!(
+            search_query_for("28 Years Later Proper 1080p WEB-DL DDP5 1 x265-NeoNoir"),
+            "28 Years Later"
         );
     }
 

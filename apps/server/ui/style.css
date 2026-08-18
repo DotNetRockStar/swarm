@@ -91,7 +91,7 @@ td.mono {
 .entry-actions button { padding: 5px 10px; font-size: .78rem; }
 
 /* Media tab: hierarchical browse (Phase 4) */
-.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin-bottom: 8px; }
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); align-items: start; gap: 14px; margin-bottom: 8px; }
 .media-card { cursor: pointer; }
 .media-card:hover .card-art { outline: 2px solid var(--accent); }
 .card-art { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; background: var(--surface-muted); display: block; }
@@ -105,7 +105,7 @@ td.mono {
 .shelf-section { margin-bottom: 20px; }
 .shelf-section:last-child { margin-bottom: 0; }
 .shelf-section h2 { margin-bottom: 8px; }
-.shelf-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+.shelf-row { display: flex; align-items: flex-start; gap: 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
 .shelf-row .media-card { flex: 0 0 150px; }
 .art-placeholder { background: linear-gradient(135deg, var(--surface-muted), var(--border)); }
 .card-title { font-size: .82rem; font-weight: 700; margin-top: 6px; line-height: 1.3; }
