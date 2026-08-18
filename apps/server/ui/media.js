@@ -215,6 +215,9 @@ function renderBrowseRoot(body) {
 
 function detailView(entry, backCrumbs) {
   const cast = (entry.cast || []).slice(0, 10);
+  const slash = entry.relative_path.lastIndexOf("/");
+  const fileName = slash === -1 ? entry.relative_path : entry.relative_path.slice(slash + 1);
+  const fileLocation = slash === -1 ? "(root)" : entry.relative_path.slice(0, slash);
   return `
     ${breadcrumb(backCrumbs)}
     <div class="detail-view">
@@ -227,6 +230,10 @@ function detailView(entry, backCrumbs) {
           </h2>
           ${entry.genres.length ? `<p class="muted">${entry.genres.map(esc).join(", ")}</p>` : ""}
           ${cast.length ? `<h2>Cast</h2><p>${cast.map(c => esc(c.character ? `${c.name} as ${c.character}` : c.name)).join(", ")}</p>` : ""}
+          <h2>File</h2>
+          <p class="mono muted" style="font-size:.78rem" title="${esc(entry.relative_path)}">
+            ${esc(fileName)}<br><span style="opacity:.75">${esc(fileLocation)}</span>
+          </p>
         </div>
       </div>
       <div id="detailManage"></div>
@@ -249,6 +256,7 @@ function wireDetailManage(entry) {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(entry.entry_key));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(entry.entry_key));
+    document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(entry.entry_key));
   }
 }
 
@@ -317,6 +325,7 @@ function wireTrackManageHandlers(container) {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
+    document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
   }
 }
 
@@ -415,6 +424,7 @@ function renderLibrary() {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
+    document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
   }
 }
 
@@ -451,9 +461,26 @@ function manageRow(entry) {
       <input id="rescrapeUrlInput" placeholder="https://www.themoviedb.org/movie/27205-inception">
       <div class="row" style="margin-top:10px">
         <button id="rescrapeBtn" class="secondary">Rescrape this entry</button>
+        ${entry.scraped_title || entry.genres.length || entry.has_artwork
+          ? `<button id="revertScrapeBtn" class="danger">Revert to unscraped</button>`
+          : ""}
       </div>
       <p id="rescrapeError" class="error"></p>
+      <p id="revertError" class="error"></p>
+
+      <h2>File</h2>
+      <p class="mono muted" style="font-size:.78rem" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
     </div>`;
+}
+
+async function revertScrape(entryKey) {
+  const errorEl = document.getElementById("revertError");
+  try {
+    await invoke("clear_scraped_metadata", { entryKey });
+    await refreshLibrary();
+  } catch (err) {
+    errorEl.textContent = String(err);
+  }
 }
 
 async function saveEdit(entryKey) {

@@ -194,6 +194,39 @@ async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_un
 }
 
 #[tokio::test]
+async fn clear_scrape_result_reverts_to_unscraped_and_leaves_grouping_fields_untouched() {
+    use swarm_media::store::ArtworkKind;
+
+    let fx = fixture("clear-scrape").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+
+    fx.library
+        .set_scrape_result(&entry.entry_key, Some("Heat"), &["Crime".to_string()], &[])
+        .await
+        .unwrap();
+    fx.library.set_artwork(&entry.entry_key, ArtworkKind::Poster, "movies/Heat (1995)/images/poster.jpg").await.unwrap();
+    let scraped = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(scraped.scraped_title.as_deref(), Some("Heat"));
+    assert!(fx.library.missing_scrape().await.unwrap().is_empty());
+
+    let cleared_paths = fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    assert_eq!(cleared_paths, vec!["movies/Heat (1995)/images/poster.jpg".to_string()]);
+
+    let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(reverted.scraped_title, None);
+    assert!(reverted.genres.is_empty());
+    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+    // Path-derived fields are never touched by a scrape (or its reversal).
+    assert_eq!(reverted.relative_path, scraped.relative_path);
+    // Reverting must put it back into the bulk-scraper's "needs work" set.
+    let missing = fx.library.missing_scrape().await.unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].entry_key, entry.entry_key);
+}
+
+#[tokio::test]
 async fn thumbprint_is_order_independent_and_content_sensitive() {
     let fx_a = fixture("tp-a").await;
     let fx_b = fixture("tp-b").await;

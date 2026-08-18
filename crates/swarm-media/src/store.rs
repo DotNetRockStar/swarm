@@ -422,6 +422,35 @@ impl Library {
         let row: Option<(Option<String>, i64)> = sqlx::query_as(&sql).bind(entry_key).fetch_optional(&self.pool).await?;
         Ok(row.and_then(|(path, version)| path.map(|p| (p, version as u32))))
     }
+
+    /// Reverts a bad scrape: clears the display-overlay `scraped_title`/
+    /// `genres`/`cast` and every artwork slot back to unscraped, so the
+    /// entry becomes eligible for `missing_scrape` again (the same `IS NULL`
+    /// sentinel a fresh, never-scraped entry has). Never touches the
+    /// path-derived grouping fields (`artist`/`album`/`show_title`/etc.) —
+    /// same invariant every other scrape-writing method here already keeps.
+    /// Returns the artwork relative paths that were cleared, if any, so the
+    /// caller can best-effort delete the now-orphaned files on disk.
+    pub async fn clear_scrape_result(&self, entry_key: &str) -> sqlx::Result<Vec<String>> {
+        let row: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path \
+             FROM library_entries WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .fetch_one(&self.pool)
+        .await?;
+        let cleared_paths: Vec<String> = [row.0, row.1, row.2, row.3].into_iter().flatten().collect();
+
+        sqlx::query(
+            "UPDATE library_entries SET scraped_title = NULL, genres_json = NULL, cast_json = NULL, \
+             poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
+             artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(cleared_paths)
+    }
 }
 
 /// `ALTER TABLE ADD COLUMN IF NOT EXISTS` doesn't exist in SQLite; check

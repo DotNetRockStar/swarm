@@ -419,6 +419,24 @@ async fn upload_artwork(
     core.library.set_artwork(&entry_key, artwork_kind, &relative).await.map_err(|e| e.to_string())
 }
 
+/// Reverts a bad scrape (wrong TMDb/MusicBrainz match, bad manual edit) —
+/// clears the scraped title/genres/cast and every artwork slot, and puts the
+/// entry back into `missing_scrape` so a plain (non-force) bulk scrape or a
+/// pinpoint rescrape will pick it up fresh. Also best-effort deletes the
+/// now-orphaned artwork files from disk; a deletion failure (e.g. the file
+/// was already gone, or a flaky network mount) never fails the command
+/// itself — the database state is what actually matters here.
+#[tauri::command]
+async fn clear_scraped_metadata(app: tauri::AppHandle, state: tauri::State<'_, AppState>, entry_key: String) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    let cleared_paths = core.library.clear_scrape_result(&entry_key).await.map_err(|e| e.to_string())?;
+    for relative_path in cleared_paths {
+        let path = core.media_roots.resolve(&relative_path);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct SwarmSummaryView {
     id: String,
@@ -523,6 +541,7 @@ fn main() {
             rescrape_entry,
             set_manual_metadata,
             upload_artwork,
+            clear_scraped_metadata,
             get_swarm_link,
             join_swarm,
             join_additional_swarm,
