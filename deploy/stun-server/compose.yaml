@@ -1,0 +1,64 @@
+name: swarm-stun-server
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      stun-server:
+        condition: service_healthy
+    environment:
+      SWARM_DOMAIN: ${SWARM_DOMAIN:?set SWARM_DOMAIN in deploy/stun-server/.env}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  stun-server:
+    image: ${SWARM_IMAGE:-swarm-stun-server:local}
+    build:
+      context: ../..
+      dockerfile: deploy/stun-server/Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      - SWARM_DATABASE_PATH=/data/swarm.sqlite
+      - SWARM_HTTP_BIND=0.0.0.0:8080
+      - SWARM_PUBLIC_URL=https://${SWARM_DOMAIN:?set SWARM_DOMAIN in deploy/stun-server/.env}
+      - SWARM_REFLECTOR_PORTS=9443,3478
+      - SWARM_STATIC_DIR=/opt/swarm/static
+      - RUST_LOG=${RUST_LOG:-info,sqlx=warn}
+      # Pass through optional SMTP settings only when .env or the shell
+      # defines them. SWARM_SMTP_HOST being absent disables email delivery.
+      - SWARM_SMTP_HOST
+      - SWARM_SMTP_PORT
+      - SWARM_SMTP_USERNAME
+      - SWARM_SMTP_PASSWORD
+      - SWARM_SMTP_STARTTLS
+      - SWARM_EMAIL_FROM
+      - SWARM_EMAIL_FROM_DISPLAY_NAME
+    ports:
+      - "443:9443/udp"
+      - "3478:3478/udp"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - stun-data:/data
+
+volumes:
+  caddy-data:
+  caddy-config:
+  stun-data:

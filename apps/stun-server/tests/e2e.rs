@@ -180,6 +180,14 @@ async fn full_phase1_flow() {
         .json(&RegisterDeviceRequest { code: codes[0].clone(), device: registration("Sneaky", DeviceType::Client, "m3", "cc") })
         .send().await.unwrap();
     assert_eq!(reuse.status(), 401);
+    let my_devices: serde_json::Value = browser
+        .request(reqwest::Method::GET, "/api/v1/me/devices")
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    let registered = my_devices["devices"].as_array().unwrap();
+    assert_eq!(registered.len(), 2);
+    assert!(registered.iter().all(|device| device["name"] != "Sneaky"),
+        "failed registration must roll its device row back");
 
     // Server device connects to signaling; then the TV connects and the
     // server should be told the TV came online.

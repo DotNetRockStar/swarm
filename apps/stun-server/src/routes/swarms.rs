@@ -148,21 +148,34 @@ pub async fn create_code(
     // Sweep expired codes, then mint (the drone rotates codes aggressively;
     // here every code is independent and single-use).
     sqlx::query("DELETE FROM join_codes WHERE expires_at < ?").bind(now()).execute(&state.db).await?;
-    let code = generate_join_code();
     let expires_at = now() + state.config.join_code_ttl_secs;
-    sqlx::query(
-        "INSERT INTO join_codes (id, swarm_id, created_by, code_hash, device_type_hint, expires_at, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(new_id())
-    .bind(&swarm_id)
-    .bind(&user.user_id)
-    .bind(token_hash(&code))
-    .bind(req.device_type_hint.map(device_type_str))
-    .bind(expires_at)
-    .bind(now())
-    .execute(&state.db)
-    .await?;
+    let device_type_hint = req.device_type_hint.map(device_type_str);
+    let mut minted_code = None;
+    // The database uniquely indexes unredeemed code hashes. Retry the tiny
+    // chance of an 8-digit collision instead of returning an ambiguous code.
+    for _ in 0..10 {
+        let code = generate_join_code();
+        let inserted = sqlx::query(
+            "INSERT INTO join_codes \
+             (id, swarm_id, created_by, code_hash, device_type_hint, expires_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(code_hash) WHERE redeemed_by_device IS NULL DO NOTHING",
+        )
+        .bind(new_id())
+        .bind(&swarm_id)
+        .bind(&user.user_id)
+        .bind(token_hash(&code))
+        .bind(device_type_hint)
+        .bind(expires_at)
+        .bind(now())
+        .execute(&state.db)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            minted_code = Some(code);
+            break;
+        }
+    }
+    let code = minted_code.ok_or_else(|| AppError::internal("could not allocate a unique join code"))?;
     Ok((axum::http::StatusCode::CREATED, Json(JoinCodeResponse { code, expires_at: rfc3339(expires_at) })))
 }
 

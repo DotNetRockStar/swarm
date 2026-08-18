@@ -30,7 +30,7 @@ apps/stun-server/          the hosted rendezvous service
 apps/server/               Tauri desktop media server
 clients/tv-android/        Fire TV client — Gradle multi-module (:core, :app); see its own README
 openapi/                   generated OpenAPI + generated Kotlin client (CI gate)
-deploy/                    docker-compose + Caddy for the STUN server
+deploy/stun-server/        Docker + Compose + Caddy for the hosted STUN server
 tests/integration/         docker-composed multi-node + simulated-NAT harness
 docs/                      PROTOCOL.md, recovered reference implementations
 ```

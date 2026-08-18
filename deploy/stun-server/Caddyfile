@@ -1,0 +1,7 @@
+{$SWARM_DOMAIN} {
+	encode zstd gzip
+
+	# Axum serves REST, WebSocket signaling, Swagger, the health endpoint,
+	# and the account UI from one listener. Caddy handles WebSocket upgrades.
+	reverse_proxy stun-server:8080
+}

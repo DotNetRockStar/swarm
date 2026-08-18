@@ -4,7 +4,7 @@
 //! - UDP reflectors (`b"bind"` -> `{"ip","port"}`) on the configured ports.
 //! - Static web UI (accounts/swarms/codes/devices) served at `/`.
 //!
-//! Deployed behind Caddy (TLS on 443) via `deploy/docker-compose.yml`.
+//! Deployed behind Caddy (TLS on 443) via `deploy/stun-server/compose.yaml`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

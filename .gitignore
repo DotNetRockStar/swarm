@@ -13,3 +13,4 @@ clients/tv-android/.kotlin/
 clients/tv-android/**/build/
 clients/tv-android/local.properties
 clients/tv-android/*/gen/
+deploy/**/.env

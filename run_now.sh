@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Runs a real SWARM STUN server + a real media server locally, for manual
-# testing — the same two binaries every automated test in this repo spawns
-# as subprocesses, just left running so you can point a browser, curl, or a
-# real device (Fire TV, phone, whatever) at them yourself. Ctrl+C stops
-# both cleanly.
+# Runs a real SWARM STUN server + a real headless media server + the Tauri
+# media server GUI, all locally, for manual testing — the first two are the
+# same binaries every automated test in this repo spawns as subprocesses,
+# just left running so you can point a browser, curl, or a real device
+# (Fire TV, phone, whatever) at them yourself; the GUI is the same
+# ServerCore wrapped in a window, for visually checking onboarding/library/
+# swarm state instead of only curl+logs. Ctrl+C stops all three, and
+# actually stops them — see the cleanup() note below on why that isn't
+# as trivial as it sounds with `cargo run` in the mix.
 #
 # Binds 0.0.0.0, not just loopback: a real device on the same Wi-Fi/LAN
 # needs to reach these, not just this machine. Use the "LAN" URL printed
@@ -13,14 +17,16 @@
 #
 # First run: open the STUN server's web UI (URL printed below), create an
 # account and a swarm, and mint a join code. Then either:
-#   - paste the code into the Tauri GUI:
-#       cargo run -p swarm-server --features gui --bin swarm-server-app
-#   - or stop this script and re-run with the code so the headless daemon
+#   - paste the code into the GUI window this script already opened, or
+#   - stop this script and re-run with the code so the headless daemon
 #     auto-registers on startup (see SWARM_STUN_CODE below).
 #
 # Env vars (all optional):
-#   SWARM_STUN_PORT   STUN server HTTP port (default 8080)
-#   SWARM_PEER_PORT   media server's peer QUIC port (default 8543)
+#   SWARM_STUN_PORT      STUN server HTTP port (default 8080)
+#   SWARM_PEER_PORT      headless media server's peer QUIC port (default 8543)
+#   SWARM_GUI_PEER_PORT  GUI media server's peer QUIC port (default 8544) —
+#                        must differ from SWARM_PEER_PORT since both are
+#                        real ServerCore instances bound at the same time
 #   SWARM_RUN_DIR     where local state (sqlite dbs, media root) lives (default .run)
 #   SWARM_STUN_URL / SWARM_STUN_CODE   set both to auto-register the media
 #                     server into a swarm on startup (see main.rs)
@@ -36,6 +42,11 @@ fi
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
 STUN_PORT="${SWARM_STUN_PORT:-8080}"
 PEER_PORT="${SWARM_PEER_PORT:-8543}"
+GUI_PEER_PORT="${SWARM_GUI_PEER_PORT:-8544}"
+# The STUN server's own reflector, not otherwise surfaced here — needed so
+# cleanup() can free them too; keep in sync with config.rs's default if that
+# ever changes.
+REFLECTOR_PORTS="9443 3478"
 export RUST_LOG="${RUST_LOG:-info}"
 
 mkdir -p "$RUN_DIR/stun-data" "$RUN_DIR/server-data" "$RUN_DIR/media"
@@ -72,6 +83,22 @@ finally:
 LAN_IP="$(detect_lan_ip)"
 
 pids=()
+# Kills whatever's actually listening on $1 (tcp) — belt-and-suspenders
+# alongside the tracked-pid kill below. Confirmed necessary the hard way:
+# `cargo run ... &` backgrounds cargo's own pid, but cargo can exit once its
+# child binary is up, reparenting the real server process — killing only
+# the tracked pid then does nothing, and the binary keeps running (and
+# holding its port) indefinitely, invisibly, until something notices the
+# *next* run_now.sh fails to bind with "Address already in use". Killing by
+# port is immune to exactly how cargo happens to structure that process tree.
+kill_port() {
+    local port="$1"
+    local held_by
+    held_by="$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)"
+    [ -n "$held_by" ] && echo "$held_by" | while read -r p; do kill "$p" 2>/dev/null || true; done
+    held_by="$(lsof -ti "udp:$port" 2>/dev/null || true)"
+    [ -n "$held_by" ] && echo "$held_by" | while read -r p; do kill "$p" 2>/dev/null || true; done
+}
 cleanup() {
     echo
     echo "Stopping..."
@@ -79,11 +106,16 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
+    sleep 0.3
+    for port in "$STUN_PORT" "$PEER_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
+        kill_port "$port"
+    done
 }
 trap cleanup EXIT INT TERM
 
-echo "==> Building swarm-stun-server + swarm-serverd (debug)..."
+echo "==> Building swarm-stun-server + swarm-serverd + the GUI (debug)..."
 cargo build --bin swarm-stun-server --bin swarm-serverd
+cargo build -p swarm-server --features gui --bin swarm-server-app
 
 echo "==> Starting STUN server on 0.0.0.0:$STUN_PORT ..."
 SWARM_DATABASE_PATH="$RUN_DIR/stun-data/swarm.sqlite" \
@@ -112,6 +144,11 @@ SWARM_PEER_BIND="0.0.0.0:$PEER_PORT" \
     cargo run -q --bin swarm-serverd &
 pids+=($!)
 
+echo "==> Opening the media server GUI (peer QUIC on 0.0.0.0:$GUI_PEER_PORT) ..."
+SWARM_PEER_BIND="0.0.0.0:$GUI_PEER_PORT" \
+    cargo run -q -p swarm-server --features gui --bin swarm-server-app &
+pids+=($!)
+
 cat <<EOF
 
 --------------------------------------------------------------------
@@ -119,17 +156,23 @@ SWARM is running, reachable from this machine and from your LAN:
   local  http://127.0.0.1:$STUN_PORT   (browser on this machine, Swagger at /api/docs)
   LAN    http://$LAN_IP:$STUN_PORT   <- use this one in the Fire TV client / other devices
 
-  Media server: peer QUIC on port $PEER_PORT (both addresses above)
-                drop files into $RUN_DIR/media to serve them
+  Headless media server: peer QUIC on port $PEER_PORT (both addresses above)
+                         drop files into $RUN_DIR/media to serve them
+  GUI media server:      a separate window should now be open, peer QUIC on
+                         port $GUI_PEER_PORT — pick its own media folder there
 
 First time here: open the STUN URL above, create an account and a
-swarm, and mint a join code. Then link the media server to it —
-either through the Tauri GUI, or by stopping this script (Ctrl+C) and
-re-running with:
+swarm, and mint a join code. Then link a media server to it — paste
+the code into the GUI window this script just opened, or stop this
+script (Ctrl+C) and re-run with:
 
   SWARM_STUN_URL=http://$LAN_IP:$STUN_PORT SWARM_STUN_CODE=<code> ./run_now.sh
 
-Ctrl+C to stop both servers.
+(that auto-registers the headless server only — the GUI always joins
+via its own window)
+
+Ctrl+C to stop everything — the STUN server, both media servers, and
+the GUI window all shut down together.
 --------------------------------------------------------------------
 EOF
 
