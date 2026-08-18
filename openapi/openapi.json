@@ -517,6 +517,32 @@
           }
         }
       }
+    },
+    "/api/v1/swarms/{swarm_id}/devices/{device_id}": {
+      "delete": {
+        "tags": [
+          "swarms"
+        ],
+        "summary": "A device leaves one swarm it belongs to, without touching its other\nmemberships or its access token — symmetric with `devices::join_swarm`.\nSelf-only (mirrors `devices::patch_metadata`'s own-resource check): a\ndevice cannot be kicked from a swarm by another device, only by the\nswarm's owner deleting the whole swarm (`delete`, above).",
+        "operationId": "leave",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
     }
   },
   "components": {
