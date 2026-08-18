@@ -12,7 +12,7 @@
 //! matched/not-found/failed counts. Concurrent runs are the caller's
 //! responsibility to prevent (see `ServerCore`'s scrape guard).
 
-use crate::roots::RootResolver;
+use crate::roots::SharedRootResolver;
 use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
@@ -64,7 +64,7 @@ pub struct BulkScrapeReport {
 
 pub async fn run_bulk_scrape(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     config: &ScrapeConfig,
     cancel: &AtomicBool,
 ) -> sqlx::Result<BulkScrapeReport> {
@@ -119,7 +119,7 @@ fn search_query_for(title: &str) -> String {
 
 async fn scrape_videos(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     config: &ScrapeConfig,
     entries: &[EntryRecord],
     cancel: &AtomicBool,
@@ -187,7 +187,7 @@ async fn scrape_videos(
 
 async fn save_video_artwork(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     entry: &EntryRecord,
     kind: ArtworkKind,
     label: &str,
@@ -221,7 +221,7 @@ impl MusicScrapers {
 
 async fn scrape_tracks(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     config: &ScrapeConfig,
     entries: &[EntryRecord],
     cancel: &AtomicBool,
@@ -256,7 +256,7 @@ async fn scrape_tracks(
 /// as a bulk run would.
 async fn scrape_one_album_group(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     scrapers: &MusicScrapers,
     artist: &str,
     album: &str,
@@ -325,7 +325,7 @@ async fn scrape_one_album_group(
 /// given, skips search and fetches that exact TMDb id/URL directly.
 pub async fn scrape_one_video(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     config: &ScrapeConfig,
     entry: &EntryRecord,
     tmdb_override: Option<TmdbOverride>,
@@ -370,7 +370,7 @@ pub async fn scrape_one_video(
 /// rescraped in isolation without leaving its siblings stale.
 pub async fn scrape_one_track(
     library: &Library,
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     config: &ScrapeConfig,
     entry: &EntryRecord,
 ) -> Result<BulkScrapeReport, ScrapeOneError> {
@@ -432,8 +432,8 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
 
-    fn resolver(root: &std::path::Path) -> RootResolver {
-        RootResolver::single(root.to_path_buf())
+    fn resolver(root: &std::path::Path) -> SharedRootResolver {
+        SharedRootResolver::new(crate::roots::RootResolver::single(root.to_path_buf()))
     }
 
     #[test]

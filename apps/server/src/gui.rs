@@ -5,9 +5,11 @@
 //! First-run onboarding picks a media folder (persisted to
 //! `<app data dir>/settings.json`) before a core can start; joining a swarm
 //! is a separate, skippable step reachable again later from the Swarm card.
-//! Changing the media folder after the core has started takes effect on the
-//! next launch — tearing down a live QUIC listener mid-session isn't worth
-//! the complexity for what is, in practice, a rare change.
+//! Adding/removing a media root after the core has started takes effect
+//! immediately (see `AppState::apply_live_roots` and
+//! `ServerCore::update_media_roots`) — the QUIC listener itself is never
+//! torn down, only the shared `SharedRootResolver` both the core and its
+//! `MediaService` hold is swapped and a scan run against the new set.
 
 mod settings;
 
@@ -43,10 +45,7 @@ impl AppState {
                     return Err("not_configured".to_string());
                 }
                 let config = ServerConfig {
-                    media_roots: media_roots
-                        .into_iter()
-                        .map(|r| MediaRoot { label: r.label, path: PathBuf::from(r.path) })
-                        .collect(),
+                    media_roots: to_media_roots(&media_roots),
                     data_dir: dir,
                     // Same SWARM_PEER_BIND convention as the headless binary
                     // (see config_from_env) — lets the GUI run on a different
@@ -65,6 +64,27 @@ impl AppState {
             .await
             .cloned()
     }
+
+    /// If a core is already running, live-apply a fresh root list (see
+    /// `ServerCore::update_media_roots`) — `add_media_root`/`remove_media_root`
+    /// take effect immediately instead of on next launch. A no-op, not an
+    /// error, when no core exists yet (e.g. mid first-run onboarding, before
+    /// any folder has ever been chosen): `OnceCell::get` never triggers
+    /// initialization, so onboarding is unaffected.
+    async fn apply_live_roots(&self, roots: &[MediaRootSetting]) -> Result<Option<RescanResult>, String> {
+        let Some(core) = self.core.get() else { return Ok(None) };
+        let report = core.update_media_roots(to_media_roots(roots)).await.map_err(|e| e.to_string())?;
+        Ok(Some(RescanResult {
+            added: report.added,
+            updated: report.updated,
+            removed: report.removed,
+            unchanged: report.unchanged,
+        }))
+    }
+}
+
+fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
+    settings.iter().map(|r| MediaRoot { label: r.label.clone(), path: PathBuf::from(&r.path) }).collect()
 }
 
 #[derive(serde::Serialize)]
@@ -136,11 +156,24 @@ async fn list_media_roots(app: tauri::AppHandle) -> Result<Vec<MediaRootSetting>
     Ok(settings::load(&app_data_dir(&app)?).media_roots)
 }
 
+#[derive(serde::Serialize)]
+struct MediaRootsResult {
+    media_roots: Vec<MediaRootSetting>,
+    /// Present when a core was already running and the change was applied
+    /// live; absent during first-run onboarding, before any core exists.
+    rescan: Option<RescanResult>,
+}
+
 /// Adds an additional named root (e.g. a mounted NAS share) alongside
-/// whatever's already configured. Like `choose_media_folder`, takes effect
-/// on next launch — see the module docs.
+/// whatever's already configured. Applied live to an already-running core —
+/// see the module docs.
 #[tauri::command]
-async fn add_media_root(app: tauri::AppHandle, label: String, path: String) -> Result<Vec<MediaRootSetting>, String> {
+async fn add_media_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    label: String,
+    path: String,
+) -> Result<MediaRootsResult, String> {
     let label = label.trim().to_string();
     let path = path.trim().to_string();
     if label.is_empty() || path.is_empty() {
@@ -153,13 +186,19 @@ async fn add_media_root(app: tauri::AppHandle, label: String, path: String) -> R
     }
     settings.media_roots.push(MediaRootSetting { label, path });
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
-    Ok(settings.media_roots)
+    let rescan = state.apply_live_roots(&settings.media_roots).await?;
+    Ok(MediaRootsResult { media_roots: settings.media_roots, rescan })
 }
 
 /// Removes a configured root by label. Refuses to remove the last remaining
-/// root — a server always needs at least one.
+/// root — a server always needs at least one. Applied live to an
+/// already-running core — see the module docs.
 #[tauri::command]
-async fn remove_media_root(app: tauri::AppHandle, label: String) -> Result<Vec<MediaRootSetting>, String> {
+async fn remove_media_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    label: String,
+) -> Result<MediaRootsResult, String> {
     let dir = app_data_dir(&app)?;
     let mut settings = settings::load(&dir);
     if settings.media_roots.len() <= 1 {
@@ -167,7 +206,8 @@ async fn remove_media_root(app: tauri::AppHandle, label: String) -> Result<Vec<M
     }
     settings.media_roots.retain(|r| r.label != label);
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
-    Ok(settings.media_roots)
+    let rescan = state.apply_live_roots(&settings.media_roots).await?;
+    Ok(MediaRootsResult { media_roots: settings.media_roots, rescan })
 }
 
 #[tauri::command]

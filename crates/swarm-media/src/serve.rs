@@ -7,7 +7,7 @@
 //! media root) — never from request input.
 
 use crate::range::{content_type, resolve, ResolvedRange};
-use crate::roots::RootResolver;
+use crate::roots::{RootResolver, SharedRootResolver};
 use crate::store::{ArtworkKind, Library};
 use crate::transcode::{
     hls_content_type, SessionRateLimiter, TranscodeConfig, TranscodeError, TranscodeManager,
@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub struct MediaService {
     library: Arc<Library>,
-    roots: RootResolver,
+    roots: SharedRootResolver,
     transcodes: Arc<TranscodeManager>,
 }
 
@@ -83,11 +83,16 @@ impl MediaService {
         media_root: PathBuf,
         config: TranscodeConfig,
     ) -> Self {
-        Self::with_roots(library, RootResolver::single(media_root), config)
+        Self::with_roots(library, SharedRootResolver::new(RootResolver::single(media_root)), config)
     }
 
     /// Multi-root variant of [`Self::with_transcoding`] — see `crate::roots`.
-    pub fn with_roots(library: Arc<Library>, roots: RootResolver, config: TranscodeConfig) -> Self {
+    /// Takes a [`SharedRootResolver`] (not a bare [`RootResolver`]) so a
+    /// caller that later live-updates its roots (see
+    /// `ServerCore::update_media_roots`) can share the exact same handle
+    /// with this service — a bare `RootResolver` clone would silently drift
+    /// out of sync on the next update.
+    pub fn with_roots(library: Arc<Library>, roots: SharedRootResolver, config: TranscodeConfig) -> Self {
         Self {
             library,
             roots,

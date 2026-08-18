@@ -15,7 +15,7 @@ use std::sync::Arc;
 use swarm_core::peer::MediaKind;
 use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmDevicesResponse, SwarmSummary};
 use swarm_core::signal::{SignalMessage, SignalPayload};
-use swarm_media::roots::{MediaRoot, RootResolver};
+use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_roots, ScanReport};
 use swarm_media::scrape::{
     run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError, TmdbOverride,
@@ -93,7 +93,7 @@ struct StunContext {
 pub struct ServerCore {
     pub identity: DeviceIdentity,
     pub library: Arc<Library>,
-    pub media_roots: RootResolver,
+    pub media_roots: SharedRootResolver,
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
     service: Arc<MediaService>,
@@ -129,6 +129,8 @@ pub enum ServerError {
     Scrape(#[from] ScrapeOneError),
     #[error("no library entry with that key")]
     EntryNotFound,
+    #[error("at least one media root is required")]
+    NoMediaRoots,
 }
 
 impl ServerCore {
@@ -141,7 +143,7 @@ impl ServerCore {
             Library::open(config.data_dir.join("library.sqlite").to_str().unwrap_or_default()).await?,
         );
         let report = scan_roots(&library, &config.media_roots).await?;
-        let media_roots = RootResolver::new(config.media_roots);
+        let media_roots = SharedRootResolver::new(RootResolver::new(config.media_roots));
 
         let static_fingerprints: Vec<String> =
             config.allowed_fingerprints.iter().map(|f| f.trim().to_lowercase()).collect();
@@ -174,7 +176,29 @@ impl ServerCore {
     }
 
     pub async fn rescan(&self) -> Result<ScanReport, ServerError> {
-        Ok(scan_roots(&self.library, self.media_roots.roots()).await?)
+        Ok(scan_roots(&self.library, &self.media_roots.roots()).await?)
+    }
+
+    /// Live-swap the configured media roots and immediately reconcile the
+    /// library against them — no restart required. Shared by every caller
+    /// (`ServerCore`'s scan/scrape paths and `MediaService`'s P2P
+    /// serving/artwork paths) all observe the new roots on their very next
+    /// call, since they hold clones of the same [`SharedRootResolver`]
+    /// handle rather than independent copies.
+    ///
+    /// Reconciliation reuses [`scan_roots`] unchanged: it snapshots every
+    /// currently-known entry, walks only the roots passed in, and removes
+    /// anything not seen during that walk. Pointing it at a different root
+    /// set than the one that produced the current library state therefore
+    /// already does the right thing — entries from a removed root are found
+    /// nowhere during the walk and get removed exactly like a deleted file
+    /// would, with no special-cased "root disappeared" handling needed.
+    pub async fn update_media_roots(&self, roots: Vec<MediaRoot>) -> Result<ScanReport, ServerError> {
+        if roots.is_empty() {
+            return Err(ServerError::NoMediaRoots);
+        }
+        self.media_roots.replace(roots.clone());
+        Ok(scan_roots(&self.library, &roots).await?)
     }
 
     pub async fn status(&self) -> Result<ServerStatus, ServerError> {

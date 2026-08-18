@@ -36,10 +36,14 @@ async function refreshMediaRoots() {
     list.querySelectorAll("[data-remove-root]").forEach(btn => {
       btn.addEventListener("click", async () => {
         const errorEl = document.getElementById("mediaRootsError");
+        errorEl.classList.add("error");
+        errorEl.textContent = "";
         try {
-          await invoke("remove_media_root", { label: btn.dataset.removeRoot });
+          const result = await invoke("remove_media_root", { label: btn.dataset.removeRoot });
           await refreshMediaRoots();
+          describeRootChange(errorEl, result);
         } catch (err) {
+          errorEl.classList.add("error");
           errorEl.textContent = String(err);
         }
       });
@@ -49,17 +53,31 @@ async function refreshMediaRoots() {
   }
 }
 
+// Shows how a live add/remove actually landed — a rescan report if a core
+// was already running (this change took effect immediately, no restart), or
+// nothing if it's still first-run onboarding (there's no core yet to apply
+// it to; the choice is just saved for when one starts).
+function describeRootChange(errorEl, result) {
+  if (!result.rescan) return;
+  const { added, updated, removed, unchanged } = result.rescan;
+  errorEl.classList.remove("error");
+  errorEl.textContent = `Applied — scanned now: +${added} added, ${updated} updated, ${removed} removed, ${unchanged} unchanged.`;
+}
+
 document.getElementById("addRootBtn").addEventListener("click", async () => {
   const errorEl = document.getElementById("mediaRootsError");
+  errorEl.classList.add("error");
   errorEl.textContent = "";
   const label = document.getElementById("addRootLabel");
   const path = document.getElementById("addRootPath");
   try {
-    await invoke("add_media_root", { label: label.value, path: path.value });
+    const result = await invoke("add_media_root", { label: label.value, path: path.value });
     label.value = "";
     path.value = "";
     await refreshMediaRoots();
+    describeRootChange(errorEl, result);
   } catch (err) {
+    errorEl.classList.add("error");
     errorEl.textContent = String(err);
   }
 });

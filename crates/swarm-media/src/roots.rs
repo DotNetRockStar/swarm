@@ -14,6 +14,7 @@
 //! make a future transition uniform.
 
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRoot {
@@ -99,6 +100,56 @@ impl RootResolver {
     }
 }
 
+/// A [`RootResolver`] behind a shared, swappable handle. `ServerCore` and
+/// `MediaService` each hold a clone of the same handle (cheap — just an
+/// `Arc` bump), so changing the configured roots via
+/// [`SharedRootResolver::replace`] takes effect for scanning, scraping, and
+/// P2P serving/artwork all at once, with no restart and no way for the two
+/// to drift onto different root sets.
+#[derive(Clone)]
+pub struct SharedRootResolver {
+    inner: Arc<RwLock<RootResolver>>,
+}
+
+impl SharedRootResolver {
+    pub fn new(resolver: RootResolver) -> Self {
+        Self { inner: Arc::new(RwLock::new(resolver)) }
+    }
+
+    /// Atomically swap in a fresh set of roots. Every clone of this handle
+    /// observes the change on its very next call — see the type doc.
+    ///
+    /// # Panics
+    /// If `roots` is empty (see [`RootResolver::new`]) — callers reachable
+    /// from user input (e.g. a Tauri command) must validate non-emptiness
+    /// themselves before calling this.
+    pub fn replace(&self, roots: Vec<MediaRoot>) {
+        *self.inner.write().unwrap() = RootResolver::new(roots);
+    }
+
+    pub fn resolve(&self, relative_path: &str) -> PathBuf {
+        self.inner.read().unwrap().resolve(relative_path)
+    }
+
+    pub fn split(&self, relative_path: &str) -> (PathBuf, String) {
+        self.inner.read().unwrap().split(relative_path)
+    }
+
+    pub fn label_for(&self, relative_path: &str) -> String {
+        self.inner.read().unwrap().label_for(relative_path)
+    }
+
+    pub fn compose(&self, label: &str, path_under_root: &str) -> String {
+        self.inner.read().unwrap().compose(label, path_under_root)
+    }
+
+    /// Point-in-time copy of the configured roots. Owned (not a borrow, unlike
+    /// [`RootResolver::roots`]) since it must outlive the read-lock guard.
+    pub fn roots(&self) -> Vec<MediaRoot> {
+        self.inner.read().unwrap().roots().to_vec()
+    }
+}
+
 /// Parse `SWARM_MEDIA_ROOTS`'s `label=path,label2=path2` format.
 pub fn parse_roots_env(value: &str) -> Vec<MediaRoot> {
     value
@@ -173,5 +224,21 @@ mod tests {
         assert_eq!(parse_roots_env(""), vec![]);
         assert_eq!(parse_roots_env("no-equals-sign"), vec![]);
         assert_eq!(parse_roots_env("=novalue,label=,ok=/path"), vec![MediaRoot { label: "ok".into(), path: PathBuf::from("/path") }]);
+    }
+
+    #[test]
+    fn shared_resolver_replace_is_visible_on_every_clone() {
+        let shared = SharedRootResolver::new(RootResolver::single(PathBuf::from("/old")));
+        let other_handle = shared.clone();
+        assert_eq!(shared.resolve("movies/Foo.mkv"), PathBuf::from("/old/movies/Foo.mkv"));
+
+        shared.replace(vec![MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") }]);
+
+        // Both handles observe the swap — this is the whole point of the
+        // shared Arc<RwLock<..>>: ServerCore and MediaService must never see
+        // different root sets after a live update.
+        assert_eq!(shared.resolve("movies/Foo.mkv"), PathBuf::from("/Volumes/nas/movies/Foo.mkv"));
+        assert_eq!(other_handle.resolve("movies/Foo.mkv"), PathBuf::from("/Volumes/nas/movies/Foo.mkv"));
+        assert_eq!(shared.roots(), vec![MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") }]);
     }
 }

@@ -4,7 +4,7 @@
 //! folder, e.g. `S01E01.mkv`/`S01E02.mkv`, must not collide); music uses
 //! fixed names shared by every track in the album folder.
 
-use crate::roots::RootResolver;
+use crate::roots::SharedRootResolver;
 
 pub fn sanitize_stem(stem: &str) -> String {
     let cleaned: String =
@@ -23,7 +23,7 @@ pub fn file_stem(relative_path: &str) -> &str {
 /// same root that owns `relative_path`, and re-labeled the same way — see
 /// `crate::roots::RootResolver`), for storage via `Library::set_artwork`.
 pub async fn save_artwork(
-    roots: &RootResolver,
+    roots: &SharedRootResolver,
     relative_path: &str,
     filename: &str,
     bytes: &[u8],
@@ -68,7 +68,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("swarm-artwork-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("movies/Foo (2020)")).unwrap();
-        let roots = RootResolver::single(root.clone());
+        let roots = SharedRootResolver::new(crate::roots::RootResolver::single(root.clone()));
         let relative = save_artwork(&roots, "movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
             .await
             .unwrap();
@@ -83,10 +83,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let nas_root = base.join("nas");
         std::fs::create_dir_all(nas_root.join("movies/Foo (2020)")).unwrap();
-        let roots = RootResolver::new(vec![
+        let roots = SharedRootResolver::new(crate::roots::RootResolver::new(vec![
             crate::roots::MediaRoot { label: "local".into(), path: base.join("local") },
             crate::roots::MediaRoot { label: "nas".into(), path: nas_root.clone() },
-        ]);
+        ]));
         let relative =
             save_artwork(&roots, "nas/movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
                 .await
