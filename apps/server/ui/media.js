@@ -516,12 +516,27 @@ document.getElementById("rescanBtn").addEventListener("click", async () => {
   }
 });
 
+function renderScrapeIssues(issues) {
+  const list = document.getElementById("scrapeIssues");
+  if (!issues || issues.length === 0) {
+    list.classList.add("d-none");
+    list.innerHTML = "";
+    return;
+  }
+  list.classList.remove("d-none");
+  list.innerHTML = issues
+    .map(i => `<li><span class="issue-title">${esc(i.title)}</span> — <span class="issue-reason">${esc(i.reason)}</span></li>`)
+    .join("");
+}
+
 document.getElementById("scrapeBtn").addEventListener("click", async () => {
   const note = document.getElementById("scanNote");
   note.textContent = "Scraping…";
+  renderScrapeIssues(null);
   try {
     const r = await invoke("run_scrape");
     note.textContent = `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`;
+    renderScrapeIssues(r.issues);
     await refreshLibrary();
   } catch (err) {
     note.textContent = String(err);

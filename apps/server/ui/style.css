@@ -55,6 +55,11 @@ td.mono { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .card-head h2 { margin-bottom: 0; }
 .card-head-actions { display: flex; gap: 8px; align-items: center; }
+.issue-list { list-style: none; margin: 0 0 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255, 141, 180, 0.06); max-height: 220px; overflow-y: auto; }
+.issue-list li { font-size: .8rem; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.issue-list li:last-child { border-bottom: none; }
+.issue-list .issue-title { color: var(--text); }
+.issue-list .issue-reason { color: #ff8db4; }
 
 /* Tab nav (Phase 3) */
 .tabnav { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }

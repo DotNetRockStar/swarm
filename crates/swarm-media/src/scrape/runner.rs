@@ -39,12 +39,27 @@ pub struct ScrapeConfig {
     pub wikimedia_base: Option<String>,
 }
 
+/// One entry (or, for a music `(artist, album)` group, one representative
+/// track) that didn't come back `matched`, with enough detail to actually
+/// act on it — the aggregate counts alone can't distinguish "this title
+/// genuinely isn't on TMDb" from "every request failed because of a bad
+/// API key," which is exactly the ambiguity that made a real 401-vs-key-
+/// format bug (see `tmdb::is_v4_read_access_token`) invisible until someone
+/// went looking at debug logs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ScrapeIssue {
+    pub entry_key: String,
+    pub title: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BulkScrapeReport {
     pub matched: u64,
     pub not_found: u64,
     pub failed: u64,
     pub skipped: u64,
+    pub issues: Vec<ScrapeIssue>,
 }
 
 pub async fn run_bulk_scrape(
@@ -63,6 +78,43 @@ pub async fn run_bulk_scrape(
         scrape_tracks(library, roots, config, &tracks, cancel, &mut report).await?;
     }
     Ok(report)
+}
+
+/// Scene-release tags that routinely survive `classify::clean_title` (which
+/// only strips bracketed groups and a bare year — see its module doc) but
+/// choke TMDb's search matcher when left in the query: confirmed live
+/// against the real API that `"10 Cloverfield Lane 1080p BluRay x264"`
+/// returns zero results while `"10 Cloverfield Lane"` matches immediately.
+/// Not a stored-title change — this only affects the string sent to TMDb
+/// search, so it can't touch anything `classify.rs`'s own tests already
+/// cover. Truncates the query at the first case-insensitive occurrence of
+/// any of these (a token boundary — not a raw substring match, so a real
+/// title that happens to contain one of these strings as part of a real
+/// word, e.g. wouldn't false-positive on a partial match inside a longer
+/// word) and trims what's left.
+const SEARCH_QUERY_NOISE_TOKENS: &[&str] = &[
+    "480p", "720p", "1080p", "2160p", "4k", "bluray", "blu-ray", "webrip", "web-dl", "webdl",
+    "hdtv", "dvdrip", "brrip", "bdrip", "x264", "x265", "h264", "h265", "hevc", "avc", "xvid",
+    "10bit", "8bit", "ddp5", "ddp", "dts", "aac", "ac3", "atmos",
+];
+
+/// See [`SEARCH_QUERY_NOISE_TOKENS`]. Splits on whitespace, drops every
+/// token from the first noise token onward, and rejoins — cheap and
+/// dependency-free, matching this module's existing hand-rolled style.
+fn search_query_for(title: &str) -> String {
+    let mut kept = Vec::new();
+    for word in title.split_whitespace() {
+        let lower = word.to_lowercase();
+        if SEARCH_QUERY_NOISE_TOKENS.iter().any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag) {
+            break;
+        }
+        kept.push(word);
+    }
+    if kept.is_empty() {
+        title.to_string()
+    } else {
+        kept.join(" ")
+    }
 }
 
 async fn scrape_videos(
@@ -90,9 +142,10 @@ async fn scrape_videos(
             break;
         }
         let outcome = match entry.kind {
-            MediaKind::Movie => tmdb.search_and_fetch_movie(&entry.title, entry.year).await,
+            MediaKind::Movie => tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year).await,
             MediaKind::Episode => {
-                let query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
+                let raw_query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
+                let query = search_query_for(&raw_query);
                 let key = query.to_lowercase();
                 if !tv_cache.contains_key(&key) {
                     let result = tmdb.search_and_fetch_tv(&query).await;
@@ -116,10 +169,16 @@ async fn scrape_videos(
             Err(TmdbError::NotFound) => {
                 library.set_scrape_result(&entry.entry_key, None, &[], &[]).await?;
                 report.not_found += 1;
+                report.issues.push(ScrapeIssue {
+                    entry_key: entry.entry_key.clone(),
+                    title: entry.title.clone(),
+                    reason: "no match found on TMDb".into(),
+                });
             }
             Err(TmdbError::Unavailable(reason)) => {
-                tracing::debug!(entry = %entry.entry_key, %reason, "tmdb unavailable, will retry next run");
+                tracing::warn!(entry = %entry.entry_key, %reason, "tmdb unavailable, will retry next run");
                 report.failed += 1;
+                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason });
             }
         }
     }
@@ -209,11 +268,19 @@ async fn scrape_one_album_group(
         Err(MbError::NotFound) => {
             for track in group {
                 library.set_scrape_result(&track.entry_key, None, &[], &[]).await?;
+                report.issues.push(ScrapeIssue {
+                    entry_key: track.entry_key.clone(),
+                    title: track.title.clone(),
+                    reason: format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\""),
+                });
             }
             report.not_found += group.len() as u64;
         }
         Err(MbError::Unavailable(reason)) => {
-            tracing::debug!(%artist, %album, %reason, "musicbrainz unavailable, will retry next run");
+            tracing::warn!(%artist, %album, %reason, "musicbrainz unavailable, will retry next run");
+            for track in group {
+                report.issues.push(ScrapeIssue { entry_key: track.entry_key.clone(), title: track.title.clone(), reason: reason.clone() });
+            }
             report.failed += group.len() as u64;
         }
         Ok(release_mbid) => {
@@ -279,10 +346,10 @@ pub async fn scrape_one_video(
             tmdb.details_by_id(id, media_type).await?
         }
         None => match entry.kind {
-            MediaKind::Movie => tmdb.search_and_fetch_movie(&entry.title, entry.year).await?,
+            MediaKind::Movie => tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year).await?,
             MediaKind::Episode => {
-                let query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
-                tmdb.search_and_fetch_tv(&query).await?
+                let raw_query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
+                tmdb.search_and_fetch_tv(&search_query_for(&raw_query)).await?
             }
             MediaKind::Track => unreachable!("checked above"),
         },
@@ -369,6 +436,39 @@ mod tests {
         RootResolver::single(root.to_path_buf())
     }
 
+    #[test]
+    fn search_query_strips_release_tags_confirmed_to_break_tmdb_search() {
+        // Both queries below are real filenames that returned zero TMDb
+        // results with the noise attached and matched immediately once
+        // stripped (verified live against the real API, not assumed).
+        assert_eq!(search_query_for("10 Cloverfield Lane 1080p BluRay x264"), "10 Cloverfield Lane");
+        assert_eq!(
+            search_query_for("28 Days Later 1080p BluRay DDP5 1 x265 10bit-GalaxyRG265"),
+            "28 Days Later"
+        );
+    }
+
+    #[test]
+    fn search_query_is_case_insensitive_and_matches_a_whole_token_only() {
+        assert_eq!(search_query_for("The Matrix WEBRip"), "The Matrix");
+        // "4k" is a noise token, but "4kids" (a hypothetical real title word)
+        // must not be truncated on a partial match.
+        assert_eq!(search_query_for("4kids and Counting"), "4kids and Counting");
+    }
+
+    #[test]
+    fn search_query_with_no_noise_tokens_is_unchanged() {
+        assert_eq!(search_query_for("Heat"), "Heat");
+        assert_eq!(search_query_for("The Dark Knight"), "The Dark Knight");
+    }
+
+    #[test]
+    fn search_query_that_is_entirely_noise_falls_back_to_the_original_title() {
+        // Never send TMDb an empty query — a title so noisy every token
+        // matches should degrade to searching the raw title, not "".
+        assert_eq!(search_query_for("1080p x264"), "1080p x264");
+    }
+
     fn fixture_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("swarm-scrape-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -385,7 +485,7 @@ mod tests {
 
         let report =
             run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false)).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1 });
+        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
         // Skipped entries stay unscraped so a later run (with a key) retries them.
         assert_eq!(library.missing_scrape().await.unwrap().len(), 1);
     }
@@ -422,7 +522,7 @@ mod tests {
             ..Default::default()
         };
         let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 1, not_found: 0, failed: 0, skipped: 0 });
+        assert_eq!(report, BulkScrapeReport { matched: 1, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entry = &library.list().await.unwrap()[0];
         assert_eq!(entry.scraped_title.as_deref(), Some("Heat"));
@@ -550,7 +650,7 @@ mod tests {
         let entries = library.list().await.unwrap();
         let config = ScrapeConfig { musicbrainz_base: Some(mb_base), ..Default::default() };
         let report = scrape_one_track(&library, &resolver(&root), &config, &entries[0]).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0 });
+        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
         for entry in library.list().await.unwrap() {
             assert_eq!(entry.genres, vec!["Rock"]);
         }
@@ -589,7 +689,13 @@ mod tests {
             ..Default::default()
         };
         let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 1, failed: 0, skipped: 0 });
+        assert_eq!(report.matched, 0);
+        assert_eq!(report.not_found, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].title, "Unknowable Film");
+        assert_eq!(report.issues[0].reason, "no match found on TMDb");
         // Processed (no match) still counts as done — must not be re-queued.
         assert!(library.missing_scrape().await.unwrap().is_empty());
         let entry = &library.list().await.unwrap()[0];
@@ -633,7 +739,7 @@ mod tests {
             ..Default::default()
         };
         let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false)).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0 });
+        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
 
         let entries = library.list().await.unwrap();
         for entry in &entries {
@@ -658,7 +764,7 @@ mod tests {
 
         let report =
             run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false)).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1 });
+        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }

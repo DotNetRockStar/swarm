@@ -80,11 +80,29 @@ fn parse_tmdb_url_id(url: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// TMDb issues two different credential shapes from the same account
+/// settings page, and it's an easy real-world mix-up (confirmed against a
+/// real user's key): the legacy v3 "API Key" is a 32-character lowercase
+/// hex string sent as an `api_key` query parameter, while the newer v4 "API
+/// Read Access Token" is a JWT (three base64url segments joined by `.`,
+/// e.g. `eyJhbG....<payload>....<signature>`) sent as `Authorization:
+/// Bearer <token>` — passing a v4 token as `api_key` is rejected with a
+/// plain 401 and no hint about which credential type was expected. Detect
+/// by shape rather than making the caller know the difference: a v3 key is
+/// always exactly 32 hex characters, which can never contain a `.`, so
+/// "contains at least two `.` characters" cleanly separates the two — a
+/// JWT always has exactly two dots (header.payload.signature) and a v3 key
+/// structurally can never have any.
+fn is_v4_read_access_token(key: &str) -> bool {
+    key.bytes().filter(|&b| b == b'.').count() >= 2
+}
+
 pub struct TmdbClient {
     http: reqwest::Client,
     api_base: String,
     image_base: String,
     api_key: String,
+    bearer_token: bool,
 }
 
 impl TmdbClient {
@@ -93,11 +111,20 @@ impl TmdbClient {
     }
 
     pub fn with_base_urls(api_key: impl Into<String>, api_base: impl Into<String>, image_base: impl Into<String>) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            api_base: api_base.into(),
-            image_base: image_base.into(),
-            api_key: api_key.into(),
+        let api_key = api_key.into();
+        let bearer_token = is_v4_read_access_token(&api_key);
+        Self { http: reqwest::Client::new(), api_base: api_base.into(), image_base: image_base.into(), api_key, bearer_token }
+    }
+
+    /// Applies this client's detected auth style to a request: a v4 token as
+    /// a Bearer header (and no `api_key` param at all — TMDb doesn't need
+    /// both and a stray `api_key=<jwt>` on a v4-authed request is itself
+    /// sometimes rejected), a v3 key as the traditional `api_key` param.
+    fn authed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.bearer_token {
+            request.bearer_auth(&self.api_key)
+        } else {
+            request.query(&[("api_key", self.api_key.as_str())])
         }
     }
 
@@ -117,16 +144,14 @@ impl TmdbClient {
     async fn search(&self, query: &str, media_type: &str, year: Option<u32>) -> Result<u64, TmdbError> {
         let url = format!("{}/search/{media_type}", self.api_base);
         let year_str = year.map(|y| y.to_string());
-        let mut params = vec![("api_key", self.api_key.as_str()), ("query", query)];
+        let mut params = vec![("query", query)];
         if media_type == "movie" {
             if let Some(year_str) = &year_str {
                 params.push(("year", year_str.as_str()));
             }
         }
         let response = self
-            .http
-            .get(&url)
-            .query(&params)
+            .authed(self.http.get(&url).query(&params))
             .send()
             .await
             .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
@@ -144,11 +169,9 @@ impl TmdbClient {
     pub async fn details_by_id(&self, id: u64, media_type: &str) -> Result<ScrapedVideo, TmdbError> {
         let url = format!("{}/{media_type}/{id}", self.api_base);
         let response = self
-            .http
-            .get(&url)
             // One request, not two: TMDb folds a sub-resource into the main
             // details payload under its own key when asked.
-            .query(&[("api_key", self.api_key.as_str()), ("append_to_response", "credits")])
+            .authed(self.http.get(&url).query(&[("append_to_response", "credits")]))
             .send()
             .await
             .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
@@ -300,6 +323,44 @@ mod tests {
         let client = TmdbClient::with_base_urls("key", &base, &base);
         let result = client.search_and_fetch_movie("Heat", Some(1995)).await.unwrap();
         assert_eq!(result.title, "Heat");
+    }
+
+    #[tokio::test]
+    async fn v3_hex_key_is_sent_as_an_api_key_query_param() {
+        let router = Router::new().route(
+            "/search/movie",
+            get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+                 headers: axum::http::HeaderMap| async move {
+                assert_eq!(params.get("api_key").map(String::as_str), Some("0123456789abcdef0123456789abcdef"));
+                assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+                Json(json!({"results": [{"id": 1}]}))
+            }),
+        )
+        .route("/movie/1", get(|| async { Json(json!({"title": "V3"})) }));
+        let base = spawn_mock(router).await;
+        let client = TmdbClient::with_base_urls("0123456789abcdef0123456789abcdef", &base, &base);
+        assert_eq!(client.search_and_fetch_movie("V3", None).await.unwrap().title, "V3");
+    }
+
+    #[tokio::test]
+    async fn v4_jwt_token_is_sent_as_a_bearer_header_not_a_query_param() {
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature";
+        let router = Router::new().route(
+            "/search/movie",
+            get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+                 headers: axum::http::HeaderMap| async move {
+                assert!(!params.contains_key("api_key"), "a v4 token must not also be sent as api_key");
+                assert_eq!(
+                    headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                    Some("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature")
+                );
+                Json(json!({"results": [{"id": 2}]}))
+            }),
+        )
+        .route("/movie/2", get(|| async { Json(json!({"title": "V4"})) }));
+        let base = spawn_mock(router).await;
+        let client = TmdbClient::with_base_urls(token, &base, &base);
+        assert_eq!(client.search_and_fetch_movie("V4", None).await.unwrap().title, "V4");
     }
 
     #[test]
