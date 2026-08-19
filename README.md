@@ -2,6 +2,21 @@
 
 A free, secure, strictly peer-to-peer media streaming suite — Plex-like, but your media never touches a cloud. People who own their music and video stream it from their own machines to their own devices, end-to-end encrypted. The hosted STUN server coordinates devices and relays hole-punch signaling only; it cannot see or decrypt media.
 
+## TL;DR — test the Fire TV client against a local STUN + media server
+
+Everything below runs on this one machine; the Fire TV just needs to be on the same LAN.
+
+```bash
+./run_now.sh                    # starts STUN server + headless media server + the desktop GUI, all local
+./deploy_tv.sh 192.168.0.148    # builds + installs the TV client on a real Fire TV (its IP: Settings -> My Fire TV -> About -> Network)
+```
+
+Then: open the **LAN** URL `run_now.sh` prints (not `127.0.0.1`) in a browser, register an account, create a swarm, and mint an 8-digit join code. Drop real media files into `.run/media/` (the headless server's root) and/or pick a folder in the GUI window that opened. On the Fire TV, enter that same LAN URL + the join code on the passcode screen. `Ctrl+C` in the terminal stops all three local services together.
+
+First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name ~7 times) and turn on **ADB debugging** under the new Developer Options entry.
+
+Full details, env vars, and troubleshooting: [Manual end-to-end testing](#manual-end-to-end-testing-stun--server--real-fire-tv) below.
+
 Three apps:
 
 | App | Where | Stack |
@@ -75,24 +90,29 @@ mocks, the same real binaries every automated test spawns as subprocesses
 (see `.claude/skills/swarm-interop-test/`), just left running so you can
 point a browser or a real device at them.
 
-**1. Start the STUN server + media server:**
+**1. Start the STUN server + media server(s):**
 ```bash
 ./run_now.sh
 ```
-Builds and runs `swarm-stun-server` + `swarm-serverd`, bound to `0.0.0.0`
-(not just loopback) so a real device on your LAN can reach them. Prints
-two URLs — always use the **LAN** one (e.g. `http://192.168.x.x:8080`),
-not `127.0.0.1`, for anything other than a browser on this same machine.
-If the LAN IP printed looks wrong, this machine likely has a VPN active;
-see `.claude/skills/swarm-local-testing/` for why and how the script
-already works around it.
+Builds and runs three real processes together: `swarm-stun-server`, a
+headless `swarm-serverd`, and the Tauri desktop GUI (`swarm-server-app`) —
+all bound to `0.0.0.0` (not just loopback) so a real device on your LAN
+can reach them. Prints two STUN URLs — always use the **LAN** one (e.g.
+`http://192.168.x.x:8080`), not `127.0.0.1`, for anything other than a
+browser on this same machine. If the LAN IP printed looks wrong, this
+machine likely has a VPN active; see `.claude/skills/swarm-local-testing/`
+for why and how the script already works around it.
 
-Open the local URL in a browser, register an account, create a swarm,
-and mint an 8-digit join code. Link the media server to it either through
-the Tauri GUI (`cargo run -p swarm-server --features gui --bin
-swarm-server-app`) or by restarting with `SWARM_STUN_URL`/`SWARM_STUN_CODE`
-set (printed in the script's own output). Drop real media files into
-`.run/media/` — that's the server's scanned media root.
+Open the LAN URL in a browser, register an account, create a swarm, and
+mint an 8-digit join code. Paste that code into the GUI window the script
+already opened, and pick a media folder there — or drop real files
+directly into `.run/media/`, the headless daemon's own scanned root, and
+register *it* into a swarm instead by stopping the script and re-running
+with `SWARM_STUN_URL`/`SWARM_STUN_CODE` set (printed in the script's own
+output; auto-registers the headless daemon only, never the GUI). Either
+server works fine for TV client testing — the GUI is just easier to watch
+scan/scrape progress on, the headless one is what every automated test
+already exercises.
 
 **2. Install the TV client on a real Fire TV:**
 ```bash
