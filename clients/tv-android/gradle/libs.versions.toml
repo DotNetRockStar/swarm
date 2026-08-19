@@ -10,6 +10,7 @@ activity-compose = "1.9.3"
 lifecycle = "2.8.7"
 media3 = "1.5.0"
 room = "2.6.1"
+ksp = "2.0.21-1.0.28"
 security-crypto = "1.1.0-alpha06"
 junit = "5.11.3"
 mockwebserver = "4.12.0"
@@ -59,3 +60,4 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 android-application = { id = "com.android.application", version.ref = "agp" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

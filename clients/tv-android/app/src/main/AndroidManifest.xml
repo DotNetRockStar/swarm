@@ -20,6 +20,7 @@
     <!-- No microphone/camera features are declared or used. -->
 
     <application
+        android:name="app.swarm.tv.app.SwarmApplication"
         android:allowBackup="false"
         android:banner="@drawable/tv_banner"
         android:icon="@drawable/ic_launcher"

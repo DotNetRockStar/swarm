@@ -46,6 +46,9 @@ sealed class UiState {
     data class Settings(
         val allSwarms: List<SwarmSummary>,
         val activeSwarmId: String?,
+        val baseUrl: String,
+        val deviceName: String,
+        val artworkCacheMinutes: Int,
         val busy: Boolean = false,
         val error: String? = null,
     ) : UiState()
@@ -82,6 +85,9 @@ sealed class UiState {
         /** Precomputed at negotiation time: the next episode if [entry] is an Episode and one follows it, else null. */
         val nextEntry: MergedEntry?,
         val previous: Catalog,
+        /** Which server negotiated [sessionId] — both needed to release its bandwidth reservation on exit, see [SwarmViewModel.releasePlaybackSession]. */
+        val serverId: String,
+        val sessionId: String,
     ) : UiState()
     data class Error(val message: String) : UiState()
 }
@@ -113,7 +119,8 @@ class SwarmViewModel(
     private val clientCertificate: X509Certificate,
     private val clientKey: PrivateKey,
     private val watchStateStore: WatchStateStore,
-    private val membershipStore: AndroidSwarmMembershipStore,
+    private val connectionStore: AndroidConnectionStore,
+    private val settingsStore: AndroidAppSettingsStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
     private val logTag = "SwarmViewModel"
@@ -124,11 +131,44 @@ class SwarmViewModel(
     private var deviceId: String? = null
     private var swarmId: String? = null
     private var signaling: SignalingClient? = null
-    /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidSwarmMembershipStore]'s doc comment. */
+    /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
     private var cachedSwarms: List<SwarmSummary> = emptyList()
+    /** Set on a successful registration or a restored session; re-sent to [connectionStore] on every edit from the config page. */
+    private var baseUrl: String? = null
+    private var deviceName: String? = null
 
     private val proxy = PeerLoopbackProxy.start()
     private val catalogSession = CatalogSession(proxy)
+
+    init {
+        viewModelScope.launch { restoreSession() }
+    }
+
+    /**
+     * Cold-start session resume: previously this app always began at
+     * [UiState.PasscodeEntry] regardless of any prior registration — every
+     * launch meant re-entering the STUN URL and a fresh passcode, since
+     * nothing was ever read back from [tokenStore]/[connectionStore]. Now
+     * that both are actually written on registration (see
+     * [saveCurrentConnection]), restore from them here; leaves the app at
+     * [UiState.PasscodeEntry] (unchanged behavior) for a genuinely first-
+     * ever launch, a signed-out state, or if the saved swarm list is empty
+     * (nothing a Dashboard could show).
+     */
+    private suspend fun restoreSession() {
+        val token = tokenStore.load() ?: return
+        val saved = connectionStore.get() ?: return
+        if (saved.swarms.isEmpty() || saved.activeSwarmId == null) return
+        accessToken = token
+        deviceId = saved.deviceId
+        swarmId = saved.activeSwarmId
+        baseUrl = saved.baseUrl
+        deviceName = saved.deviceName
+        cachedSwarms = saved.swarms
+        client = StunApiClient(saved.baseUrl)
+        establishSignaling(saved.baseUrl, token, saved.deviceId)
+        loadRoster()
+    }
 
     fun submitPasscode(baseUrl: String, code: String, deviceName: String) {
         val trimmedBaseUrl = baseUrl.trim()
@@ -137,6 +177,7 @@ class SwarmViewModel(
             _state.value = UiState.Error("Enter the STUN server URL and the 8-digit join code.")
             return
         }
+        val trimmedDeviceName = deviceName.ifBlank { "Fire TV" }
         viewModelScope.launch {
             _state.value = UiState.Registering
             val api = StunApiClient(trimmedBaseUrl)
@@ -144,7 +185,7 @@ class SwarmViewModel(
                 val response = api.registerDevice(
                     trimmedCode,
                     DeviceRegistration(
-                        name = deviceName.ifBlank { "Fire TV" },
+                        name = trimmedDeviceName,
                         deviceType = DeviceType.CLIENT,
                         machineId = machineId,
                         certFingerprint = certFingerprint,
@@ -157,8 +198,10 @@ class SwarmViewModel(
                 accessToken = response.accessToken
                 deviceId = response.deviceId
                 swarmId = response.swarm.id
+                this@SwarmViewModel.baseUrl = trimmedBaseUrl
+                this@SwarmViewModel.deviceName = trimmedDeviceName
                 cachedSwarms = listOf(response.swarm)
-                viewModelScope.launch { membershipStore.set(cachedSwarms) }
+                viewModelScope.launch { connectionStore.saveNewConnection(trimmedBaseUrl, trimmedDeviceName, response.deviceId, response.swarm) }
                 establishSignaling(trimmedBaseUrl, response.accessToken, response.deviceId)
                 loadRoster()
             } catch (e: StunClientError) {
@@ -182,7 +225,49 @@ class SwarmViewModel(
     fun openSettings() {
         val current = _state.value
         if (current !is UiState.Dashboard) return
-        _state.value = UiState.Settings(allSwarms = current.allSwarms, activeSwarmId = current.swarm.id)
+        viewModelScope.launch {
+            val artworkCacheMinutes = settingsStore.getArtworkCacheMinutes()
+            _state.value = UiState.Settings(
+                allSwarms = current.allSwarms,
+                activeSwarmId = current.swarm.id,
+                baseUrl = baseUrl.orEmpty(),
+                deviceName = deviceName.orEmpty(),
+                artworkCacheMinutes = artworkCacheMinutes,
+            )
+        }
+    }
+
+    /** Config-page edit: where this device connects next — see [AndroidConnectionStore.updateBaseUrl]. */
+    fun updateBaseUrl(newBaseUrl: String) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        val trimmed = newBaseUrl.trim()
+        if (trimmed.isEmpty()) {
+            _state.value = current.copy(error = "Enter a STUN server URL.")
+            return
+        }
+        baseUrl = trimmed
+        _state.value = current.copy(baseUrl = trimmed, error = null)
+        viewModelScope.launch { connectionStore.updateBaseUrl(trimmed) }
+    }
+
+    /** Config-page edit: the locally-remembered device label — see [AndroidConnectionStore.updateDeviceName] for why this never renames the device on the server. */
+    fun updateDeviceName(newName: String) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        val trimmed = newName.ifBlank { "Fire TV" }
+        deviceName = trimmed
+        _state.value = current.copy(deviceName = trimmed, error = null)
+        viewModelScope.launch { connectionStore.updateDeviceName(trimmed) }
+    }
+
+    /** Config-page edit: how long Coil trusts a cached artwork image before re-fetching — see [app.swarm.tv.app.ui.ArtworkCache]. */
+    fun updateArtworkCacheMinutes(minutes: Int) {
+        val current = _state.value
+        if (current !is UiState.Settings) return
+        val clamped = minutes.coerceIn(0, 1440)
+        _state.value = current.copy(artworkCacheMinutes = clamped, error = null)
+        viewModelScope.launch { settingsStore.setArtworkCacheMinutes(clamped) }
     }
 
     /** Redeems an additional join code against this device's existing STUN session — same server, a new swarm on it. */
@@ -201,7 +286,7 @@ class SwarmViewModel(
             try {
                 val joined = withContext(Dispatchers.IO) { api.joinSwarm(token, trimmedCode) }
                 cachedSwarms = (cachedSwarms + joined).distinctBy { it.id }
-                membershipStore.set(cachedSwarms)
+                connectionStore.updateSwarms(cachedSwarms, swarmId)
                 val stateNow = _state.value
                 if (stateNow is UiState.Settings) {
                     _state.value = stateNow.copy(allSwarms = cachedSwarms, busy = false)
@@ -234,9 +319,9 @@ class SwarmViewModel(
             try {
                 withContext(Dispatchers.IO) { api.leaveSwarm(token, swarmIdToLeave, device) }
                 cachedSwarms = cachedSwarms.filterNot { it.id == swarmIdToLeave }
-                membershipStore.set(cachedSwarms)
                 val newActiveId = if (current.activeSwarmId == swarmIdToLeave) cachedSwarms.firstOrNull()?.id else current.activeSwarmId
                 swarmId = newActiveId
+                connectionStore.updateSwarms(cachedSwarms, newActiveId)
                 val stateNow = _state.value
                 if (stateNow is UiState.Settings) {
                     _state.value = stateNow.copy(allSwarms = cachedSwarms, activeSwarmId = newActiveId, busy = false)
@@ -255,6 +340,7 @@ class SwarmViewModel(
         if (current !is UiState.Settings) return
         swarmId = newSwarmId
         _state.value = current.copy(activeSwarmId = newSwarmId)
+        viewModelScope.launch { connectionStore.setActiveSwarm(newSwarmId) }
     }
 
     fun backFromSettings() {
@@ -329,7 +415,20 @@ class SwarmViewModel(
         val current = _state.value
         if (current !is UiState.Player) return
         val next = current.nextEntry ?: return
+        releasePlaybackSession(current.previous, current.serverId, current.sessionId)
         playEntry(next, current.previous)
+    }
+
+    /** Best-effort, fire-and-forget release of a just-finished player's server-side bandwidth reservation — see [CatalogSession.stopPlayback]. */
+    private fun releasePlaybackSession(catalog: UiState.Catalog, serverId: String, sessionId: String) {
+        val device = catalog.devices.find { it.deviceId == serverId } ?: return
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.stopPlayback(device, sessionId, clientCertificate, clientKey)
+                }
+            }.onFailure { Log.w(logTag, "failed to release playback session $sessionId", it) }
+        }
     }
 
     /**
@@ -384,6 +483,8 @@ class SwarmViewModel(
                 entry = entry,
                 nextEntry = nextEntry,
                 previous = catalog.copy(playbackError = null),
+                serverId = serverId,
+                sessionId = selection.sessionId,
             )
         }
     }
@@ -476,7 +577,10 @@ class SwarmViewModel(
 
     fun stopPlayback() {
         val current = _state.value
-        if (current is UiState.Player) _state.value = current.previous
+        if (current is UiState.Player) {
+            releasePlaybackSession(current.previous, current.serverId, current.sessionId)
+            _state.value = current.previous
+        }
     }
 
     fun backToDashboard() {

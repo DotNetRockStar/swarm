@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.android.application)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -62,6 +63,14 @@ android {
     }
 }
 
+// Room writes a JSON snapshot of the schema at each version here on every
+// build — the diffable history a migration-testing tool checks new
+// Migration objects against (see MigrationTest and data/db/Migrations.kt's
+// doc comment for the yoyo-style versioned-script convention this backs).
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(project(":core"))
 
@@ -94,13 +103,17 @@ dependencies {
     // either (bundles OkHttp fetching by default).
     implementation(libs.coil.compose)
 
-    // A local *catalog* cache (for offline/instant browsing) would still
-    // land as Room in a later pass if it turns out to be worth it — not
-    // needed yet (no DAO/entity code exists), and pulling in the KSP
-    // plugin for nothing isn't a trade worth making speculatively. Resume/
-    // watched state is a *separate* concern and deliberately does NOT use
-    // Room even when this does eventually — see AndroidWatchStateStore's
-    // doc comment for why a plain key/value store fits that data better.
+    // Relational on-device store for what the app remembers between
+    // launches — the saved STUN connection (server URL, device name,
+    // device id) and its joined swarms, plus app-level settings (artwork
+    // cache TTL). See data/db/ for the schema and the migration
+    // convention. Resume/watched state is a *separate* concern and
+    // deliberately does NOT use Room — see AndroidWatchStateStore's doc
+    // comment for why a plain key/value store fits that data better.
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
+
     implementation(libs.security.crypto)
 
     implementation(libs.kotlinx.coroutines.android)

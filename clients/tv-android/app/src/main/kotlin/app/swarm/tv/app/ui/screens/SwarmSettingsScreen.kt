@@ -1,10 +1,12 @@
 /**
- * Multi-swarm membership management: reached from [SwarmDashboardScreen],
+ * Multi-swarm membership management, reached from [SwarmDashboardScreen]:
  * lists every swarm this device belongs to, lets the user switch which one
- * is active, leave one, or join an additional one with a fresh 8-digit code
- * (same D-pad number-grid pattern as [PasscodeEntryScreen], reimplemented
- * locally rather than shared since that screen's fields — STUN URL, device
- * name — don't apply once a device is already registered).
+ * is active, leave one, or join an additional one with a fresh 8-digit
+ * code; also the app's one configuration page — editable STUN server URL
+ * and device name (both remembered across launches via
+ * [app.swarm.tv.app.data.AndroidConnectionStore], previously entered once
+ * at registration and never revisited — see that store's doc comment) and
+ * the artwork cache TTL (minutes, [app.swarm.tv.app.ui.ArtworkCache]).
  */
 package app.swarm.tv.app.ui.screens
 
@@ -19,9 +21,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +50,7 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.app.ui.theme.SwarmBorder
 import app.swarm.tv.app.ui.theme.SwarmGreen
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
@@ -55,14 +62,22 @@ import app.swarm.tv.core.rest.SwarmSummary
 fun SwarmSettingsScreen(
     allSwarms: List<SwarmSummary>,
     activeSwarmId: String?,
+    baseUrl: String,
+    deviceName: String,
+    artworkCacheMinutes: Int,
     busy: Boolean,
     errorMessage: String?,
     onJoin: (code: String) -> Unit,
     onLeave: (swarmId: String) -> Unit,
     onSwitchActive: (swarmId: String) -> Unit,
+    onUpdateBaseUrl: (baseUrl: String) -> Unit,
+    onUpdateDeviceName: (name: String) -> Unit,
+    onUpdateArtworkCacheMinutes: (minutes: Int) -> Unit,
     onBack: () -> Unit,
 ) {
     var code by remember { mutableStateOf("") }
+    var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
+    var deviceNameField by remember(deviceName) { mutableStateOf(deviceName) }
 
     // Same reasoning as SwarmDashboardScreen: reached by a UiState swap, not
     // real navigation, so nothing else ever moves D-pad focus here.
@@ -86,6 +101,78 @@ fun SwarmSettingsScreen(
         }
         Spacer(Modifier.height(24.dp))
 
+        Text("Connection", color = SwarmMuted, fontSize = 14.sp)
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = baseUrlField,
+                onValueChange = { baseUrlField = it },
+                label = { Text("STUN server URL") },
+                singleLine = true,
+                colors = fieldColors(),
+                modifier = Modifier.width(420.dp),
+            )
+            Button(
+                onClick = { onUpdateBaseUrl(baseUrlField) },
+                enabled = !busy && baseUrlField.isNotBlank() && baseUrlField != baseUrl,
+                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+            ) {
+                Text("Save")
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = deviceNameField,
+                onValueChange = { deviceNameField = it },
+                label = { Text("Device name") },
+                singleLine = true,
+                colors = fieldColors(),
+                modifier = Modifier.width(420.dp),
+            )
+            Button(
+                onClick = { onUpdateDeviceName(deviceNameField) },
+                enabled = !busy && deviceNameField.isNotBlank() && deviceNameField != deviceName,
+                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+            ) {
+                Text("Save")
+            }
+        }
+        Text(
+            "Renaming here only updates what this app remembers locally — it doesn't rename the device other swarm members already see.",
+            color = SwarmMuted,
+            fontSize = 11.sp,
+        )
+
+        Spacer(Modifier.height(28.dp))
+        Text("Artwork cache", color = SwarmMuted, fontSize = 14.sp)
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Button(
+                onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
+                enabled = !busy && artworkCacheMinutes > 0,
+                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+            ) { Text("−") }
+            Text(
+                if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
+                color = SwarmText,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(110.dp),
+            )
+            Button(
+                onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
+                enabled = !busy && artworkCacheMinutes < 1440,
+                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+            ) { Text("+") }
+        }
+        Text(
+            "How long a cached poster/cover image is trusted before re-fetching. 0 always re-fetches.",
+            color = SwarmMuted,
+            fontSize = 11.sp,
+        )
+
+        Spacer(Modifier.height(28.dp))
         Text("Joined swarms (${allSwarms.size})", color = SwarmMuted, fontSize = 14.sp)
         Spacer(Modifier.height(12.dp))
         if (allSwarms.isEmpty()) {
@@ -131,6 +218,17 @@ fun SwarmSettingsScreen(
         }
     }
 }
+
+@Composable
+private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = SwarmText,
+    unfocusedTextColor = SwarmText,
+    focusedBorderColor = SwarmAccent,
+    unfocusedBorderColor = SwarmBorder,
+    focusedLabelColor = SwarmAccent,
+    unfocusedLabelColor = SwarmMuted,
+    cursorColor = SwarmAccent,
+)
 
 @Composable
 private fun SwarmRow(swarm: SwarmSummary, isActive: Boolean, busy: Boolean, onSelect: () -> Unit, onLeave: () -> Unit) {
