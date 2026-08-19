@@ -169,6 +169,8 @@ data class PlaybackPlan(
     val mode: PlaybackMode,
     val path: String,
     val maxBitrate: Long,
+    /** Same id embedded in [path] — pass to [app.swarm.tv.core.catalog.CatalogSession.stopPlayback] on exit to release this session's bandwidth reservation without waiting out the server's idle timeout. */
+    val sessionId: String,
 )
 
 @Serializable

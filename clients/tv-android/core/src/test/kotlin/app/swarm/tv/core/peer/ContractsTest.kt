@@ -102,8 +102,8 @@ class ContractsTest {
             encoded,
         )
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(
-            """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000}""",
+            """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000,"session_id":"session"}""",
         )
-        assertEquals(PlaybackPlan(PlaybackMode.HLS, "/hls/session/master.m3u8", 4_160_000), plan)
+        assertEquals(PlaybackPlan(PlaybackMode.HLS, "/hls/session/master.m3u8", 4_160_000, "session"), plan)
     }
 }

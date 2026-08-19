@@ -63,6 +63,10 @@ pub struct PlaybackPlan {
     /// Hard server-side allocation for this session, including audio, in
     /// bits/sec. The client also uses it as its conservative ABR ceiling.
     pub max_bitrate: u64,
+    /// Same id embedded in `path` (`/stream/{id}/...` or `/hls/{id}/...`),
+    /// surfaced explicitly so the client can release this session's
+    /// bandwidth reservation via `/stop/{id}` without parsing `path`.
+    pub session_id: String,
 }
 
 /// HTTP-style byte range. `Suffix(n)` = last `n` bytes (`bytes=-n`);
@@ -248,6 +252,7 @@ mod tests {
             mode: PlaybackMode::Hls,
             path: "/hls/session/master.m3u8".into(),
             max_bitrate: 4_160_000,
+            session_id: "session".into(),
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert_eq!(serde_json::from_str::<PlaybackPlan>(&json).unwrap(), plan);

@@ -96,7 +96,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     var punchFallback: PunchFallback? = null
 
     data class Result(val entries: List<MergedEntry>, val unreachable: List<SwarmDevice>)
-    data class PlaybackSelection(val url: String, val mode: PlaybackMode, val maxBitrate: Long)
+    data class PlaybackSelection(val url: String, val mode: PlaybackMode, val maxBitrate: Long, val sessionId: String)
 
     /** The URL to hand a media player for `peerPath` on `serverId` — only live once that server appeared connected in a [refresh]. */
     fun urlFor(serverId: String, peerPath: String): String = proxy.urlFor(serverId, peerPath)
@@ -141,7 +141,22 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             throw IOException("server could not prepare playback (${response.header.status}): $body")
         }
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(body)
-        return PlaybackSelection(proxy.urlFor(device.deviceId, plan.path), plan.mode, plan.maxBitrate)
+        return PlaybackSelection(proxy.urlFor(device.deviceId, plan.path), plan.mode, plan.maxBitrate, plan.sessionId)
+    }
+
+    /**
+     * Releases [sessionId]'s bandwidth reservation on [device] — call once
+     * the player screen for it is torn down (back-press, or moving on to
+     * the next entry), so a same-device retry doesn't get rejected with
+     * "not enough upload bandwidth" for the rest of the server's idle
+     * timeout. Best-effort and silent on failure: this is cleanup on the
+     * way out, and the worst case if it doesn't land (dead connection, no
+     * reachable server) is exactly today's behavior — the reservation
+     * still expires on its own, just later.
+     */
+    suspend fun stopPlayback(device: SwarmDevice, sessionId: String, clientCertificate: X509Certificate, clientKey: PrivateKey) {
+        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        runCatching { connection.request(path = "/stop/$sessionId") }
     }
 
     suspend fun refresh(devices: List<SwarmDevice>, clientCertificate: X509Certificate, clientKey: PrivateKey): Result {

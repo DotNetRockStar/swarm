@@ -117,6 +117,116 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Confirmed live on real hardware: a video froze, the user pressed back,
+/// and every subsequent play attempt (including of a different title) got
+/// rejected with 429 "not enough upload bandwidth is available for the
+/// lowest rendition" — the frozen session's reservation was never released
+/// on back-press, only by the (much longer) idle timeout. `/stop/{id}`
+/// exists so the client can release it immediately on its way out instead
+/// of leaving the whole upload budget stuck for however long remains.
+#[tokio::test]
+async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeout() {
+    let root = std::env::temp_dir().join(format!("swarm-playback-stop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let media_root = root.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+    let relative_path = "movies/example.mp4";
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, vec![7u8; 1_000_000]).unwrap();
+
+    let library = Arc::new(
+        Library::open(root.join("library.sqlite").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let entry = EntryRecord {
+        entry_key: "0123456789abcdef01234567".into(),
+        relative_path: relative_path.into(),
+        kind: MediaKind::Movie,
+        title: "Example".into(),
+        size: 1_000_000,
+        modified_time: 0,
+        fingerprint: "fingerprint".into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: Some(10.0),
+        video: Some(VideoStreamInfo {
+            codec: "h264".into(),
+            width: 640,
+            height: 360,
+            level: Some("4.1".into()),
+            bitrate: Some(700_000),
+        }),
+        audio: Some(AudioStreamInfo {
+            codec: "aac".into(),
+            channels: 2,
+            bitrate: Some(96_000),
+        }),
+        scraped_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+    };
+    library.upsert(&entry).await.unwrap();
+
+    // Budget sized to exactly fit one of this entry's 1,000,000bps direct
+    // sessions and nothing more on top of it — a second concurrent
+    // negotiation must fail until the first is released.
+    let service = MediaService::with_transcoding(
+        library,
+        media_root,
+        TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 1_000_000,
+            reserve_percent: 0,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+        },
+    );
+    let negotiate = || PeerRequest {
+        path: format!("/play/{}", entry.entry_key),
+        range: None,
+        if_none_match: None,
+        playback: Some(PlaybackPreferences {
+            capabilities: CapabilityProfile::fire_tv_baseline(),
+            start_position_secs: 0,
+            prefer_direct: true,
+        }),
+    };
+
+    let first = service.resolve(&negotiate()).await;
+    assert_eq!(first.header.status, 200);
+    let Body::Bytes(body) = first.body else {
+        panic!("playback plan must be JSON")
+    };
+    let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(plan.mode, PlaybackMode::Direct);
+
+    // Simulates "froze, pressed back, tried to play again" without ever
+    // calling /stop: the reservation is still held, so this must still fail.
+    let stuck_retry = service.resolve(&negotiate()).await;
+    assert_eq!(stuck_retry.header.status, 429, "budget must still be held by the first, unreleased session");
+
+    let stop = service.resolve(&request(format!("/stop/{}", plan.session_id))).await;
+    assert_eq!(stop.header.status, 200);
+    assert_eq!(service.transcode_manager().reserved_bps(), 0, "release must free the whole reservation immediately, not just mark it idle");
+
+    let retry_after_stop = service.resolve(&negotiate()).await;
+    assert_eq!(retry_after_stop.header.status, 200, "retry must succeed right away now, not after waiting out idle_timeout");
+
+    drop(service);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Confirmed live on real hardware: with two lingering direct-play sessions
 /// from earlier, unrelated plays (neither expired yet — they sit for up to
 /// `idle_timeout` after their last byte, not released the moment playback

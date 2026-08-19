@@ -163,24 +163,33 @@ pub struct SessionFile {
 /// streams cannot multiply a session's upload allocation.
 #[derive(Debug)]
 pub struct SessionRateLimiter {
-    rate_bps: u64,
+    rate_bps: std::sync::atomic::AtomicU64,
     next_available: tokio::sync::Mutex<tokio::time::Instant>,
 }
 
 impl SessionRateLimiter {
     fn new(rate_bps: u64) -> Self {
         Self {
-            rate_bps,
+            rate_bps: std::sync::atomic::AtomicU64::new(rate_bps),
             next_available: tokio::sync::Mutex::new(tokio::time::Instant::now()),
         }
     }
 
     pub fn rate_bps(&self) -> u64 {
-        self.rate_bps
+        self.rate_bps.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Live-updates the pacing rate — used when the auto-measured upload
+    /// baseline (see `bandwidth` module in apps/server) changes, so an
+    /// already-running session's throttle reflects it immediately rather
+    /// than only affecting sessions negotiated after the update.
+    pub fn set_rate_bps(&self, rate_bps: u64) {
+        self.rate_bps.store(rate_bps, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn wait_for(&self, bytes: usize) {
-        if self.rate_bps == 0 || bytes == 0 {
+        let rate_bps = self.rate_bps();
+        if rate_bps == 0 || bytes == 0 {
             return;
         }
         let now = tokio::time::Instant::now();
@@ -190,7 +199,7 @@ impl SessionRateLimiter {
                 *next = now;
             }
             let send_at = *next;
-            *next += Duration::from_secs_f64(bytes as f64 * 8.0 / self.rate_bps as f64);
+            *next += Duration::from_secs_f64(bytes as f64 * 8.0 / rate_bps as f64);
             send_at
         };
         if send_at > now {
@@ -201,6 +210,10 @@ impl SessionRateLimiter {
 
 pub struct TranscodeManager {
     config: TranscodeConfig,
+    /// Overrides `config.max_upload_bps` once a real measurement lands —
+    /// see `set_max_upload_bps`. Starts equal to `config.max_upload_bps`,
+    /// so behavior is unchanged until something actually updates it.
+    max_upload_bps: std::sync::atomic::AtomicU64,
     state: Mutex<State>,
     global_rate_limiter: Arc<SessionRateLimiter>,
 }
@@ -209,8 +222,10 @@ impl TranscodeManager {
     pub fn new(config: TranscodeConfig) -> Arc<Self> {
         cleanup_stale_session_dirs(&config.session_dir);
         let global_rate_limiter = Arc::new(SessionRateLimiter::new(config.usable_upload_bps()));
+        let max_upload_bps = std::sync::atomic::AtomicU64::new(config.max_upload_bps);
         let manager = Arc::new(Self {
             config,
+            max_upload_bps,
             state: Mutex::new(State::default()),
             global_rate_limiter,
         });
@@ -223,6 +238,27 @@ impl TranscodeManager {
 
     pub fn config(&self) -> &TranscodeConfig {
         &self.config
+    }
+
+    /// The live usable streaming budget — `config.usable_upload_bps()`
+    /// recomputed against whatever `max_upload_bps` currently holds
+    /// (the configured/default value until a real measurement overrides
+    /// it), not the static config value alone.
+    pub fn usable_upload_bps(&self) -> u64 {
+        let max = self.max_upload_bps.load(std::sync::atomic::Ordering::Relaxed);
+        let reserve = self.config.reserve_percent.min(90) as u64;
+        max.saturating_mul(100 - reserve) / 100
+    }
+
+    /// Called with a freshly measured real upload rate (see the
+    /// `bandwidth` module) — updates both the admission-control budget
+    /// (`usable_upload_bps`, gates *new* session negotiation) and the
+    /// live global pacing rate (`global_rate_limiter`, throttles bytes
+    /// actually being sent by sessions already in flight), so a change
+    /// takes effect immediately rather than only for future sessions.
+    pub fn set_max_upload_bps(&self, bps: u64) {
+        self.max_upload_bps.store(bps, std::sync::atomic::Ordering::Relaxed);
+        self.global_rate_limiter.set_rate_bps(self.usable_upload_bps());
     }
 
     pub fn active_sessions(&self) -> usize {
@@ -269,6 +305,7 @@ impl TranscodeManager {
                         mode: PlaybackMode::Direct,
                         path: format!("/stream/{id}/media"),
                         max_bitrate: source_peak,
+                        session_id: id,
                     });
                 }
             }
@@ -372,6 +409,18 @@ impl TranscodeManager {
         }
     }
 
+    /// Client-initiated early release (`/stop/{id}`) — the player screen was
+    /// torn down (back-press, or moving on to the next entry), so free this
+    /// session's bandwidth reservation now instead of leaving it held for
+    /// the full `idle_timeout`, which would otherwise reject a same-device
+    /// replay attempt with `not enough upload bandwidth` for however long
+    /// remained. Unconditional unlike `expire_idle` (no `in_use == 0`
+    /// gate): the client is telling us it's done, not merely paused between
+    /// segment requests.
+    pub fn release(&self, session_id: &str) {
+        self.remove_session(session_id);
+    }
+
     // Bandwidth only — deliberately not gated on max_sessions here. This is
     // called once at the top of plan() before direct-vs-HLS is decided, and
     // max_sessions models concurrent *ffmpeg processes*, which a direct-play
@@ -386,7 +435,7 @@ impl TranscodeManager {
             .values()
             .map(|session| session.reserved_bps)
             .sum();
-        Ok(self.config.usable_upload_bps().saturating_sub(reserved))
+        Ok(self.usable_upload_bps().saturating_sub(reserved))
     }
 
     /// Only ever called for `SessionKind::Direct` (see `plan()`) — no
@@ -399,7 +448,7 @@ impl TranscodeManager {
             .values()
             .map(|session| session.reserved_bps)
             .sum();
-        if already_reserved.saturating_add(reserved_bps) > self.config.usable_upload_bps() {
+        if already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps() {
             return Err(TranscodeError::Bandwidth);
         }
         let id = session_id();
@@ -456,7 +505,7 @@ impl TranscodeManager {
                 .values()
                 .map(|session| session.reserved_bps)
                 .sum();
-            if already_reserved.saturating_add(reserved_bps) > self.config.usable_upload_bps() {
+            if already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps() {
                 let _ = std::fs::remove_dir_all(&directory);
                 return Err(TranscodeError::Bandwidth);
             }
@@ -504,6 +553,7 @@ impl TranscodeManager {
             mode: PlaybackMode::Hls,
             path: format!("/hls/{id}/master.m3u8"),
             max_bitrate: reserved_bps,
+            session_id: id,
         })
     }
 

@@ -4,8 +4,9 @@
 //! headless daemon (`swarm-serverd`) and the Tauri desktop shell
 //! (`swarm-server-app`) drive this same surface.
 
+mod bandwidth;
 pub mod punch_connect;
-mod stun_link;
+mod state_db;
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ use tokio::sync::Mutex;
 
 use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
 
-pub use stun_link::StunLinkRecord;
+pub use state_db::StunLinkRecord;
 
 /// How often a linked server re-fetches its swarms' rosters. Not push-based
 /// yet (that lands with WSS presence in Phase 4) — polling is the Phase 2/3
@@ -103,6 +104,7 @@ pub struct ServerCore {
     pub listen_addr: SocketAddr,
     service: Arc<MediaService>,
     data_dir: PathBuf,
+    state_db: Arc<state_db::StateDb>,
     /// Fingerprints from `ServerConfig::allowed_fingerprints` — kept
     /// separate so a roster sync can rebuild `allowed` as
     /// `static_fingerprints ∪ swarm_roster` without losing the static set.
@@ -177,6 +179,7 @@ impl ServerCore {
         let library = Arc::new(
             Library::open(config.data_dir.join("library.sqlite").to_str().unwrap_or_default()).await?,
         );
+        let state_db = Arc::new(state_db::StateDb::open(&config.data_dir).await?);
         let media_roots = SharedRootResolver::new(RootResolver::new(config.media_roots));
 
         let static_fingerprints: Vec<String> =
@@ -185,12 +188,22 @@ impl ServerCore {
         allowed.replace(static_fingerprints.iter().cloned());
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
-        let service = Arc::new(MediaService::with_roots(
-            Arc::clone(&library),
-            media_roots.clone(),
-            transcode_config_from_env(&config.data_dir),
-        ));
+
+        // Seed the streaming budget from the last real measurement (if
+        // any) right at construction, so a restart doesn't fall back to
+        // the static default for a full probe interval before its first
+        // tick completes — see bandwidth.rs.
+        let mut transcode_config = transcode_config_from_env(&config.data_dir);
+        if let Some(measured_bps) = state_db.latest_bandwidth_measurement().await? {
+            transcode_config.max_upload_bps = measured_bps;
+        }
+        let service = Arc::new(MediaService::with_roots(Arc::clone(&library), media_roots.clone(), transcode_config));
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
+        tokio::spawn(bandwidth::run_periodic_probe(
+            Arc::clone(&state_db),
+            Arc::clone(service.transcode_manager()),
+            bandwidth::interval_from_env(),
+        ));
 
         let core = Arc::new(Self {
             identity,
@@ -200,6 +213,7 @@ impl ServerCore {
             listen_addr,
             service,
             data_dir: config.data_dir,
+            state_db,
             static_fingerprints,
             token_store_mode: config.token_store_mode,
             stun: Mutex::new(None),
@@ -306,7 +320,7 @@ impl ServerCore {
             listen_addr: self.listen_addr.to_string(),
             entry_count: self.library.entry_count().await?,
             thumbprint: self.library.thumbprint().await?,
-            streaming_upload_budget_bps: self.service.transcode_manager().config().usable_upload_bps(),
+            streaming_upload_budget_bps: self.service.transcode_manager().usable_upload_bps(),
             active_playback_sessions: self.service.transcode_manager().active_sessions(),
             scanning: matches!(&*self.scan_status.borrow(), ScanState::Scanning),
         })
@@ -402,7 +416,7 @@ impl ServerCore {
         token_store.save(&response.access_token)?;
         let link =
             StunLinkRecord { base_url, device_id: response.device_id.clone(), swarms: vec![response.swarm.clone()] };
-        stun_link::save(&self.data_dir, &link)?;
+        self.state_db.save_stun_link(&link).await?;
 
         self.establish_signaling(&link.base_url, &response.access_token, &link.device_id).await;
         *self.stun.lock().await =
@@ -421,7 +435,7 @@ impl ServerCore {
             )))?;
             let swarm = ctx.client.join_swarm(&ctx.access_token, code).await?;
             ctx.link.swarms.push(swarm.clone());
-            stun_link::save(&self.data_dir, &ctx.link)?;
+            self.state_db.save_stun_link(&ctx.link).await?;
             swarm
         };
         self.sync_roster().await?;
@@ -440,7 +454,7 @@ impl ServerCore {
             )))?;
             ctx.client.leave_swarm(&ctx.access_token, swarm_id, &ctx.link.device_id).await?;
             ctx.link.swarms.retain(|s| s.id != swarm_id);
-            stun_link::save(&self.data_dir, &ctx.link)?;
+            self.state_db.save_stun_link(&ctx.link).await?;
         }
         self.sync_roster().await?;
         Ok(())
@@ -472,7 +486,12 @@ impl ServerCore {
     }
 
     async fn restore_stun_link(self: Arc<Self>) {
-        let Some(link) = stun_link::load(&self.data_dir) else { return };
+        let Some(link) = self.state_db.load_stun_link().await.unwrap_or_else(|err| {
+            tracing::warn!(%err, "could not read saved STUN link; starting unlinked");
+            None
+        }) else {
+            return;
+        };
         let token_store = match self.token_store() {
             Ok(store) => store,
             Err(err) => {
@@ -647,8 +666,8 @@ async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Opti
 /// STUN server at all), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring —
 /// set this on headless boxes with no Secret Service). Streaming controls:
 /// `SWARM_MAX_UPLOAD_MBPS` (default 10), `SWARM_UPLOAD_RESERVE_PERCENT`
-/// (default 30), `SWARM_MAX_STREAMS` (default 2), `SWARM_FFMPEG_PATH`, and
-/// `SWARM_TRANSCODING_DISABLED`.
+/// (default 90, capped at 90), `SWARM_MAX_STREAMS` (default 2),
+/// `SWARM_FFMPEG_PATH`, and `SWARM_TRANSCODING_DISABLED`.
 pub fn config_from_env() -> Option<ServerConfig> {
     let media_roots = match std::env::var("SWARM_MEDIA_ROOTS").ok().filter(|v| !v.trim().is_empty()) {
         Some(value) => {
@@ -692,7 +711,7 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
     let reserve_percent = std::env::var("SWARM_UPLOAD_RESERVE_PERCENT")
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(30)
+        .unwrap_or(90)
         .min(90);
     let max_sessions = std::env::var("SWARM_MAX_STREAMS")
         .ok()

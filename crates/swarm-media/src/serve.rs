@@ -122,6 +122,8 @@ impl MediaService {
                     self.session_media(rest, request).await
                 } else if let Some(rest) = path.strip_prefix("/hls/") {
                     self.hls(rest, request).await
+                } else if let Some(session_id) = path.strip_prefix("/stop/") {
+                    self.stop(session_id).await
                 } else if let Some(rest) = path.strip_prefix("/art/") {
                     let mut segments = rest.splitn(2, '/');
                     let entry_key = segments.next().unwrap_or("");
@@ -253,6 +255,17 @@ impl MediaService {
                 transcode_error(error)
             }
         }
+    }
+
+    /// Explicit early release of a playback session's bandwidth reservation
+    /// (player screen torn down — back-press or moving to the next entry).
+    /// Idempotent and always 200, including for an id that already expired
+    /// or was never valid: the client fires this best-effort on its way out
+    /// and has no useful recovery if the server disagrees about whether the
+    /// session still existed.
+    async fn stop(&self, session_id: &str) -> Resolved {
+        self.transcodes.release(session_id);
+        status(200)
     }
 
     async fn session_media(&self, rest: &str, request: &PeerRequest) -> Resolved {

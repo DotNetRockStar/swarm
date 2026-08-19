@@ -14,12 +14,12 @@ Builds and runs three real processes together: the STUN server, a headless media
 
 **2. Get a passcode** (the STUN server's own web UI, no separate tooling):
 - Open the **LAN URL** from step 1 in a browser (e.g. `http://192.168.0.242:8080`).
-- Register an account (any email/password — this is your own local instance).
-- Create a swarm — a name is all it needs (e.g. "Home"). A swarm is a private device group; only devices that join the same one can find each other.
-- Click into that swarm and generate a join code — an 8-digit, **single-use** code good for **15 minutes**. Every device you register needs its own fresh code (generate a new one per device — the desktop GUI and the Fire TV each need their own).
+- Click the **Create account** tab, enter any email + a password (**10+ characters**, that's the only rule), and click **Create account** — it signs you in automatically, no email verification needed for local testing.
+- Under **Your swarms**, type a name into the **New swarm name** box (e.g. "Home") and click **Create**. A swarm is a private device group; only devices that join the same one can find each other.
+- Click the new swarm to expand it, then click **Generate join code**. A popup shows the code (8 digits, shown as two groups of 4) and its expiry — **single-use**, good for **15 minutes**. Every device needs its own fresh code, so you'll come back here once per device (desktop GUI, then Fire TV).
 
 **3. Register the desktop GUI into that swarm:**
-In the GUI window `run_now.sh` already opened, first-run onboarding asks for a media folder first (required — pick real media if you want something to actually play, or just point it at the sample `.run/media/` folder for a quick connectivity check), then offers an optional "join a swarm" screen — paste the LAN URL + a join code into it there, or skip and do it later from the Swarm tab.
+In the GUI window `run_now.sh` already opened, click **Choose media folder…** first (required — pick real media if you want something to actually play, or just point it at the sample `.run/media/` folder for a quick connectivity check). Next it shows **Join a swarm (optional)** — fill in **STUN server URL** (the LAN URL from step 1), **Join code** (from step 2), and **Device name** (defaults to "SWARM Server"), then click **Join swarm**. Or click **Skip for now** and do it later from the GUI's **Swarm** tab (same fields, under "Join another swarm").
 
 **4. Install and register the TV client:**
 ```bash
@@ -27,7 +27,7 @@ In the GUI window `run_now.sh` already opened, first-run onboarding asks for a m
 ```
 First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name row ~7 times), then turn on **ADB debugging** under the new Developer Options entry, and accept the "Allow USB debugging?" prompt on the TV.
 
-Once installed and launched, enter the same **LAN URL** from step 1 and a **fresh** join code (generate a new one — the one you used for the GUI is already spent) on the Fire TV's passcode screen.
+Once installed and launched, the app opens straight to its **STUN server URL** / **Device name** / passcode screen. Enter the same **LAN URL** from step 1, a **fresh** join code (generate a new one on the STUN web UI — the one you used for the GUI is already spent, it's single-use), and click **Join swarm**.
 
 **5. Test it:** on the Fire TV, browse the merged catalog and play something. Both the GUI and the Fire TV should now show up as devices in that swarm on the STUN web UI.
 
@@ -83,12 +83,16 @@ The fingerprint tests pin byte-for-byte compatibility with the original Python `
 Server app env vars (headless daemon; the GUI persists media/scraper settings to `<app data dir>/settings.json`): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
 
 Streaming bandwidth is a server-wide reservation pool. `SWARM_MAX_UPLOAD_MBPS`
-(default `10`) is reduced by `SWARM_UPLOAD_RESERVE_PERCENT` (default `30`),
-and the peak rates reserved by every active playback must fit in the remainder.
-`SWARM_MAX_STREAMS` defaults to `2`; `SWARM_FFMPEG_PATH` selects the FFmpeg
-binary; `SWARM_TRANSCODING_DISABLED=1` disables HLS while retaining compatible
-direct play. Example: a 10 Mbps uplink leaves a 7 Mbps pool and therefore
-advertises at most the 720p rung to the first viewer.
+(default `10`) is reduced by `SWARM_UPLOAD_RESERVE_PERCENT` (default `90`,
+capped at `90`), and the peak rates reserved by every active playback must
+fit in the remainder. `SWARM_MAX_STREAMS` defaults to `2`; `SWARM_FFMPEG_PATH`
+selects the FFmpeg binary; `SWARM_TRANSCODING_DISABLED=1` disables HLS while
+retaining compatible direct play. Example: at the defaults, a 10 Mbps uplink
+leaves only a 1 Mbps pool — under the ~1.1 Mbps even the lowest (360p) HLS
+rung needs, so raise `SWARM_MAX_UPLOAD_MBPS` to match your real uplink (or
+lower `SWARM_UPLOAD_RESERVE_PERCENT`) if transcoded playback should fit.
+Direct play (no transcode) has no such floor — it only needs the source
+file's own bitrate to fit the pool.
 FFmpeg and ffprobe must be installed on the media server; set
 `SWARM_FFMPEG_PATH` when `ffmpeg` is not on `PATH`.
 
