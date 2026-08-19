@@ -260,13 +260,31 @@ hard way:
   reliable) once the Bug #2 scroll fix landed — worth retrying a slightly
   larger batch size after that fix if speed matters, but always verify
   the *result*, not just trust the batch executed.
-- **A stray key can navigate clean out of the app.** During one attempt a
-  batch ended up focused on something that opened the Amazon Appstore
-  (`com.amazon.venezia`) instead of our app — confirmed via `adb shell
-  dumpsys activity activities | grep mResumedActivity`. Recover with
-  `adb shell input keyevent KEYCODE_HOME` then relaunch
-  (`am start -n app.swarm.tv/app.swarm.tv.app.MainActivity`) rather than
-  trying to navigate back manually.
+- **A stray key can navigate clean out of the app — and `KEYCODE_BACK`
+  from this app's root screen is the single riskiest key to send.**
+  `PasscodeEntryScreen` (and every other top-level `UiState` screen) has
+  no back-stack of its own, so `BACK` from there falls through to
+  whatever the OS considers "underneath" — which is real user state on a
+  real device, not a safe no-op. Confirmed twice, at increasing severity:
+  once landed on the Amazon Appstore (`com.amazon.venezia`) browsing
+  page; a second time landed **on a live "Get MHz Choice" Prime Video
+  channel subscription checkout screen**, mid-flow, with a real saved
+  card ("Visa ending in 0053") pre-selected and a one-press "Start MHz
+  Choice free trial" button — one more misdirected `KEYCODE_DPAD_CENTER`
+  there would have started a real paid subscription trial on the
+  account's real payment method. Confirmed via `adb shell dumpsys
+  activity activities | grep mResumedActivity` both times, same as
+  before. **Never send `BACK` speculatively while driving this app on
+  someone's real device with a real Amazon account behind it** — only
+  send it when the current screen is positively confirmed (via a fresh
+  screenshot) to be a screen *inside* this app that's known to have its
+  own back target. If `BACK` (or anything else) lands somewhere
+  unexpected, stop issuing keys immediately, screenshot to see what's
+  actually on screen, and recover with `adb shell input keyevent
+  KEYCODE_HOME` then relaunch
+  (`am start -n app.swarm.tv/app.swarm.tv.app.MainActivity`) — never
+  press `CENTER`/`DPAD_CENTER`/`ENTER` to try to "back out" of an unknown
+  screen, since that's exactly the press that would confirm a purchase.
 - **`adb exec-out screencap -p` can prepend stray bytes on this hardware**
   — one capture had a literal log line (`Init wrapper sys mutex
   successful. Pid:2160`) stuck in front of the real PNG data, making it

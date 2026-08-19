@@ -147,9 +147,16 @@ cargo build --bin swarm-stun-server --bin swarm-serverd
 cargo build -p swarm-server --features gui --bin swarm-server-app
 
 echo "==> Starting STUN server on 0.0.0.0:$STUN_PORT ..."
+# swarm-stun-server defaults SWARM_STATIC_DIR to the relative path "static",
+# resolved against the process's cwd — which `cargo run` leaves as wherever
+# it was invoked from (this script's repo root), not the crate's own
+# directory. Left unset, that relative path silently misses the real UI at
+# apps/stun-server/static, and the server falls back to API-only (every
+# non-API path, including "/", 404s) with only a log warning to show for it.
 SWARM_DATABASE_PATH="$RUN_DIR/stun-data/swarm.sqlite" \
 SWARM_HTTP_BIND="0.0.0.0:$STUN_PORT" \
 SWARM_PUBLIC_URL="http://$LAN_IP:$STUN_PORT" \
+SWARM_STATIC_DIR="apps/stun-server/static" \
     cargo run -q --bin swarm-stun-server &
 pids+=($!)
 
