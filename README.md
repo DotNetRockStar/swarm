@@ -4,16 +4,34 @@ A free, secure, strictly peer-to-peer media streaming suite — Plex-like, but y
 
 ## TL;DR — test the Fire TV client against a local STUN + media server
 
-Everything below runs on this one machine; the Fire TV just needs to be on the same LAN.
+Everything runs on this one machine; the Fire TV just needs to be on the same Wi-Fi/LAN. No mocks — these are the same real binaries the automated tests spawn as subprocesses, just left running.
 
+**1. Start everything:**
 ```bash
-./run_now.sh                    # starts STUN server + headless media server + the desktop GUI, all local
-./deploy_tv.sh 192.168.0.148    # builds + installs the TV client on a real Fire TV (its IP: Settings -> My Fire TV -> About -> Network)
+./run_now.sh
 ```
+Builds and runs three real processes together: the STUN server, a headless media server, and the desktop GUI (a window should open). Prints two STUN URLs at the end — always use the **LAN** one, e.g. `http://192.168.0.242:8080`, never `127.0.0.1` (that only works for a browser on this same machine; a real device on your LAN can't reach loopback). `Ctrl+C` stops all three together. If the LAN IP looks wrong (e.g. a `10.x`/`100.x` VPN address instead of your real `192.168.x.x` Wi-Fi one), see [Manual end-to-end testing](#manual-end-to-end-testing-stun--server--real-fire-tv) below.
 
-Then: open the **LAN** URL `run_now.sh` prints (not `127.0.0.1`) in a browser, register an account, create a swarm, and mint an 8-digit join code. Drop real media files into `.run/media/` (the headless server's root) and/or pick a folder in the GUI window that opened. On the Fire TV, enter that same LAN URL + the join code on the passcode screen. `Ctrl+C` in the terminal stops all three local services together.
+**2. Get a passcode** (the STUN server's own web UI, no separate tooling):
+- Open the **LAN URL** from step 1 in a browser (e.g. `http://192.168.0.242:8080`).
+- Register an account (any email/password — this is your own local instance).
+- Create a swarm — a name is all it needs (e.g. "Home"). A swarm is a private device group; only devices that join the same one can find each other.
+- Click into that swarm and generate a join code — an 8-digit, **single-use** code good for **15 minutes**. Every device you register needs its own fresh code (generate a new one per device — the desktop GUI and the Fire TV each need their own).
 
-First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name ~7 times) and turn on **ADB debugging** under the new Developer Options entry.
+**3. Register the desktop GUI into that swarm:**
+In the GUI window `run_now.sh` already opened, first-run onboarding asks for a media folder first (required — pick real media if you want something to actually play, or just point it at the sample `.run/media/` folder for a quick connectivity check), then offers an optional "join a swarm" screen — paste the LAN URL + a join code into it there, or skip and do it later from the Swarm tab.
+
+**4. Install and register the TV client:**
+```bash
+./deploy_tv.sh 192.168.0.148    # your Fire TV's IP — Settings -> My Fire TV -> About -> Network
+```
+First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name row ~7 times), then turn on **ADB debugging** under the new Developer Options entry, and accept the "Allow USB debugging?" prompt on the TV.
+
+Once installed and launched, enter the same **LAN URL** from step 1 and a **fresh** join code (generate a new one — the one you used for the GUI is already spent) on the Fire TV's passcode screen.
+
+**5. Test it:** on the Fire TV, browse the merged catalog and play something. Both the GUI and the Fire TV should now show up as devices in that swarm on the STUN web UI.
+
+Already have something running from a previous session? `./run_now.sh` now self-heals — it kills anything still holding its ports before starting, so you never need to manually hunt down stale processes first.
 
 Full details, env vars, and troubleshooting: [Manual end-to-end testing](#manual-end-to-end-testing-stun--server--real-fire-tv) below.
 
@@ -104,8 +122,11 @@ machine likely has a VPN active; see `.claude/skills/swarm-local-testing/`
 for why and how the script already works around it.
 
 Open the LAN URL in a browser, register an account, create a swarm, and
-mint an 8-digit join code. Paste that code into the GUI window the script
-already opened, and pick a media folder there — or drop real files
+mint an 8-digit join code. In the GUI window the script already opened,
+first-run onboarding asks for a media folder first (required — pick real
+media, or point it at the sample `.run/media/` folder), then offers an
+optional "join a swarm" screen where you paste the LAN URL + that code —
+or skip and join later from the Swarm tab. Alternatively, drop real files
 directly into `.run/media/`, the headless daemon's own scanned root, and
 register *it* into a swarm instead by stopping the script and re-running
 with `SWARM_STUN_URL`/`SWARM_STUN_CODE` set (printed in the script's own
