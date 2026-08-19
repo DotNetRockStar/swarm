@@ -7,6 +7,7 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,11 +35,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
+import app.swarm.tv.R
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -72,6 +75,12 @@ fun PasscodeEntryScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
+        Image(
+            painter = painterResource(R.drawable.mascot),
+            contentDescription = null,
+            modifier = Modifier.height(72.dp),
+        )
+        Spacer(Modifier.height(8.dp))
         Text("SWARM", color = SwarmAccent, fontSize = 32.sp, fontWeight = FontWeight.Black)
         Text("Stream Whatever, Anywhere — Remote Media", color = SwarmMuted, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
