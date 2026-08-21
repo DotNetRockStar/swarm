@@ -270,9 +270,13 @@ td.mono {
 
 /* About tab: the leftmost/default tab now that it's an explainer, not just
    a security page — gets a bit of "wizbang" (a hero card with a Server ->
-   STUN -> Client flow diagram and feature badges) since it's the first
-   thing every user sees, unlike the plain stacked-card treatment the rest
-   of the app uses for reference material nobody browses cold. */
+   Secure-by-design -> Client flow diagram and feature badges) since it's
+   the first thing every user sees, unlike the plain stacked-card treatment
+   the rest of the app uses for reference material nobody browses cold.
+   Deliberately never names the coordination server by its protocol
+   (STUN) anywhere on this tab, including the collapsed detail section
+   below — that's an implementation detail, not something an average user
+   evaluating "is this safe/simple" needs to parse. */
 .about-hero { background: linear-gradient(160deg, var(--surface), var(--surface-muted)); }
 .about-hero-head { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
 .about-hero-badge { width: 56px; height: 56px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 0 8px rgba(0,194,255,.5)); }
@@ -280,20 +284,55 @@ td.mono {
 .about-flow-step {
   flex: 1; min-width: 150px; background: var(--surface); border: 1px solid var(--border);
   border-radius: 10px; padding: 14px; text-align: center;
+  transition: transform .15s ease, border-color .15s ease;
 }
+.about-flow-step:hover { transform: translateY(-2px); border-color: var(--accent); }
 .about-flow-icon { font-size: 1.4rem; color: var(--accent); margin-bottom: 8px; }
 .about-flow-label { font-weight: 700; font-size: .85rem; margin-bottom: 4px; }
 .about-flow-desc { color: var(--muted); font-size: .75rem; line-height: 1.4; }
 .about-flow-arrow { display: flex; align-items: center; justify-content: center; color: var(--border); font-size: 1.2rem; flex: 0 0 auto; }
-.about-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.about-badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
 .about-badge {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
   padding: 6px 14px; font-size: .78rem; font-weight: 700; color: var(--text);
+  transition: border-color .15s ease, background .15s ease;
 }
+.about-badge:hover { border-color: var(--accent); background: rgba(0, 194, 255, .1); }
 .about-badge i { color: var(--accent); }
-.about-section-label {
-  font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
-  font-weight: 800; margin: 22px 0 10px;
+
+/* Feature grid — replaces what used to be a wall of individual security/
+   about `.card`s (real feedback: "too many vanilla plain jane boxes", too
+   wordy for an average user who just wants the gist). Tiles float directly
+   on the page background rather than nesting inside another outer card, and
+   each is its own small hoverable surface — lighter and more "trendy web"
+   than another full-width bordered box. */
+.about-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
+.about-feature {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px;
+  transition: transform .15s ease, border-color .15s ease, background .15s ease;
 }
-.about-section-label:first-of-type { margin-top: 6px; }
+.about-feature:hover { transform: translateY(-3px); border-color: var(--accent); background: var(--surface-muted); }
+.about-feature-icon {
+  width: 44px; height: 44px; border-radius: 12px; margin-bottom: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 194, 255, .12); color: var(--accent); font-size: 1.25rem;
+}
+.about-feature-title { font-weight: 800; font-size: .95rem; margin-bottom: 4px; }
+.about-feature-desc { color: var(--muted); font-size: .82rem; line-height: 1.45; }
+
+/* Progressive disclosure for the curious, via native <details> — no JS
+   needed, fits this codebase's no-framework convention, and keeps the
+   default view short for the average user while still letting anyone who
+   wants more depth expand it in place. */
+.about-more { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; margin-top: 18px; }
+.about-more summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: .85rem; color: var(--text);
+}
+.about-more summary::-webkit-details-marker { display: none; }
+.about-more summary i { color: var(--accent); transition: transform .15s ease; }
+.about-more[open] summary i { transform: rotate(90deg); }
+.about-more-body { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.about-more-body p { color: var(--muted); font-size: .85rem; line-height: 1.5; margin-bottom: 10px; }
+.about-more-body p:last-child { margin-bottom: 0; }

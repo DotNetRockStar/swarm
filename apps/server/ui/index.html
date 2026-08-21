@@ -218,9 +218,9 @@
         </div>
         <div class="about-flow-arrow"><i class="bi bi-arrow-right"></i></div>
         <div class="about-flow-step">
-          <div class="about-flow-icon"><i class="bi bi-broadcast"></i></div>
-          <div class="about-flow-label">STUN introduction</div>
-          <div class="about-flow-desc">A hosted matchmaker that tells two devices how to reach each other, then steps aside.</div>
+          <div class="about-flow-icon"><i class="bi bi-shield-lock-fill"></i></div>
+          <div class="about-flow-label">Secure by design</div>
+          <div class="about-flow-desc">Every device is verified before it connects — nothing in between ever sees your media.</div>
         </div>
         <div class="about-flow-arrow"><i class="bi bi-arrow-right"></i></div>
         <div class="about-flow-step">
@@ -237,51 +237,47 @@
       </div>
     </div>
 
-    <div class="about-section-label">The media server</div>
-    <div class="card">
-      <h2>What this app does</h2>
-      <p class="muted">This is the SWARM server — it lives on the machine that actually holds your movies, shows, and music. It scans the media roots you point it at (see the Details tab), keeps a searchable library with artwork and metadata, and streams files directly to any client in your swarm over an encrypted connection. When a client can't natively decode a file, this server transcodes it on the fly to an adaptive HLS stream instead of failing to play.</p>
-    </div>
-    <div class="card">
-      <h2>One library, every server</h2>
-      <p class="muted">If you run more than one SWARM server (say, one at home and one at a cabin), clients merge every reachable server's catalog into a single browsable library — the same file on two servers shows up once, with whichever source is actually reachable picked automatically at play time.</p>
+    <div class="about-features">
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-hdd-network-fill"></i></div>
+        <div class="about-feature-title">Your server</div>
+        <div class="about-feature-desc">Runs on your own computer and streams your movies, shows, and music straight from it.</div>
+      </div>
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-tv-fill"></i></div>
+        <div class="about-feature-title">Your clients</div>
+        <div class="about-feature-desc">Fire TV today, with more devices coming — watch and listen from anywhere in your home.</div>
+      </div>
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-lock-fill"></i></div>
+        <div class="about-feature-title">Bank-grade encryption</div>
+        <div class="about-feature-desc">Every connection is locked down the same way your bank's is — nobody in between can see a thing.</div>
+      </div>
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-cloud-slash-fill"></i></div>
+        <div class="about-feature-title">No cloud, ever</div>
+        <div class="about-feature-desc">Your media never leaves your own devices — nothing is uploaded, stored, or seen by anyone else.</div>
+      </div>
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-key-fill"></i></div>
+        <div class="about-feature-title">Invite only</div>
+        <div class="about-feature-desc">A simple code lets a new device in — you're always in control of who's allowed to connect.</div>
+      </div>
+      <div class="about-feature">
+        <div class="about-feature-icon"><i class="bi bi-diagram-3-fill"></i></div>
+        <div class="about-feature-title">One library, everywhere</div>
+        <div class="about-feature-desc">Run more than one server? Everything merges into a single browsable library automatically.</div>
+      </div>
     </div>
 
-    <div class="about-section-label">The clients</div>
-    <div class="card">
-      <h2>Fire TV, with more on the way</h2>
-      <p class="muted">The first SWARM client is a native Fire TV app (Kotlin, Compose for TV, built on Media3/ExoPlayer) — a full D-pad-driven 10-foot browsing experience for movies, shows, and music, plus Kid Mode parental controls. It's built to add sibling clients for other platforms over time; every client talks the same protocol this server does, so they all share one swarm and one library.</p>
-    </div>
-
-    <div class="about-section-label">Security &amp; privacy</div>
-    <div class="card">
-      <h2>The short version</h2>
-      <p class="muted">Your media never leaves your own devices. There's no cloud server storing your files, no upload step, and no company that could see what you watch or listen to. When you press play, your Fire TV (or other client) connects <em>directly</em> to your own server and streams the file straight from it — nothing in between ever has a copy.</p>
-    </div>
-    <div class="card">
-      <h2>Direct, device-to-device streaming</h2>
-      <p class="muted">Every stream goes straight from your server to your client over a private connection — the same way two phone calls don't route through a switchboard operator anymore. No third-party server ever sits in the middle relaying, caching, or seeing the video/audio itself.</p>
-    </div>
-    <div class="card">
-      <h2>What the STUN server actually does (and doesn't)</h2>
-      <p class="muted">Two devices behind separate home routers usually can't just dial each other directly — routers weren't built to accept an unsolicited connection. The STUN server's only job is introductions: it tells your two devices what address to reach each other at, the same way a switchboard used to just connect two lines and then get out of the way. Once that handshake finishes, your devices talk to each other directly — the STUN server is never in the path your media actually travels, and it has no way to see, log, or store any of it.</p>
-    </div>
-    <div class="card">
-      <h2>Encryption and identity</h2>
-      <p class="muted">Every device-to-device connection is encrypted with TLS 1.3 — the same encryption standard used by online banking. It's also <em>mutual</em>: your server and your client each present a certificate and check the other's, so a device can't stream from your server (or accept a connection claiming to be it) unless it's genuinely one you've invited. An eavesdropper on the network sees only encrypted noise, not your file names or the video itself.</p>
-    </div>
-    <div class="card">
-      <h2>Only who you invite</h2>
-      <p class="muted">Internet-connected devices join through STUN with an 8-digit code. On your local network, this server is discoverable automatically, but a client still needs the separate short-lived LAN pairing code the first time. Both paths pin device certificates, and trusted LAN clients can be revoked from the Swarm tab.</p>
-    </div>
-    <div class="card">
-      <h2>What the coordination account actually stores</h2>
-      <p class="muted">Signing in to generate join codes needs an account (an email address and a password), the same as almost any online service — that account lives on the STUN server, separate from your media server entirely. Your password is one-way hashed, never stored as readable text, and neither is any device's access token. What's stored is the bare minimum to introduce your devices to each other: an email for login, each device's name and a fingerprint of its certificate, and nothing about your library — no file names, folder paths, watch history, or the media itself.</p>
-    </div>
-    <div class="card">
-      <h2>On your device</h2>
-      <p class="muted">Your Fire TV's login token and private key are stored using the device's own hardware-backed secure storage (Android Keystore) — not as a plain file anything on the device could just read. If you're on the same home network as your server, your client can even connect directly by local address, skipping the STUN handshake entirely.</p>
-    </div>
+    <details class="about-more">
+      <summary><i class="bi bi-chevron-right"></i>Want the technical details?</summary>
+      <div class="about-more-body">
+        <p>Every connection between your devices is end-to-end encrypted with TLS 1.3 — the same standard banks use — and mutually verified, so a device has to be one you've actually invited before it can ever connect.</p>
+        <p>New devices join with a short one-time code you generate yourself. On your home network, a device can also be trusted directly with its own short-lived pairing code — nothing has to leave your network to do it.</p>
+        <p>Signing in to generate codes needs a basic account (just an email and password) that's kept completely separate from your media — it stores nothing about your library, your files, or what you watch. Login credentials on your devices are kept in hardware-backed secure storage, not as plain files anything could read.</p>
+      </div>
+    </details>
   </div>
 </div>
 
