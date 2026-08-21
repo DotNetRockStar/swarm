@@ -12,7 +12,6 @@ package app.swarm.tv.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -22,12 +21,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -90,13 +87,14 @@ fun SwarmSettingsScreen(
     var code by remember { mutableStateOf("") }
     var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
     var deviceNameField by remember(deviceName) { mutableStateOf(deviceName) }
+    var section by remember { mutableStateOf(SettingsSection.GENERAL) }
 
-    // Same reasoning as SwarmDashboardScreen: reached by a UiState swap, not
-    // real navigation, so nothing else ever moves D-pad focus here.
-    val backFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { backFocusRequester.requestFocus() }
+    // Same reasoning as SwarmDashboardScreen: reached by a UiState swap,
+    // not real navigation, so explicitly seed focus on the first section.
+    val firstSectionFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstSectionFocusRequester.requestFocus() }
 
-    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(40.dp)) {
+    Column(modifier = Modifier.fillMaxSize().padding(32.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -105,130 +103,195 @@ fun SwarmSettingsScreen(
             Text("Swarm settings", color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
             Button(
                 onClick = onBack,
-                modifier = Modifier.focusRequester(backFocusRequester),
                 colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
             ) {
                 Text("Back")
             }
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(18.dp))
 
-        Text("Connection", color = SwarmMuted, fontSize = 14.sp)
-        Spacer(Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TvOutlinedTextField(
-                value = baseUrlField,
-                onValueChange = { baseUrlField = it },
-                label = { Text("STUN server URL") },
-                colors = fieldColors(),
-                modifier = Modifier.width(420.dp),
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SettingsTab(
+                label = "General",
+                selected = section == SettingsSection.GENERAL,
+                onClick = { section = SettingsSection.GENERAL },
+                modifier = Modifier.focusRequester(firstSectionFocusRequester),
             )
-            Button(
-                onClick = { onUpdateBaseUrl(baseUrlField) },
-                enabled = !busy && baseUrlField.isNotBlank() && baseUrlField != baseUrl,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) {
-                Text("Save")
+            SettingsTab("Swarms", section == SettingsSection.SWARMS, { section = SettingsSection.SWARMS })
+            SettingsTab("Family", section == SettingsSection.FAMILY, { section = SettingsSection.FAMILY })
+        }
+        Spacer(Modifier.height(16.dp))
+
+        Column(
+            modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            errorMessage?.let {
+                Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+                Spacer(Modifier.height(12.dp))
             }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TvOutlinedTextField(
-                value = deviceNameField,
-                onValueChange = { deviceNameField = it },
-                label = { Text("Device name") },
-                colors = fieldColors(),
-                modifier = Modifier.width(420.dp),
-            )
-            Button(
-                onClick = { onUpdateDeviceName(deviceNameField) },
-                enabled = !busy && deviceNameField.isNotBlank() && deviceNameField != deviceName,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) {
-                Text("Save")
-            }
-        }
-        Text(
-            "Renaming here only updates what this app remembers locally — it doesn't rename the device other swarm members already see.",
-            color = SwarmMuted,
-            fontSize = 11.sp,
-        )
+            when (section) {
+                SettingsSection.GENERAL -> SettingsPanel(
+                    title = "General",
+                    subtitle = "Connection identity and artwork behavior for this TV.",
+                ) {
+                    Text("Connection", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(12.dp))
+                    SettingFieldRow(
+                        value = baseUrlField,
+                        onValueChange = { baseUrlField = it },
+                        label = "STUN server URL",
+                        saveEnabled = !busy && baseUrlField.isNotBlank() && baseUrlField != baseUrl,
+                        onSave = { onUpdateBaseUrl(baseUrlField) },
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    SettingFieldRow(
+                        value = deviceNameField,
+                        onValueChange = { deviceNameField = it },
+                        label = "Device name",
+                        saveEnabled = !busy && deviceNameField.isNotBlank() && deviceNameField != deviceName,
+                        onSave = { onUpdateDeviceName(deviceNameField) },
+                    )
+                    Text(
+                        "The device name is stored on this TV; it does not rename an existing STUN roster entry.",
+                        color = SwarmMuted,
+                        fontSize = 11.sp,
+                    )
 
-        Spacer(Modifier.height(28.dp))
-        Text("Artwork cache", color = SwarmMuted, fontSize = 14.sp)
-        Spacer(Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Button(
-                onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
-                enabled = !busy && artworkCacheMinutes > 0,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) { Text("−") }
-            Text(
-                if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
-                color = SwarmText,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.width(110.dp),
-            )
-            Button(
-                onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
-                enabled = !busy && artworkCacheMinutes < 1440,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) { Text("+") }
-        }
-        Text(
-            "How long a cached poster/cover image is trusted before re-fetching. 0 always re-fetches.",
-            color = SwarmMuted,
-            fontSize = 11.sp,
-        )
+                    Spacer(Modifier.height(24.dp))
+                    Text("Artwork cache", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Button(
+                            onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
+                            enabled = !busy && artworkCacheMinutes > 0,
+                            colors = secondaryButtonColors(),
+                        ) { Text("−") }
+                        Text(
+                            if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
+                            color = SwarmText,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(120.dp),
+                        )
+                        Button(
+                            onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
+                            enabled = !busy && artworkCacheMinutes < 1440,
+                            colors = secondaryButtonColors(),
+                        ) { Text("+") }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text("0 always re-fetches; up to 1,440 minutes keeps browsing fast on slower networks.", color = SwarmMuted, fontSize = 11.sp)
+                }
 
-        Spacer(Modifier.height(28.dp))
-        Text("Joined swarms (${allSwarms.size})", color = SwarmMuted, fontSize = 14.sp)
-        Spacer(Modifier.height(12.dp))
-        if (allSwarms.isEmpty()) {
-            Text("Not a member of any swarm yet — join one below.", color = SwarmMuted, fontSize = 14.sp)
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (swarm in allSwarms) {
-                    SwarmRow(
-                        swarm = swarm,
-                        isActive = swarm.id == activeSwarmId,
-                        busy = busy,
-                        onSelect = { onSwitchActive(swarm.id) },
-                        onLeave = { onLeave(swarm.id) },
+                SettingsSection.SWARMS -> SettingsPanel(
+                    title = "Swarms",
+                    subtitle = "Choose the active swarm, leave one, or join another.",
+                ) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.Top) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Joined (${allSwarms.size})", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(12.dp))
+                            if (allSwarms.isEmpty()) {
+                                Text("This device has not joined a swarm yet.", color = SwarmMuted, fontSize = 14.sp)
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    for (swarm in allSwarms) {
+                                        SwarmRow(
+                                            swarm = swarm,
+                                            isActive = swarm.id == activeSwarmId,
+                                            busy = busy,
+                                            onSelect = { onSwitchActive(swarm.id) },
+                                            onLeave = { onLeave(swarm.id) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Join another", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(12.dp))
+                            NumberPadEntry(value = code, maxLength = 8, onValueChange = { code = it }, enabled = !busy)
+                            Spacer(Modifier.height(14.dp))
+                            Button(
+                                onClick = { onJoin(code); code = "" },
+                                enabled = !busy && code.length == 8,
+                                colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                            ) {
+                                Text(if (busy) "Working…" else "Join swarm", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                SettingsSection.FAMILY -> SettingsPanel(
+                    title = "Family controls",
+                    subtitle = "Limit the library shown on this TV with a PIN.",
+                ) {
+                    KidModeCard(
+                        kidModeSettings = kidModeSettings,
+                        availableGenres = availableGenres,
+                        onEnable = onEnableKidMode,
+                        onUpdateRules = onUpdateKidModeRules,
+                        onDisable = onDisableKidMode,
                     )
                 }
             }
+            Spacer(Modifier.height(24.dp))
         }
-
-        Spacer(Modifier.height(32.dp))
-        Text("Join another swarm", color = SwarmMuted, fontSize = 14.sp)
-        Spacer(Modifier.height(12.dp))
-        NumberPadEntry(value = code, maxLength = 8, onValueChange = { code = it }, enabled = !busy)
-        Spacer(Modifier.height(16.dp))
-        Button(
-            onClick = { onJoin(code); code = "" },
-            enabled = !busy && code.length == 8,
-            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
-        ) {
-            Text(if (busy) "Working…" else "Join swarm", fontWeight = FontWeight.Bold)
-        }
-
-        errorMessage?.let {
-            Spacer(Modifier.height(16.dp))
-            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
-        }
-
-        Spacer(Modifier.height(32.dp))
-        KidModeCard(
-            kidModeSettings = kidModeSettings,
-            availableGenres = availableGenres,
-            onEnable = onEnableKidMode,
-            onUpdateRules = onUpdateKidModeRules,
-            onDisable = onDisableKidMode,
-        )
     }
 }
+
+private enum class SettingsSection { GENERAL, SWARMS, FAMILY }
+
+@Composable
+private fun SettingsTab(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.colors(
+            containerColor = if (selected) SwarmAccent else SwarmSurfaceMuted,
+            contentColor = if (selected) Color(0xFF04263A) else SwarmText,
+        ),
+    ) {
+        Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun SettingsPanel(title: String, subtitle: String, content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(SwarmSurface).padding(24.dp),
+    ) {
+        Text(title, color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text(subtitle, color = SwarmMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(20.dp))
+        content()
+    }
+}
+
+@Composable
+private fun SettingFieldRow(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    saveEnabled: Boolean,
+    onSave: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        TvOutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(label) },
+            colors = fieldColors(),
+            modifier = Modifier.width(520.dp),
+        )
+        Button(onClick = onSave, enabled = saveEnabled, colors = secondaryButtonColors()) { Text("Save") }
+    }
+}
+
+@Composable
+private fun secondaryButtonColors() = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)
 
 // --- Kid Mode -----------------------------------------------------------
 
@@ -530,4 +593,3 @@ private fun SwarmRow(swarm: SwarmSummary, isActive: Boolean, busy: Boolean, onSe
         }
     }
 }
-
