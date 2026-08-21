@@ -1,6 +1,6 @@
 ---
 name: tv-client-ui-conventions
-description: Use when building or changing any screen/composable in the Fire TV client (clients/tv-android/app/src/main/kotlin/app/swarm/tv/app/ui and MainActivity/SwarmViewModel's UiState). Covers the shared SwarmTvTheme palette, tv-material3 Button color pitfalls (focused/pressed states silently falling back to library defaults), D-pad focus-trapping for overlays/modals, initial-focus and initial-state-flash patterns, the shared loading indicator, and layout conventions confirmed against a real 1080p Fire TV screen. For real-device debugging methodology (not UI design), see swarm-real-device-debugging.
+description: Use when building or changing any screen/composable in the Fire TV client (clients/tv-android/app/src/main/kotlin/app/swarm/tv/app/ui and MainActivity/SwarmViewModel's UiState). Covers the shared palette, explicit TV button focus colors, D-pad focus, player lifecycle, screen-awake behavior, subtitles, artwork/icon safe zones, loading, and layouts confirmed against a real 1080p Fire TV screen. For real-device debugging methodology, see swarm-real-device-debugging.
 ---
 
 # TV client UI conventions
@@ -198,6 +198,62 @@ replaces any on-screen "Cancel"/"Back" button in a modal or overlay —
 don't add one. It's redundant D-pad real estate the user has to
 navigate past, and every overlay in this app already gets a working
 physical Back for free via `BackHandler`.
+
+## Playback controls and lifecycle
+
+Conventional action buttons everywhere use
+`ui/components/SwarmButtonColors.kt`'s `swarmActionButtonColors()`: white at
+rest with dark navy text, cyan when D-pad focused, and hot accent while
+pressed. Do not reproduce `ButtonDefaults.colors` at call sites. Selected
+shuffle/like/tab state is communicated in the label or weight rather than by
+breaking this palette. `SelectableChip` and number-pad keys are distinct
+semantic controls and intentionally retain their own selected/keypad styling.
+
+Media3 owns movie/show transport controls rather than Compose. Keep
+`applySwarmPlaybackControlColors` in `PlayerScreen` aligned with the shared
+sequence by applying a stateful white/cyan/hot tint to its native image
+buttons.
+
+Music has two distinct exits: physical Back minimizes the active session, and
+the visible **Close** button stops it. Do not add a visible Minimize button;
+Back already provides that action. The compact mini-player is aligned at the
+bottom-right and its root measures only its visible controls. Never wrap it in
+a full-screen focusable overlay, because that blocks D-pad access to the UI
+behind it.
+
+Player ownership is hoisted in `MainActivity` so recomposing or minimizing a
+screen does not accidentally create another ExoPlayer or leave an abandoned
+transcode alive. Every close, skip, cancellation, and runtime error path must
+release the previous player before negotiating another stream.
+
+## Keep the TV awake only during active playback
+
+Use the activity window's `FLAG_KEEP_SCREEN_ON`, driven centrally from the
+hoisted playback state. Enable it for any video player and for music only while
+the player is actually playing, including while minimized. Clear it from
+`DisposableEffect.onDispose`. Do not request a broad Android wake lock: the
+window flag prevents the Fire TV screensaver while playback is active without
+keeping the device awake after pause, close, or navigation.
+
+## Side-loaded subtitles
+
+Peer paths in `PlaybackPlan.subtitles` are not directly fetchable URLs.
+`CatalogSession` must route each path through the same authenticated loopback
+proxy used for media. Attach the resulting WebVTT URLs as Media3
+`MediaItem.SubtitleConfiguration`s before preparing the item. Leave selection
+and the Off option to `PlayerView`/Media3 rather than building a competing
+custom subtitle picker.
+
+## Launcher artwork needs a TV-safe zone
+
+Fire TV applies its own icon mask and visual crop. A source mascot that fills
+most of a 512px square will look oversized even though the PNG dimensions are
+technically valid. Preserve the existing mascot artwork, scale it down, and
+center it on a transparent 512x512 canvas. The current launcher's nontransparent
+bounds are roughly 211x265px at `(149,117)`, which provides a tested safe zone.
+The wide `tv_banner` is a separate resource and should remain independently
+padded. After any change, assemble the APK and inspect the packaged icon rather
+than judging only the source PNG.
 
 ## Client-error reporting: two related but distinct pipelines
 

@@ -10,24 +10,21 @@ Everything runs on this one machine; the Fire TV just needs to be on the same Wi
 ```bash
 ./run_now.sh
 ```
-Builds and runs three real processes together: the STUN server, a headless media server, and the desktop GUI (a window should open). Prints two STUN URLs at the end — always use the **LAN** one, e.g. `http://192.168.0.242:8080`, never `127.0.0.1` (that only works for a browser on this same machine; a real device on your LAN can't reach loopback). `Ctrl+C` stops all three together. If the LAN IP looks wrong (e.g. a `10.x`/`100.x` VPN address instead of your real `192.168.x.x` Wi-Fi one), see [Manual end-to-end testing](#manual-end-to-end-testing-stun--server--real-fire-tv) below.
+Builds and runs two real processes together: the hosted-style SWARM service and the desktop media-server app (a window should open). The desktop app is the media server; there is no second headless server. Closing its window hides it to the system tray so streaming continues, and **Quit SWARM** in the tray menu stops it. `Ctrl+C` stops both development processes together.
 
-**2. Get a passcode** (the STUN server's own web UI, no separate tooling):
-- Open the **LAN URL** from step 1 in a browser (e.g. `http://192.168.0.242:8080`).
-- Click the **Create account** tab, enter any email + a password (**10+ characters**, that's the only rule), and click **Create account** — it signs you in automatically, no email verification needed for local testing.
-- Under **Your swarms**, type a name into the **New swarm name** box (e.g. "Home") and click **Create**. A swarm is a private device group; only devices that join the same one can find each other.
-- Click the new swarm to expand it, then click **Generate join code**. A popup shows the code (8 digits, shown as two groups of 4) and its expiry — **single-use**, good for **15 minutes**. Every device needs its own fresh code, so you'll come back here once per device (desktop GUI, then Fire TV).
+**2. Configure the desktop media server:**
+In the window `run_now.sh` opened, choose a media folder. With the development SWARM service URL supplied by the script, the desktop app securely creates and owns its swarm automatically. The service remains infrastructure rather than something an ordinary user has to configure.
 
-**3. Register the desktop GUI into that swarm:**
-In the GUI window `run_now.sh` already opened, click **Choose media folder…** first (required — pick real media if you want something to actually play, or just point it at the sample `.run/media/` folder for a quick connectivity check). Next it shows **Join a swarm (optional)** — fill in **STUN server URL** (the LAN URL from step 1), **Join code** (from step 2), and **Device name** (defaults to "SWARM Server"), then click **Join swarm**. Or click **Skip for now** and do it later from the GUI's **Swarm** tab (same fields, under "Join another swarm").
-
-**4. Install and register the TV client:**
+**3. Install the TV client:**
 ```bash
 ./deploy_tv.sh 192.168.0.148    # your Fire TV's IP — Settings -> My Fire TV -> About -> Network
 ```
 First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name row ~7 times), then turn on **ADB debugging** under the new Developer Options entry, and accept the "Allow USB debugging?" prompt on the TV.
 
-Once installed and launched, the app opens straight to its **STUN server URL** / **Device name** / passcode screen. Enter the same **LAN URL** from step 1, a **fresh** join code (generate a new one on the STUN web UI — the one you used for the GUI is already spent, it's single-use), and click **Join swarm**.
+On a first-run TV choose **Connect through SWARM**. From an already-connected TV use **Swarm → Add Server → Show Code**. The TV displays a short-lived activation code without asking for a service URL.
+
+**4. Approve the TV:**
+Open the desktop app's **Swarm** page, enter the activation code, verify the TV name shown, and approve it. The TV detects approval automatically and opens the swarm dashboard. LAN-discovered servers can still be paired directly without using the internet service.
 
 **5. Test it:** on the Fire TV, browse the merged catalog and play something. Both the GUI and the Fire TV should now show up as devices in that swarm on the STUN web UI.
 
@@ -73,16 +70,17 @@ docs/                      PROTOCOL.md, recovered reference implementations
 ## Development
 
 ```bash
-cargo test --workspace                              # everything except the Tauri GUI
-cargo test -p swarm-server --features gui            # include the GUI binary's own tests
-cargo run -p stun-server                              # run the STUN server locally
-SWARM_MEDIA_ROOT=/path/to/media cargo run -p swarm-server --bin swarm-serverd   # headless media server
-SWARM_MEDIA_ROOT=/path/to/media cargo run -p swarm-server --features gui --bin swarm-server-app  # desktop app
+cargo test --workspace                # Rust workspace tests
+cargo run -p stun-server              # run the SWARM rendezvous service locally
+cargo run -p swarm-server             # run the desktop media server
+cd apps/server && npm install && npm run build  # native desktop package
 ```
 
 The fingerprint tests pin byte-for-byte compatibility with the original Python `sample-fp-v1` implementation — do not change `fingerprint.rs` without regenerating vectors against `batocera.drone/app/common/fingerprint.py`.
 
-Server app env vars (headless daemon; the GUI persists media/scraper settings to `<app data dir>/settings.json`): `SWARM_MEDIA_ROOT` (required), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`, `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a STUN server), `SWARM_STUN_URL`/`SWARM_STUN_CODE`/`SWARM_DEVICE_NAME` (one-shot swarm join at startup), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring on headless boxes with no Secret Service).
+The desktop app persists media, scraper, streaming, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, and `SWARM_TRANSCODING_DISABLED`.
+
+TV builds receive the public service address at build time, keeping it out of the living-room UI: `SWARM_RENDEZVOUS_URL=https://swarm.example.com ./gradlew :app:assembleDebug` (or Gradle property `-PswarmRendezvousUrl=...`). On first connection the TV displays an eight-digit, ten-minute activation code; enter that code on the media server's **Swarm** page and approve the device shown. Existing account-created swarms and join codes remain available as a compatibility fallback.
 
 Streaming bandwidth is a server-wide reservation pool. `SWARM_MAX_UPLOAD_MBPS`
 (default `10`) is reduced by `SWARM_UPLOAD_RESERVE_PERCENT` (default `90`,
@@ -97,6 +95,17 @@ Direct play (no transcode) has no such floor — it only needs the source
 file's own bitrate to fit the pool.
 FFmpeg and ffprobe must be installed on the media server; set
 `SWARM_FFMPEG_PATH` when `ffmpeg` is not on `PATH`.
+
+Local English subtitle generation is optional under **Details → Local
+subtitles**. Enabling it downloads and verifies the official 466 MiB
+`small.en` Whisper model on first use, then processes movies and episodes in
+durable ten-minute sections. Completed sections survive a real app restart;
+the worker also pauses automatically while a client is streaming. Its
+always-visible progress panel is at the top of **Media**, and completed WebVTT
+tracks appear in the TV player's normal subtitle controls. Source media never
+leaves the media server. Building the desktop app requires CMake because
+`whisper.cpp` is linked into the native binary; end users do not install a
+separate transcription executable.
 
 TV client (`clients/tv-android`, Gradle — see its own README for the full build/test story and what's deliberately not built yet):
 
@@ -118,28 +127,22 @@ point a browser or a real device at them.
 ```bash
 ./run_now.sh
 ```
-Builds and runs three real processes together: `swarm-stun-server`, a
-headless `swarm-serverd`, and the Tauri desktop GUI (`swarm-server-app`) —
-all bound to `0.0.0.0` (not just loopback) so a real device on your LAN
-can reach them. Prints two STUN URLs — always use the **LAN** one (e.g.
+Builds and runs two real processes together: `swarm-stun-server` and the
+Tauri desktop media server (`swarm-server-app`). The desktop process owns
+both the UI and `ServerCore`; hiding the window does not stop streaming. Both
+are bound to `0.0.0.0` (not just loopback) so a real device on your LAN
+can reach them. Prints two SWARM service URLs — use the **LAN** one (e.g.
 `http://192.168.x.x:8080`), not `127.0.0.1`, for anything other than a
 browser on this same machine. If the LAN IP printed looks wrong, this
 machine likely has a VPN active; see `.claude/skills/swarm-local-testing/`
 for why and how the script already works around it.
 
-Open the LAN URL in a browser, register an account, create a swarm, and
-mint an 8-digit join code. In the GUI window the script already opened,
-first-run onboarding asks for a media folder first (required — pick real
-media, or point it at the sample `.run/media/` folder), then offers an
-optional "join a swarm" screen where you paste the LAN URL + that code —
-or skip and join later from the Swarm tab. Alternatively, drop real files
-directly into `.run/media/`, the headless daemon's own scanned root, and
-register *it* into a swarm instead by stopping the script and re-running
-with `SWARM_STUN_URL`/`SWARM_STUN_CODE` set (printed in the script's own
-output; auto-registers the headless daemon only, never the GUI). Either
-server works fine for TV client testing — the GUI is just easier to watch
-scan/scrape progress on, the headless one is what every automated test
-already exercises.
+In the GUI window the script opened, choose a media folder. The app
+automatically creates and manages its own swarm because `run_now.sh` supplied
+the rendezvous URL. On the TV choose **Connect through SWARM** on first run, or
+**Add Server → Show Code** from an existing dashboard, then enter the displayed
+short-lived code on the desktop app's **Swarm** page. The TV returns to its
+existing dashboard if that flow is cancelled or the code request fails.
 
 **2. Install the TV client on a real Fire TV:**
 ```bash
@@ -156,8 +159,9 @@ actually stayed up (checks for `FATAL EXCEPTION` in logcat and confirms
 the process is still alive) rather than just trusting a successful
 install — this is what caught a real launch crash on first real-hardware
 use (see `.claude/skills/swarm-real-device-debugging/` for the full
-story). Add `-f` to tail logcat afterward. On the TV, enter the **LAN**
-STUN URL from step 1 plus the join code on the passcode screen.
+story). Add `-f` to tail logcat afterward. Approve the TV's activation code in
+the desktop app; the service URL is supplied by the debug build rather than
+typed with a remote.
 
 Building against a real device specifically needs the **debug** build —
 the release manifest intentionally disables cleartext HTTP/WS traffic for

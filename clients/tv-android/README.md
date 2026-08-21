@@ -9,13 +9,15 @@ Kotlin/JVM, no Android dependency) and `:app` (the Android application).
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17   # AGP needs 17, not whatever `java` defaults to
 ./gradlew :core:test         # wire contracts, STUN client, catalog merger, PeerQuicClient — JDK only, no SDK needed
-./gradlew :core:interopTest  # kwik <-> real Rust quinn server QUIC spike; needs a release swarm-serverd build (see below)
+./gradlew :core:interopTest  # opt-in cross-process protocol tests (see note below)
 ./gradlew :app:assembleDebug # full APK (armeabi-v7a + arm64-v8a splits); needs $ANDROID_HOME
 ```
 
-`:core:interopTest` needs `cargo build --release -p swarm-server --bin swarm-serverd` run first from the
-workspace root — it skips gracefully (not fails) if that binary isn't present, so it's a separate
-opt-in task rather than part of the default `:core:test`.
+Some legacy `:core:interopTest` fixtures still look for the removed
+`swarm-serverd` binary and therefore skip. A skip is not current media-server
+interop validation: the desktop GUI now owns `ServerCore`. New cross-language
+media-peer coverage should use an explicitly test-only Rust harness rather
+than restoring a production headless server.
 
 `local.properties` (gitignored) must point `sdk.dir` at an installed Android SDK
 with `platforms;android-35` + `build-tools;35.0.0`.
@@ -48,8 +50,8 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   `android.hardware.touchscreen` explicitly not required,
   `android.software.leanback` required, no Google-Play-Services dependency.
   Screens: connection landing page (automatically discovered LAN servers,
-  first-time 6-digit LAN pairing, plus STUN URL/device name and its 8-digit
-  join code) and a swarm dashboard (server roster with online/offline status,
+  first-time 6-digit LAN pairing, plus short-lived SWARM activation) and a
+  swarm dashboard (server roster with online/offline status,
   resync button). A saved STUN session takes startup priority; otherwise the
   most recently connected LAN server is restored directly to the dashboard,
   and onboarding appears only when neither exists. `AndroidTokenStore` wraps
@@ -77,10 +79,11 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   correct status/headers. Programs against a small `PeerConnection`
   interface (not `PeerQuicClient` directly) so its HTTP-translation logic is
   unit tested fast, against a fake, with no live QUIC connection required.
-- **Both proven against the real Rust server, not just compiled.**
-  `PeerQuicClientInteropTest` (`./gradlew :core:interopTest`) spawns the
-  actual release `swarm-serverd` binary and drives it from Kotlin over
-  loopback QUIC:
+- **The QUIC protocol was originally proven against the former real Rust
+  headless server, not just compiled.** The historical
+  `PeerQuicClientInteropTest` coverage drove that binary from Kotlin over
+  loopback QUIC; those fixtures now skip until they are migrated to an
+  explicitly test-only `ServerCore` harness:
   - A full `PeerQuicClient` session — thumbprint, manifest, a byte-exact
     300 KB direct-play transfer, a seek Range, a suffix Range — passes
     repeatedly with every byte verified, and a client whose certificate
@@ -108,7 +111,7 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   every server with a usable `peer_addr`, registers each live connection
   with a `PeerLoopbackProxy`, fetches and merges their catalogs via
   `CatalogMerger`, and reports which devices weren't reachable rather than
-  failing the whole refresh. Proven against a real `swarm-serverd`: a
+  failing the whole refresh. The historical headless interop fixture proved a
   roster with one real server (dialed purely from its self-reported
   address, no hardcoded host:port anywhere in the test) plus one
   never-registered device merges to the right one-entry catalog and streams

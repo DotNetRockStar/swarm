@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "SWARM STUN API",
+    "title": "SWARM Rendezvous API",
     "description": "Rendezvous service for the SWARM P2P media suite: accounts, swarms, join codes, device registry, and WSS signaling (see /api/v1/ws — not representable in OpenAPI).",
     "license": {
       "name": "GPL-3.0-or-later",
@@ -10,6 +10,121 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/activations": {
+      "post": {
+        "tags": [
+          "activation"
+        ],
+        "operationId": "create_activation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateActivationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateActivationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/activations/lookup": {
+      "post": {
+        "tags": [
+          "activation"
+        ],
+        "operationId": "lookup_activation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LookupActivationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationPreview"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/activations/{activation_id}": {
+      "get": {
+        "tags": [
+          "activation"
+        ],
+        "operationId": "activation_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationStatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/activations/{activation_id}/approve": {
+      "post": {
+        "tags": [
+          "activation"
+        ],
+        "operationId": "approve_activation",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationStatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -345,6 +460,36 @@
         ]
       }
     },
+    "/api/v1/managed-swarms/provision": {
+      "post": {
+        "tags": [
+          "managed swarms"
+        ],
+        "operationId": "provision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionManagedSwarmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionManagedSwarmResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/devices": {
       "get": {
         "tags": [
@@ -547,6 +692,68 @@
   },
   "components": {
     "schemas": {
+      "ActivationPreview": {
+        "type": "object",
+        "required": [
+          "activation_id",
+          "device_name",
+          "platform",
+          "expires_at"
+        ],
+        "properties": {
+          "activation_id": {
+            "type": "string"
+          },
+          "device_name": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        }
+      },
+      "ActivationStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "expired"
+        ]
+      },
+      "ActivationStatusResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "expires_at"
+        ],
+        "properties": {
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ActivationStatus"
+          },
+          "swarm": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SwarmSummary"
+              }
+            ]
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "description": "Uniform error body for every non-2xx REST response.",
@@ -559,6 +766,46 @@
             "type": "string"
           },
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateActivationRequest": {
+        "type": "object",
+        "description": "A TV starts this flow and shows `code` to the user. The access token is a\npre-authorized random credential whose hash alone is stored by the\nservice; it is unusable until the media server approves the activation.",
+        "required": [
+          "device"
+        ],
+        "properties": {
+          "device": {
+            "$ref": "#/components/schemas/DeviceRegistration"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateActivationResponse": {
+        "type": "object",
+        "required": [
+          "activation_id",
+          "code",
+          "poll_token",
+          "access_token",
+          "expires_at"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "activation_id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "poll_token": {
             "type": "string"
           }
         }
@@ -691,6 +938,18 @@
         },
         "additionalProperties": false
       },
+      "LookupActivationRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MetadataPatchRequest": {
         "type": "object",
         "description": "`PATCH /api/v1/devices/{device_id}/metadata` — a device updating its own\narbitrary key/value metadata (e.g. a server self-reporting the address\npeers should dial: `{\"peer_addr\": \"192.168.1.50:8543\"}`).",
@@ -780,6 +1039,54 @@
           }
         },
         "additionalProperties": false
+      },
+      "ProvisionManagedSwarmRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/managed-swarms/provision` — idempotently create or renew\nthe private swarm owned by a media server. `swarm_id` and `claim_token`\nare generated and retained by that server, so the rendezvous service\nnever becomes the authority for inviting clients.",
+        "required": [
+          "swarm_id",
+          "claim_token",
+          "swarm_name",
+          "device"
+        ],
+        "properties": {
+          "claim_token": {
+            "type": "string"
+          },
+          "device": {
+            "$ref": "#/components/schemas/DeviceRegistration"
+          },
+          "swarm_id": {
+            "type": "string"
+          },
+          "swarm_name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProvisionManagedSwarmResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "device_id",
+          "swarm",
+          "lease_expires_at"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "type": "string"
+          },
+          "swarm": {
+            "$ref": "#/components/schemas/SwarmSummary"
+          }
+        }
       },
       "RegisterDeviceRequest": {
         "type": "object",
@@ -1045,6 +1352,14 @@
     {
       "name": "devices",
       "description": "Device registration and management"
+    },
+    {
+      "name": "managed swarms",
+      "description": "Media-server-owned automatic swarms"
+    },
+    {
+      "name": "activation",
+      "description": "Short-lived TV activation approved by a media server"
     }
   ]
 }

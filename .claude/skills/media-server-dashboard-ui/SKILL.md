@@ -1,6 +1,6 @@
 ---
 name: media-server-dashboard-ui
-description: Use when building or changing anything in the Tauri media server's web dashboard (apps/server/ui — index.html, app.js, details.js, swarm.js, notifications.js, media.js, ai.js, style.css). Covers the no-framework vanilla-JS conventions (invoke(), esc(), showToast()), the shared SwarmBackground/SwarmAccent-style CSS palette, the tab system, script-load-order pitfalls, and the pattern for adding a new panel like "Client errors." For the Fire TV client's UI conventions (a separate, Kotlin/Compose surface sharing the same palette), see tv-client-ui-conventions.
+description: Use when building or changing anything in the Tauri media server's web dashboard (apps/server/ui — index.html, app.js, details.js, swarm.js, notifications.js, media.js, ai.js, style.css). Covers the no-framework vanilla-JS conventions, shared palette, tabs, script-load-order pitfalls, persistent progress panels, info popups, and toast/error behavior. For durable backend workers use media-server-background-work; for the Kotlin TV surface use tv-client-ui-conventions.
 ---
 
 # Media server dashboard UI conventions
@@ -178,10 +178,10 @@ Kotlin side too rather than letting one app silently drift off-palette.
 - Icons are Bootstrap Icons (`<i class="bi bi-icon-name">`), always
   paired with the button/label text, never icon-only for a primary
   action.
-- Tabs: `TABS` array in `app.js` (currently `about`, `details`, `swarm`,
-  `notifications`, `media`, `ai`, in on-screen left-to-right order —
-  `about` is deliberately leftmost and is also the tab `enterDashboard()`
-  opens on at boot, since it's the first thing every user should see),
+- Tabs: `TABS` array in `app.js` (currently `media`, `details`, `swarm`,
+  `notifications`, `ai`, `about`, in on-screen left-to-right order —
+  `media` is deliberately first and is also the tab `enterDashboard()`
+  opens on at boot),
   `tabPanel-<name>` / `tabBtn-<name>` id convention, `showTab(name)`
   toggles `.d-none`/`.tab-active` and dispatches to that tab's
   `refresh*()`. Adding a tab means adding to `TABS`, adding the matching
@@ -194,6 +194,30 @@ Kotlin side too rather than letting one app silently drift off-palette.
   `setInterval`-polled `refresh*Badge()` function (30s interval is the
   existing standard) rather than a push mechanism, since there's no
   websocket/event channel wired up for this yet.
+
+## Long-running progress belongs outside re-rendered content
+
+The Local subtitle generation panel is the reference pattern for a process
+that can run for hours or days. Its static markup lives in `index.html` above
+`#library`; `renderMediaTab()` may replace the entire library subtree without
+destroying the progress node. Do not inject long-running status into a
+container whose `.innerHTML` is rebuilt by search, filters, or navigation.
+
+`media.js` polls `get_transcription_status` once per second and updates only
+text, width, and active classes. Its catch is deliberately silent because a
+background poll must not produce a toast every second during startup or a
+transient IPC failure. User-initiated operations still toast every failure.
+Represent disabled, download, verify, transcribe, playback-paused, idle, and
+failed states in the same always-present panel. Combine durable checkpoint
+counts with native in-section progress so the bar keeps moving during one
+expensive checkpoint.
+
+The panel is sticky within the Media card, not globally fixed: it remains
+visible while a long library scrolls but cannot cover other tabs. Pair its
+Details toggle with an `INFO_TOPICS` popup explaining download size, time/CPU
+implications, pause/resume behavior, and local data handling; the success toast
+must state that an automatic download is starting when applicable. See
+`media-server-background-work` for the backend half.
 
 ## Adding a new report/feed-style panel: follow the "Client errors" shape
 

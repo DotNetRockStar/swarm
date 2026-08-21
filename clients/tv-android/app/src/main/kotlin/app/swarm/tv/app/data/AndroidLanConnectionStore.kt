@@ -15,20 +15,12 @@ data class SavedLanConnection(
 class AndroidLanConnectionStore(context: Context) {
     private val dao = AppDatabase.getInstance(context).localServerConnectionDao()
 
+    suspend fun all(): List<SavedLanConnection> = withContext(Dispatchers.IO) {
+        dao.list().map { it.toSavedConnection() }
+    }
+
     suspend fun mostRecent(): SavedLanConnection? = withContext(Dispatchers.IO) {
-        dao.mostRecent()?.let { entity ->
-            SavedLanConnection(
-                server = LanServer(
-                    serviceName = entity.serviceName,
-                    name = entity.name,
-                    host = entity.host,
-                    peerPort = entity.peerPort,
-                    pairingPort = entity.pairingPort,
-                    certFingerprint = entity.certFingerprint,
-                ),
-                deviceName = entity.deviceName,
-            )
-        }
+        dao.mostRecent()?.toSavedConnection()
     }
 
     suspend fun save(server: LanServer, deviceName: String) = withContext(Dispatchers.IO) {
@@ -49,4 +41,16 @@ class AndroidLanConnectionStore(context: Context) {
     suspend fun forget(fingerprint: String) = withContext(Dispatchers.IO) {
         dao.delete(fingerprint)
     }
+
+    private fun LocalServerConnectionEntity.toSavedConnection() = SavedLanConnection(
+        server = LanServer(
+            serviceName = serviceName,
+            name = name,
+            host = host,
+            peerPort = peerPort,
+            pairingPort = pairingPort,
+            certFingerprint = certFingerprint,
+        ),
+        deviceName = deviceName,
+    )
 }

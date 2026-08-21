@@ -66,7 +66,17 @@ impl LanService {
         // TCP and QUIC/UDP can share the same numeric port. Keeping pairing
         // on the configured peer port avoids an unpredictable high port that
         // would be awkward to permit through a host firewall.
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, peer_addr.port())).await?;
+        let listener = match TcpListener::bind((Ipv4Addr::UNSPECIFIED, peer_addr.port())).await {
+            Ok(listener) => listener,
+            // Tests and dynamically assigned deployments can race another
+            // TCP listener that received the same numeric ephemeral port as
+            // our UDP/QUIC socket. Pairing already advertises its own port,
+            // so falling back to another ephemeral TCP port is transparent.
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?
+            }
+            Err(error) => return Err(error),
+        };
         let pairing_port = listener.local_addr()?.port();
         let pairing = Arc::new(Mutex::new(PairingWindow::default()));
         let listener_pairing = Arc::clone(&pairing);

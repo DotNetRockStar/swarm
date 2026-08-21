@@ -93,21 +93,36 @@ async fn handle(state: SharedState, addr: SocketAddr, mut socket: WebSocket) {
     };
     let parsed: Result<SignalMessage, _> = serde_json::from_str(&text);
     let (device_id, token) = match parsed {
-        Ok(SignalMessage::Hello { protocol_version, access_token, device_id, .. }) => {
+        Ok(SignalMessage::Hello {
+            protocol_version,
+            access_token,
+            device_id,
+            ..
+        }) => {
             if protocol_version != PROTOCOL_VERSION {
-                let _ = send(&mut socket, &SignalMessage::Error {
-                    code: "protocol_version".into(),
-                    message: format!("server speaks protocol v{PROTOCOL_VERSION}; please update"),
-                }).await;
+                let _ = send(
+                    &mut socket,
+                    &SignalMessage::Error {
+                        code: "protocol_version".into(),
+                        message: format!(
+                            "server speaks protocol v{PROTOCOL_VERSION}; please update"
+                        ),
+                    },
+                )
+                .await;
                 return;
             }
             (device_id, access_token)
         }
         _ => {
-            let _ = send(&mut socket, &SignalMessage::Error {
-                code: "expected_hello".into(),
-                message: "first frame must be hello".into(),
-            }).await;
+            let _ = send(
+                &mut socket,
+                &SignalMessage::Error {
+                    code: "expected_hello".into(),
+                    message: "first frame must be hello".into(),
+                },
+            )
+            .await;
             return;
         }
     };
@@ -121,21 +136,30 @@ async fn handle(state: SharedState, addr: SocketAddr, mut socket: WebSocket) {
     .unwrap_or(None);
     let Some((device_type_raw, None)) = row else {
         state.blocker.record_failure(addr.ip());
-        let _ = send(&mut socket, &SignalMessage::Error {
-            code: "unauthorized".into(),
-            message: "unknown device or bad token".into(),
-        }).await;
+        let _ = send(
+            &mut socket,
+            &SignalMessage::Error {
+                code: "unauthorized".into(),
+                message: "unknown device or bad token".into(),
+            },
+        )
+        .await;
         return;
     };
     let device_type = parse_device_type(&device_type_raw);
 
     let session_id = new_id();
     let mut inbox = state.hub.connect(&device_id, &session_id);
-    if !send(&mut socket, &SignalMessage::HelloAck {
-        session_id: session_id.clone(),
-        observed_addr: addr.to_string(),
-        reflector_ports: state.config.reflector_ports.clone(),
-    }).await {
+    if !send(
+        &mut socket,
+        &SignalMessage::HelloAck {
+            session_id: session_id.clone(),
+            observed_addr: addr.to_string(),
+            reflector_ports: state.config.reflector_ports.clone(),
+        },
+    )
+    .await
+    {
         state.hub.disconnect(&device_id, &session_id);
         return;
     }

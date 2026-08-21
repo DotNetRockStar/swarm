@@ -60,6 +60,83 @@ pub struct RegisterDeviceResponse {
     pub swarm: SwarmSummary,
 }
 
+/// `POST /api/v1/managed-swarms/provision` — idempotently create or renew
+/// the private swarm owned by a media server. `swarm_id` and `claim_token`
+/// are generated and retained by that server, so the rendezvous service
+/// never becomes the authority for inviting clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionManagedSwarmRequest {
+    pub swarm_id: String,
+    pub claim_token: String,
+    pub swarm_name: String,
+    pub device: DeviceRegistration,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProvisionManagedSwarmResponse {
+    pub access_token: String,
+    pub device_id: String,
+    pub swarm: SwarmSummary,
+    pub lease_expires_at: String,
+}
+
+/// A TV starts this flow and shows `code` to the user. The access token is a
+/// pre-authorized random credential whose hash alone is stored by the
+/// service; it is unusable until the media server approves the activation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CreateActivationRequest {
+    pub device: DeviceRegistration,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateActivationResponse {
+    pub activation_id: String,
+    pub code: String,
+    pub poll_token: String,
+    pub access_token: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LookupActivationRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ActivationPreview {
+    pub activation_id: String,
+    pub device_name: String,
+    pub platform: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationStatus {
+    Pending,
+    Approved,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ActivationStatusResponse {
+    pub status: ActivationStatus,
+    pub device_id: Option<String>,
+    pub swarm: Option<SwarmSummary>,
+    pub expires_at: String,
+}
+
 /// `POST /api/v1/swarms/join` — add an already-registered device (Bearer auth)
 /// to another swarm with a fresh join code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,7 +214,10 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(serde_json::from_str::<RegisterDeviceRequest>(&json).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<RegisterDeviceRequest>(&json).unwrap(),
+            req
+        );
     }
 
     #[test]
@@ -155,6 +235,9 @@ mod tests {
 
     #[test]
     fn device_type_wire_format_is_snake_case() {
-        assert_eq!(serde_json::to_string(&DeviceType::Both).unwrap(), r#""both""#);
+        assert_eq!(
+            serde_json::to_string(&DeviceType::Both).unwrap(),
+            r#""both""#
+        );
     }
 }

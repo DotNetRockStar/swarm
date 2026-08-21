@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::email::Mailer;
 use crate::hub::Hub;
-use crate::security::BruteForceBlocker;
+use crate::security::{AllocationLimiter, BruteForceBlocker};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
@@ -12,6 +12,8 @@ pub struct AppState {
     pub hub: Hub,
     pub config: Config,
     pub blocker: BruteForceBlocker,
+    pub activation_allocations: AllocationLimiter,
+    pub managed_swarm_allocations: AllocationLimiter,
     pub mailer: Mailer,
 }
 

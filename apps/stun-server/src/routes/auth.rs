@@ -76,15 +76,23 @@ pub struct ResetPasswordRequest {
 }
 
 fn ok() -> Json<StatusResponse> {
-    Json(StatusResponse { status: "ok".into() })
+    Json(StatusResponse {
+        status: "ok".into(),
+    })
 }
 
 fn valid_email(email: &str) -> bool {
-    let Some((local, domain)) = email.split_once('@') else { return false };
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
     !local.is_empty() && domain.contains('.') && !domain.ends_with('.') && email.len() <= 254
 }
 
-fn session_cookies(state: &SharedState, session_token: &str, csrf_token: &str) -> (Cookie<'static>, Cookie<'static>) {
+fn session_cookies(
+    state: &SharedState,
+    session_token: &str,
+    csrf_token: &str,
+) -> (Cookie<'static>, Cookie<'static>) {
     let secure = state.config.public_url.starts_with("https://");
     let session = Cookie::build((SESSION_COOKIE, session_token.to_string()))
         .path("/")
@@ -106,7 +114,10 @@ async fn create_session(state: &SharedState, user_id: &str) -> ApiResult<(String
     let csrf = generate_token();
     let ts = now();
     // Opportunistic sweep of expired rows (auth.py pattern).
-    sqlx::query("DELETE FROM sessions WHERE expires_at < ?").bind(ts).execute(&state.db).await?;
+    sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        .bind(ts)
+        .execute(&state.db)
+        .await?;
     sqlx::query(
         "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -128,10 +139,14 @@ pub async fn register(
 ) -> ApiResult<(axum::http::StatusCode, Json<StatusResponse>)> {
     let email = req.email.trim().to_lowercase();
     if !valid_email(&email) {
-        return Err(AppError::bad_request("invalid_email", "enter a valid email address"));
+        return Err(AppError::bad_request(
+            "invalid_email",
+            "enter a valid email address",
+        ));
     }
     validate_password(&req.password).map_err(|m| AppError::bad_request("weak_password", m))?;
-    let password_hash = hash_password(&req.password).map_err(|_| AppError::internal("hashing failed"))?;
+    let password_hash =
+        hash_password(&req.password).map_err(|_| AppError::internal("hashing failed"))?;
     let user_id = new_id();
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(email) DO NOTHING",
@@ -190,12 +205,19 @@ pub async fn login(
     let (session_cookie, csrf_cookie) = session_cookies(&state, &session_token, &csrf_token);
     Ok((
         jar.add(session_cookie).add(csrf_cookie),
-        Json(SessionResponse { authenticated: true, email: Some(email), email_verified: Some(verified_at.is_some()) }),
+        Json(SessionResponse {
+            authenticated: true,
+            email: Some(email),
+            email_verified: Some(verified_at.is_some()),
+        }),
     ))
 }
 
 #[utoipa::path(get, path = "/api/v1/auth/session", responses((status = 200, body = SessionResponse)), tag = "auth")]
-pub async fn session(State(state): State<SharedState>, jar: CookieJar) -> ApiResult<Json<SessionResponse>> {
+pub async fn session(
+    State(state): State<SharedState>,
+    jar: CookieJar,
+) -> ApiResult<Json<SessionResponse>> {
     match session_user(&state, &jar).await? {
         Some(user) => {
             let verified: Option<(Option<i64>,)> =
@@ -209,19 +231,30 @@ pub async fn session(State(state): State<SharedState>, jar: CookieJar) -> ApiRes
                 email_verified: Some(verified.and_then(|(v,)| v).is_some()),
             }))
         }
-        None => Ok(Json(SessionResponse { authenticated: false, email: None, email_verified: None })),
+        None => Ok(Json(SessionResponse {
+            authenticated: false,
+            email: None,
+            email_verified: None,
+        })),
     }
 }
 
 #[utoipa::path(post, path = "/api/v1/auth/logout", responses((status = 200, body = StatusResponse)), tag = "auth")]
-pub async fn logout(State(state): State<SharedState>, jar: CookieJar) -> ApiResult<(CookieJar, Json<StatusResponse>)> {
+pub async fn logout(
+    State(state): State<SharedState>,
+    jar: CookieJar,
+) -> ApiResult<(CookieJar, Json<StatusResponse>)> {
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(token_hash(cookie.value()))
             .execute(&state.db)
             .await?;
     }
-    Ok((jar.remove(Cookie::from(SESSION_COOKIE)).remove(Cookie::from(CSRF_COOKIE)), ok()))
+    Ok((
+        jar.remove(Cookie::from(SESSION_COOKIE))
+            .remove(Cookie::from(CSRF_COOKIE)),
+        ok(),
+    ))
 }
 
 #[utoipa::path(post, path = "/api/v1/auth/password", request_body = PasswordChangeRequest,
@@ -242,14 +275,18 @@ pub async fn change_password(
         return Err(AppError::unauthorized("current password is incorrect"));
     }
     validate_password(&req.new_password).map_err(|m| AppError::bad_request("weak_password", m))?;
-    let new_hash = hash_password(&req.new_password).map_err(|_| AppError::internal("hashing failed"))?;
+    let new_hash =
+        hash_password(&req.new_password).map_err(|_| AppError::internal("hashing failed"))?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(&new_hash)
         .bind(&user.user_id)
         .execute(&state.db)
         .await?;
     // Sign out every other session but keep the caller's (auth.py pattern).
-    let keep = jar.get(SESSION_COOKIE).map(|c| token_hash(c.value())).unwrap_or_default();
+    let keep = jar
+        .get(SESSION_COOKIE)
+        .map(|c| token_hash(c.value()))
+        .unwrap_or_default();
     sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
         .bind(&user.user_id)
         .bind(&keep)
@@ -272,7 +309,10 @@ pub async fn verify_email(
     .fetch_optional(&state.db)
     .await?;
     let Some((user_id,)) = row else {
-        return Err(AppError::bad_request("invalid_token", "verification link is invalid or expired"));
+        return Err(AppError::bad_request(
+            "invalid_token",
+            "verification link is invalid or expired",
+        ));
     };
     sqlx::query("UPDATE users SET email_verified_at = ? WHERE id = ?")
         .bind(now())
@@ -330,17 +370,24 @@ pub async fn reset_password(
     .fetch_optional(&state.db)
     .await?;
     let Some((user_id,)) = row else {
-        return Err(AppError::bad_request("invalid_token", "reset link is invalid or expired"));
+        return Err(AppError::bad_request(
+            "invalid_token",
+            "reset link is invalid or expired",
+        ));
     };
     validate_password(&req.new_password).map_err(|m| AppError::bad_request("weak_password", m))?;
-    let new_hash = hash_password(&req.new_password).map_err(|_| AppError::internal("hashing failed"))?;
+    let new_hash =
+        hash_password(&req.new_password).map_err(|_| AppError::internal("hashing failed"))?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(&new_hash)
         .bind(&user_id)
         .execute(&state.db)
         .await?;
     // Reset invalidates every session and outstanding reset token.
-    sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(&user_id).execute(&state.db).await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await?;
     sqlx::query("DELETE FROM email_tokens WHERE user_id = ? AND purpose = 'reset'")
         .bind(&user_id)
         .execute(&state.db)

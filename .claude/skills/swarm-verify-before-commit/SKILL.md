@@ -35,13 +35,24 @@ needs this first, in every fresh shell context.)
 5. `cargo clippy --workspace --all-targets` — must be silent. This repo
    has zero tolerance for clippy warnings; every commit lands clean.
 6. If you touched a binary the Kotlin interop tests spawn
-   (`swarm-serverd`, `swarm-stun-server`), rebuild the release binary
+   (`swarm-stun-server`), rebuild the release binary
    before re-running any Kotlin interop test that uses it — the interop
    tests silently run against a **stale** binary otherwise:
    ```bash
-   cargo build --release -p swarm-server --bin swarm-serverd
    cargo build --release -p stun-server --bin swarm-stun-server
    ```
+
+The media server is GUI-owned; the supported desktop binary is
+`swarm-server-app`. Check it with
+`cargo check -p swarm-server --bin swarm-server-app`. Do not restore or build
+the removed `swarm-serverd` just to satisfy an old fixture. Building the native
+Whisper dependency requires CMake on the developer machine.
+
+For changes under `apps/server/ui`, also run:
+
+```bash
+node --test apps/server/ui/test/*.test.js
+```
 
 ## Kotlin changes (`clients/tv-android`)
 
@@ -55,8 +66,10 @@ export ANDROID_HOME=~/Library/Android/sdk        # only needed for :app tasks
    toolchain needed). Every fixture/unit test lives here.
 3. `./gradlew :core:interopTest` — only if you touched anything that talks
    to a real Rust process (signaling, reflector, punch, QUIC, `CatalogSession`).
-   Needs the release binaries built first (see above). Re-run new tests
-   3+ times, same reasoning as the Rust side.
+   Needs the applicable release binary built first (see above). Legacy tests
+   that look for the removed `swarm-serverd` may skip; a skip is not validation
+   of media-server interoperability. Re-run new tests 3+ times, same reasoning
+   as the Rust side.
 4. `./gradlew :app:compileDebugKotlin` — confirm the Android module still
    builds against whatever `:core` API changed. This has broken silently
    before (e.g. `refresh()` becoming `suspend` needed two existing test

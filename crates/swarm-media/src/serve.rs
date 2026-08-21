@@ -12,10 +12,14 @@ use crate::store::{ArtworkKind, Library};
 use crate::transcode::{
     hls_content_type, SessionRateLimiter, TranscodeConfig, TranscodeError, TranscodeManager,
 };
+use std::io::BufWriter;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use swarm_core::entry_key::is_valid_entry_key;
-use swarm_core::peer::{CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader};
+use swarm_core::peer::{
+    CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, SubtitleTrack,
+};
 use swarm_p2p::endpoint::{read_request, write_response_header, P2pError};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -23,6 +27,7 @@ pub struct MediaService {
     library: Arc<Library>,
     roots: SharedRootResolver,
     transcodes: Arc<TranscodeManager>,
+    thumbnail_generation: tokio::sync::Mutex<()>,
 }
 
 /// A resolved response: header plus a body source the transport streams out.
@@ -83,7 +88,11 @@ impl MediaService {
         media_root: PathBuf,
         config: TranscodeConfig,
     ) -> Self {
-        Self::with_roots(library, SharedRootResolver::new(RootResolver::single(media_root)), config)
+        Self::with_roots(
+            library,
+            SharedRootResolver::new(RootResolver::single(media_root)),
+            config,
+        )
     }
 
     /// Multi-root variant of [`Self::with_transcoding`] — see `crate::roots`.
@@ -92,11 +101,16 @@ impl MediaService {
     /// `ServerCore::update_media_roots`) can share the exact same handle
     /// with this service — a bare `RootResolver` clone would silently drift
     /// out of sync on the next update.
-    pub fn with_roots(library: Arc<Library>, roots: SharedRootResolver, config: TranscodeConfig) -> Self {
+    pub fn with_roots(
+        library: Arc<Library>,
+        roots: SharedRootResolver,
+        config: TranscodeConfig,
+    ) -> Self {
         Self {
             library,
             roots,
             transcodes: TranscodeManager::new(config),
+            thumbnail_generation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -105,6 +119,13 @@ impl MediaService {
     }
 
     pub async fn resolve(&self, request: &PeerRequest) -> Resolved {
+        self.resolve_for_network(request, false).await
+    }
+
+    /// Resolve a request with transport context. `is_lan` bypasses upload
+    /// admission limits and pacing because a local transfer does not spend
+    /// the internet uplink the budget is meant to protect.
+    pub async fn resolve_for_network(&self, request: &PeerRequest, is_lan: bool) -> Resolved {
         let request_path = request
             .path
             .split_once('?')
@@ -117,15 +138,17 @@ impl MediaService {
             "/likes/toggle" => self.set_like(request).await,
             path => {
                 if let Some(entry_key) = path.strip_prefix("/media/") {
-                    self.media(entry_key, request).await
+                    self.media(entry_key, request, is_lan).await
                 } else if let Some(entry_key) = path.strip_prefix("/play/") {
-                    self.play(entry_key, request).await
+                    self.play(entry_key, request, is_lan).await
                 } else if let Some(rest) = path.strip_prefix("/stream/") {
-                    self.session_media(rest, request).await
+                    self.session_media(rest, request, is_lan).await
                 } else if let Some(rest) = path.strip_prefix("/hls/") {
-                    self.hls(rest, request).await
+                    self.hls(rest, request, is_lan).await
                 } else if let Some(session_id) = path.strip_prefix("/stop/") {
                     self.stop(session_id).await
+                } else if let Some(rest) = path.strip_prefix("/subtitles/") {
+                    self.subtitle(rest).await
                 } else if let Some(rest) = path.strip_prefix("/art/") {
                     let mut segments = rest.splitn(2, '/');
                     let entry_key = segments.next().unwrap_or("");
@@ -155,9 +178,11 @@ impl MediaService {
     }
 
     async fn manifest(&self) -> Resolved {
-        let (Ok(thumbprint), Ok(entries), Ok(like_counts)) =
-            (self.library.thumbprint().await, self.library.list().await, self.library.like_counts().await)
-        else {
+        let (Ok(thumbprint), Ok(entries), Ok(like_counts)) = (
+            self.library.thumbprint().await,
+            self.library.list().await,
+            self.library.like_counts().await,
+        ) else {
             return status(500);
         };
         let manifest = CatalogManifest {
@@ -200,26 +225,30 @@ impl MediaService {
         if like.device_id.is_empty() || like.entry_key.is_empty() {
             return status(400);
         }
-        match self.library.set_like(&like.entry_key, &like.device_id, &like.device_name, like.liked).await {
+        match self
+            .library
+            .set_like(
+                &like.entry_key,
+                &like.device_id,
+                &like.device_name,
+                like.liked,
+            )
+            .await
+        {
             Ok(()) => status(204),
             Err(_) => status(500),
         }
     }
 
-    async fn media(&self, entry_key: &str, request: &PeerRequest) -> Resolved {
+    async fn media(&self, entry_key: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
         if !is_valid_entry_key(entry_key) {
             return status(404);
         }
         let Ok(Some(entry)) = self.library.get(entry_key).await else {
             return status(404);
         };
-        self.media_entry(
-            entry,
-            request,
-            None,
-            vec![self.transcodes.global_rate_limiter()],
-        )
-        .await
+        self.media_entry(entry, request, None, self.rate_limiters(is_lan, None))
+            .await
     }
 
     async fn media_entry(
@@ -274,7 +303,7 @@ impl MediaService {
         }
     }
 
-    async fn play(&self, entry_key: &str, request: &PeerRequest) -> Resolved {
+    async fn play(&self, entry_key: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
         if !is_valid_entry_key(entry_key) {
             return status(404);
         }
@@ -288,8 +317,42 @@ impl MediaService {
         if !media_path.is_file() {
             return status(404);
         }
-        match self.transcodes.plan(&entry, &media_path, preferences).await {
-            Ok(plan) => json_response(200, &plan),
+        match self
+            .transcodes
+            .plan(&entry, &media_path, preferences, is_lan)
+            .await
+        {
+            Ok(mut plan) => {
+                if entry.kind == swarm_core::peer::MediaKind::Track {
+                    match self.library.track_lyrics(entry_key).await {
+                        Ok(lyrics) => plan.lyrics = lyrics,
+                        Err(error) => {
+                            tracing::warn!(entry_key, %error, "could not load cached lyrics for playback");
+                        }
+                    }
+                } else {
+                    match self.library.subtitle_tracks(entry_key).await {
+                        Ok(tracks) => {
+                            plan.subtitles = tracks
+                                .into_iter()
+                                .filter(|track| track.fingerprint == entry.fingerprint)
+                                .filter(|track| PathBuf::from(&track.file_path).is_file())
+                                .map(|track| SubtitleTrack {
+                                    path: format!("/subtitles/{entry_key}/{}.vtt", track.id),
+                                    id: track.id,
+                                    language: track.language,
+                                    label: track.label,
+                                    source: track.source,
+                                })
+                                .collect();
+                        }
+                        Err(error) => {
+                            tracing::warn!(entry_key, %error, "could not load generated subtitles for playback");
+                        }
+                    }
+                }
+                json_response(200, &plan)
+            }
             Err(error) => {
                 tracing::warn!(entry_key, %error, "playback negotiation failed");
                 transcode_error(error)
@@ -308,7 +371,45 @@ impl MediaService {
         status(200)
     }
 
-    async fn session_media(&self, rest: &str, request: &PeerRequest) -> Resolved {
+    /// Serve only a completed track previously registered in SQLite. The
+    /// request never becomes a filesystem path, so this cannot traverse out
+    /// of the server-managed subtitle directory.
+    async fn subtitle(&self, rest: &str) -> Resolved {
+        let Some((entry_key, filename)) = rest.split_once('/') else {
+            return status(404);
+        };
+        if !is_valid_entry_key(entry_key) {
+            return status(404);
+        }
+        let Some(track_id) = filename.strip_suffix(".vtt") else {
+            return status(404);
+        };
+        let Ok(Some(track)) = self.library.subtitle_track(entry_key, track_id).await else {
+            return status(404);
+        };
+        let Ok(Some(entry)) = self.library.get(entry_key).await else {
+            return status(404);
+        };
+        if track.fingerprint != entry.fingerprint || track.format != "vtt" {
+            return status(404);
+        }
+        match tokio::fs::read(&track.file_path).await {
+            Ok(bytes) => Resolved {
+                header: PeerResponseHeader {
+                    status: 200,
+                    len: bytes.len() as u64,
+                    content_type: Some("text/vtt; charset=utf-8".into()),
+                    content_range: None,
+                    etag: None,
+                },
+                body: Body::Bytes(bytes),
+                session_id: None,
+            },
+            Err(_) => status(404),
+        }
+    }
+
+    async fn session_media(&self, rest: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
         let Some((session_id, tail)) = rest.split_once('/') else {
             return status(404);
         };
@@ -326,12 +427,12 @@ impl MediaService {
             entry,
             request,
             Some(session_id.to_string()),
-            vec![self.transcodes.global_rate_limiter(), rate_limiter],
+            self.rate_limiters(is_lan, Some(rate_limiter)),
         )
         .await
     }
 
-    async fn hls(&self, rest: &str, request: &PeerRequest) -> Resolved {
+    async fn hls(&self, rest: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
         let Some((session_id, relative_path)) = rest.split_once('/') else {
             return status(404);
         };
@@ -357,7 +458,7 @@ impl MediaService {
                     path: file.path,
                     offset: 0,
                     len,
-                    rate_limiters: vec![self.transcodes.global_rate_limiter(), file.rate_limiter],
+                    rate_limiters: self.rate_limiters(is_lan, Some(file.rate_limiter)),
                 },
                 session_id: Some(file.session_id),
             },
@@ -375,10 +476,7 @@ impl MediaService {
                         path: file.path,
                         offset: content_range.start,
                         len,
-                        rate_limiters: vec![
-                            self.transcodes.global_rate_limiter(),
-                            file.rate_limiter,
-                        ],
+                        rate_limiters: self.rate_limiters(is_lan, Some(file.rate_limiter)),
                     },
                     session_id: Some(file.session_id),
                 }
@@ -388,6 +486,21 @@ impl MediaService {
                 status(416)
             }
         }
+    }
+
+    fn rate_limiters(
+        &self,
+        is_lan: bool,
+        session: Option<Arc<SessionRateLimiter>>,
+    ) -> Vec<Arc<SessionRateLimiter>> {
+        if !self.transcodes.should_throttle(is_lan) {
+            return Vec::new();
+        }
+        let mut limiters = vec![self.transcodes.global_rate_limiter()];
+        if let Some(session) = session {
+            limiters.push(session);
+        }
+        limiters
     }
 
     /// `GET /art/{entry_key}/{poster|backdrop|cover|artist}` — the artwork a
@@ -404,7 +517,11 @@ impl MediaService {
         let Ok(Some((relative_path, version))) = self.library.artwork(entry_key, kind).await else {
             return status(404);
         };
-        let etag = format!("v{version}");
+        let requested_width = artwork_thumbnail_width(&request.path);
+        let etag = requested_width.map_or_else(
+            || format!("v{version}"),
+            |width| format!("v{version}-w{width}"),
+        );
         if request.if_none_match.as_deref() == Some(etag.as_str()) {
             return Resolved {
                 header: PeerResponseHeader {
@@ -418,7 +535,20 @@ impl MediaService {
                 session_id: None,
             };
         }
-        let path = self.roots.resolve(&relative_path);
+        let source_path = self.roots.resolve(&relative_path);
+        let path = match requested_width {
+            Some(width) => self
+                .thumbnail_path(
+                    &source_path,
+                    entry_key,
+                    kind.route_segment(),
+                    version,
+                    width,
+                )
+                .await
+                .unwrap_or(source_path),
+            None => source_path,
+        };
         let Ok(metadata) = std::fs::metadata(&path) else {
             return status(404); // artwork file missing from disk since the scrape
         };
@@ -428,7 +558,7 @@ impl MediaService {
                 header: PeerResponseHeader {
                     status: 200,
                     len,
-                    content_type: Some(image_content_type(&relative_path).into()),
+                    content_type: Some(image_content_type(path.to_string_lossy().as_ref()).into()),
                     content_range: None,
                     etag: Some(etag),
                 },
@@ -446,7 +576,9 @@ impl MediaService {
                     header: PeerResponseHeader {
                         status: 206,
                         len,
-                        content_type: Some(image_content_type(&relative_path).into()),
+                        content_type: Some(
+                            image_content_type(path.to_string_lossy().as_ref()).into(),
+                        ),
                         content_range: Some(content_range),
                         etag: Some(etag),
                     },
@@ -462,6 +594,106 @@ impl MediaService {
             ResolvedRange::Unsatisfiable => status(416),
         }
     }
+
+    /// Build a persistent, version-keyed JPEG thumbnail beside the source
+    /// artwork. Generation is serialized and performed on the blocking pool:
+    /// image decode/resize/encode is CPU and filesystem work and must never
+    /// occupy a Tokio request worker. Any failure falls back to the original
+    /// file, so thumbnail support cannot make existing artwork unavailable.
+    async fn thumbnail_path(
+        &self,
+        source: &std::path::Path,
+        entry_key: &str,
+        kind: &str,
+        version: u32,
+        width: u32,
+    ) -> Option<PathBuf> {
+        let parent = source.parent()?;
+        let cache_dir = parent.join(".swarm-thumbnails");
+        let file_prefix = format!("{entry_key}-{kind}-");
+        let target = cache_dir.join(format!("{file_prefix}v{version}-w{width}.jpg"));
+        if std::fs::metadata(&target).is_ok_and(|metadata| metadata.len() > 0) {
+            return Some(target);
+        }
+
+        let _generation = self.thumbnail_generation.lock().await;
+        if std::fs::metadata(&target).is_ok_and(|metadata| metadata.len() > 0) {
+            return Some(target);
+        }
+
+        let source = source.to_path_buf();
+        let output = target.clone();
+        tokio::task::spawn_blocking(move || {
+            generate_artwork_thumbnail(&source, &output, &file_prefix, width)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|_| target)
+    }
+}
+
+fn artwork_thumbnail_width(path: &str) -> Option<u32> {
+    let query = path.split_once('?')?.1;
+    query.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        if name != "w" {
+            return None;
+        }
+        match value.parse::<u32>().ok()? {
+            320 => Some(320),
+            640 => Some(640),
+            _ => None,
+        }
+    })
+}
+
+fn generate_artwork_thumbnail(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    file_prefix: &str,
+    width: u32,
+) -> Result<(), image::ImageError> {
+    let image = image::ImageReader::open(source)?
+        .with_guessed_format()?
+        .decode()?;
+    let target_height = ((image.height() as u64 * width as u64) / image.width().max(1) as u64)
+        .clamp(1, 1280) as u32;
+    let thumbnail = image.thumbnail(width, target_height);
+    let cache_dir = target.parent().ok_or_else(|| {
+        image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "thumbnail target has no parent",
+        ))
+    })?;
+    std::fs::create_dir_all(cache_dir)?;
+
+    let temporary = cache_dir.join(format!(".{file_prefix}{}.tmp", std::process::id()));
+    {
+        let file = std::fs::File::create(&temporary)?;
+        let mut writer = BufWriter::new(file);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 82);
+        encoder.encode_image(&thumbnail)?;
+    }
+    std::fs::rename(&temporary, target)?;
+
+    // One current variant per entry/kind/size is enough. Removing old
+    // version files keeps long-lived libraries from accumulating thumbnails
+    // every time artwork is replaced.
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(file_prefix)
+                && name.ends_with(&format!("-w{width}.jpg"))
+                && path != target
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn transcode_error(error: TranscodeError) -> Resolved {
@@ -496,9 +728,10 @@ pub async fn handle_stream(
     service: &MediaService,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    is_lan: bool,
 ) -> Result<(), P2pError> {
     let request = read_request(&mut recv).await?;
-    let resolved = service.resolve(&request).await;
+    let resolved = service.resolve_for_network(&request, is_lan).await;
     let session_id = resolved.session_id.clone();
     let result = async {
         write_response_header(&mut send, &resolved.header).await?;
@@ -546,15 +779,31 @@ pub async fn handle_stream(
 /// connection from `apps/server`'s `punch_connect`, say, rather than
 /// `endpoint.accept()` — gets exactly the same per-stream serving behavior.
 pub async fn serve_connection(connection: quinn::Connection, service: Arc<MediaService>) {
-    tracing::info!(remote = %connection.remote_address(), "peer connected");
+    let remote = connection.remote_address();
+    let is_lan = is_lan_ip(remote.ip());
+    tracing::info!(%remote, is_lan, "peer connected");
     // Loop ends when accept_bi errors, i.e. the connection closed.
     while let Ok((send, recv)) = connection.accept_bi().await {
         let service = Arc::clone(&service);
         tokio::spawn(async move {
-            if let Err(err) = handle_stream(&service, send, recv).await {
+            if let Err(err) = handle_stream(&service, send, recv, is_lan).await {
                 tracing::debug!(error = %err, "stream failed");
             }
         });
+    }
+}
+
+fn is_lan_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|ip| ip.is_private() || ip.is_link_local() || ip.is_loopback())
+        }
     }
 }
 
@@ -573,5 +822,20 @@ pub async fn accept_loop(endpoint: quinn::Endpoint, service: Arc<MediaService>) 
             };
             serve_connection(connection, service).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::is_lan_ip;
+
+    #[test]
+    fn identifies_local_and_internet_addresses() {
+        assert!(is_lan_ip("192.168.1.20".parse().unwrap()));
+        assert!(is_lan_ip("10.0.0.8".parse().unwrap()));
+        assert!(is_lan_ip("fe80::1234".parse().unwrap()));
+        assert!(is_lan_ip("fc00::1234".parse().unwrap()));
+        assert!(!is_lan_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_lan_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 }

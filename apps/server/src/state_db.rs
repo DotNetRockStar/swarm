@@ -12,9 +12,10 @@
 //! `ON DELETE CASCADE` so relinking to a different server can't leave
 //! orphaned swarm rows behind.
 //!
-//! The access token itself still lives in `TokenStore` (OS keyring or
-//! encrypted file), never here — this file is not a secret and is fine to
-//! read while debugging, same posture the old `stun_link.rs` documented.
+//! The access token and managed-swarm owner claim still live in separate
+//! `TokenStore` entries (OS keyring or permission-restricted fallback
+//! files), never here — this database contains no bearer secrets and is
+//! safe to inspect while debugging.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -38,6 +39,12 @@ pub struct LocalPeerRecord {
     pub paired_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSwarmIdentity {
+    pub base_url: String,
+    pub swarm_id: String,
+}
+
 pub struct StateDb {
     pool: SqlitePool,
 }
@@ -45,12 +52,20 @@ pub struct StateDb {
 impl StateDb {
     pub async fn open(data_dir: &Path) -> sqlx::Result<Self> {
         let path = data_dir.join("server-state.sqlite");
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_str().unwrap_or_default()))?
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new().max_connections(4).connect_with(options).await?;
-        sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await?;
+        let options = SqliteConnectOptions::from_str(&format!(
+            "sqlite://{}",
+            path.to_str().unwrap_or_default()
+        ))?
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await?;
+        sqlx::query("PRAGMA foreign_keys = ON;")
+            .execute(&pool)
+            .await?;
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS stun_link (
@@ -76,6 +91,13 @@ impl StateDb {
                 paired_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_local_peer_paired_at ON local_peer(paired_at DESC);
+            CREATE TABLE IF NOT EXISTS managed_swarm_identity (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                base_url TEXT NOT NULL,
+                swarm_id TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             "#,
         )
         .execute(&pool)
@@ -92,15 +114,19 @@ impl StateDb {
         else {
             return Ok(None);
         };
-        let swarms: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, name FROM stun_link_swarm WHERE stun_link_id = ? ORDER BY name")
-                .bind(STUN_LINK_ROW_ID)
-                .fetch_all(&self.pool)
-                .await?;
+        let swarms: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM stun_link_swarm WHERE stun_link_id = ? ORDER BY name",
+        )
+        .bind(STUN_LINK_ROW_ID)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(Some(StunLinkRecord {
             base_url,
             device_id,
-            swarms: swarms.into_iter().map(|(id, name)| SwarmSummary { id, name }).collect(),
+            swarms: swarms
+                .into_iter()
+                .map(|(id, name)| SwarmSummary { id, name })
+                .collect(),
         }))
     }
 
@@ -165,13 +191,18 @@ impl StateDb {
     }
 
     pub async fn local_peers(&self) -> sqlx::Result<Vec<LocalPeerRecord>> {
-        let rows: Vec<(String, String, i64)> =
-            sqlx::query_as("SELECT fingerprint, name, paired_at FROM local_peer ORDER BY paired_at DESC")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT fingerprint, name, paired_at FROM local_peer ORDER BY paired_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
-            .map(|(fingerprint, name, paired_at)| LocalPeerRecord { fingerprint, name, paired_at })
+            .map(|(fingerprint, name, paired_at)| LocalPeerRecord {
+                fingerprint,
+                name,
+                paired_at,
+            })
             .collect())
     }
 
@@ -182,10 +213,38 @@ impl StateDb {
             .await?;
         Ok(())
     }
+
+    pub async fn load_managed_swarm_identity(&self) -> sqlx::Result<Option<ManagedSwarmIdentity>> {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT base_url, swarm_id FROM managed_swarm_identity WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(base_url, swarm_id)| ManagedSwarmIdentity { base_url, swarm_id }))
+    }
+
+    pub async fn save_managed_swarm_identity(
+        &self,
+        identity: &ManagedSwarmIdentity,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO managed_swarm_identity (id, base_url, swarm_id, created_at, updated_at) VALUES (1, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, updated_at = excluded.updated_at",
+        )
+        .bind(identity.base_url.trim_end_matches('/'))
+        .bind(&identity.swarm_id)
+        .bind(now())
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[cfg(test)]
@@ -203,8 +262,14 @@ mod tests {
             base_url: "https://swarm.example.com".into(),
             device_id: "dev-1".into(),
             swarms: vec![
-                SwarmSummary { id: "sw-1".into(), name: "Home".into() },
-                SwarmSummary { id: "sw-2".into(), name: "Cabin".into() },
+                SwarmSummary {
+                    id: "sw-1".into(),
+                    name: "Home".into(),
+                },
+                SwarmSummary {
+                    id: "sw-2".into(),
+                    name: "Cabin".into(),
+                },
             ],
         };
         db.save_stun_link(&record).await.unwrap();
@@ -221,7 +286,8 @@ mod tests {
     /// actually prevents drift between the two tables.
     #[tokio::test]
     async fn saving_a_smaller_swarm_list_drops_the_removed_rows() {
-        let dir = std::env::temp_dir().join(format!("swarm-state-db-shrink-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swarm-state-db-shrink-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = StateDb::open(&dir).await.unwrap();
 
@@ -229,8 +295,14 @@ mod tests {
             base_url: "https://swarm.example.com".into(),
             device_id: "dev-1".into(),
             swarms: vec![
-                SwarmSummary { id: "sw-1".into(), name: "Home".into() },
-                SwarmSummary { id: "sw-2".into(), name: "Cabin".into() },
+                SwarmSummary {
+                    id: "sw-1".into(),
+                    name: "Home".into(),
+                },
+                SwarmSummary {
+                    id: "sw-2".into(),
+                    name: "Cabin".into(),
+                },
             ],
         };
         db.save_stun_link(&record).await.unwrap();
@@ -253,19 +325,25 @@ mod tests {
 
         db.record_bandwidth_measurement(5_000_000).await.unwrap();
         db.record_bandwidth_measurement(7_500_000).await.unwrap();
-        assert_eq!(db.latest_bandwidth_measurement().await.unwrap(), Some(7_500_000));
+        assert_eq!(
+            db.latest_bandwidth_measurement().await.unwrap(),
+            Some(7_500_000)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn local_peers_persist_and_can_be_revoked() {
-        let dir = std::env::temp_dir().join(format!("swarm-state-db-local-peer-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swarm-state-db-local-peer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = StateDb::open(&dir).await.unwrap();
         let fingerprint = "ab".repeat(32);
 
-        db.save_local_peer(&fingerprint, "Living Room TV").await.unwrap();
+        db.save_local_peer(&fingerprint, "Living Room TV")
+            .await
+            .unwrap();
         let peers = db.local_peers().await.unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].fingerprint, fingerprint);
@@ -273,6 +351,26 @@ mod tests {
 
         db.remove_local_peer(&fingerprint).await.unwrap();
         assert!(db.local_peers().await.unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn managed_swarm_identity_is_stable_while_its_service_url_can_refresh() {
+        let dir =
+            std::env::temp_dir().join(format!("swarm-state-db-managed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = StateDb::open(&dir).await.unwrap();
+        let mut identity = ManagedSwarmIdentity {
+            base_url: "https://swarm.example.com/".into(),
+            swarm_id: "ab".repeat(32),
+        };
+        db.save_managed_swarm_identity(&identity).await.unwrap();
+        identity.base_url = "https://swarm.example.com".into();
+        db.save_managed_swarm_identity(&identity).await.unwrap();
+        assert_eq!(
+            db.load_managed_swarm_identity().await.unwrap(),
+            Some(identity)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -38,7 +38,7 @@ private const val HELLO_ACK_TIMEOUT_MS = 10_000L
 
 sealed class SignalingError(message: String) : Exception(message) {
     class InvalidBaseUrl(baseUrl: String) :
-        SignalingError("STUN base URL must start with http:// or https://, got: $baseUrl")
+        SignalingError("SWARM server URL must start with http:// or https://, got: $baseUrl")
     class Connect(cause: Throwable) : SignalingError("could not connect to the signaling endpoint: ${cause.message}")
     data object HelloTimeout : SignalingError("timed out waiting for hello_ack")
     data object ConnectionClosed : SignalingError("connection closed before hello_ack")

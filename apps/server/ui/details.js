@@ -1,15 +1,63 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshTranscriptionSetting()]);
 }
 
 async function refreshTmdbKeyField() {
   const settings = await invoke("get_settings");
+  document.getElementById("uploadBudgetEnabledCheck").checked = settings.streaming_upload_budget_enabled;
   const status = document.getElementById("tmdbKeyStatus");
   status.textContent = settings.has_tmdb_key ? "A key is saved. Scraping is enabled." : "No key saved yet — scraping is disabled until one is added.";
   status.classList.toggle("error", !settings.has_tmdb_key);
 }
+
+async function refreshTranscriptionSetting() {
+  const settings = await invoke("get_settings");
+  document.getElementById("localTranscriptionEnabledCheck").checked = settings.local_transcription_enabled;
+  const statusEl = document.getElementById("localTranscriptionSettingStatus");
+  try {
+    const status = await invoke("get_transcription_status");
+    if (!settings.local_transcription_enabled) {
+      statusEl.textContent = status.model_installed
+        ? "Paused. The installed model and completed work are preserved."
+        : "Off. The ~466 MB Whisper model will download automatically the first time this is enabled.";
+    } else {
+      statusEl.textContent = status.message;
+    }
+  } catch (err) {
+    statusEl.textContent = "Unable to load subtitle-generation status.";
+  }
+}
+
+document.getElementById("localTranscriptionEnabledCheck").addEventListener("change", async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    await invoke("set_local_transcription_enabled", { enabled });
+    if (enabled) {
+      openInfoModal("local-subtitles");
+      showToast("Local subtitles enabled. SWARM will download the Whisper model automatically if needed.", "success", { duration: 7000 });
+    } else {
+      showToast("Local subtitle generation paused. Progress has been saved.", "success");
+    }
+    await Promise.all([refreshTranscriptionSetting(), refreshTranscriptionProgress()]);
+  } catch (err) {
+    event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("uploadBudgetEnabledCheck").addEventListener("change", async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    await invoke("set_streaming_upload_budget_enabled", { enabled });
+    await refreshStatus();
+    showToast(enabled ? "Internet streaming budget enabled." : "Internet streaming budget disabled.", "success");
+  } catch (err) {
+    event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
 
 document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => {
   const input = document.getElementById("tmdbKeyInput");
@@ -38,8 +86,7 @@ async function refreshStatus() {
     grid.innerHTML =
       stat("Entries", status.entry_count, false, "entries") +
       stat("Library size", totalGb.toFixed(2) + " GB", false, "library-size") +
-      stat("Listening (QUIC)", status.listen_addr, false, "listening-quic") +
-      stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps", false, "upload-budget") +
+      stat("Streaming upload budget", status.streaming_upload_budget_enabled ? (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps" : "Unlimited", false, "upload-budget") +
       stat("Active playback sessions", status.active_playback_sessions, false, "active-sessions") +
       stat("Device fingerprint", status.fingerprint, true, "device-fingerprint") +
       stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true, "library-thumbprint");

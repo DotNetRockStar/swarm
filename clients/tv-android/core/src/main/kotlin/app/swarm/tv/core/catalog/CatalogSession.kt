@@ -88,6 +88,9 @@ private class RouteMemory {
         lastSuccessful[deviceId] = route
     }
     fun preferred(deviceId: String): ConnectionRoute? = lastSuccessful[deviceId]
+    fun forget(deviceId: String) {
+        lastSuccessful.remove(deviceId)
+    }
 }
 
 class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
@@ -104,10 +107,30 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     var punchFallback: PunchFallback? = null
 
     data class Result(val entries: List<MergedEntry>, val unreachable: List<SwarmDevice>)
-    data class PlaybackSelection(val url: String, val mode: PlaybackMode, val maxBitrate: Long, val sessionId: String)
+    data class PlaybackSelection(
+        val url: String,
+        val mode: PlaybackMode,
+        val maxBitrate: Long,
+        val sessionId: String,
+        val lyrics: app.swarm.tv.core.peer.TrackLyrics? = null,
+        val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
+    )
 
     /** The URL to hand a media player for `peerPath` on `serverId` — only live once that server appeared connected in a [refresh]. */
     fun urlFor(serverId: String, peerPath: String): String = proxy.urlFor(serverId, peerPath)
+
+    /** Drop a cached indirect route so the next connection uses a newly discovered LAN address first. */
+    fun preferDirect(deviceId: String) {
+        connections.remove(deviceId)?.let { runCatching { it.close() } }
+        routeMemory.record(deviceId, ConnectionRoute.DIRECT)
+    }
+
+    /** Close this TV's connection to one server without changing any other device's swarm membership. */
+    fun disconnect(deviceId: String) {
+        connections.remove(deviceId)?.let { runCatching { it.close() } }
+        routeMemory.forget(deviceId)
+        if (proxyRegisteredDevices.remove(deviceId)) proxy.unregister(deviceId)
+    }
 
     /**
      * Reserve this server's shared upload budget and obtain either a paced
@@ -150,7 +173,14 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             throw IOException("server could not prepare playback (${response.header.status}): $body")
         }
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(body)
-        return PlaybackSelection(proxy.urlFor(device.deviceId, plan.path), plan.mode, plan.maxBitrate, plan.sessionId)
+        return PlaybackSelection(
+            proxy.urlFor(device.deviceId, plan.path),
+            plan.mode,
+            plan.maxBitrate,
+            plan.sessionId,
+            plan.lyrics,
+            plan.subtitles.map { track -> track.copy(path = proxy.urlFor(device.deviceId, track.path)) },
+        )
     }
 
     /**
@@ -164,8 +194,23 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
      * still expires on its own, just later.
      */
     suspend fun stopPlayback(device: SwarmDevice, sessionId: String, clientCertificate: X509Certificate, clientKey: PrivateKey) {
-        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
-        runCatching { connection.request(path = "/stop/$sessionId") }
+        var connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        fun stop(current: PeerQuicClient): Boolean = runCatching {
+            val response = current.request(path = "/stop/$sessionId")
+            response.body.readBytes()
+            response.header.status == 200
+        }.getOrDefault(false)
+
+        if (stop(connection)) return
+
+        // A track can end after several minutes with no control requests in
+        // between, leaving the cached QUIC connection stale. Cleanup matters
+        // most precisely then, so reconnect and retry once instead of silently
+        // leaving the old transcode reservation until its idle timeout.
+        connections.remove(device.deviceId)
+        runCatching { connection.close() }
+        connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        stop(connection)
     }
 
     /**

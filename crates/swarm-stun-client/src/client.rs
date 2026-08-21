@@ -5,17 +5,23 @@
 
 use std::collections::BTreeMap;
 use swarm_core::rest::{
-    ApiError, DeviceRegistration, JoinSwarmRequest, MetadataPatchRequest, RegisterDeviceRequest,
-    RegisterDeviceResponse, SwarmDevicesResponse, SwarmSummary,
+    ActivationPreview, ActivationStatusResponse, ApiError, CreateActivationRequest,
+    CreateActivationResponse, DeviceRegistration, JoinSwarmRequest, LookupActivationRequest,
+    MetadataPatchRequest, ProvisionManagedSwarmRequest, ProvisionManagedSwarmResponse,
+    RegisterDeviceRequest, RegisterDeviceResponse, SwarmDevicesResponse, SwarmSummary,
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum StunClientError {
-    #[error("could not reach STUN server: {0}")]
+    #[error("could not reach SWARM server: {0}")]
     Network(String),
-    #[error("STUN server rejected the request ({status}, {code}): {message}")]
-    Api { status: u16, code: String, message: String },
-    #[error("could not parse STUN server response: {0}")]
+    #[error("SWARM server rejected the request ({status}, {code}): {message}")]
+    Api {
+        status: u16,
+        code: String,
+        message: String,
+    },
+    #[error("could not parse SWARM server response: {0}")]
     Decode(String),
 }
 
@@ -36,7 +42,10 @@ pub struct StunClient {
 impl StunClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         let base_url = base_url.into();
-        Self { http: reqwest::Client::new(), base_url: base_url.trim_end_matches('/').to_string() }
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
     }
 
     /// Redeem a single-use join code, submitting device metadata and the
@@ -47,14 +56,86 @@ impl StunClient {
         code: &str,
         device: DeviceRegistration,
     ) -> Result<RegisterDeviceResponse, StunClientError> {
-        let request = RegisterDeviceRequest { code: code.to_string(), device };
-        self.post_json("/api/v1/devices/register", &request, None).await
+        let request = RegisterDeviceRequest {
+            code: code.to_string(),
+            device,
+        };
+        self.post_json("/api/v1/devices/register", &request, None)
+            .await
+    }
+
+    pub async fn provision_managed_swarm(
+        &self,
+        request: ProvisionManagedSwarmRequest,
+    ) -> Result<ProvisionManagedSwarmResponse, StunClientError> {
+        self.post_json("/api/v1/managed-swarms/provision", &request, None)
+            .await
+    }
+
+    pub async fn create_activation(
+        &self,
+        device: DeviceRegistration,
+        access_token: Option<&str>,
+    ) -> Result<CreateActivationResponse, StunClientError> {
+        self.post_json(
+            "/api/v1/activations",
+            &CreateActivationRequest { device },
+            access_token,
+        )
+        .await
+    }
+
+    pub async fn lookup_activation(
+        &self,
+        access_token: &str,
+        code: &str,
+    ) -> Result<ActivationPreview, StunClientError> {
+        self.post_json(
+            "/api/v1/activations/lookup",
+            &LookupActivationRequest {
+                code: code.to_string(),
+            },
+            Some(access_token),
+        )
+        .await
+    }
+
+    pub async fn approve_activation(
+        &self,
+        access_token: &str,
+        activation_id: &str,
+    ) -> Result<ActivationStatusResponse, StunClientError> {
+        self.post_json(
+            &format!("/api/v1/activations/{activation_id}/approve"),
+            &serde_json::json!({}),
+            Some(access_token),
+        )
+        .await
+    }
+
+    pub async fn activation_status(
+        &self,
+        activation_id: &str,
+        poll_token: &str,
+    ) -> Result<ActivationStatusResponse, StunClientError> {
+        self.get_json(
+            &format!("/api/v1/activations/{activation_id}"),
+            Some(poll_token),
+        )
+        .await
     }
 
     /// Add an already-registered device to another swarm with a fresh code.
-    pub async fn join_swarm(&self, access_token: &str, code: &str) -> Result<SwarmSummary, StunClientError> {
-        let request = JoinSwarmRequest { code: code.to_string() };
-        self.post_json("/api/v1/swarms/join", &request, Some(access_token)).await
+    pub async fn join_swarm(
+        &self,
+        access_token: &str,
+        code: &str,
+    ) -> Result<SwarmSummary, StunClientError> {
+        let request = JoinSwarmRequest {
+            code: code.to_string(),
+        };
+        self.post_json("/api/v1/swarms/join", &request, Some(access_token))
+            .await
     }
 
     /// The swarm's device roster — fingerprints, online status, metadata —
@@ -64,7 +145,11 @@ impl StunClient {
         access_token: &str,
         swarm_id: &str,
     ) -> Result<SwarmDevicesResponse, StunClientError> {
-        self.get_json(&format!("/api/v1/swarms/{swarm_id}/devices"), Some(access_token)).await
+        self.get_json(
+            &format!("/api/v1/swarms/{swarm_id}/devices"),
+            Some(access_token),
+        )
+        .await
     }
 
     /// Leave one swarm this device belongs to, without touching its other
@@ -77,7 +162,10 @@ impl StunClient {
         device_id: &str,
     ) -> Result<(), StunClientError> {
         let _: serde_json::Value = self
-            .delete_json(&format!("/api/v1/swarms/{swarm_id}/devices/{device_id}"), Some(access_token))
+            .delete_json(
+                &format!("/api/v1/swarms/{swarm_id}/devices/{device_id}"),
+                Some(access_token),
+            )
             .await?;
         Ok(())
     }
@@ -95,7 +183,11 @@ impl StunClient {
     ) -> Result<(), StunClientError> {
         let request = MetadataPatchRequest { metadata };
         let _: serde_json::Value = self
-            .patch_json(&format!("/api/v1/devices/{device_id}/metadata"), &request, Some(access_token))
+            .patch_json(
+                &format!("/api/v1/devices/{device_id}/metadata"),
+                &request,
+                Some(access_token),
+            )
             .await?;
         Ok(())
     }
@@ -106,11 +198,17 @@ impl StunClient {
         body: &Req,
         bearer: Option<&str>,
     ) -> Result<Resp, StunClientError> {
-        let mut request = self.http.post(format!("{}{path}", self.base_url)).json(body);
+        let mut request = self
+            .http
+            .post(format!("{}{path}", self.base_url))
+            .json(body);
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| StunClientError::Network(e.to_string()))?;
         Self::parse_response(response).await
     }
 
@@ -120,11 +218,17 @@ impl StunClient {
         body: &Req,
         bearer: Option<&str>,
     ) -> Result<Resp, StunClientError> {
-        let mut request = self.http.patch(format!("{}{path}", self.base_url)).json(body);
+        let mut request = self
+            .http
+            .patch(format!("{}{path}", self.base_url))
+            .json(body);
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| StunClientError::Network(e.to_string()))?;
         Self::parse_response(response).await
     }
 
@@ -137,7 +241,10 @@ impl StunClient {
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| StunClientError::Network(e.to_string()))?;
         Self::parse_response(response).await
     }
 
@@ -150,7 +257,10 @@ impl StunClient {
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.map_err(|e| StunClientError::Network(e.to_string()))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| StunClientError::Network(e.to_string()))?;
         Self::parse_response(response).await
     }
 
@@ -159,11 +269,18 @@ impl StunClient {
     ) -> Result<Resp, StunClientError> {
         let status = response.status();
         if status.is_success() {
-            response.json().await.map_err(|e| StunClientError::Decode(e.to_string()))
+            response
+                .json()
+                .await
+                .map_err(|e| StunClientError::Decode(e.to_string()))
         } else {
             let status_code = status.as_u16();
             match response.json::<ApiError>().await {
-                Ok(body) => Err(StunClientError::Api { status: status_code, code: body.code, message: body.message }),
+                Ok(body) => Err(StunClientError::Api {
+                    status: status_code,
+                    code: body.code,
+                    message: body.message,
+                }),
                 Err(_) => Err(StunClientError::Api {
                     status: status_code,
                     code: "unknown".into(),
@@ -180,8 +297,8 @@ mod tests {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use serde_json::json;
-    use swarm_core::rest::DeviceType;
     use std::collections::BTreeMap;
+    use swarm_core::rest::DeviceType;
 
     async fn spawn_mock(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -215,7 +332,10 @@ mod tests {
         );
         let base = spawn_mock(router).await;
         let client = StunClient::new(base);
-        let result = client.register_device("12345678", sample_device()).await.unwrap();
+        let result = client
+            .register_device("12345678", sample_device())
+            .await
+            .unwrap();
         assert_eq!(result.access_token, "tok");
         assert_eq!(result.swarm.name, "Home");
     }
@@ -233,7 +353,10 @@ mod tests {
         );
         let base = spawn_mock(router).await;
         let client = StunClient::new(base);
-        let err = client.register_device("00000000", sample_device()).await.unwrap_err();
+        let err = client
+            .register_device("00000000", sample_device())
+            .await
+            .unwrap_err();
         assert!(err.is_unauthorized());
         assert!(matches!(err, StunClientError::Api { code, .. } if code == "unauthorized"));
     }
@@ -258,7 +381,10 @@ mod tests {
     async fn unreachable_server_is_a_network_error() {
         // Nothing listening on this port.
         let client = StunClient::new("http://127.0.0.1:1");
-        let err = client.register_device("12345678", sample_device()).await.unwrap_err();
+        let err = client
+            .register_device("12345678", sample_device())
+            .await
+            .unwrap_err();
         assert!(matches!(err, StunClientError::Network(_)));
         assert!(!err.is_unauthorized());
     }

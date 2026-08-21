@@ -8,6 +8,7 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,17 +30,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import app.swarm.tv.R
 import app.swarm.tv.app.data.LanServer
 import app.swarm.tv.app.ui.components.NumberPadEntry
+import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
+import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -56,6 +57,7 @@ fun PasscodeEntryScreen(
     onConnectLan: (server: LanServer, deviceName: String) -> Unit,
     onPairLan: (server: LanServer, code: String, deviceName: String) -> Unit,
     onSubmit: (baseUrl: String, code: String, deviceName: String) -> Unit,
+    onStartActivation: (deviceName: String) -> Unit,
 ) {
     var baseUrl by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
@@ -116,7 +118,7 @@ fun PasscodeEntryScreen(
                         Button(
                             onClick = { onConnectLan(server, deviceName) },
                             enabled = !lanPairingBusy && !isSubmitting,
-                            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                            colors = swarmActionButtonColors(),
                         ) { Text(if (lanPairingBusy) "Connecting…" else "Connect", fontWeight = FontWeight.Bold) }
                         Button(
                             onClick = {
@@ -124,6 +126,7 @@ fun PasscodeEntryScreen(
                                 lanCode = ""
                             },
                             enabled = !lanPairingBusy && !isSubmitting,
+                            colors = swarmActionButtonColors(),
                         ) { Text("Pair first time") }
                     }
                 }
@@ -140,18 +143,30 @@ fun PasscodeEntryScreen(
             Button(
                 onClick = { onPairLan(selectedLanServer, lanCode, deviceName) },
                 enabled = !lanPairingBusy && lanCode.length == 6,
-                colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                colors = swarmActionButtonColors(),
             ) { Text(if (lanPairingBusy) "Pairing…" else "Pair and connect", fontWeight = FontWeight.Bold) }
         }
 
         Spacer(Modifier.height(36.dp))
-        Text("Or connect through a STUN server", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("Or connect through SWARM", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+
+        Text("Your TV will show a temporary code to approve in the media server app.", color = SwarmMuted, fontSize = 14.sp)
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onStartActivation(deviceName) },
+            enabled = !isSubmitting,
+            colors = swarmActionButtonColors(),
+        ) { Text(if (isSubmitting) "Requesting code…" else "Connect through SWARM", fontWeight = FontWeight.Bold) }
+
+        Spacer(Modifier.height(36.dp))
+        Text("Compatibility setup", color = SwarmMuted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
 
         TvOutlinedTextField(
             value = baseUrl,
             onValueChange = { baseUrl = it },
-            label = { Text("STUN server URL") },
+            label = { Text("SWARM server URL") },
             placeholder = { Text("https://swarm.example.com") },
             colors = fieldColors(),
             modifier = Modifier.width(420.dp),
@@ -164,7 +179,7 @@ fun PasscodeEntryScreen(
         Button(
             onClick = { onSubmit(baseUrl, code, deviceName) },
             enabled = !isSubmitting && code.length == 8 && baseUrl.isNotBlank(),
-            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+            colors = swarmActionButtonColors(),
         ) {
             Text(if (isSubmitting) "Joining…" else "Join swarm", fontWeight = FontWeight.Bold)
         }
@@ -173,6 +188,57 @@ fun PasscodeEntryScreen(
             Spacer(Modifier.height(16.dp))
             Text(it, color = SwarmAccentHot, fontSize = 14.sp)
         }
+    }
+}
+
+@Composable
+fun ActivationRequestScreen(onCancel: () -> Unit) {
+    BackHandler(onBack = onCancel)
+    Column(
+        modifier = Modifier.fillMaxSize().padding(48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Image(painter = painterResource(R.drawable.mascot), contentDescription = null, modifier = Modifier.height(72.dp))
+        Spacer(Modifier.height(18.dp))
+        Text("Creating a secure code", color = SwarmText, fontSize = 26.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(18.dp))
+        SwarmLoadingIndicator()
+        Spacer(Modifier.height(18.dp))
+        Text("This should only take a moment.", color = SwarmMuted, fontSize = 15.sp)
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onCancel, colors = swarmActionButtonColors()) { Text("Cancel") }
+    }
+}
+
+@Composable
+fun ActivationCodeScreen(
+    code: String,
+    expiresAt: String,
+    errorMessage: String?,
+    onCancel: () -> Unit,
+) {
+    BackHandler(onBack = onCancel)
+    Column(
+        modifier = Modifier.fillMaxSize().padding(48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Image(painter = painterResource(R.drawable.mascot), contentDescription = null, modifier = Modifier.height(72.dp))
+        Spacer(Modifier.height(18.dp))
+        Text("Approve this TV", color = SwarmText, fontSize = 26.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(10.dp))
+        Text("Enter this temporary code on the media server's Swarm page", color = SwarmMuted, fontSize = 15.sp)
+        Spacer(Modifier.height(26.dp))
+        Text(code.chunked(4).joinToString("  "), color = SwarmAccent, fontSize = 46.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(14.dp))
+        Text("Waiting for approval · expires $expiresAt", color = SwarmMuted, fontSize = 13.sp)
+        errorMessage?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onCancel, colors = swarmActionButtonColors()) { Text("Cancel") }
     }
 }
 

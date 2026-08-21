@@ -8,7 +8,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::str::FromStr;
-use swarm_core::peer::{AudioStreamInfo, CatalogEntry, MediaKind, VideoStreamInfo};
+use swarm_core::peer::{AudioStreamInfo, CatalogEntry, MediaKind, TrackLyrics, VideoStreamInfo};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryRecord {
@@ -147,6 +147,37 @@ pub struct ClientErrorRecord {
     pub received_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleRecord {
+    pub id: String,
+    pub entry_key: String,
+    pub language: String,
+    pub label: String,
+    pub source: String,
+    pub format: String,
+    pub file_path: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptionJob {
+    pub entry_key: String,
+    pub fingerprint: String,
+    pub model: String,
+    pub language: String,
+    pub total_segments: u32,
+    pub completed_segments: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptionQueueStatus {
+    pub queued: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub total_segments: u64,
+    pub completed_segments: u64,
+}
+
 fn kind_str(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Movie => "movie",
@@ -163,6 +194,13 @@ fn parse_kind(raw: &str) -> MediaKind {
     }
 }
 
+fn unix_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub struct Library {
     pool: SqlitePool,
 }
@@ -171,6 +209,7 @@ impl Library {
     pub async fn open(database_path: &str) -> sqlx::Result<Self> {
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{database_path}"))?
             .create_if_missing(true)
+            .foreign_keys(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(4).connect_with(options).await?;
@@ -189,6 +228,55 @@ impl Library {
                 duration_secs REAL, video_json TEXT, audio_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_entries_path ON library_entries(relative_path COLLATE NOCASE);
+            CREATE TABLE IF NOT EXISTS track_lyrics (
+                entry_key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_id INTEGER,
+                language TEXT,
+                plain_lyrics TEXT,
+                synced_lyrics TEXT,
+                instrumental INTEGER NOT NULL DEFAULT 0 CHECK (instrumental IN (0, 1)),
+                fetched_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (entry_key) REFERENCES library_entries(entry_key) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_track_lyrics_provider_id ON track_lyrics(provider, provider_id);
+            CREATE INDEX IF NOT EXISTS idx_track_lyrics_language ON track_lyrics(language);
+            CREATE TABLE IF NOT EXISTS transcription_jobs (
+                entry_key TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                model TEXT NOT NULL,
+                language TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued','transcribing','finalizing','completed','failed')),
+                total_segments INTEGER NOT NULL CHECK (total_segments > 0),
+                completed_segments INTEGER NOT NULL DEFAULT 0 CHECK (completed_segments >= 0),
+                error TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (entry_key) REFERENCES library_entries(entry_key) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcription_jobs_status ON transcription_jobs(status, updated_at_ms);
+            CREATE TABLE IF NOT EXISTS transcription_segments (
+                entry_key TEXT NOT NULL,
+                segment_index INTEGER NOT NULL,
+                cues_json TEXT NOT NULL,
+                completed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (entry_key, segment_index),
+                FOREIGN KEY (entry_key) REFERENCES transcription_jobs(entry_key) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS subtitle_tracks (
+                entry_key TEXT NOT NULL,
+                id TEXT NOT NULL,
+                language TEXT NOT NULL,
+                label TEXT NOT NULL,
+                source TEXT NOT NULL,
+                format TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                generated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (entry_key, id),
+                FOREIGN KEY (entry_key) REFERENCES library_entries(entry_key) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_entry ON subtitle_tracks(entry_key, language);
             CREATE TABLE IF NOT EXISTS deleted_library_entries (
                 entry_key TEXT PRIMARY KEY,
                 relative_path TEXT NOT NULL,
@@ -364,6 +452,241 @@ impl Library {
         Ok(rows.into_iter().map(EntryRecord::from).collect())
     }
 
+    /// Make every movie/episode with a known duration eligible for local
+    /// transcription. Existing work for the same fingerprint/model/language
+    /// is preserved; changed media is reset atomically to a fresh job.
+    pub async fn enqueue_missing_transcriptions(
+        &self,
+        model: &str,
+        language: &str,
+        segment_duration_secs: u64,
+    ) -> sqlx::Result<u64> {
+        let entries = self.list().await?;
+        let existing_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT entry_key, fingerprint, model, language FROM transcription_jobs",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let existing: HashMap<String, (String, String, String)> = existing_rows
+            .into_iter()
+            .map(|(entry_key, fingerprint, model, language)| {
+                (entry_key, (fingerprint, model, language))
+            })
+            .collect();
+        let now_ms = unix_time_ms();
+        let mut queued = 0;
+        for entry in entries.into_iter().filter(|entry| {
+            matches!(entry.kind, MediaKind::Movie | MediaKind::Episode)
+                && entry.audio.is_some()
+                && entry.duration_secs.is_some_and(|duration| duration > 0.0)
+        }) {
+            let total_segments = ((entry.duration_secs.unwrap_or(1.0) / segment_duration_secs.max(1) as f64).ceil() as i64).max(1);
+            if existing.get(&entry.entry_key).is_some_and(|(fingerprint, old_model, old_language)| {
+                fingerprint == &entry.fingerprint && old_model == model && old_language == language
+            }) {
+                continue;
+            }
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query("DELETE FROM subtitle_tracks WHERE entry_key = ? AND source = 'whisper'")
+                .bind(&entry.entry_key)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM transcription_jobs WHERE entry_key = ?")
+                .bind(&entry.entry_key)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "INSERT INTO transcription_jobs \
+                 (entry_key, fingerprint, model, language, status, total_segments, completed_segments, created_at_ms, updated_at_ms) \
+                 VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?)",
+            )
+            .bind(&entry.entry_key)
+            .bind(&entry.fingerprint)
+            .bind(model)
+            .bind(language)
+            .bind(total_segments)
+            .bind(now_ms)
+            .bind(now_ms)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            queued += 1;
+        }
+        Ok(queued)
+    }
+
+    /// A process exit can leave a claimed job marked transcribing/finalizing.
+    /// Completed segment rows are durable, so startup only needs to requeue
+    /// the job; it resumes at the first missing segment.
+    pub async fn recover_interrupted_transcriptions(&self) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE transcription_jobs SET status = 'queued', error = NULL, updated_at_ms = ? \
+             WHERE status IN ('transcribing','finalizing')",
+        )
+        .bind(unix_time_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claim_next_transcription(&self) -> sqlx::Result<Option<TranscriptionJob>> {
+        let mut transaction = self.pool.begin().await?;
+        type Row = (String, String, String, String, i64, i64);
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT entry_key, fingerprint, model, language, total_segments, completed_segments \
+             FROM transcription_jobs WHERE status = 'queued' ORDER BY created_at_ms, entry_key LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((entry_key, fingerprint, model, language, total_segments, completed_segments)) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        sqlx::query("UPDATE transcription_jobs SET status = 'transcribing', updated_at_ms = ? WHERE entry_key = ?")
+            .bind(unix_time_ms())
+            .bind(&entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(TranscriptionJob {
+            entry_key,
+            fingerprint,
+            model,
+            language,
+            total_segments: total_segments as u32,
+            completed_segments: completed_segments as u32,
+        }))
+    }
+
+    pub async fn requeue_transcription(&self, entry_key: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE transcription_jobs SET status = 'queued', updated_at_ms = ? WHERE entry_key = ?")
+            .bind(unix_time_ms())
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn fail_transcription(&self, entry_key: &str, error: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE transcription_jobs SET status = 'failed', error = ?, updated_at_ms = ? WHERE entry_key = ?")
+            .bind(error)
+            .bind(unix_time_ms())
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn store_transcription_segment(
+        &self,
+        entry_key: &str,
+        segment_index: u32,
+        cues_json: &str,
+    ) -> sqlx::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO transcription_segments (entry_key, segment_index, cues_json, completed_at_ms) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(entry_key, segment_index) DO UPDATE SET cues_json = excluded.cues_json, completed_at_ms = excluded.completed_at_ms",
+        )
+        .bind(entry_key)
+        .bind(i64::from(segment_index))
+        .bind(cues_json)
+        .bind(unix_time_ms())
+        .execute(&mut *transaction)
+        .await?;
+        let (completed,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transcription_segments WHERE entry_key = ?")
+            .bind(entry_key)
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE transcription_jobs SET completed_segments = ?, updated_at_ms = ? WHERE entry_key = ?")
+            .bind(completed)
+            .bind(unix_time_ms())
+            .bind(entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn transcription_segments(&self, entry_key: &str) -> sqlx::Result<Vec<(u32, String)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT segment_index, cues_json FROM transcription_segments WHERE entry_key = ? ORDER BY segment_index",
+        )
+        .bind(entry_key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(index, json)| (index as u32, json)).collect())
+    }
+
+    pub async fn complete_transcription(&self, subtitle: &SubtitleRecord) -> sqlx::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO subtitle_tracks \
+             (entry_key, id, language, label, source, format, file_path, fingerprint, generated_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(entry_key, id) DO UPDATE SET language = excluded.language, label = excluded.label, \
+             source = excluded.source, format = excluded.format, file_path = excluded.file_path, \
+             fingerprint = excluded.fingerprint, generated_at_ms = excluded.generated_at_ms",
+        )
+        .bind(&subtitle.entry_key)
+        .bind(&subtitle.id)
+        .bind(&subtitle.language)
+        .bind(&subtitle.label)
+        .bind(&subtitle.source)
+        .bind(&subtitle.format)
+        .bind(&subtitle.file_path)
+        .bind(&subtitle.fingerprint)
+        .bind(unix_time_ms())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE transcription_jobs SET status = 'completed', completed_segments = total_segments, error = NULL, updated_at_ms = ? WHERE entry_key = ?")
+            .bind(unix_time_ms())
+            .bind(&subtitle.entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn subtitle_tracks(&self, entry_key: &str) -> sqlx::Result<Vec<SubtitleRecord>> {
+        type Row = (String, String, String, String, String, String, String, String);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, entry_key, language, label, source, format, file_path, fingerprint \
+             FROM subtitle_tracks WHERE entry_key = ? ORDER BY language, label",
+        )
+        .bind(entry_key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id, entry_key, language, label, source, format, file_path, fingerprint)| SubtitleRecord {
+            id, entry_key, language, label, source, format, file_path, fingerprint,
+        }).collect())
+    }
+
+    pub async fn subtitle_track(&self, entry_key: &str, id: &str) -> sqlx::Result<Option<SubtitleRecord>> {
+        Ok(self.subtitle_tracks(entry_key).await?.into_iter().find(|track| track.id == id))
+    }
+
+    pub async fn transcription_queue_status(&self) -> sqlx::Result<TranscriptionQueueStatus> {
+        type Row = (i64, i64, i64, i64, i64);
+        let (queued, completed, failed, total_segments, completed_segments): Row = sqlx::query_as(
+            "SELECT \
+                COALESCE(SUM(CASE WHEN status IN ('queued','transcribing','finalizing') THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(total_segments), 0), COALESCE(SUM(completed_segments), 0) \
+             FROM transcription_jobs",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(TranscriptionQueueStatus {
+            queued: queued as u64,
+            completed: completed as u64,
+            failed: failed as u64,
+            total_segments: total_segments as u64,
+            completed_segments: completed_segments as u64,
+        })
+    }
+
     /// Every track sharing exactly this (artist, album) pair — the sibling
     /// set a pinpoint music rescrape re-syncs together, matching bulk
     /// scrape's per-album (not per-track) grouping.
@@ -424,6 +747,102 @@ impl Library {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
+    /// Tracks with enough tag/probe metadata for an exact LRCLIB lookup but
+    /// no completed lyric lookup yet. A fresh no-match marker counts as
+    /// completed so routine runs do not hammer the public service, then
+    /// expires after 30 days because LRCLIB can acquire lyrics later.
+    pub async fn missing_track_lyrics(&self) -> sqlx::Result<Vec<EntryRecord>> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let not_found_cutoff_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000);
+        let rows = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE kind = 'track' AND duration_secs IS NOT NULL \
+             AND artist IS NOT NULL AND artist <> '' AND album IS NOT NULL AND album <> '' \
+             AND NOT EXISTS (SELECT 1 FROM track_lyrics \
+                 WHERE track_lyrics.entry_key = library_entries.entry_key \
+                 AND (plain_lyrics IS NOT NULL OR synced_lyrics IS NOT NULL OR instrumental = 1 OR fetched_at_ms >= ?)) \
+             ORDER BY relative_path"
+        ))
+        .bind(not_found_cutoff_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
+    /// Cache an LRCLIB match. The entry foreign key makes stale lyrics leave
+    /// automatically when a media file is removed from the library.
+    pub async fn set_track_lyrics(&self, entry_key: &str, lyrics: &TrackLyrics) -> sqlx::Result<()> {
+        let fetched_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO track_lyrics \
+             (entry_key, provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental, fetched_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(entry_key) DO UPDATE SET provider = excluded.provider, provider_id = excluded.provider_id, \
+             language = excluded.language, plain_lyrics = excluded.plain_lyrics, synced_lyrics = excluded.synced_lyrics, \
+             instrumental = excluded.instrumental, fetched_at_ms = excluded.fetched_at_ms",
+        )
+        .bind(entry_key)
+        .bind(&lyrics.provider)
+        .bind(lyrics.provider_id)
+        .bind(&lyrics.language)
+        .bind(&lyrics.plain_lyrics)
+        .bind(&lyrics.synced_lyrics)
+        .bind(i64::from(lyrics.instrumental))
+        .bind(fetched_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record a provider 404. This sentinel has no lyric text and is never
+    /// returned to clients. Routine scrapes suppress it for 30 days, then
+    /// retry because LRCLIB may have acquired the track in the meantime.
+    pub async fn mark_track_lyrics_not_found(&self, entry_key: &str) -> sqlx::Result<()> {
+        self.set_track_lyrics(
+            entry_key,
+            &TrackLyrics {
+                provider: "lrclib".into(),
+                provider_id: None,
+                language: None,
+                plain_lyrics: None,
+                synced_lyrics: None,
+                instrumental: false,
+            },
+        )
+        .await
+    }
+
+    /// Cached lyrics for playback. A no-match marker returns `None`.
+    pub async fn track_lyrics(&self, entry_key: &str) -> sqlx::Result<Option<TrackLyrics>> {
+        type Row = (String, Option<i64>, Option<String>, Option<String>, Option<String>, i64);
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental \
+             FROM track_lyrics WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental)| {
+            if plain_lyrics.is_none() && synced_lyrics.is_none() && instrumental == 0 {
+                None
+            } else {
+                Some(TrackLyrics {
+                    provider,
+                    provider_id,
+                    language,
+                    plain_lyrics,
+                    synced_lyrics,
+                    instrumental: instrumental != 0,
+                })
+            }
+        }))
     }
 
     /// Record that a scrape attempt completed for this entry — whether or not
@@ -610,12 +1029,13 @@ impl Library {
     /// Returns the artwork relative paths that were cleared, if any, so the
     /// caller can best-effort delete the now-orphaned files on disk.
     pub async fn clear_scrape_result(&self, entry_key: &str) -> sqlx::Result<Vec<String>> {
+        let mut transaction = self.pool.begin().await?;
         let row: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path \
              FROM library_entries WHERE entry_key = ?",
         )
         .bind(entry_key)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await?;
         let cleared_paths: Vec<String> = [row.0, row.1, row.2, row.3].into_iter().flatten().collect();
 
@@ -625,8 +1045,13 @@ impl Library {
              artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
         )
         .bind(entry_key)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        sqlx::query("DELETE FROM track_lyrics WHERE entry_key = ?")
+            .bind(entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(cleared_paths)
     }
 

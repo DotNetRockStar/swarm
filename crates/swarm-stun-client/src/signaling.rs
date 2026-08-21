@@ -24,7 +24,7 @@ const HELLO_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignalingError {
-    #[error("STUN base URL must start with http:// or https://, got: {0}")]
+    #[error("SWARM server URL must start with http:// or https://, got: {0}")]
     InvalidBaseUrl(String),
     #[error("could not connect to the signaling endpoint: {0}")]
     Connect(String),
@@ -70,8 +70,9 @@ impl SignalingClient {
         capabilities: Option<CapabilityProfile>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<SignalMessage>), SignalingError> {
         let ws_url = to_ws_url(base_url)?;
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(ws_url).await.map_err(|e| SignalingError::Connect(e.to_string()))?;
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
+            .await
+            .map_err(|e| SignalingError::Connect(e.to_string()))?;
 
         let hello = SignalMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -79,20 +80,29 @@ impl SignalingClient {
             device_id: device_id.to_string(),
             capabilities,
         };
-        ws.send(to_ws_message(&hello)).await.map_err(|e| SignalingError::Connect(e.to_string()))?;
+        ws.send(to_ws_message(&hello))
+            .await
+            .map_err(|e| SignalingError::Connect(e.to_string()))?;
 
         let frame = tokio::time::timeout(HELLO_ACK_TIMEOUT, ws.next())
             .await
             .map_err(|_| SignalingError::HelloTimeout)?
             .ok_or(SignalingError::ConnectionClosed)?
             .map_err(|e| SignalingError::Connect(e.to_string()))?;
-        let WsMessage::Text(text) = frame else { return Err(SignalingError::UnexpectedFrame) };
-        let message: SignalMessage = serde_json::from_str(&text).map_err(|e| SignalingError::Decode(e.to_string()))?;
+        let WsMessage::Text(text) = frame else {
+            return Err(SignalingError::UnexpectedFrame);
+        };
+        let message: SignalMessage =
+            serde_json::from_str(&text).map_err(|e| SignalingError::Decode(e.to_string()))?;
         let (session_id, observed_addr, reflector_ports) = match message {
-            SignalMessage::HelloAck { session_id, observed_addr, reflector_ports } => {
-                (session_id, observed_addr, reflector_ports)
+            SignalMessage::HelloAck {
+                session_id,
+                observed_addr,
+                reflector_ports,
+            } => (session_id, observed_addr, reflector_ports),
+            SignalMessage::Error { code, message } => {
+                return Err(SignalingError::Rejected { code, message })
             }
-            SignalMessage::Error { code, message } => return Err(SignalingError::Rejected { code, message }),
             _ => return Err(SignalingError::UnexpectedFrame),
         };
 
@@ -100,21 +110,39 @@ impl SignalingClient {
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         tokio::spawn(run(ws, outbound_rx, inbound_tx));
 
-        Ok((Self { session_id, observed_addr, reflector_ports, outbound: outbound_tx }, inbound_rx))
+        Ok((
+            Self {
+                session_id,
+                observed_addr,
+                reflector_ports,
+                outbound: outbound_tx,
+            },
+            inbound_rx,
+        ))
     }
 
     /// Queues a message for delivery. Returns [`SignalingError::Closed`] if
     /// the connection has already ended — the caller decides whether that
     /// means reconnecting or giving up, this layer doesn't guess.
     pub fn send(&self, message: SignalMessage) -> Result<(), SignalingError> {
-        self.outbound.send(message).map_err(|_| SignalingError::Closed)
+        self.outbound
+            .send(message)
+            .map_err(|_| SignalingError::Closed)
     }
 
     /// Convenience for the common case: relay a hole-punch payload to `to`.
     /// `from` is left unset — the server stamps it, and overwrites it if a
     /// caller sets it anyway (see `ws.rs`'s `handle`).
-    pub fn send_signal(&self, to: impl Into<String>, payload: swarm_core::signal::SignalPayload) -> Result<(), SignalingError> {
-        self.send(SignalMessage::Signal { from: None, to: to.into(), payload })
+    pub fn send_signal(
+        &self,
+        to: impl Into<String>,
+        payload: swarm_core::signal::SignalPayload,
+    ) -> Result<(), SignalingError> {
+        self.send(SignalMessage::Signal {
+            from: None,
+            to: to.into(),
+            payload,
+        })
     }
 
     /// Tells the server this session is ending on purpose (vs. a network
@@ -124,7 +152,11 @@ impl SignalingClient {
     }
 }
 
-async fn run(mut ws: WsStream, mut outbound_rx: mpsc::UnboundedReceiver<SignalMessage>, inbound_tx: mpsc::UnboundedSender<SignalMessage>) {
+async fn run(
+    mut ws: WsStream,
+    mut outbound_rx: mpsc::UnboundedReceiver<SignalMessage>,
+    inbound_tx: mpsc::UnboundedSender<SignalMessage>,
+) {
     let mut ping_seq: u64 = 0;
     let mut ping_timer = tokio::time::interval(PING_INTERVAL);
     ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -205,12 +237,21 @@ mod tests {
 
     #[test]
     fn converts_http_and_https_to_ws_urls() {
-        assert_eq!(to_ws_url("http://example.test:8080").unwrap(), "ws://example.test:8080/api/v1/ws");
-        assert_eq!(to_ws_url("https://example.test/").unwrap(), "wss://example.test/api/v1/ws");
+        assert_eq!(
+            to_ws_url("http://example.test:8080").unwrap(),
+            "ws://example.test:8080/api/v1/ws"
+        );
+        assert_eq!(
+            to_ws_url("https://example.test/").unwrap(),
+            "wss://example.test/api/v1/ws"
+        );
     }
 
     #[test]
     fn rejects_a_base_url_without_a_scheme() {
-        assert!(matches!(to_ws_url("example.test"), Err(SignalingError::InvalidBaseUrl(_))));
+        assert!(matches!(
+            to_ws_url("example.test"),
+            Err(SignalingError::InvalidBaseUrl(_))
+        ));
     }
 }

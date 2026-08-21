@@ -72,7 +72,6 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -80,13 +79,14 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.R
 import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
+import app.swarm.tv.app.ui.components.swarmActionButtonColors
+import app.swarm.tv.app.ui.PrefetchArtworkRow
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -100,7 +100,6 @@ import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
-import coil.compose.AsyncImage
 
 /** Mirrors the media server's own browse-page filter (`media.js`'s `kindFilter`) — same four choices, same meaning. */
 private enum class KindFilter(val label: String) {
@@ -114,6 +113,7 @@ fun CatalogScreen(
     unreachable: List<SwarmDevice>,
     playbackError: String?,
     artworkUrl: (MergedEntry) -> String?,
+    artistPhotoUrl: (MergedEntry) -> String?,
     onOpenMovie: (MergedEntry) -> Unit,
     onOpenMovieShelf: () -> Unit,
     onOpenArtistShelf: () -> Unit,
@@ -155,13 +155,34 @@ fun CatalogScreen(
     var likedOnly by remember { mutableStateOf(false) }
     var showFilterOverlay by remember { mutableStateOf(false) }
     val anyFilterActive = kindFilter != KindFilter.ALL || genreFilter != null || ratingFilter != null || likedOnly
-    // The header lives outside the nested lazy catalog. Compose's geometric
-    // focus search cannot reliably enter a LazyColumn/LazyGrid after focus
-    // has moved back to that fixed header because off-axis/lazy children may
-    // not currently be candidates. Every possible catalog layout attaches
-    // this requester to its first active card; the header's DOWN handler
-    // below therefore has one deterministic way back into the content.
+    // The controls are the first item in the same lazy catalog so they scroll
+    // away with the shelves. Every possible layout still attaches this
+    // requester to its first active card; the controls' DOWN handler has one
+    // deterministic way into content even when lazy children are not yet
+    // candidates for geometric focus search.
     val catalogEntryFocusRequester = remember { FocusRequester() }
+    val catalogControls: @Composable () -> Unit = {
+        CatalogControls(
+            searchText = searchText,
+            onSearchTextChange = { searchText = it },
+            onSubmitSearch = { appliedSearchQuery = searchText },
+            showClear = searchText.isNotEmpty() || appliedSearchQuery.isNotEmpty() || anyFilterActive,
+            onClear = {
+                searchText = ""
+                appliedSearchQuery = ""
+                kindFilter = KindFilter.ALL
+                genreFilter = null
+                ratingFilter = null
+                likedOnly = false
+            },
+            anyFilterActive = anyFilterActive,
+            onOpenFilter = { showFilterOverlay = true },
+            unreachable = unreachable,
+            playbackError = playbackError,
+            showFilterOverlay = showFilterOverlay,
+            catalogEntryFocusRequester = catalogEntryFocusRequester,
+        )
+    }
 
     // Outer Box, not just a Column: real bug, found live — with a Column as
     // this screen's sole root, FilterOverlay (a Column *child*, below) got
@@ -192,83 +213,20 @@ fun CatalogScreen(
                 // actually confines the D-pad to the modal.
                 .focusProperties { canFocus = !showFilterOverlay },
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
-                    if (!showFilterOverlay && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                        // requestFocus throws when there is no matching card
-                        // (loading/empty/no matches). In that case leave the
-                        // event available to normal focus search.
-                        runCatching { catalogEntryFocusRequester.requestFocus() }.isSuccess
-                    } else {
-                        false
-                    }
-                },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Image(
-                    painter = painterResource(R.drawable.mascot),
-                    contentDescription = null,
-                    modifier = Modifier.size(32.dp),
-                )
-                TvOutlinedTextField(
-                    value = searchText,
-                    onValueChange = { searchText = it },
-                    placeholder = { Text("Search title, artist, show…", color = SwarmMuted) },
-                    colors = searchFieldColors(),
-                    onSubmit = { appliedSearchQuery = searchText },
-                    modifier = Modifier.weight(1f),
-                )
-                if (searchText.isNotEmpty() || appliedSearchQuery.isNotEmpty() || anyFilterActive) {
-                    Button(
-                        onClick = {
-                            searchText = ""
-                            appliedSearchQuery = ""
-                            kindFilter = KindFilter.ALL
-                            genreFilter = null
-                            ratingFilter = null
-                            likedOnly = false
-                        },
-                        colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                    ) {
-                        Text("Clear", fontSize = 13.sp)
-                    }
-                }
-                Button(
-                    onClick = { showFilterOverlay = true },
-                    colors = ButtonDefaults.colors(
-                        containerColor = if (anyFilterActive) SwarmAccent else SwarmSurfaceMuted,
-                        contentColor = if (anyFilterActive) Color(0xFF04263A) else SwarmText,
-                    ),
-                ) {
-                    Text("Filter", fontSize = 13.sp)
-                }
-            }
-
-            if (unreachable.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "${unreachable.size} server(s) not reachable yet: ${unreachable.joinToString { it.name }}",
-                    color = SwarmMuted,
-                    fontSize = 12.sp,
-                )
-            }
-            if (playbackError != null) {
-                Spacer(Modifier.height(10.dp))
-                Text(playbackError, color = SwarmAccent, fontSize = 12.sp)
-            }
-            Spacer(Modifier.height(16.dp))
-
             when {
                 // Same GIF/caption treatment PlayerScreen's own "negotiated,
                 // now waiting" state uses — real feedback from live use:
                 // merging every reachable server's catalog is a real,
                 // sometimes-noticeable network wait too, and there's no
                 // reason it should feel less alive than the player's.
-                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    SwarmLoadingIndicator()
+                loading -> Column(Modifier.fillMaxSize()) {
+                    catalogControls()
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { SwarmLoadingIndicator() }
                 }
-                entries.isEmpty() -> Text("Nothing in the catalog yet.", color = SwarmMuted, fontSize = 14.sp)
+                entries.isEmpty() -> Column {
+                    catalogControls()
+                    Text("Nothing in the catalog yet.", color = SwarmMuted, fontSize = 14.sp)
+                }
                 else -> {
                     // Same multi-field match the media server's own search box
                     // uses (`media.js`'s `filteredEntries`) — matches on
@@ -312,7 +270,10 @@ fun CatalogScreen(
                     }
 
                     if (movies.isEmpty() && shows.isEmpty() && artists.isEmpty()) {
-                        Text("No matches for the current search/filter.", color = SwarmMuted, fontSize = 14.sp)
+                        Column {
+                            catalogControls()
+                            Text("No matches for the current search/filter.", color = SwarmMuted, fontSize = 14.sp)
+                        }
                     } else {
                         // Which top-level row gets *default* (first-card)
                         // focus when nothing is being restored — unchanged
@@ -355,15 +316,18 @@ fun CatalogScreen(
                                 shows,
                                 artists,
                                 artworkUrl,
+                                artistPhotoUrl,
                                 onOpenMovie,
                                 onOpenShow,
                                 onOpenArtist,
                                 isLiked,
                                 firstFocusRequester = catalogEntryFocusRequester,
                                 requestInitialFocus = !showFilterOverlay,
+                                header = catalogControls,
                             )
                         } else {
-                            LazyColumn(verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                            LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                                item(key = "catalog-controls", contentType = "controls") { catalogControls() }
                                 if (movies.isNotEmpty()) {
                                     item {
                                         MovieRow(
@@ -394,7 +358,7 @@ fun CatalogScreen(
                                 if (artists.isNotEmpty()) {
                                     item {
                                         ArtistShelfRow(
-                                            "Music", artists, onOpenArtistShelf, onOpenArtist, artistRestoreIndex,
+                                            "Music", artists, artworkUrl, artistPhotoUrl, onOpenArtistShelf, onOpenArtist, artistRestoreIndex,
                                             isDefaultFocusRow = firstSection == "music",
                                             defaultFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "music" },
                                             requestInitialFocus = !showFilterOverlay,
@@ -402,7 +366,16 @@ fun CatalogScreen(
                                     }
                                 }
                                 items(musicGenreShelves, key = { "music-genre-${it.first}" }) { (genre, genreArtists) ->
-                                    ArtistShelfRow(genre, genreArtists, onOpenArtistShelf = null, onOpenArtist = onOpenArtist, restoreFocusIndex = null, isDefaultFocusRow = false)
+                                    ArtistShelfRow(
+                                        genre,
+                                        genreArtists,
+                                        artworkUrl,
+                                        artistPhotoUrl,
+                                        onOpenArtistShelf = null,
+                                        onOpenArtist = onOpenArtist,
+                                        restoreFocusIndex = null,
+                                        isDefaultFocusRow = false,
+                                    )
                                 }
                             }
                         }
@@ -446,6 +419,76 @@ private fun kindMatches(entry: MergedEntry, filter: KindFilter): Boolean = when 
     KindFilter.MUSIC -> entry.entry.kind == MediaKind.TRACK
 }
 
+@Composable
+private fun CatalogControls(
+    searchText: String,
+    onSearchTextChange: (String) -> Unit,
+    onSubmitSearch: () -> Unit,
+    showClear: Boolean,
+    onClear: () -> Unit,
+    anyFilterActive: Boolean,
+    onOpenFilter: () -> Unit,
+    unreachable: List<SwarmDevice>,
+    playbackError: String?,
+    showFilterOverlay: Boolean,
+    catalogEntryFocusRequester: FocusRequester,
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+                if (!showFilterOverlay && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    runCatching { catalogEntryFocusRequester.requestFocus() }.isSuccess
+                } else {
+                    false
+                }
+            },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Image(
+                painter = painterResource(R.drawable.mascot),
+                contentDescription = null,
+                modifier = Modifier.size(32.dp),
+            )
+            TvOutlinedTextField(
+                value = searchText,
+                onValueChange = onSearchTextChange,
+                placeholder = { Text("Search title, artist, show…", color = SwarmMuted) },
+                colors = searchFieldColors(),
+                onSubmit = onSubmitSearch,
+                modifier = Modifier.weight(1f),
+            )
+            if (showClear) {
+                Button(
+                    onClick = onClear,
+                    colors = swarmActionButtonColors(),
+                ) {
+                    Text("Clear", fontSize = 13.sp)
+                }
+            }
+            Button(
+                onClick = onOpenFilter,
+                colors = swarmActionButtonColors(),
+            ) {
+                Text("Filter", fontSize = 13.sp)
+            }
+        }
+        if (unreachable.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "${unreachable.size} server(s) not reachable yet: ${unreachable.joinToString { it.name }}",
+                color = SwarmMuted,
+                fontSize = 12.sp,
+            )
+        }
+        if (playbackError != null) {
+            Spacer(Modifier.height(10.dp))
+            Text(playbackError, color = SwarmAccent, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
 /** Ranks [entries]' genres by how many entries in this specific kind carry each one (descending), takes the top 5 (or fewer, if the kind has fewer distinct genres), and groups each genre's matching subset via [group] — [ShowGroup]/[ArtistGroup] for Shows/Music, the identity function for the already-flat Movies list. */
 private fun <T> topGenreShelves(entries: List<MergedEntry>, group: (List<MergedEntry>) -> List<T>): List<Pair<String, List<T>>> =
     entries.flatMap { it.entry.genres }
@@ -475,12 +518,14 @@ private fun GenreFilteredGrid(
     shows: List<ShowGroup>,
     artists: List<ArtistGroup>,
     artworkUrl: (MergedEntry) -> String?,
+    artistPhotoUrl: (MergedEntry) -> String?,
     onOpenMovie: (MergedEntry) -> Unit,
     onOpenShow: (ShowGroup) -> Unit,
     onOpenArtist: (ArtistGroup) -> Unit,
     isLiked: (MergedEntry) -> Boolean,
     firstFocusRequester: FocusRequester,
     requestInitialFocus: Boolean,
+    header: @Composable () -> Unit,
 ) {
     LaunchedEffect(movies, shows, artists, requestInitialFocus) {
         if (requestInitialFocus) {
@@ -506,9 +551,14 @@ private fun GenreFilteredGrid(
         // button.
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
     ) {
+        item(key = "catalog-controls", span = { GridItemSpan(maxLineSpan) }, contentType = "controls") { header() }
         if (movies.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) { GridSectionHeader("Movies") }
-            gridItemsIndexed(movies) { index, entry ->
+            gridItemsIndexed(
+                items = movies,
+                key = { _, entry -> "movie-${entry.entry.entryKey}" },
+                contentType = { _, _ -> "movie" },
+            ) { index, entry ->
                 CatalogCard(
                     entry,
                     artworkUrl(entry),
@@ -521,7 +571,11 @@ private fun GenreFilteredGrid(
         }
         if (shows.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) { GridSectionHeader("Shows") }
-            gridItemsIndexed(shows) { index, show ->
+            gridItemsIndexed(
+                items = shows,
+                key = { _, show -> "show-${show.show}" },
+                contentType = { _, _ -> "show" },
+            ) { index, show ->
                 val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
                 GroupCard(
                     title = show.show,
@@ -535,12 +589,20 @@ private fun GenreFilteredGrid(
         }
         if (artists.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) { GridSectionHeader("Music") }
-            gridItemsIndexed(artists) { index, artist ->
+            gridItemsIndexed(
+                items = artists,
+                key = { _, artist -> "artist-${artist.artist}" },
+                contentType = { _, _ -> "artist" },
+            ) { index, artist ->
                 val albumCount = artist.albums.size
+                val artistArtwork = artist.artworkUrls(artworkUrl, artistPhotoUrl)
                 GroupCard(
                     title = artist.artist,
                     subtitle = "$albumCount album" + if (albumCount == 1) "" else "s",
-                    artworkUrl = null,
+                    artworkUrl = artistArtwork.artistPhoto,
+                    fallbackArtworkUrl = artistArtwork.albumCoverFallback,
+                    artworkAspectRatio = 1f,
+                    placeholderType = "Artist",
                     onClick = { onOpenArtist(artist) },
                     focusRequester = if (firstSection == "music" && index == 0) firstFocusRequester else null,
                     widthModifier = Modifier.fillMaxWidth(),
@@ -677,7 +739,7 @@ private fun ShelfHeader(label: String, onOpenAll: (() -> Unit)?, fontSize: TextU
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(label, color = SwarmMuted, fontSize = fontSize, fontWeight = FontWeight.Black)
         if (onOpenAll != null) {
-            Button(onClick = onOpenAll, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmAccent)) {
+            Button(onClick = onOpenAll, colors = swarmActionButtonColors()) {
                 Text("Browse all", fontSize = 12.sp)
             }
         }
@@ -744,6 +806,8 @@ private fun MovieRow(
 ) {
     val isTopLevel = onOpenShelf != null
     val listState = rememberLazyListState()
+    val artworkUrls = remember(movies, artworkUrl) { movies.map(artworkUrl) }
+    PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
         movies.size,
         restoreFocusIndex,
@@ -763,8 +827,12 @@ private fun MovieRow(
         // Reserving a little extra space inside the scrollable area gives the scale
         // animation room without moving any card's resting position.
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
-            itemsIndexed(movies) { index, entry ->
-                CatalogCard(entry, artworkUrl(entry), onClick = { onOpenMovie(entry) }, focusRequester = if (index == targetIndex) focusRequester else null, isLiked = isLiked(entry))
+            itemsIndexed(
+                items = movies,
+                key = { _, entry -> entry.entry.entryKey },
+                contentType = { _, _ -> "movie" },
+            ) { index, entry ->
+                CatalogCard(entry, artworkUrls[index], onClick = { onOpenMovie(entry) }, focusRequester = if (index == targetIndex) focusRequester else null, isLiked = isLiked(entry))
             }
         }
     }
@@ -784,6 +852,10 @@ private fun ShowShelfRow(
 ) {
     val isTopLevel = onOpenShowShelf != null
     val listState = rememberLazyListState()
+    val artworkUrls = remember(shows, artworkUrl) {
+        shows.map { show -> show.seasons.firstOrNull()?.episodes?.firstOrNull()?.let(artworkUrl) }
+    }
+    PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
         shows.size,
         restoreFocusIndex,
@@ -796,12 +868,15 @@ private fun ShowShelfRow(
         ShelfHeader(title, onOpenShowShelf, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
-            itemsIndexed(shows) { index, show ->
-                val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
+            itemsIndexed(
+                items = shows,
+                key = { _, show -> show.show },
+                contentType = { _, _ -> "show" },
+            ) { index, show ->
                 GroupCard(
                     title = show.show,
                     subtitle = "${show.seasons.size} season" + if (show.seasons.size == 1) "" else "s",
-                    artworkUrl = representative?.let(artworkUrl),
+                    artworkUrl = artworkUrls[index],
                     onClick = { onOpenShow(show) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
                 )
@@ -814,6 +889,8 @@ private fun ShowShelfRow(
 private fun ArtistShelfRow(
     title: String,
     artists: List<ArtistGroup>,
+    artworkUrl: (MergedEntry) -> String?,
+    artistPhotoUrl: (MergedEntry) -> String?,
     onOpenArtistShelf: (() -> Unit)?,
     onOpenArtist: (ArtistGroup) -> Unit,
     restoreFocusIndex: Int?,
@@ -823,6 +900,10 @@ private fun ArtistShelfRow(
 ) {
     val isTopLevel = onOpenArtistShelf != null
     val listState = rememberLazyListState()
+    val artistArtwork = remember(artists, artworkUrl, artistPhotoUrl) {
+        artists.map { it.artworkUrls(artworkUrl, artistPhotoUrl) }
+    }
+    PrefetchArtworkRow(listState, artistArtwork.map { it.artistPhoto ?: it.albumCoverFallback })
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
         artists.size,
         restoreFocusIndex,
@@ -835,12 +916,20 @@ private fun ArtistShelfRow(
         ShelfHeader(title, onOpenArtistShelf, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
-            itemsIndexed(artists) { index, artist ->
+            itemsIndexed(
+                items = artists,
+                key = { _, artist -> artist.artist },
+                contentType = { _, _ -> "artist" },
+            ) { index, artist ->
                 val albumCount = artist.albums.size
+                val artwork = artistArtwork[index]
                 GroupCard(
                     title = artist.artist,
                     subtitle = "$albumCount album" + if (albumCount == 1) "" else "s",
-                    artworkUrl = null,
+                    artworkUrl = artwork.artistPhoto,
+                    fallbackArtworkUrl = artwork.albumCoverFallback,
+                    artworkAspectRatio = 1f,
+                    placeholderType = "Artist",
                     onClick = { onOpenArtist(artist) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
                 )
@@ -871,23 +960,21 @@ private fun CatalogCard(
         modifier = focusModifier.then(widthModifier),
     ) {
         Column {
-            if (artworkUrl != null) {
-                Box {
-                    AsyncImage(
-                        model = artworkUrl,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+            Box {
+                ArtworkImage(
+                    label = merged.entry.scrapedTitle ?: merged.entry.title,
+                    placeholderType = "Movie",
+                    primaryUrl = artworkUrl,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                )
+                if (isLiked) {
+                    Text(
+                        "♥",
+                        color = SwarmAccentHot,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                     )
-                    if (isLiked) {
-                        Text(
-                            "♥",
-                            color = SwarmAccentHot,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Black,
-                            modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
-                        )
-                    }
                 }
             }
             Column(modifier = Modifier.padding(10.dp)) {
@@ -915,9 +1002,19 @@ private fun CatalogCard(
     }
 }
 
-/** A Show or Artist shelf card — no per-group artwork field exists server-side, so a group falls back to a representative entry's art (Show) or a plain initial (Artist, per the plan's explicit fallback allowance). */
+/** Shared grouped-media card: shows use representative poster art; artists prefer a photo and then an album cover. */
 @Composable
-private fun GroupCard(title: String, subtitle: String, artworkUrl: String?, onClick: () -> Unit, focusRequester: FocusRequester?, widthModifier: Modifier = Modifier.width(CARD_WIDTH)) {
+private fun GroupCard(
+    title: String,
+    subtitle: String,
+    artworkUrl: String?,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester?,
+    widthModifier: Modifier = Modifier.width(CARD_WIDTH),
+    fallbackArtworkUrl: String? = null,
+    artworkAspectRatio: Float = 2f / 3f,
+    placeholderType: String = "Show",
+) {
     val focusModifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
     Card(
         onClick = onClick,
@@ -925,36 +1022,18 @@ private fun GroupCard(title: String, subtitle: String, artworkUrl: String?, onCl
         modifier = focusModifier.then(widthModifier),
     ) {
         Column {
-            if (artworkUrl != null) {
-                AsyncImage(
-                    model = artworkUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                )
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    InitialBadge(title)
-                }
-            }
+            ArtworkImage(
+                label = title,
+                placeholderType = placeholderType,
+                primaryUrl = artworkUrl,
+                fallbackUrl = fallbackArtworkUrl,
+                modifier = Modifier.fillMaxWidth().aspectRatio(artworkAspectRatio).clip(RoundedCornerShape(4.dp)),
+            )
             Column(modifier = Modifier.padding(10.dp)) {
                 Text(title, color = SwarmText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                 Spacer(Modifier.height(4.dp))
                 Text(subtitle, color = SwarmMuted, fontSize = 10.sp)
             }
         }
-    }
-}
-
-@Composable
-internal fun InitialBadge(title: String) {
-    Box(
-        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(24.dp)).background(SwarmSurfaceMuted),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?", color = SwarmAccent, fontSize = 20.sp, fontWeight = FontWeight.Black)
     }
 }

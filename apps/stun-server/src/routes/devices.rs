@@ -42,7 +42,7 @@ pub struct MyDevicesResponse {
     pub devices: Vec<MyDevice>,
 }
 
-fn validate_registration(device: &DeviceRegistration) -> Result<(), AppError> {
+pub(crate) fn validate_registration(device: &DeviceRegistration) -> Result<(), AppError> {
     let fp = &device.cert_fingerprint;
     if fp.len() != 64
         || !fp
@@ -123,7 +123,7 @@ async fn redeem_code(
     })
 }
 
-async fn add_membership(
+pub(crate) async fn add_membership(
     connection: &mut SqliteConnection,
     swarm_id: &str,
     device_id: &str,
@@ -139,7 +139,7 @@ async fn add_membership(
     Ok(())
 }
 
-async fn replace_metadata(
+pub(crate) async fn replace_metadata(
     connection: &mut SqliteConnection,
     device_id: &str,
     metadata: &BTreeMap<String, String>,

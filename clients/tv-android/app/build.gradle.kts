@@ -23,7 +23,16 @@ android {
         // coroutines + BouncyCastle land 16 dex files), so this is
         // required for the build to link at all.
         multiDexEnabled = true
+        val rendezvousUrl = providers.gradleProperty("swarmRendezvousUrl")
+            .orElse(providers.environmentVariable("SWARM_RENDEZVOUS_URL"))
+            .orElse("")
+            .get()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "SWARM_RENDEZVOUS_URL", "\"$rendezvousUrl\"")
     }
+
+    buildFeatures { buildConfig = true }
 
     buildTypes {
         release {

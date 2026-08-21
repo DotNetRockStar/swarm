@@ -27,6 +27,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,16 +39,24 @@ import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 
 @Composable
-fun NumberPadEntry(value: String, maxLength: Int, onValueChange: (String) -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
+fun NumberPadEntry(
+    value: String,
+    maxLength: Int,
+    onValueChange: (String) -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    firstKeyFocusRequester: FocusRequester? = null,
+) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (i in 0 until maxLength) DigitSlot(value.getOrNull(i))
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
         NumberPad(
             enabled = enabled,
             onDigit = { d -> if (value.length < maxLength) onValueChange(value + d) },
             onBackspace = { if (value.isNotEmpty()) onValueChange(value.dropLast(1)) },
+            firstKeyFocusRequester = firstKeyFocusRequester,
         )
     }
 }
@@ -55,12 +65,12 @@ fun NumberPadEntry(value: String, maxLength: Int, onValueChange: (String) -> Uni
 private fun DigitSlot(digit: Char?) {
     Box(
         modifier = Modifier
-            .size(40.dp, 52.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .size(30.dp, 39.dp)
+            .clip(RoundedCornerShape(6.dp))
             .background(if (digit != null) SwarmSurfaceMuted else SwarmSurface),
         contentAlignment = Alignment.Center,
     ) {
-        Text(digit?.toString() ?: "", color = SwarmText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text(digit?.toString() ?: "", color = SwarmText, fontSize = 18.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -72,20 +82,22 @@ private val padRows = listOf(
 )
 
 @Composable
-private fun NumberPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+private fun NumberPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () -> Unit, firstKeyFocusRequester: FocusRequester?) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         for (row in padRows) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (key in row) {
-                    Box(modifier = Modifier.size(64.dp)) {
+                    Box(modifier = Modifier.size(48.dp)) {
                         if (key != null) {
                             Button(
                                 onClick = { if (key == '<') onBackspace() else onDigit(key) },
                                 enabled = enabled,
                                 colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                                modifier = Modifier.size(64.dp),
+                                modifier = Modifier.size(48.dp).then(
+                                    if (key == '1' && firstKeyFocusRequester != null) Modifier.focusRequester(firstKeyFocusRequester) else Modifier,
+                                ),
                             ) {
-                                Text(if (key == '<') "⌫" else key.toString(), fontSize = 22.sp)
+                                Text(if (key == '<') "⌫" else key.toString(), fontSize = 17.sp)
                             }
                         }
                     }

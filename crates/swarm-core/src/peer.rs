@@ -106,6 +106,38 @@ pub enum PlaybackMode {
     Hls,
 }
 
+/// Cached lyrics attached only to music playback negotiation. Keeping this
+/// out of the catalog manifest avoids making every catalog sync carry a
+/// library's worth of lyric text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackLyrics {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_lyrics: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_lyrics: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
+}
+
+/// One side-loaded subtitle track available for this playback session.
+/// `path` is an authenticated peer path; clients route it through their
+/// existing loopback proxy just like the media URL itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubtitleTrack {
+    pub id: String,
+    pub language: String,
+    pub label: String,
+    pub source: String,
+    pub path: String,
+}
+
 /// Body returned by `/play/{entry_key}`. `path` is another peer path, not a
 /// public URL; the client feeds it through its authenticated loopback proxy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +152,13 @@ pub struct PlaybackPlan {
     /// surfaced explicitly so the client can release this session's
     /// bandwidth reservation via `/stop/{id}` without parsing `path`.
     pub session_id: String,
+    /// Present for music when the server has cached an LRCLIB result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<TrackLyrics>,
+    /// Completed side-loaded subtitle tracks. Partial transcription output
+    /// is never included here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtitles: Vec<SubtitleTrack>,
 }
 
 /// HTTP-style byte range. `Suffix(n)` = last `n` bytes (`bytes=-n`);
@@ -341,6 +380,21 @@ mod tests {
             path: "/hls/session/master.m3u8".into(),
             max_bitrate: 4_160_000,
             session_id: "session".into(),
+            lyrics: Some(TrackLyrics {
+                provider: "lrclib".into(),
+                provider_id: Some(42),
+                language: Some("en".into()),
+                plain_lyrics: Some("First line".into()),
+                synced_lyrics: Some("[00:01.00]First line".into()),
+                instrumental: false,
+            }),
+            subtitles: vec![SubtitleTrack {
+                id: "whisper-en".into(),
+                language: "en".into(),
+                label: "English — AI generated".into(),
+                source: "whisper".into(),
+                path: "/subtitles/entry/whisper-en.vtt".into(),
+            }],
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert_eq!(serde_json::from_str::<PlaybackPlan>(&json).unwrap(), plan);

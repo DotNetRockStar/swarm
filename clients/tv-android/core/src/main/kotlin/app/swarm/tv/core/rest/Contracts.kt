@@ -51,6 +51,33 @@ data class RegisterDeviceResponse(
 )
 
 @Serializable
+data class CreateActivationRequest(val device: DeviceRegistration)
+
+@Serializable
+data class CreateActivationResponse(
+    val activationId: String,
+    val code: String,
+    val pollToken: String,
+    val accessToken: String,
+    val expiresAt: String,
+)
+
+@Serializable
+enum class ActivationStatus {
+    @SerialName("pending") PENDING,
+    @SerialName("approved") APPROVED,
+    @SerialName("expired") EXPIRED,
+}
+
+@Serializable
+data class ActivationStatusResponse(
+    val status: ActivationStatus,
+    val deviceId: String? = null,
+    val swarm: SwarmSummary? = null,
+    val expiresAt: String,
+)
+
+@Serializable
 data class JoinSwarmRequest(
     val code: String,
 )

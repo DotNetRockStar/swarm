@@ -36,6 +36,7 @@ button {
   padding: 8px 16px; font-weight: 700; font-family: inherit; cursor: pointer; white-space: nowrap;
 }
 button:hover { filter: brightness(1.15); }
+button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
 button.secondary { background: var(--surface-muted); color: var(--text); border: 1px solid var(--border); }
 button.danger { background: var(--surface-muted); color: #ff8db4; border: 1px solid #6b3348; }
 button i.bi, .tabnav button i.bi, .checkbox-label i.bi { margin-right: 6px; }
@@ -84,6 +85,12 @@ td.mono {
 .media-root-info { flex: 1; min-width: 0; }
 .media-root-label { font-size: .85rem; font-weight: 700; }
 .media-root-path { font-size: .78rem; margin-top: 2px; overflow-wrap: break-word; }
+.add-root-row { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+.upload-budget-toggle { margin-top: 16px; }
+.compact-help { margin-top: 5px; font-size: .78rem; }
+.swarm-remote-card { margin-top: 28px; }
+.swarm-name { display: inline-flex; align-items: center; gap: 8px; }
+.swarm-name i { color: var(--accent); }
 
 /* Toast notifications: every success/warning/error message in the app
    surfaces here instead of scattered inline text, color-coded so status is
@@ -124,6 +131,9 @@ td.mono {
    since native OS chrome can override author styles; a real icon element
    with pointer-events:none (clicks pass through to the control beneath)
    renders consistently everywhere the rest of this app's icons already do. */
+.media-search-row { align-items: center; padding: 10px 0; margin-bottom: 14px; }
+.media-group-actions { align-items: center; margin: 12px 0 18px; }
+.media-group-actions .muted { font-size: .8rem; }
 .search-input-wrap { position: relative; flex: 2; }
 .search-input-icon {
   position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
@@ -153,6 +163,22 @@ td.mono {
 .scrape-progress { margin-bottom: 14px; }
 .progress-bar { width: 100%; height: 6px; border-radius: 4px; background: var(--surface-muted); overflow: hidden; margin-bottom: 4px; }
 .progress-bar-fill { height: 100%; background: var(--accent); transition: width .15s ease-out; }
+.transcription-toggle { cursor: pointer; }
+.transcription-toggle i { color: var(--accent); }
+.transcription-progress {
+  margin: 2px 0 16px; padding: 11px 13px; border: 1px solid var(--border);
+  border-radius: 9px; background: var(--surface-muted); position: sticky; top: 8px;
+  z-index: 8; box-shadow: 0 5px 14px rgba(0, 0, 0, .16);
+}
+.transcription-progress-active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.transcription-progress-head, .transcription-progress-copy {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+}
+.transcription-progress-head { margin-bottom: 7px; font-size: .82rem; font-weight: 700; }
+.transcription-progress-head i { color: var(--accent); }
+.transcription-progress-copy { font-size: .76rem; line-height: 1.35; }
+.transcription-progress-copy span:first-child { min-width: 0; }
+.transcription-progress-copy span:last-child { flex: 0 0 auto; text-align: right; }
 
 /* Tab nav (Phase 3) */
 .tabnav { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
@@ -162,6 +188,7 @@ td.mono {
 }
 .tabnav button:hover { filter: none; color: var(--text); }
 .tabnav button.tab-active { color: var(--accent); background: var(--surface); }
+.tabnav button.tray-hide-button { margin-left: auto; }
 
 /* Notification bubble — client-reported error count on the Notifications tab. */
 .badge-count {
@@ -275,6 +302,9 @@ td.mono {
 .ai-console-head i { margin-right: 6px; }
 .ai-console-line { color: var(--text); line-height: 1.7; }
 .ai-console-prompt { color: var(--accent); font-weight: 700; margin-right: 6px; }
+.ai-console-response { margin-top: 8px; color: var(--muted); }
+.heading-icon { color: var(--accent); margin-right: 8px; }
+.token-row { margin-top: 12px; }
 
 /* About tab: the leftmost/default tab now that it's an explainer, not just
    a security page — gets a bit of "wizbang" (a hero card with a Server ->
@@ -380,6 +410,7 @@ td.mono {
 }
 .modal-box h2 { margin-bottom: 10px; text-transform: none; letter-spacing: 0; font-size: 1.05rem; color: var(--text); }
 .modal-box p { color: var(--muted); font-size: .88rem; line-height: 1.55; }
+.modal-links { display: flex; flex-wrap: wrap; gap: 8px 16px; }
 .modal-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 16px; color: var(--accent); font-size: .82rem; font-weight: 700; }
 .modal-link:hover { text-decoration: underline; }
 .modal-link.d-none { display: none; }

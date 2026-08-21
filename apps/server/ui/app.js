@@ -1,6 +1,14 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 
+document.getElementById("hideToTrayBtn")?.addEventListener("click", async () => {
+  try {
+    await invoke("hide_to_tray");
+  } catch (error) {
+    showToast(`Could not hide SWARM: ${error}`, "error");
+  }
+});
+
 function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
@@ -61,14 +69,9 @@ const INFO_TOPICS = {
     icon: "bi-hdd-fill", title: "Library size",
     body: "The combined size on disk of every file in your library, across every media root.",
   },
-  "listening-quic": {
-    icon: "bi-broadcast", title: "Listening (QUIC)",
-    body: "The address and port this server listens on for direct client connections. QUIC is a modern, encrypted transport protocol — the same one powering HTTP/3 — built to stay fast and reliable even on spotty networks.",
-    link: "https://en.wikipedia.org/wiki/QUIC", linkLabel: "Learn about QUIC",
-  },
   "upload-budget": {
     icon: "bi-speedometer2", title: "Streaming upload budget",
-    body: "The share of your internet connection's upload speed this server allows itself to use for streaming, measured automatically so playback never saturates your home network.",
+    body: "The share of your internet upload speed reserved for streaming. SWARM measures it automatically using a longer upload sample. Disable the limit if you want remote streams to use the full connection; local-network streams are never limited.",
   },
   "active-sessions": {
     icon: "bi-play-circle-fill", title: "Active playback sessions",
@@ -89,8 +92,13 @@ const INFO_TOPICS = {
   },
   "tmdb-scraping": {
     icon: "bi-cloud-download", title: "TMDb scraping",
-    body: "TMDb (The Movie Database) is a free, community-built database SWARM uses to automatically fetch posters, artwork, cast lists, and plot summaries for your library.",
+    body: "TMDb supplies posters, artwork, cast lists, and summaries for movies and TV. Create a free Developer API key at TMDb under Settings → API, then paste the v3 API key or v4 read token here. Music artwork and LRCLIB lyrics are fetched automatically during metadata scraping and do not require an API key.",
     link: "https://www.themoviedb.org/", linkLabel: "Visit TMDb",
+  },
+  "local-subtitles": {
+    icon: "bi-badge-cc-fill", title: "Local subtitle generation",
+    body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a model of about 466 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU, so SWARM automatically pauses while anyone is streaming. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
+    link: "https://github.com/ggerganov/whisper.cpp", linkLabel: "Learn about Whisper.cpp",
   },
   "about-server": {
     icon: "bi-hdd-network-fill", title: "Your server",
@@ -127,6 +135,14 @@ const INFO_TOPICS = {
     body: "The Model Context Protocol is an open standard that lets an AI assistant talk directly to outside tools and data. SWARM exposes a small, read-only MCP API so an assistant like Claude can look things up in your library on your behalf.",
     link: "https://modelcontextprotocol.io", linkLabel: "Read the MCP spec",
   },
+  "try-asking": {
+    icon: "bi-chat-square-text-fill", title: "Ask with an AI tool",
+    body: "After you add this MCP Server to an AI tool, ask ordinary questions about your library. The tool chooses the read-only SWARM functions it needs and turns the results into a conversational answer.",
+    links: [
+      { href: "https://developers.openai.com/codex/", label: "Learn about Codex" },
+      { href: "https://claude.ai/", label: "Open Claude" },
+    ],
+  },
   "tool-search-library": {
     icon: "bi-search", title: "search_library",
     body: "Finds entries in your library by title, kind, genre, rating, or liked status — the same filtering the Media tab's search box uses.",
@@ -145,7 +161,7 @@ const INFO_TOPICS = {
   },
   "lan-network": {
     icon: "bi-broadcast-pin", title: "Local network",
-    body: "On the same Wi-Fi/LAN, this server advertises itself automatically via mDNS — no internet or STUN server involved. A short-lived pairing code is only needed the first time a new device trusts it; later connections reuse that trust and go straight over QUIC.",
+    body: "Clients on the same Wi-Fi or wired network discover this server automatically without a SWARM server. Choose Pair a client and enter the short-lived code on a new client once; trusted clients reconnect directly afterward.",
     link: "https://en.wikipedia.org/wiki/Multicast_DNS", linkLabel: "Learn about mDNS",
   },
   "swarm-concept": {
@@ -153,9 +169,8 @@ const INFO_TOPICS = {
     body: "A swarm is a private group of your own devices — servers and clients — that can find and stream from each other. A device joins one with a short one-time code, and can belong to more than one swarm at a time.",
   },
   "stun-server-address": {
-    icon: "bi-hdd-network-fill", title: "STUN server",
-    body: "The coordination server this device is linked to. STUN only handles introductions — telling two devices how to reach each other — so join codes come from its admin page, but your media never actually passes through it.",
-    link: "https://en.wikipedia.org/wiki/STUN", linkLabel: "Learn about STUN",
+    icon: "bi-hdd-network-fill", title: "SWARM server",
+    body: "The coordination server that helps your devices find each other away from home. It handles introductions and membership; your media streams directly between your devices.",
   },
   "trusted-peers": {
     icon: "bi-people-fill", title: "Trusted peers",
@@ -170,14 +185,17 @@ function openInfoModal(topicId) {
   document.getElementById("infoModalIcon").className = `bi ${topic.icon}`;
   document.getElementById("infoModalTitle").textContent = topic.title;
   document.getElementById("infoModalBody").textContent = topic.body;
-  const link = document.getElementById("infoModalLink");
-  if (topic.link) {
-    link.href = topic.link;
-    link.querySelector("span").textContent = topic.linkLabel || "Learn more";
-    link.classList.remove("d-none");
-  } else {
-    link.classList.add("d-none");
-  }
+  const links = topic.links || (topic.link ? [{ href: topic.link, label: topic.linkLabel || "Learn more" }] : []);
+  const linksEl = document.getElementById("infoModalLinks");
+  linksEl.replaceChildren(...links.map(item => {
+    const link = document.createElement("a");
+    link.className = "modal-link";
+    link.href = item.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.innerHTML = `<span>${esc(item.label)}</span><i class="bi bi-box-arrow-up-right"></i>`;
+    return link;
+  }));
   backdrop.classList.remove("d-none");
   document.getElementById("infoModalClose").focus();
 }
@@ -198,9 +216,11 @@ document.getElementById("infoModalClose").addEventListener("click", closeInfoMod
 // to open_external_url (apps/server/src/gui.rs), a thin wrapper around the
 // Tauri opener plugin, which is the one thing that actually knows how to ask
 // the OS to open a URL in the user's real browser.
-document.getElementById("infoModalLink").addEventListener("click", async (e) => {
+document.getElementById("infoModalLinks").addEventListener("click", async (e) => {
+  const link = e.target.closest("a");
+  if (!link) return;
   e.preventDefault();
-  const url = e.currentTarget.href;
+  const url = link.href;
   try {
     await invoke("open_external_url", { url });
   } catch (err) {
@@ -237,7 +257,7 @@ function show(id) {
 
 // "about" has no refresh*() dispatch below — its tab content is static
 // (no invoke() calls, nothing that goes stale), unlike every other tab here.
-const TABS = ["about", "details", "swarm", "notifications", "media", "ai"];
+const TABS = ["media", "details", "swarm", "notifications", "ai", "about"];
 
 function showTab(name) {
   for (const tab of TABS) {
@@ -305,7 +325,7 @@ async function refreshNotificationBadge() {
 
 async function enterDashboard() {
   show("dashView");
-  showTab("about");
+  showTab("media");
   refreshNotificationBadge();
   setInterval(refreshNotificationBadge, 30000);
 }

@@ -19,7 +19,7 @@ const PROBE_URL: &str = "https://speed.cloudflare.com/__up";
 /// Large enough to get past TCP slow-start and settle into a real
 /// steady-state rate; small enough not to waste meaningful real data on
 /// every interval.
-const PROBE_PAYLOAD_BYTES: usize = 8_000_000;
+const PROBE_PAYLOAD_BYTES: usize = 16_000_000;
 
 pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -49,7 +49,12 @@ pub enum BandwidthProbeError {
 pub async fn measure_upload_bps(client: &reqwest::Client) -> Result<u64, BandwidthProbeError> {
     let payload = vec![0u8; PROBE_PAYLOAD_BYTES];
     let started = std::time::Instant::now();
-    client.post(PROBE_URL).body(payload).send().await?.error_for_status()?;
+    client
+        .post(PROBE_URL)
+        .body(payload)
+        .send()
+        .await?
+        .error_for_status()?;
     let elapsed = started.elapsed();
     if elapsed.is_zero() {
         return Err(BandwidthProbeError::NoElapsedTime);
@@ -65,7 +70,11 @@ pub async fn measure_upload_bps(client: &reqwest::Client) -> Result<u64, Bandwid
 /// fresh install with no measurement history yet) stays in effect rather
 /// than zeroing out the streaming budget over what might just be a
 /// transient outage.
-pub async fn run_periodic_probe(state_db: Arc<StateDb>, transcodes: Arc<TranscodeManager>, interval: Duration) {
+pub async fn run_periodic_probe(
+    state_db: Arc<StateDb>,
+    transcodes: Arc<TranscodeManager>,
+    interval: Duration,
+) {
     let client = reqwest::Client::new();
     loop {
         match measure_upload_bps(&client).await {

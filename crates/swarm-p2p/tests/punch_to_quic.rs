@@ -9,7 +9,10 @@
 //! not just two pieces that each work in isolation.
 
 use swarm_core::peer::{PeerRequest, PeerResponseHeader};
-use swarm_p2p::endpoint::{connect_on_socket, listen_on_socket, read_body, read_request, send_request, write_response_header};
+use swarm_p2p::endpoint::{
+    connect_on_socket, listen_on_socket, read_body, read_request, send_request,
+    write_response_header,
+};
 use swarm_p2p::identity::ensure_identity;
 use swarm_p2p::pin::AllowedPeers;
 use swarm_p2p::punch::punch;
@@ -32,16 +35,22 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
     // the real thing, and critically this is the exact socket + port that
     // carries the QUIC traffic next.
     let (dialer_candidates, listener_candidates) = ([listener_addr], [dialer_addr]);
-    let (dialer_punch, listener_punch) =
-        tokio::join!(punch(&dialer_socket, &dialer_candidates), punch(&listener_socket, &listener_candidates));
+    let (dialer_punch, listener_punch) = tokio::join!(
+        punch(&dialer_socket, &dialer_candidates),
+        punch(&listener_socket, &listener_candidates)
+    );
     dialer_punch.unwrap();
     listener_punch.unwrap();
 
     let listener_allowed = AllowedPeers::new();
     listener_allowed.replace([dialer_identity.fingerprint.clone()]);
 
-    let listener_endpoint =
-        listen_on_socket(listener_socket.into_std().unwrap(), &listener_identity, listener_allowed).unwrap();
+    let listener_endpoint = listen_on_socket(
+        listener_socket.into_std().unwrap(),
+        &listener_identity,
+        listener_allowed,
+    )
+    .unwrap();
     let accept_task = tokio::spawn({
         let listener_endpoint = listener_endpoint.clone();
         async move {
@@ -50,7 +59,13 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
             let (mut send, mut recv) = connection.accept_bi().await.unwrap();
             let request = read_request(&mut recv).await.unwrap();
             assert_eq!(request.path, "/ping");
-            let header = PeerResponseHeader { status: 200, len: 4, content_type: None, content_range: None, etag: None };
+            let header = PeerResponseHeader {
+                status: 200,
+                len: 4,
+                content_type: None,
+                content_range: None,
+                etag: None,
+            };
             write_response_header(&mut send, &header).await.unwrap();
             send.write_all(b"pong").await.unwrap();
             send.finish().ok();
@@ -71,7 +86,14 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
     )
     .await
     .unwrap();
-    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None, playback: None, error_report: None };
+    let request = PeerRequest {
+        path: "/ping".into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: None,
+    };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

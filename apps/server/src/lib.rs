@@ -1,13 +1,13 @@
 //! Shared server core: identity → library → scan → pinned QUIC listener,
-//! plus STUN swarm membership (register with a join code, keep the QUIC
-//! listener's allowed-peer set synced with the swarm roster). Both the
-//! headless daemon (`swarm-serverd`) and the Tauri desktop shell
-//! (`swarm-server-app`) drive this same surface.
+//! plus SWARM membership (register with a join code, keep the QUIC listener's
+//! allowed-peer set synced with the swarm roster). The Tauri desktop app owns
+//! this core for its entire process lifetime, including while hidden to tray.
 
 mod bandwidth;
 pub mod lan;
 pub mod punch_connect;
 mod state_db;
+pub mod transcription;
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
@@ -15,13 +15,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use swarm_core::peer::MediaKind;
-use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmDevicesResponse, SwarmSummary};
+use swarm_core::rest::{
+    ActivationPreview, ActivationStatusResponse, DeviceRegistration, DeviceType,
+    ProvisionManagedSwarmRequest, SwarmDevicesResponse, SwarmSummary,
+};
 use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_roots, ScanProgressEvent, ScanReport};
 use swarm_media::scrape::{
-    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError,
-    ScrapeProgressEvent, TmdbOverride,
+    run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig,
+    ScrapeOneError, ScrapeProgressEvent, TmdbOverride,
 };
 use swarm_media::serve::{accept_loop, serve_connection, MediaService};
 use swarm_media::store::Library;
@@ -33,13 +36,14 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
+use crate::transcription::{TranscriptionManager, TranscriptionStatus};
 
-pub use state_db::{LocalPeerRecord, StunLinkRecord};
+pub use state_db::{LocalPeerRecord, ManagedSwarmIdentity, StunLinkRecord};
 
 /// How often a linked server re-fetches its swarms' rosters. Not push-based
 /// yet (that lands with WSS presence in Phase 4) — polling is the Phase 2/3
-/// stand-in, and it's what keeps a headless daemon's AllowedPeers set fresh
-/// even with no GUI open to trigger a manual resync.
+/// stand-in, and it keeps AllowedPeers fresh even while the desktop window is
+/// hidden and no GUI action can trigger a manual resync.
 const ROSTER_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Where the STUN access token is stored at rest. See
@@ -50,9 +54,9 @@ pub enum TokenStoreMode {
     /// permission-restricted file only if no backend is available.
     #[default]
     PreferKeyring,
-    /// Skip the keyring entirely — for headless deployments known to have
-    /// no Secret Service, and for tests (real keyring behavior varies too
-    /// much across environments to assert on reliably).
+    /// Skip the keyring entirely — used by the desktop app so unsigned local
+    /// rebuilds retain access, and by tests because keyring behavior varies
+    /// too much across environments to assert on reliably.
     FileOnly,
 }
 
@@ -71,6 +75,10 @@ pub struct ServerConfig {
     /// replacing it.
     pub allowed_fingerprints: Vec<String>,
     pub token_store_mode: TokenStoreMode,
+    /// Public SWARM service used to create or renew the server-owned swarm.
+    /// `None` preserves a legacy/manual link unless a managed identity was
+    /// already created locally, in which case that identity is still renewed.
+    pub managed_rendezvous_url: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,6 +91,7 @@ pub struct ServerStatus {
     pub entry_count: u64,
     pub thumbprint: String,
     pub streaming_upload_budget_bps: u64,
+    pub streaming_upload_budget_enabled: bool,
     pub active_playback_sessions: usize,
     /// True while a scan (initial, rescan, or a root change) is in
     /// progress — the library reflects whatever's been found so far either
@@ -104,6 +113,7 @@ pub struct ServerCore {
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
     service: Arc<MediaService>,
+    transcription: Arc<TranscriptionManager>,
     data_dir: PathBuf,
     state_db: Arc<state_db::StateDb>,
     lan_service: lan::LanService,
@@ -149,7 +159,7 @@ pub enum ServerError {
     P2p(#[from] swarm_p2p::endpoint::P2pError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("STUN server error: {0}")]
+    #[error("SWARM server error: {0}")]
     Stun(#[from] swarm_stun_client::StunClientError),
     #[error("token storage error: {0}")]
     TokenStore(#[from] swarm_stun_client::TokenStoreError),
@@ -176,19 +186,44 @@ impl ServerCore {
     /// could respond to anything at all. Callers that specifically need the
     /// initial scan's result (mainly tests) can await [`Self::wait_for_scan`].
     pub async fn start(config: ServerConfig) -> Result<Arc<Self>, ServerError> {
+        let configured_managed_url = config
+            .managed_rendezvous_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_end_matches('/').to_string());
         std::fs::create_dir_all(&config.data_dir)?;
         let identity = swarm_p2p::identity::ensure_identity(&config.data_dir)?;
         let library = Arc::new(
-            Library::open(config.data_dir.join("library.sqlite").to_str().unwrap_or_default()).await?,
+            Library::open(
+                config
+                    .data_dir
+                    .join("library.sqlite")
+                    .to_str()
+                    .unwrap_or_default(),
+            )
+            .await?,
         );
         let state_db = Arc::new(state_db::StateDb::open(&config.data_dir).await?);
         let media_roots = SharedRootResolver::new(RootResolver::new(config.media_roots));
 
-        let static_fingerprints: Vec<String> =
-            config.allowed_fingerprints.iter().map(|f| f.trim().to_lowercase()).collect();
+        let static_fingerprints: Vec<String> = config
+            .allowed_fingerprints
+            .iter()
+            .map(|f| f.trim().to_lowercase())
+            .collect();
         let allowed = AllowedPeers::new();
-        let local_fingerprints = state_db.local_peers().await?.into_iter().map(|peer| peer.fingerprint);
-        allowed.replace(static_fingerprints.iter().cloned().chain(local_fingerprints));
+        let local_fingerprints = state_db
+            .local_peers()
+            .await?
+            .into_iter()
+            .map(|peer| peer.fingerprint);
+        allowed.replace(
+            static_fingerprints
+                .iter()
+                .cloned()
+                .chain(local_fingerprints),
+        );
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
         let lan_service = lan::LanService::start(
@@ -207,13 +242,26 @@ impl ServerCore {
         if let Some(measured_bps) = state_db.latest_bandwidth_measurement().await? {
             transcode_config.max_upload_bps = measured_bps;
         }
-        let service = Arc::new(MediaService::with_roots(Arc::clone(&library), media_roots.clone(), transcode_config));
+        let ffmpeg_path = transcode_config.ffmpeg_path.clone();
+        let service = Arc::new(MediaService::with_roots(
+            Arc::clone(&library),
+            media_roots.clone(),
+            transcode_config,
+        ));
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
         tokio::spawn(bandwidth::run_periodic_probe(
             Arc::clone(&state_db),
             Arc::clone(service.transcode_manager()),
             bandwidth::interval_from_env(),
         ));
+        let transcription = TranscriptionManager::start(
+            Arc::clone(&library),
+            media_roots.clone(),
+            Arc::clone(service.transcode_manager()),
+            &config.data_dir,
+            ffmpeg_path,
+        )
+        .await?;
 
         let core = Arc::new(Self {
             identity,
@@ -222,6 +270,7 @@ impl ServerCore {
             allowed,
             listen_addr,
             service,
+            transcription,
             data_dir: config.data_dir,
             state_db,
             lan_service,
@@ -232,7 +281,34 @@ impl ServerCore {
             scan_lock: tokio::sync::Mutex::new(()),
             scan_status: tokio::sync::watch::Sender::new(ScanState::NotStarted),
         });
-        Arc::clone(&core).restore_stun_link().await;
+        // A configured or previously-created managed swarm takes precedence
+        // over an old manual link. Previously this restored the old link first
+        // and skipped provisioning whenever *any* link existed. The resulting
+        // token could browse a normal swarm but did not own a managed one, so
+        // TV activation lookup/approval failed with 403.
+        let stored_managed_url = core
+            .state_db
+            .load_managed_swarm_identity()
+            .await?
+            .map(|identity| identity.base_url);
+        let managed_url = configured_managed_url.or(stored_managed_url);
+        let mut managed_ready = false;
+        if let Some(base_url) = managed_url {
+            let name =
+                std::env::var("SWARM_DEVICE_NAME").unwrap_or_else(|_| "SWARM Media Server".into());
+            match Arc::clone(&core)
+                .provision_managed_swarm(&base_url, &name)
+                .await
+            {
+                Ok(_) => managed_ready = true,
+                Err(err) => {
+                    tracing::warn!(%err, "automatic SWARM provisioning failed; trying the saved link");
+                }
+            }
+        }
+        if !managed_ready {
+            Arc::clone(&core).restore_stun_link().await;
+        }
 
         // Mark Scanning synchronously, before returning, so a caller that
         // calls wait_for_scan() immediately after start() can never observe
@@ -242,8 +318,13 @@ impl ServerCore {
         tokio::spawn(async move {
             let roots = scan_core.media_roots.roots();
             match scan_core.run_scan(&roots, None).await {
-                Ok(report) => tracing::info!(added = report.added, updated = report.updated,
-                    removed = report.removed, unchanged = report.unchanged, "initial library scan complete"),
+                Ok(report) => tracing::info!(
+                    added = report.added,
+                    updated = report.updated,
+                    removed = report.removed,
+                    unchanged = report.unchanged,
+                    "initial library scan complete"
+                ),
                 Err(err) => tracing::error!(%err, "initial library scan failed"),
             }
         });
@@ -264,11 +345,13 @@ impl ServerCore {
         self.scan_status.send_modify(|s| *s = ScanState::Scanning);
         match scan_roots(&self.library, roots, progress_tx).await {
             Ok(report) => {
-                self.scan_status.send_modify(|s| *s = ScanState::Done(report.clone()));
+                self.scan_status
+                    .send_modify(|s| *s = ScanState::Done(report.clone()));
                 Ok(report)
             }
             Err(err) => {
-                self.scan_status.send_modify(|s| *s = ScanState::Failed(err.to_string()));
+                self.scan_status
+                    .send_modify(|s| *s = ScanState::Failed(err.to_string()));
                 Err(err.into())
             }
         }
@@ -292,11 +375,16 @@ impl ServerCore {
                 ScanState::Failed(err) => return Err(err.clone()),
                 ScanState::NotStarted | ScanState::Scanning => {}
             }
-            rx.changed().await.expect("ServerCore dropped its own scan_status sender");
+            rx.changed()
+                .await
+                .expect("ServerCore dropped its own scan_status sender");
         }
     }
 
-    pub async fn rescan(&self, progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>) -> Result<ScanReport, ServerError> {
+    pub async fn rescan(
+        &self,
+        progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>,
+    ) -> Result<ScanReport, ServerError> {
         let roots = self.media_roots.roots();
         self.run_scan(&roots, progress_tx).await
     }
@@ -315,7 +403,10 @@ impl ServerCore {
     /// already does the right thing — entries from a removed root are found
     /// nowhere during the walk and get removed exactly like a deleted file
     /// would, with no special-cased "root disappeared" handling needed.
-    pub async fn update_media_roots(&self, roots: Vec<MediaRoot>) -> Result<ScanReport, ServerError> {
+    pub async fn update_media_roots(
+        &self,
+        roots: Vec<MediaRoot>,
+    ) -> Result<ScanReport, ServerError> {
         if roots.is_empty() {
             return Err(ServerError::NoMediaRoots);
         }
@@ -336,9 +427,31 @@ impl ServerCore {
             entry_count: self.library.entry_count().await?,
             thumbprint: self.library.thumbprint().await?,
             streaming_upload_budget_bps: self.service.transcode_manager().usable_upload_bps(),
+            streaming_upload_budget_enabled: self
+                .service
+                .transcode_manager()
+                .upload_budget_enabled(),
             active_playback_sessions: self.service.transcode_manager().active_sessions(),
             scanning: matches!(&*self.scan_status.borrow(), ScanState::Scanning),
         })
+    }
+
+    /// Enables or pauses the durable local subtitle worker. Pausing is
+    /// cooperative and preserves every completed ten-minute segment.
+    pub fn set_local_transcription_enabled(&self, enabled: bool) {
+        self.transcription.set_enabled(enabled);
+    }
+
+    pub async fn transcription_status(&self) -> Result<TranscriptionStatus, ServerError> {
+        Ok(self.transcription.status().await?)
+    }
+
+    /// Live preference used by the desktop app. LAN connections always
+    /// bypass the budget in `swarm_media::serve`, even when this is true.
+    pub fn set_streaming_upload_budget_enabled(&self, enabled: bool) {
+        self.service
+            .transcode_manager()
+            .set_upload_budget_enabled(enabled);
     }
 
     /// Scrape metadata/artwork for entries that don't have any yet. Rejects
@@ -359,7 +472,15 @@ impl ServerCore {
             return Err(ServerError::ScrapeInProgress);
         }
         let cancel = AtomicBool::new(false);
-        let result = run_bulk_scrape(&self.library, &self.media_roots, &config, &cancel, progress_tx, force).await;
+        let result = run_bulk_scrape(
+            &self.library,
+            &self.media_roots,
+            &config,
+            &cancel,
+            progress_tx,
+            force,
+        )
+        .await;
         self.scraping.store(false, Ordering::Release);
         Ok(result?)
     }
@@ -377,13 +498,24 @@ impl ServerCore {
         config: ScrapeConfig,
         tmdb_override: Option<TmdbOverride>,
     ) -> Result<(), ServerError> {
-        let entry = self.library.get(entry_key).await?.ok_or(ServerError::EntryNotFound)?;
+        let entry = self
+            .library
+            .get(entry_key)
+            .await?
+            .ok_or(ServerError::EntryNotFound)?;
         match entry.kind {
             MediaKind::Track => {
                 scrape_one_track(&self.library, &self.media_roots, &config, &entry).await?;
             }
             MediaKind::Movie | MediaKind::Episode => {
-                scrape_one_video(&self.library, &self.media_roots, &config, &entry, tmdb_override).await?;
+                scrape_one_video(
+                    &self.library,
+                    &self.media_roots,
+                    &config,
+                    &entry,
+                    tmdb_override,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -393,10 +525,111 @@ impl ServerCore {
         let fallback_path = self.data_dir.join("stun-token");
         match self.token_store_mode {
             TokenStoreMode::FileOnly => Ok(TokenStore::file_only(fallback_path)),
-            TokenStoreMode::PreferKeyring => {
-                Ok(TokenStore::new("swarm-server", &self.identity.fingerprint, fallback_path)?)
-            }
+            TokenStoreMode::PreferKeyring => Ok(TokenStore::new(
+                "swarm-server",
+                &self.identity.fingerprint,
+                fallback_path,
+            )?),
         }
+    }
+
+    fn managed_claim_store(&self) -> Result<TokenStore, ServerError> {
+        let fallback_path = self.data_dir.join("managed-swarm-claim");
+        match self.token_store_mode {
+            TokenStoreMode::FileOnly => Ok(TokenStore::file_only(fallback_path)),
+            TokenStoreMode::PreferKeyring => Ok(TokenStore::new(
+                "swarm-server-managed-owner",
+                &self.identity.fingerprint,
+                fallback_path,
+            )?),
+        }
+    }
+
+    fn server_registration(&self, device_name: &str, machine_id: String) -> DeviceRegistration {
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "peer_addr".to_string(),
+            swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string(),
+        );
+        DeviceRegistration {
+            name: device_name.to_string(),
+            device_type: DeviceType::Server,
+            machine_id,
+            cert_fingerprint: self.identity.fingerprint.clone(),
+            platform: std::env::consts::OS.to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            metadata,
+        }
+    }
+
+    /// Idempotently creates or renews the private swarm this media server
+    /// owns. The claim secret lives in a separate OS credential entry (or a
+    /// 0600 fallback file), never in SQLite.
+    pub async fn provision_managed_swarm(
+        self: Arc<Self>,
+        base_url: &str,
+        device_name: &str,
+    ) -> Result<SwarmSummary, ServerError> {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let claim_store = self.managed_claim_store()?;
+        let existing = self.state_db.load_managed_swarm_identity().await?;
+        let (identity, claim_token) = match existing {
+            Some(identity) => {
+                let claim = claim_store.load()?.ok_or_else(|| {
+                    ServerError::Stun(swarm_stun_client::StunClientError::Decode(
+                        "managed swarm identity exists but its owner credential is missing".into(),
+                    ))
+                })?;
+                (identity, claim)
+            }
+            None => {
+                let identity = ManagedSwarmIdentity {
+                    base_url: base_url.clone(),
+                    swarm_id: swarm_stun_client::random_token(),
+                };
+                let claim = swarm_stun_client::random_token();
+                claim_store.save(&claim)?;
+                self.state_db.save_managed_swarm_identity(&identity).await?;
+                (identity, claim)
+            }
+        };
+        if identity.base_url.trim_end_matches('/') != base_url {
+            return Err(ServerError::Stun(
+                swarm_stun_client::StunClientError::Decode(
+                    "this server's managed swarm belongs to a different SWARM service".into(),
+                ),
+            ));
+        }
+        let machine_id = swarm_stun_client::machine_id::ensure_machine_id(&self.data_dir)?;
+        let registration = self.server_registration(device_name, machine_id);
+        let client = StunClient::new(base_url.clone());
+        let response = client
+            .provision_managed_swarm(ProvisionManagedSwarmRequest {
+                swarm_id: identity.swarm_id,
+                claim_token,
+                swarm_name: format!("{}'s SWARM", device_name.trim()),
+                device: registration,
+            })
+            .await?;
+        let token_store = self.token_store()?;
+        token_store.save(&response.access_token)?;
+        let link = StunLinkRecord {
+            base_url,
+            device_id: response.device_id.clone(),
+            swarms: vec![response.swarm.clone()],
+        };
+        self.state_db.save_stun_link(&link).await?;
+        self.establish_signaling(&link.base_url, &response.access_token, &link.device_id)
+            .await;
+        *self.stun.lock().await = Some(StunContext {
+            client,
+            token_store,
+            access_token: response.access_token,
+            link,
+        });
+        Arc::clone(&self).spawn_roster_sync_loop();
+        self.sync_roster().await?;
+        Ok(response.swarm)
     }
 
     /// Redeem a join code against a STUN server, persist the link + token,
@@ -412,30 +645,28 @@ impl ServerCore {
         // this server joins doesn't have to wait for the first periodic
         // sync tick to learn where to dial it — see sync_roster for the
         // ongoing refresh.
-        let mut metadata = BTreeMap::new();
-        metadata.insert("peer_addr".to_string(), swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string());
-        let registration = DeviceRegistration {
-            name: device_name.to_string(),
-            device_type: DeviceType::Server,
-            machine_id,
-            cert_fingerprint: self.identity.fingerprint.clone(),
-            platform: std::env::consts::OS.to_string(),
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            metadata,
-        };
+        let registration = self.server_registration(device_name, machine_id);
         let base_url = base_url.trim_end_matches('/').to_string();
         let client = StunClient::new(base_url.clone());
         let response = client.register_device(code, registration).await?;
 
         let token_store = self.token_store()?;
         token_store.save(&response.access_token)?;
-        let link =
-            StunLinkRecord { base_url, device_id: response.device_id.clone(), swarms: vec![response.swarm.clone()] };
+        let link = StunLinkRecord {
+            base_url,
+            device_id: response.device_id.clone(),
+            swarms: vec![response.swarm.clone()],
+        };
         self.state_db.save_stun_link(&link).await?;
 
-        self.establish_signaling(&link.base_url, &response.access_token, &link.device_id).await;
-        *self.stun.lock().await =
-            Some(StunContext { client, token_store, access_token: response.access_token, link });
+        self.establish_signaling(&link.base_url, &response.access_token, &link.device_id)
+            .await;
+        *self.stun.lock().await = Some(StunContext {
+            client,
+            token_store,
+            access_token: response.access_token,
+            link,
+        });
         Arc::clone(self).spawn_roster_sync_loop();
         self.sync_roster().await?;
         Ok(response.swarm)
@@ -445,9 +676,11 @@ impl ServerCore {
     pub async fn join_additional_swarm(&self, code: &str) -> Result<SwarmSummary, ServerError> {
         let swarm = {
             let mut guard = self.stun.lock().await;
-            let ctx = guard.as_mut().ok_or(ServerError::Stun(swarm_stun_client::StunClientError::Network(
-                "not linked to a STUN server yet".into(),
-            )))?;
+            let ctx = guard.as_mut().ok_or(ServerError::Stun(
+                swarm_stun_client::StunClientError::Network(
+                    "not linked to a SWARM server yet".into(),
+                ),
+            ))?;
             let swarm = ctx.client.join_swarm(&ctx.access_token, code).await?;
             ctx.link.swarms.push(swarm.clone());
             self.state_db.save_stun_link(&ctx.link).await?;
@@ -464,10 +697,14 @@ impl ServerCore {
     pub async fn leave_swarm(&self, swarm_id: &str) -> Result<(), ServerError> {
         {
             let mut guard = self.stun.lock().await;
-            let ctx = guard.as_mut().ok_or(ServerError::Stun(swarm_stun_client::StunClientError::Network(
-                "not linked to a STUN server yet".into(),
-            )))?;
-            ctx.client.leave_swarm(&ctx.access_token, swarm_id, &ctx.link.device_id).await?;
+            let ctx = guard.as_mut().ok_or(ServerError::Stun(
+                swarm_stun_client::StunClientError::Network(
+                    "not linked to a SWARM server yet".into(),
+                ),
+            ))?;
+            ctx.client
+                .leave_swarm(&ctx.access_token, swarm_id, &ctx.link.device_id)
+                .await?;
             ctx.link.swarms.retain(|s| s.id != swarm_id);
             self.state_db.save_stun_link(&ctx.link).await?;
         }
@@ -486,10 +723,41 @@ impl ServerCore {
     /// perspective.
     pub async fn swarm_devices(&self, swarm_id: &str) -> Result<SwarmDevicesResponse, ServerError> {
         let guard = self.stun.lock().await;
-        let ctx = guard.as_ref().ok_or(ServerError::Stun(swarm_stun_client::StunClientError::Network(
-            "not linked to a STUN server yet".into(),
-        )))?;
-        Ok(ctx.client.swarm_devices(&ctx.access_token, swarm_id).await?)
+        let ctx = guard.as_ref().ok_or(ServerError::Stun(
+            swarm_stun_client::StunClientError::Network("not linked to a SWARM server yet".into()),
+        ))?;
+        Ok(ctx
+            .client
+            .swarm_devices(&ctx.access_token, swarm_id)
+            .await?)
+    }
+
+    pub async fn lookup_activation(&self, code: &str) -> Result<ActivationPreview, ServerError> {
+        let guard = self.stun.lock().await;
+        let ctx = guard.as_ref().ok_or(ServerError::Stun(
+            swarm_stun_client::StunClientError::Network("not linked to a SWARM service yet".into()),
+        ))?;
+        Ok(ctx
+            .client
+            .lookup_activation(&ctx.access_token, code)
+            .await?)
+    }
+
+    pub async fn approve_activation(
+        &self,
+        activation_id: &str,
+    ) -> Result<ActivationStatusResponse, ServerError> {
+        let guard = self.stun.lock().await;
+        let ctx = guard.as_ref().ok_or(ServerError::Stun(
+            swarm_stun_client::StunClientError::Network("not linked to a SWARM service yet".into()),
+        ))?;
+        let result = ctx
+            .client
+            .approve_activation(&ctx.access_token, activation_id)
+            .await?;
+        drop(guard);
+        self.sync_roster().await?;
+        Ok(result)
     }
 
     /// Manually trigger a roster re-sync (a GUI "Resync" button, or a test
@@ -534,7 +802,9 @@ impl ServerCore {
         let access_token = match token_store.load() {
             Ok(Some(token)) => token,
             Ok(None) => {
-                tracing::warn!("stun-link.json present but no access token stored; re-registration required");
+                tracing::warn!(
+                    "stun-link.json present but no access token stored; re-registration required"
+                );
                 return;
             }
             Err(err) => {
@@ -543,8 +813,14 @@ impl ServerCore {
             }
         };
         let client = StunClient::new(link.base_url.clone());
-        self.establish_signaling(&link.base_url, &access_token, &link.device_id).await;
-        *self.stun.lock().await = Some(StunContext { client, token_store, access_token, link });
+        self.establish_signaling(&link.base_url, &access_token, &link.device_id)
+            .await;
+        *self.stun.lock().await = Some(StunContext {
+            client,
+            token_store,
+            access_token,
+            link,
+        });
         tracing::info!("restored STUN link, starting roster sync");
         Arc::clone(&self).spawn_roster_sync_loop();
         if let Err(err) = self.sync_roster().await {
@@ -558,15 +834,29 @@ impl ServerCore {
     /// session still serves LAN direct-play peers via `peer_addr` just
     /// fine, it just can't accept a connection from anyone off-LAN —
     /// logged, not propagated as an error.
-    async fn establish_signaling(self: &Arc<Self>, base_url: &str, access_token: &str, device_id: &str) {
-        let (signaling, signal_rx) = match SignalingClient::connect(base_url, access_token, device_id, None).await {
+    async fn establish_signaling(
+        self: &Arc<Self>,
+        base_url: &str,
+        access_token: &str,
+        device_id: &str,
+    ) {
+        let (signaling, signal_rx) = match SignalingClient::connect(
+            base_url,
+            access_token,
+            device_id,
+            None,
+        )
+        .await
+        {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!(%err, "could not open a signaling session; hole-punch connections unavailable on this link");
                 return;
             }
         };
-        let Some(reflector_addr) = resolve_reflector_addr(base_url, &signaling.reflector_ports).await else {
+        let Some(reflector_addr) =
+            resolve_reflector_addr(base_url, &signaling.reflector_ports).await
+        else {
             tracing::warn!("could not resolve the reflector's address; hole-punch connections unavailable on this link");
             return;
         };
@@ -601,16 +891,42 @@ impl ServerCore {
                         return;
                     }
                 };
-                let SignalMessage::Signal { from: Some(from), payload: SignalPayload::Offer { punch_id, candidates, cert_fingerprint }, .. } = message else {
+                let SignalMessage::Signal {
+                    from: Some(from),
+                    payload:
+                        SignalPayload::Offer {
+                            punch_id,
+                            candidates,
+                            cert_fingerprint,
+                        },
+                    ..
+                } = message
+                else {
                     continue;
                 };
-                let offer = ReceivedOffer { from: from.clone(), punch_id, candidates, cert_fingerprint };
-                match respond_to_punch_offer(&signaling, &mut signal_rx, reflector_addr, offer, &self.identity, self.allowed.clone()).await {
+                let offer = ReceivedOffer {
+                    from: from.clone(),
+                    punch_id,
+                    candidates,
+                    cert_fingerprint,
+                };
+                match respond_to_punch_offer(
+                    &signaling,
+                    &mut signal_rx,
+                    reflector_addr,
+                    offer,
+                    &self.identity,
+                    self.allowed.clone(),
+                )
+                .await
+                {
                     Ok(connection) => {
                         tracing::info!(peer = %from, "hole-punched connection established");
                         tokio::spawn(serve_connection(connection, Arc::clone(&self.service)));
                     }
-                    Err(err) => tracing::debug!(peer = %from, %err, "hole-punch negotiation failed"),
+                    Err(err) => {
+                        tracing::debug!(peer = %from, %err, "hole-punch negotiation failed")
+                    }
                 }
             }
         });
@@ -636,7 +952,13 @@ impl ServerCore {
     async fn sync_roster(&self) -> Result<usize, ServerError> {
         let guard = self.stun.lock().await;
         let mut fingerprints: HashSet<String> = self.static_fingerprints.iter().cloned().collect();
-        fingerprints.extend(self.state_db.local_peers().await?.into_iter().map(|peer| peer.fingerprint));
+        fingerprints.extend(
+            self.state_db
+                .local_peers()
+                .await?
+                .into_iter()
+                .map(|peer| peer.fingerprint),
+        );
         let Some(ctx) = guard.as_ref() else {
             let count = fingerprints.len();
             self.allowed.replace(fingerprints);
@@ -649,9 +971,15 @@ impl ServerCore {
         // client's next connect attempt uses last-known-good info, same
         // spirit as the peer route memory the Kotlin/Rust P2P clients keep.
         let mut self_metadata = BTreeMap::new();
-        self_metadata
-            .insert("peer_addr".to_string(), swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string());
-        if let Err(err) = ctx.client.patch_metadata(&ctx.access_token, &ctx.link.device_id, self_metadata).await {
+        self_metadata.insert(
+            "peer_addr".to_string(),
+            swarm_p2p::local_addr::detect_local_addr(self.listen_addr.port()).to_string(),
+        );
+        if let Err(err) = ctx
+            .client
+            .patch_metadata(&ctx.access_token, &ctx.link.device_id, self_metadata)
+            .await
+        {
             tracing::debug!(%err, "failed to self-report peer address this cycle");
         }
 
@@ -688,55 +1016,15 @@ impl ServerCore {
 /// base URL is as likely to be a domain name as a literal IP.
 async fn resolve_reflector_addr(base_url: &str, reflector_ports: &[u16]) -> Option<SocketAddr> {
     let port = *reflector_ports.first()?;
-    let without_scheme = base_url.strip_prefix("https://").or_else(|| base_url.strip_prefix("http://"))?;
+    let without_scheme = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))?;
     let host_and_port = without_scheme.split('/').next().unwrap_or(without_scheme);
     let host = host_and_port.split(':').next().unwrap_or(host_and_port);
     tokio::net::lookup_host((host, port)).await.ok()?.next()
 }
 
-/// Config sourced from env (shared by both binaries):
-/// `SWARM_MEDIA_ROOT` (a single unlabeled root — required unless
-/// `SWARM_MEDIA_ROOTS` is set instead), `SWARM_MEDIA_ROOTS` (multi-root
-/// form, `label=path,label2=path2` — takes precedence over
-/// `SWARM_MEDIA_ROOT` if both are set), `SWARM_DATA_DIR`, `SWARM_PEER_BIND`,
-/// `SWARM_ALLOW_FPS` (comma-separated fingerprints, for running without a
-/// STUN server at all), `SWARM_TOKEN_STORE_FILE_ONLY` (skip the OS keyring —
-/// set this on headless boxes with no Secret Service). Streaming controls:
-/// `SWARM_MAX_UPLOAD_MBPS` (default 10), `SWARM_UPLOAD_RESERVE_PERCENT`
-/// (default 90, capped at 90), `SWARM_MAX_STREAMS` (default 2),
-/// `SWARM_FFMPEG_PATH`, and `SWARM_TRANSCODING_DISABLED`.
-pub fn config_from_env() -> Option<ServerConfig> {
-    let media_roots = match std::env::var("SWARM_MEDIA_ROOTS").ok().filter(|v| !v.trim().is_empty()) {
-        Some(value) => {
-            let roots = swarm_media::roots::parse_roots_env(&value);
-            if roots.is_empty() {
-                return None;
-            }
-            roots
-        }
-        None => vec![MediaRoot { label: "local".to_string(), path: PathBuf::from(std::env::var("SWARM_MEDIA_ROOT").ok()?) }],
-    };
-    let file_only = std::env::var("SWARM_TOKEN_STORE_FILE_ONLY")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    Some(ServerConfig {
-        media_roots,
-        data_dir: PathBuf::from(std::env::var("SWARM_DATA_DIR").unwrap_or_else(|_| "swarm-server-data".into())),
-        bind: std::env::var("SWARM_PEER_BIND")
-            .unwrap_or_else(|_| "0.0.0.0:8543".into())
-            .parse()
-            .expect("SWARM_PEER_BIND must be host:port"),
-        allowed_fingerprints: std::env::var("SWARM_ALLOW_FPS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        token_store_mode: if file_only { TokenStoreMode::FileOnly } else { TokenStoreMode::PreferKeyring },
-    })
-}
-
-/// Shared daemon/GUI transcode settings. The usable streaming budget is
+/// Desktop-server transcode settings. The usable streaming budget is
 /// `max_upload * (1 - reserve_percent)`; every negotiated playback session
 /// reserves from that one aggregate pool.
 pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig {
@@ -756,11 +1044,18 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
         .filter(|value| *value > 0)
         .unwrap_or(2);
     let disabled = std::env::var("SWARM_TRANSCODING_DISABLED")
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false);
     TranscodeConfig {
         enabled: !disabled,
-        ffmpeg_path: PathBuf::from(std::env::var("SWARM_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into())),
+        ffmpeg_path: PathBuf::from(
+            std::env::var("SWARM_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into()),
+        ),
         session_dir: data_dir.join("transcodes"),
         max_upload_bps: (max_upload_mbps * 1_000_000.0) as u64,
         reserve_percent,

@@ -87,7 +87,10 @@ fn random_punch_id() -> String {
     hex::encode(bytes)
 }
 
-async fn gather_candidates(socket: &UdpSocket, reflector_addr: SocketAddr) -> Result<Vec<Candidate>, PunchConnectError> {
+async fn gather_candidates(
+    socket: &UdpSocket,
+    reflector_addr: SocketAddr,
+) -> Result<Vec<Candidate>, PunchConnectError> {
     let mut candidates = Vec::new();
     // `socket.local_addr()` would report the wildcard bind address
     // (0.0.0.0) we bound to, not a real routable interface — useless, in
@@ -96,9 +99,17 @@ async fn gather_candidates(socket: &UdpSocket, reflector_addr: SocketAddr) -> Re
     // probe `local_addr::detect_local_addr` already uses for `peer_addr`.
     let port = socket.local_addr()?.port();
     let local = swarm_p2p::local_addr::detect_local_addr(port);
-    candidates.push(Candidate { kind: CandidateKind::Lan, ip: local.ip().to_string(), port: local.port() });
+    candidates.push(Candidate {
+        kind: CandidateKind::Lan,
+        ip: local.ip().to_string(),
+        port: local.port(),
+    });
     if let Ok(reflexive) = swarm_p2p::reflector::reflexive_addr(socket, reflector_addr).await {
-        candidates.push(Candidate { kind: CandidateKind::Reflexive, ip: reflexive.ip().to_string(), port: reflexive.port() });
+        candidates.push(Candidate {
+            kind: CandidateKind::Reflexive,
+            ip: reflexive.ip().to_string(),
+            port: reflexive.port(),
+        });
     }
     Ok(candidates)
 }
@@ -111,7 +122,10 @@ fn candidate_addrs(candidates: &[Candidate]) -> Vec<SocketAddr> {
         CandidateKind::Forwarded => 1,
         CandidateKind::Reflexive => 2,
     });
-    sorted.iter().filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok()).collect()
+    sorted
+        .iter()
+        .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+        .collect()
 }
 
 /// Waits for a `Signal` from `from_device` whose payload `matches` accepts,
@@ -130,17 +144,23 @@ async fn await_signal_payload<T>(
     let wait = async {
         loop {
             match rx.recv().await.ok_or(PunchConnectError::SignalingClosed)? {
-                SignalMessage::Signal { from, payload, .. } if from.as_deref() == Some(from_device) => {
+                SignalMessage::Signal { from, payload, .. }
+                    if from.as_deref() == Some(from_device) =>
+                {
                     if let Some(value) = matches(&payload) {
                         return Ok(value);
                     }
                 }
-                SignalMessage::Error { code, message } => return Err(PunchConnectError::PeerError { code, message }),
+                SignalMessage::Error { code, message } => {
+                    return Err(PunchConnectError::PeerError { code, message })
+                }
                 _ => {}
             }
         }
     };
-    tokio::time::timeout(timeout, wait).await.unwrap_or(Err(on_timeout))
+    tokio::time::timeout(timeout, wait)
+        .await
+        .unwrap_or(Err(on_timeout))
 }
 
 /// The "I" (initiator) role: offers, waits for an answer pinned to
@@ -160,7 +180,11 @@ pub async fn initiate_punch_connection(
 
     signaling.send_signal(
         peer_device_id,
-        SignalPayload::Offer { punch_id: punch_id.clone(), candidates, cert_fingerprint: identity.fingerprint.clone() },
+        SignalPayload::Offer {
+            punch_id: punch_id.clone(),
+            candidates,
+            cert_fingerprint: identity.fingerprint.clone(),
+        },
     )?;
 
     let expected_punch_id = punch_id.clone();
@@ -170,7 +194,11 @@ pub async fn initiate_punch_connection(
         ANSWER_TIMEOUT,
         PunchConnectError::AnswerTimeout,
         |payload| match payload {
-            SignalPayload::Answer { punch_id, candidates, cert_fingerprint } if *punch_id == expected_punch_id => {
+            SignalPayload::Answer {
+                punch_id,
+                candidates,
+                cert_fingerprint,
+            } if *punch_id == expected_punch_id => {
                 Some((candidates.clone(), cert_fingerprint.clone()))
             }
             _ => None,
@@ -189,7 +217,13 @@ pub async fn initiate_punch_connection(
         return Err(PunchConnectError::NoCandidates);
     }
     let confirmed_addr = swarm_p2p::punch::punch(&socket, &targets).await?;
-    signaling.send_signal(peer_device_id, SignalPayload::Punched { punch_id: punch_id.clone(), ok: true })?;
+    signaling.send_signal(
+        peer_device_id,
+        SignalPayload::Punched {
+            punch_id: punch_id.clone(),
+            ok: true,
+        },
+    )?;
 
     let expected_punch_id = punch_id.clone();
     await_signal_payload(
@@ -198,15 +232,21 @@ pub async fn initiate_punch_connection(
         CONFIRMATION_TIMEOUT,
         PunchConnectError::ConfirmationTimeout,
         |payload| match payload {
-            SignalPayload::Punched { punch_id, ok: true } if *punch_id == expected_punch_id => Some(()),
+            SignalPayload::Punched { punch_id, ok: true } if *punch_id == expected_punch_id => {
+                Some(())
+            }
             _ => None,
         },
     )
     .await?;
 
-    let connection =
-        swarm_p2p::endpoint::connect_on_socket(socket.into_std()?, confirmed_addr, identity, expected_fingerprint)
-            .await?;
+    let connection = swarm_p2p::endpoint::connect_on_socket(
+        socket.into_std()?,
+        confirmed_addr,
+        identity,
+        expected_fingerprint,
+    )
+    .await?;
     Ok(connection)
 }
 
@@ -241,7 +281,13 @@ pub async fn respond_to_punch_offer(
         return Err(PunchConnectError::NoCandidates);
     }
     swarm_p2p::punch::punch(&socket, &targets).await?;
-    signaling.send_signal(&offer.from, SignalPayload::Punched { punch_id: offer.punch_id.clone(), ok: true })?;
+    signaling.send_signal(
+        &offer.from,
+        SignalPayload::Punched {
+            punch_id: offer.punch_id.clone(),
+            ok: true,
+        },
+    )?;
 
     let expected_punch_id = offer.punch_id.clone();
     await_signal_payload(
@@ -250,7 +296,9 @@ pub async fn respond_to_punch_offer(
         CONFIRMATION_TIMEOUT,
         PunchConnectError::ConfirmationTimeout,
         |payload| match payload {
-            SignalPayload::Punched { punch_id, ok: true } if *punch_id == expected_punch_id => Some(()),
+            SignalPayload::Punched { punch_id, ok: true } if *punch_id == expected_punch_id => {
+                Some(())
+            }
             _ => None,
         },
     )
@@ -261,6 +309,8 @@ pub async fn respond_to_punch_offer(
         .await
         .map_err(|_| PunchConnectError::AcceptTimeout)?
         .ok_or(PunchConnectError::AcceptTimeout)?;
-    let connection = incoming.await.map_err(swarm_p2p::endpoint::P2pError::from)?;
+    let connection = incoming
+        .await
+        .map_err(swarm_p2p::endpoint::P2pError::from)?;
     Ok(connection)
 }

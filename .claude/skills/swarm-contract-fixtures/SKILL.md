@@ -36,6 +36,11 @@ misjudge from the Rust source alone:
   `explicitNulls = false` (already set on `SwarmJson`, `:core/rest/SwarmJson.kt`)
   plus a default value (`= null`) on the property so decode tolerates the
   field being absent.
+- Additive list fields need compatibility defaults on both sides. In Rust use
+  `#[serde(default, skip_serializing_if = "Vec::is_empty")]`; in Kotlin give
+  the mirrored property `= emptyList()`. This lets an older sender omit the
+  field and an older fixture remain decodable. `PlaybackPlan.subtitles` is the
+  reference example.
 - `#[serde(rename_all = "snake_case")]` converts *variant names* to
   snake_case for enum/sealed-class discriminator values — kotlinx's
   `JsonNamingStrategy.SnakeCase` (also on `SwarmJson`) only touches
@@ -95,6 +100,11 @@ capture the real output and compare against it.
 
 6. Run `./gradlew :core:test --tests "*ContractsTest*"` (fast, no
    subprocess needed) and confirm every fixture round-trips.
+
+If the new contract carries peer-relative asset paths (for example subtitle
+tracks), contract compatibility is only half the work. Convert those paths
+through `CatalogSession`'s authenticated loopback proxy before handing them to
+Android APIs; never treat a peer route as a device-local or public URL.
 
 ## Real precedent in this repo
 

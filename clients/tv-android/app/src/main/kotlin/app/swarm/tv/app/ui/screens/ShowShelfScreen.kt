@@ -28,7 +28,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,7 +38,6 @@ import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
-import coil.compose.AsyncImage
 
 @Composable
 fun ShowShelfScreen(shows: List<ShowGroup>, artworkUrl: (MergedEntry) -> String?, onOpenShow: (ShowGroup) -> Unit, onBack: () -> Unit) {
@@ -59,19 +57,21 @@ fun ShowShelfScreen(shows: List<ShowGroup>, artworkUrl: (MergedEntry) -> String?
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
-                itemsIndexed(shows) { index, show ->
+                itemsIndexed(
+                    items = shows,
+                    key = { _, show -> show.show },
+                    contentType = { _, _ -> "show" },
+                ) { index, show ->
                     val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
                     val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenShow(show) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                         Column {
-                            representative?.let(artworkUrl)?.let { url ->
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                                )
-                            }
+                            ArtworkImage(
+                                label = show.show,
+                                placeholderType = "Show",
+                                primaryUrl = representative?.let(artworkUrl),
+                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                            )
                             Column(Modifier.padding(14.dp)) {
                                 Text(show.show, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                                 Spacer(Modifier.height(6.dp))

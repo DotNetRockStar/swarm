@@ -23,6 +23,7 @@ fn config(data_dir: std::path::PathBuf, media_root: std::path::PathBuf) -> Serve
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: None,
     }
 }
 

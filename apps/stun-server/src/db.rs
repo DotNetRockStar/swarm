@@ -96,12 +96,43 @@ async fn init_schema(pool: &SqlitePool) -> sqlx::Result<()> {
             redeemed_by_device TEXT REFERENCES devices(id) ON DELETE CASCADE,
             created_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS managed_swarm_owners (
+            swarm_id TEXT PRIMARY KEY REFERENCES swarms(id) ON DELETE CASCADE,
+            owner_device_id TEXT NOT NULL UNIQUE REFERENCES devices(id) ON DELETE CASCADE,
+            claim_token_hash TEXT NOT NULL UNIQUE,
+            lease_expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS device_activations (
+            id TEXT PRIMARY KEY,
+            code_hash TEXT NOT NULL,
+            poll_token_hash TEXT NOT NULL UNIQUE,
+            access_token_hash TEXT NOT NULL UNIQUE,
+            requesting_device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL CHECK (device_type IN ('client','server','both')),
+            machine_id TEXT NOT NULL,
+            cert_fingerprint TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','approved')),
+            approved_swarm_id TEXT REFERENCES swarms(id) ON DELETE CASCADE,
+            completed_device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            approved_at INTEGER,
+            CHECK ((status = 'pending' AND approved_swarm_id IS NULL AND completed_device_id IS NULL AND approved_at IS NULL)
+                OR (status = 'approved' AND approved_swarm_id IS NOT NULL AND completed_device_id IS NOT NULL AND approved_at IS NOT NULL))
+        );
         "#,
     )
     .execute(pool)
     .await?;
 
     migrate_join_code_device_relation(pool).await?;
+    ensure_activation_requester_column(pool).await?;
 
     // SQLite does not automatically index foreign-key child columns. Besides
     // accelerating the application's hot lookups, these indexes keep parent
@@ -132,6 +163,18 @@ async fn init_schema(pool: &SqlitePool) -> sqlx::Result<()> {
             ON join_codes(created_by);
         CREATE INDEX IF NOT EXISTS idx_join_codes_redeemed_device
             ON join_codes(redeemed_by_device) WHERE redeemed_by_device IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_managed_swarm_owners_lease
+            ON managed_swarm_owners(lease_expires_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_device_activations_pending_code
+            ON device_activations(code_hash) WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_device_activations_expiry
+            ON device_activations(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_device_activations_swarm
+            ON device_activations(approved_swarm_id) WHERE approved_swarm_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_device_activations_device
+            ON device_activations(completed_device_id) WHERE completed_device_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_device_activations_requester
+            ON device_activations(requesting_device_id) WHERE requesting_device_id IS NOT NULL;
         "#,
     )
     .execute(pool)
@@ -149,6 +192,24 @@ async fn init_schema(pool: &SqlitePool) -> sqlx::Result<()> {
         )));
     }
     sqlx::query("PRAGMA optimize").execute(pool).await?;
+    Ok(())
+}
+
+async fn ensure_activation_requester_column(pool: &SqlitePool) -> sqlx::Result<()> {
+    let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info('device_activations')")
+            .fetch_all(pool)
+            .await?;
+    if !columns
+        .iter()
+        .any(|(_, name, _, _, _, _)| name == "requesting_device_id")
+    {
+        sqlx::query(
+            "ALTER TABLE device_activations ADD COLUMN requesting_device_id TEXT REFERENCES devices(id) ON DELETE CASCADE",
+        )
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 

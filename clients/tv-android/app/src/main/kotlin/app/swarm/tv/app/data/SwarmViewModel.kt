@@ -16,9 +16,11 @@ import app.swarm.tv.core.peer.ClientErrorReport
 import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.peer.PlaybackMode
+import app.swarm.tv.core.peer.TrackLyrics
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
+import app.swarm.tv.core.rest.ActivationStatus
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.core.token.TokenStore
@@ -29,13 +31,25 @@ import java.net.InetSocketAddress
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+enum class ClientNotificationKind { SUCCESS, WARNING, ERROR }
+
+data class ClientNotification(
+    val message: String,
+    val kind: ClientNotificationKind,
+)
 
 sealed class UiState {
     /**
@@ -54,11 +68,19 @@ sealed class UiState {
     data object Loading : UiState()
     data object PasscodeEntry : UiState()
     data object Registering : UiState()
+    data object RequestingActivation : UiState()
+    data class Activating(
+        val code: String,
+        val expiresAt: String,
+        val error: String? = null,
+    ) : UiState()
     data class Dashboard(
         val swarm: SwarmSummary,
         val devices: List<SwarmDevice>,
         val resyncing: Boolean = false,
         val allSwarms: List<SwarmSummary> = emptyList(),
+        val joiningServer: Boolean = false,
+        val joinServerError: String? = null,
     ) : UiState()
     /** [activeSwarmId] is null only once every swarm has been left — the device is still registered, just not a member of anything yet. */
     data class Settings(
@@ -74,7 +96,10 @@ sealed class UiState {
     ) : UiState()
     data class Catalog(
         val swarm: SwarmSummary,
+        /** Effective connection targets, including LAN-first routes and paired LAN-only servers. */
         val devices: List<SwarmDevice>,
+        /** The unmodified membership roster restored when returning to the dashboard. */
+        val dashboardDevices: List<SwarmDevice> = devices,
         val entries: List<MergedEntry> = emptyList(),
         val loading: Boolean = true,
         val unreachable: List<SwarmDevice> = emptyList(),
@@ -121,6 +146,8 @@ sealed class UiState {
         /** Which server negotiated [sessionId] — both needed to release its bandwidth reservation on exit, see [SwarmViewModel.releasePlaybackSession]. */
         val serverId: String,
         val sessionId: String,
+        val lyrics: TrackLyrics? = null,
+        val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
     ) : UiState()
     data class Error(val message: String) : UiState()
 }
@@ -168,16 +195,29 @@ class SwarmViewModel(
     private val kidModeStore: AndroidKidModeStore,
     private val lanDiscovery: LanDiscoveryManager,
     private val lanConnectionStore: AndroidLanConnectionStore,
+    private val disconnectedServerStore: AndroidDisconnectedServerStore,
+    private val rendezvousUrl: String,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.Loading)
     private val logTag = "SwarmViewModel"
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    private val _notifications = MutableSharedFlow<ClientNotification>(extraBufferCapacity = 32)
+    val notifications: SharedFlow<ClientNotification> = _notifications.asSharedFlow()
+
+    private fun notify(message: String, kind: ClientNotificationKind) {
+        _notifications.tryEmit(ClientNotification(message, kind))
+    }
 
     val lanServers: StateFlow<List<LanServer>> = lanDiscovery.servers
     private val _lanPairingBusy = MutableStateFlow(false)
     val lanPairingBusy: StateFlow<Boolean> = _lanPairingBusy.asStateFlow()
     private val _lanError = MutableStateFlow<String?>(null)
     val lanError: StateFlow<String?> = _lanError.asStateFlow()
+    private val _pairedLanFingerprints = MutableStateFlow<Set<String>>(emptySet())
+    val pairedLanFingerprints: StateFlow<Set<String>> = _pairedLanFingerprints.asStateFlow()
+    private val _disconnectedServerFingerprints = MutableStateFlow<Set<String>>(emptySet())
+    val disconnectedServerFingerprints: StateFlow<Set<String>> = _disconnectedServerFingerprints.asStateFlow()
 
     /** In-memory mirror of [likedEntriesStore], loaded once in [init] — see that store's own doc comment for why the UI never reads through it directly. */
     private val _likedFingerprints = MutableStateFlow<Set<String>>(emptySet())
@@ -203,6 +243,11 @@ class SwarmViewModel(
     private var deviceId: String? = null
     private var swarmId: String? = null
     private var signaling: SignalingClient? = null
+    private var activationJob: Job? = null
+    /** Serializes play/skip/autoplay negotiation so repeated callbacks cannot reserve duplicate server sessions. */
+    private var playbackNegotiationJob: Job? = null
+    /** Dashboard to restore when Add Server's activation is cancelled or fails. */
+    private var activationReturnState: UiState.Dashboard? = null
     /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
     private var cachedSwarms: List<SwarmSummary> = emptyList()
     /** Set on a successful registration or a restored session; re-sent to [connectionStore] on every edit from the config page. */
@@ -210,6 +255,9 @@ class SwarmViewModel(
     private var deviceName: String? = null
     private var localSession = false
     private var activeLocalServer: LanServer? = null
+    private var latestLanServers: List<LanServer> = emptyList()
+    private data class LanRoute(val fingerprint: String, val address: String)
+    private val activeLanRoutes = mutableMapOf<String, LanRoute>()
 
     private val proxy = PeerLoopbackProxy.start()
     private val catalogSession = CatalogSession(proxy)
@@ -218,17 +266,32 @@ class SwarmViewModel(
         lanDiscovery.start()
         viewModelScope.launch { restoreSession() }
         viewModelScope.launch {
-            lanDiscovery.servers.collect { discovered -> refreshActiveLocalServer(discovered) }
+            lanDiscovery.servers.collect { discovered ->
+                latestLanServers = discovered
+                val discoveredFingerprints = discovered.mapTo(mutableSetOf()) { normalizeFingerprint(it.certFingerprint) }
+                activeLanRoutes.entries.removeAll { (_, route) -> route.fingerprint !in discoveredFingerprints }
+                refreshActiveLocalServer(discovered)
+            }
+        }
+        viewModelScope.launch {
+            _pairedLanFingerprints.value = lanConnectionStore.all().mapTo(mutableSetOf()) { normalizeFingerprint(it.server.certFingerprint) }
         }
         viewModelScope.launch { _likedFingerprints.value = likedEntriesStore.loadAll() }
-        viewModelScope.launch { _kidModeSettings.value = kidModeStore.get() }
+        // Keep the UI tied to Room's authoritative row instead of taking a
+        // one-time startup snapshot. Enabling/updating Kid Mode is async;
+        // observing the row guarantees the enabled state survives settings
+        // navigation and application restarts as soon as the transaction
+        // commits.
+        viewModelScope.launch {
+            kidModeStore.observe().collect { _kidModeSettings.value = it }
+        }
     }
 
     /**
      * Cold-start session resume, run once from [init] while [UiState.Loading]
      * is showing. Falls back to [UiState.PasscodeEntry] for a genuinely
      * first-ever launch only after trying the two persisted connection modes
-     * in priority order: a complete STUN session first, then the most recently
+     * in priority order: a complete SWARM session first, then the most recently
      * authenticated LAN server. Both resume directly to [Dashboard]; the
      * landing screen appears only when neither exists.
      */
@@ -246,6 +309,7 @@ class SwarmViewModel(
             deviceName = saved.deviceName
             cachedSwarms = saved.swarms
             client = StunApiClient(saved.baseUrl)
+            _disconnectedServerFingerprints.value = disconnectedServerStore.load(savedActiveSwarm.id)
             _state.value = UiState.Dashboard(savedActiveSwarm, emptyList(), resyncing = true, allSwarms = saved.swarms)
             establishSignaling(saved.baseUrl, token, saved.deviceId)
             loadRoster()
@@ -264,7 +328,9 @@ class SwarmViewModel(
         val trimmedBaseUrl = baseUrl.trim()
         val trimmedCode = code.trim()
         if (trimmedBaseUrl.isEmpty() || trimmedCode.length != 8) {
-            _state.value = UiState.Error("Enter the STUN server URL and the 8-digit join code.")
+            val message = "Enter the SWARM server URL and the 8-digit join code."
+            _state.value = UiState.Error(message)
+            notify(message, ClientNotificationKind.ERROR)
             return
         }
         val trimmedDeviceName = deviceName.ifBlank { "Fire TV" }
@@ -291,13 +357,116 @@ class SwarmViewModel(
                 this@SwarmViewModel.baseUrl = trimmedBaseUrl
                 this@SwarmViewModel.deviceName = trimmedDeviceName
                 cachedSwarms = listOf(response.swarm)
+                _disconnectedServerFingerprints.value = disconnectedServerStore.load(response.swarm.id)
                 viewModelScope.launch { connectionStore.saveNewConnection(trimmedBaseUrl, trimmedDeviceName, response.deviceId, response.swarm) }
                 establishSignaling(trimmedBaseUrl, response.accessToken, response.deviceId)
                 loadRoster()
             } catch (e: StunClientError) {
-                _state.value = UiState.Error(e.message ?: "Could not join that swarm.")
+                val message = e.message ?: "Could not join that swarm."
+                _state.value = UiState.Error(message)
+                notify(message, ClientNotificationKind.ERROR)
             }
         }
+    }
+
+    /** Starts the TV-first activation flow. A connected client reuses its
+     * saved SWARM service address; first-run builds use the configured one.
+     * Only the short-lived code is shown to the user.
+     * The future device token stays in memory and is persisted only after
+     * the media server explicitly approves this TV. */
+    fun startActivation(deviceName: String) {
+        val dashboard = _state.value as? UiState.Dashboard
+        activationReturnState = dashboard
+        val url = baseUrl
+            ?.trim()
+            ?.trimEnd('/')
+            ?.takeIf { it.isNotEmpty() }
+            ?: rendezvousUrl.trim().trimEnd('/')
+        if (url.isEmpty()) {
+            val message = "This app build does not have a SWARM service configured."
+            _state.value = dashboard?.copy(joiningServer = false, joinServerError = message)
+                ?: UiState.Error(message)
+            notify(message, ClientNotificationKind.ERROR)
+            activationReturnState = null
+            return
+        }
+        val name = deviceName.ifBlank { "Fire TV" }
+        val priorToken = accessToken
+        val priorDeviceId = deviceId
+        activationJob?.cancel()
+        activationJob = viewModelScope.launch {
+            _state.value = UiState.RequestingActivation
+            val api = StunApiClient(url)
+            try {
+                val activation = api.createActivation(
+                    DeviceRegistration(
+                        name = name,
+                        deviceType = DeviceType.CLIENT,
+                        machineId = machineId,
+                        certFingerprint = certFingerprint,
+                        platform = "android-tv",
+                        appVersion = "0.1.0",
+                    ),
+                    priorToken,
+                )
+                _state.value = UiState.Activating(activation.code, activation.expiresAt)
+                while (true) {
+                    delay(2_000)
+                    val status = api.activationStatus(activation.activationId, activation.pollToken)
+                    when (status.status) {
+                        ActivationStatus.PENDING -> Unit
+                        ActivationStatus.EXPIRED -> {
+                            val message = "This code expired. Go back and request a new one."
+                            _state.value = UiState.Activating(
+                                activation.code,
+                                activation.expiresAt,
+                                message,
+                            )
+                            notify(message, ClientNotificationKind.WARNING)
+                            return@launch
+                        }
+                        ActivationStatus.APPROVED -> {
+                            val approvedDeviceId = status.deviceId ?: throw StunClientError.Decode("approved activation had no device")
+                            val approvedSwarm = status.swarm ?: throw StunClientError.Decode("approved activation had no swarm")
+                            val effectiveToken = priorToken ?: activation.accessToken
+                            val effectiveDeviceId = priorDeviceId ?: approvedDeviceId
+                            if (priorToken == null) tokenStore.save(effectiveToken)
+                            client = api
+                            accessToken = effectiveToken
+                            deviceId = effectiveDeviceId
+                            swarmId = approvedSwarm.id
+                            baseUrl = url
+                            this@SwarmViewModel.deviceName = name
+                            cachedSwarms = (cachedSwarms + approvedSwarm).distinctBy { it.id }
+                            if (priorToken == null) {
+                                connectionStore.saveNewConnection(url, name, effectiveDeviceId, approvedSwarm)
+                            } else {
+                                connectionStore.updateSwarms(cachedSwarms, approvedSwarm.id)
+                            }
+                            establishSignaling(url, effectiveToken, effectiveDeviceId)
+                            activationReturnState = null
+                            notify("${approvedSwarm.name} was added.", ClientNotificationKind.SUCCESS)
+                            loadRoster()
+                            return@launch
+                        }
+                    }
+                }
+            } catch (e: StunClientError) {
+                val message = e.message ?: "Could not start TV activation."
+                _state.value = activationReturnState
+                    ?.copy(joiningServer = false, joinServerError = message)
+                    ?: UiState.Error(message)
+                notify(message, ClientNotificationKind.ERROR)
+                activationReturnState = null
+            }
+        }
+    }
+
+    fun cancelActivation() {
+        activationJob?.cancel()
+        activationJob = null
+        _state.value = activationReturnState ?: UiState.PasscodeEntry
+        activationReturnState = null
     }
 
     /**
@@ -313,7 +482,9 @@ class SwarmViewModel(
     fun pairLanServer(server: LanServer, code: String, deviceName: String) {
         val trimmedCode = code.trim()
         if (trimmedCode.length != 6) {
-            _lanError.value = "Enter the 6-digit LAN pairing code shown by the media server."
+            val message = "Enter the 6-digit LAN pairing code shown by the media server."
+            _lanError.value = message
+            notify(message, ClientNotificationKind.ERROR)
             return
         }
         val trimmedName = deviceName.ifBlank { "Fire TV" }
@@ -323,7 +494,9 @@ class SwarmViewModel(
             val paired = lanDiscovery.pair(server, trimmedCode, trimmedName, certFingerprint)
             if (paired.isFailure) {
                 _lanPairingBusy.value = false
-                _lanError.value = paired.exceptionOrNull()?.message ?: "Could not pair with the media server."
+                val message = paired.exceptionOrNull()?.message ?: "Could not pair with the media server."
+                _lanError.value = message
+                notify(message, ClientNotificationKind.ERROR)
                 return@launch
             }
             connectLanServerNow(server, trimmedName)
@@ -334,7 +507,23 @@ class SwarmViewModel(
         _lanPairingBusy.value = true
         _lanError.value = null
         val name = clientName.ifBlank { "Fire TV" }
-        val device = server.asSwarmDevice()
+        val swarmDashboard = (_state.value as? UiState.Dashboard)?.takeIf { !localSession && it.swarm.id != "lan" }
+        val lanDevice = server.asSwarmDevice()
+        val matchingRosterDevice = swarmDashboard?.devices?.firstOrNull {
+            normalizeFingerprint(it.certFingerprint) == normalizeFingerprint(server.certFingerprint) &&
+                (it.deviceType == DeviceType.SERVER || it.deviceType == DeviceType.BOTH)
+        }
+        val device = matchingRosterDevice?.copy(
+            online = true,
+            metadata = matchingRosterDevice.metadata + lanDevice.metadata + ("connection_route" to "lan"),
+        ) ?: lanDevice
+        if (matchingRosterDevice != null) {
+            catalogSession.preferDirect(device.deviceId)
+            activeLanRoutes[device.deviceId] = LanRoute(
+                normalizeFingerprint(server.certFingerprint),
+                lanDevice.metadata.getValue("peer_addr"),
+            )
+        }
         val swarm = SwarmSummary("lan", "Local network")
         val result = withTimeoutOrNull(15_000) {
             withContext(Dispatchers.IO) {
@@ -343,17 +532,81 @@ class SwarmViewModel(
         }
         _lanPairingBusy.value = false
         if (result == null || result.unreachable.isNotEmpty()) {
-            _lanError.value = "Could not connect securely. If this is the first connection, open LAN pairing on the media server and enter its code."
+            val message = "Could not connect securely. If this is the first connection, open LAN pairing on the media server and enter its code."
+            _lanError.value = message
+            notify(message, ClientNotificationKind.ERROR)
             return
         }
-        localSession = true
-        activeLocalServer = server
         deviceId = deviceId ?: "lan-client-${certFingerprint.take(16)}"
         deviceName = name
         lastKnownGenres = result.entries.flatMap { it.entry.genres }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
         lanConnectionStore.save(server, name)
-        _state.value = UiState.Dashboard(swarm = swarm, devices = listOf(device))
+        val fingerprint = normalizeFingerprint(server.certFingerprint)
+        _pairedLanFingerprints.value = _pairedLanFingerprints.value + fingerprint
+        if (swarmDashboard != null) {
+            localSession = false
+            activeLocalServer = null
+            _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value - fingerprint
+            disconnectedServerStore.setDisconnected(swarmDashboard.swarm.id, fingerprint, disconnected = false)
+            _state.value = swarmDashboard
+        } else {
+            localSession = true
+            activeLocalServer = server
+            _state.value = UiState.Dashboard(swarm = swarm, devices = listOf(device))
+        }
+        notify("Connected to ${server.name} over the local network.", ClientNotificationKind.SUCCESS)
     }
+
+    /** Disconnects one server from this TV only; the shared roster remains unchanged for every other device. */
+    fun disconnectSwarmServer(device: SwarmDevice) {
+        val current = _state.value as? UiState.Dashboard ?: return
+        if (current.swarm.id == "lan") return
+        val fingerprint = normalizeFingerprint(device.certFingerprint)
+        _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value + fingerprint
+        catalogSession.disconnect(device.deviceId)
+        viewModelScope.launch { disconnectedServerStore.setDisconnected(current.swarm.id, fingerprint, disconnected = true) }
+        notify("Disconnected ${device.name} from this TV.", ClientNotificationKind.WARNING)
+    }
+
+    fun reconnectSwarmServer(device: SwarmDevice) {
+        val current = _state.value as? UiState.Dashboard ?: return
+        if (current.swarm.id == "lan") return
+        val fingerprint = normalizeFingerprint(device.certFingerprint)
+        _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value - fingerprint
+        viewModelScope.launch { disconnectedServerStore.setDisconnected(current.swarm.id, fingerprint, disconnected = false) }
+        notify("Reconnected ${device.name}.", ClientNotificationKind.SUCCESS)
+    }
+
+    private fun effectiveCatalogDevices(roster: List<SwarmDevice>): List<SwarmDevice> {
+        val disconnected = _disconnectedServerFingerprints.value
+        val activeRoster = roster.filterNot { normalizeFingerprint(it.certFingerprint) in disconnected }
+        val rosterFingerprints = activeRoster.mapTo(mutableSetOf()) { normalizeFingerprint(it.certFingerprint) }
+        val routedRoster = activeRoster.map(::withPreferredLanRoute)
+
+        val pairedLanOnly = latestLanServers
+            .filter { normalizeFingerprint(it.certFingerprint) in _pairedLanFingerprints.value }
+            .filterNot { normalizeFingerprint(it.certFingerprint) in rosterFingerprints }
+            .map { server ->
+                val device = server.asSwarmDevice()
+                device.copy(metadata = device.metadata + ("lan_only" to "true"))
+            }
+        return routedRoster + pairedLanOnly
+    }
+
+    private fun withPreferredLanRoute(device: SwarmDevice): SwarmDevice {
+        if (device.deviceType != DeviceType.SERVER && device.deviceType != DeviceType.BOTH) return device
+        val fingerprint = normalizeFingerprint(device.certFingerprint)
+        val lan = latestLanServers.firstOrNull { normalizeFingerprint(it.certFingerprint) == fingerprint } ?: return device
+        val direct = lan.asSwarmDevice()
+        val route = LanRoute(fingerprint, direct.metadata.getValue("peer_addr"))
+        if (activeLanRoutes.put(device.deviceId, route) != route) catalogSession.preferDirect(device.deviceId)
+        return device.copy(
+            online = true,
+            metadata = device.metadata + direct.metadata + ("connection_route" to "lan"),
+        )
+    }
+
+    private fun normalizeFingerprint(fingerprint: String): String = fingerprint.trim().lowercase()
 
     private fun showLocalDashboard(server: LanServer, clientName: String) {
         localSession = true
@@ -387,6 +640,7 @@ class SwarmViewModel(
         if (localSession) {
             val server = activeLocalServer ?: run {
                 _state.value = current.copy(resyncing = false)
+                notify("The local media server is not available.", ClientNotificationKind.ERROR)
                 return
             }
             viewModelScope.launch {
@@ -401,6 +655,11 @@ class SwarmViewModel(
                         devices = listOf(server.asSwarmDevice().copy(online = reachable)),
                         resyncing = false,
                     )
+                    if (reachable) {
+                        notify("Server connection refreshed.", ClientNotificationKind.SUCCESS)
+                    } else {
+                        notify("The media server is not reachable.", ClientNotificationKind.ERROR)
+                    }
                 }
             }
             return
@@ -434,12 +693,15 @@ class SwarmViewModel(
         if (current !is UiState.Settings) return
         val trimmed = newBaseUrl.trim()
         if (trimmed.isEmpty()) {
-            _state.value = current.copy(error = "Enter a STUN server URL.")
+            val message = "Enter a SWARM server URL."
+            _state.value = current.copy(error = message)
+            notify(message, ClientNotificationKind.ERROR)
             return
         }
         baseUrl = trimmed
         _state.value = current.copy(baseUrl = trimmed, error = null)
         viewModelScope.launch { connectionStore.updateBaseUrl(trimmed) }
+        notify("SWARM server address saved.", ClientNotificationKind.SUCCESS)
     }
 
     /** Config-page edit: the locally-remembered device label — see [AndroidConnectionStore.updateDeviceName] for why this never renames the device on the server. */
@@ -450,6 +712,7 @@ class SwarmViewModel(
         deviceName = trimmed
         _state.value = current.copy(deviceName = trimmed, error = null)
         viewModelScope.launch { connectionStore.updateDeviceName(trimmed) }
+        notify("Device name saved.", ClientNotificationKind.SUCCESS)
     }
 
     /** Config-page edit: how long Coil trusts a cached artwork image before re-fetching — see [app.swarm.tv.app.ui.ArtworkCache]. */
@@ -461,32 +724,55 @@ class SwarmViewModel(
         viewModelScope.launch { settingsStore.setArtworkCacheMinutes(clamped) }
     }
 
-    /** Redeems an additional join code against this device's existing STUN session — same server, a new swarm on it. */
+    /** Redeems an additional join code from the main SWARM page and switches
+     * to the newly joined swarm. The legacy Settings caller remains accepted
+     * while that screen is being retired from persisted navigation state. */
     fun joinAdditionalSwarm(code: String) {
         val current = _state.value
-        if (current !is UiState.Settings) return
+        if (current !is UiState.Settings && current !is UiState.Dashboard) return
         val api = client ?: return
         val token = accessToken ?: return
         val trimmedCode = code.trim()
         if (trimmedCode.length != 8) {
-            _state.value = current.copy(error = "Enter the 8-digit join code.")
+            val message = "Enter the 8-digit join code."
+            _state.value = when (current) {
+                is UiState.Settings -> current.copy(error = message)
+                is UiState.Dashboard -> current.copy(joinServerError = message)
+                else -> current
+            }
+            notify(message, ClientNotificationKind.ERROR)
             return
         }
-        _state.value = current.copy(busy = true, error = null)
+        _state.value = when (current) {
+            is UiState.Settings -> current.copy(busy = true, error = null)
+            is UiState.Dashboard -> current.copy(joiningServer = true, joinServerError = null)
+            else -> current
+        }
         viewModelScope.launch {
             try {
                 val joined = withContext(Dispatchers.IO) { api.joinSwarm(token, trimmedCode) }
                 cachedSwarms = (cachedSwarms + joined).distinctBy { it.id }
-                connectionStore.updateSwarms(cachedSwarms, swarmId)
+                swarmId = joined.id
+                connectionStore.updateSwarms(cachedSwarms, joined.id)
                 val stateNow = _state.value
                 if (stateNow is UiState.Settings) {
-                    _state.value = stateNow.copy(allSwarms = cachedSwarms, busy = false)
+                    _state.value = stateNow.copy(allSwarms = cachedSwarms, activeSwarmId = joined.id, busy = false)
+                } else if (stateNow is UiState.Dashboard) {
+                    loadRoster()
                 }
+                notify("${joined.name} was added.", ClientNotificationKind.SUCCESS)
             } catch (e: StunClientError) {
                 val stateNow = _state.value
+                val message = e.message ?: "Could not add that server."
                 if (stateNow is UiState.Settings) {
-                    _state.value = stateNow.copy(busy = false, error = e.message ?: "Could not join that swarm.")
+                    _state.value = stateNow.copy(busy = false, error = message)
+                } else if (stateNow is UiState.Dashboard) {
+                    _state.value = stateNow.copy(
+                        joiningServer = false,
+                        joinServerError = message,
+                    )
                 }
+                notify(message, ClientNotificationKind.ERROR)
             }
         }
     }
@@ -531,7 +817,10 @@ class SwarmViewModel(
         if (current !is UiState.Settings) return
         swarmId = newSwarmId
         _state.value = current.copy(activeSwarmId = newSwarmId)
-        viewModelScope.launch { connectionStore.setActiveSwarm(newSwarmId) }
+        viewModelScope.launch {
+            _disconnectedServerFingerprints.value = disconnectedServerStore.load(newSwarmId)
+            connectionStore.setActiveSwarm(newSwarmId)
+        }
     }
 
     fun backFromSettings() {
@@ -549,7 +838,13 @@ class SwarmViewModel(
         val current = _state.value
         Log.i(logTag, "browseCatalog() called, current state=${current::class.simpleName}")
         if (current !is UiState.Dashboard) return
-        _state.value = UiState.Catalog(current.swarm, current.devices, loading = true)
+        val connectionDevices = if (localSession) current.devices else effectiveCatalogDevices(current.devices)
+        _state.value = UiState.Catalog(
+            swarm = current.swarm,
+            devices = connectionDevices,
+            dashboardDevices = current.devices,
+            loading = true,
+        )
         viewModelScope.launch {
             // CatalogSession.refresh blocks on real network I/O (connect + one
             // request per server) — never run it on the Main dispatcher.
@@ -570,13 +865,14 @@ class SwarmViewModel(
             // once real hardware timing is known.
             val result = withTimeoutOrNull(30_000) {
                 withContext(Dispatchers.IO) {
-                    catalogSession.refresh(current.devices, clientCertificate, clientKey)
+                    catalogSession.refresh(connectionDevices, clientCertificate, clientKey)
                 }
             }
             if (result == null) {
-                Log.w(logTag, "browseCatalog() timed out waiting on ${current.devices.size} device(s)")
+                Log.w(logTag, "browseCatalog() timed out waiting on ${connectionDevices.size} device(s)")
             } else {
                 Log.i(logTag, "browseCatalog() refresh done: entries=${result.entries.size} unreachable=${result.unreachable.size}")
+                result.unreachable.forEach { activeLanRoutes.remove(it.deviceId) }
             }
             val stateNow = _state.value
             if (stateNow is UiState.Catalog) {
@@ -594,7 +890,7 @@ class SwarmViewModel(
                     // Same "which devices were actually dialed" filter refresh()
                     // itself applies, so the count shown matches what a
                     // completed (non-timed-out) refresh would have reported.
-                    stateNow.copy(loading = false, unreachable = current.devices.filter { it.deviceType != DeviceType.CLIENT })
+                    stateNow.copy(loading = false, unreachable = connectionDevices.filter { it.deviceType != DeviceType.CLIENT })
                 }
             }
         }
@@ -608,21 +904,34 @@ class SwarmViewModel(
      * of entry, per `docs/PROTOCOL.md`'s artwork section.
      */
     fun artworkUrl(entry: MergedEntry): String? {
-        if (entry.entry.artworkEtag == null) return null
+        val version = entry.entry.artworkEtag ?: return null
         val kind = if (entry.entry.kind == MediaKind.TRACK) "cover" else "poster"
-        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind")
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind?v=$version&w=320")
+    }
+
+    /** Full-resolution poster/cover for detail and now-playing screens. */
+    fun fullArtworkUrl(entry: MergedEntry): String? {
+        val version = entry.entry.artworkEtag ?: return null
+        val kind = if (entry.entry.kind == MediaKind.TRACK) "cover" else "poster"
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/$kind?v=$version")
     }
 
     /** Movie/episode backdrop art for detail screens — best-effort, same gate as [artworkUrl]; a 404 (backdrop never scraped) just fails the image load silently, same as this app's existing artwork handling. */
     fun backdropUrl(entry: MergedEntry): String? {
-        if (entry.entry.artworkEtag == null) return null
-        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/backdrop")
+        val version = entry.entry.artworkEtag ?: return null
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/backdrop?v=$version")
     }
 
     /** Track-only fallback visual for the music player when no cover art was scraped — an artist photo reads better as "something to look at" than a blank/placeholder square. Same best-effort gate as [artworkUrl]; a 404 just fails the image load silently. */
     fun artistPhotoUrl(entry: MergedEntry): String? {
-        if (entry.entry.artworkEtag == null) return null
-        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/artist")
+        val version = entry.entry.artworkEtag ?: return null
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/artist?v=$version")
+    }
+
+    /** Shelf-sized artist photo; keeps browse cards from decoding the full-resolution source image. */
+    fun artistPhotoThumbnailUrl(entry: MergedEntry): String? {
+        val version = entry.entry.artworkEtag ?: return null
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/artist?v=$version&w=320")
     }
 
     /**
@@ -636,7 +945,12 @@ class SwarmViewModel(
     fun play(entry: MergedEntry) {
         val current = _state.value
         val catalog = current.embeddedCatalog() ?: return
-        playEntry(entry, catalog, previousScreen = current)
+        playEntry(
+            entry,
+            catalog,
+            previousScreen = current,
+            replaceSession = _minimizedPlayer.value,
+        )
     }
 
     /**
@@ -652,14 +966,19 @@ class SwarmViewModel(
         val next = current.nextEntry ?: return
         val catalog = current.previous.embeddedCatalog() ?: return
         val wasMinimized = _minimizedPlayer.value != null
-        releasePlaybackSession(catalog, current.serverId, current.sessionId)
         // Carries the same `previous` forward (not just `catalog`) so Back
         // after auto-playing into a second, third, ... episode/track still
         // returns to the screen the user actually started browsing from,
         // not somewhere reset to the flat catalog. keepMinimized preserves
         // "still in the background" across the track change instead of
         // popping the full screen back up just because playback advanced.
-        playEntry(next, catalog, previousScreen = current.previous, keepMinimized = wasMinimized)
+        playEntry(
+            next,
+            catalog,
+            previousScreen = current.previous,
+            keepMinimized = wasMinimized,
+            replaceSession = current,
+        )
     }
 
     /** Whichever [UiState.Player] is actually live right now — the full screen's own state, or a session still playing in the background after [minimizePlayback]. At most one is ever non-null. */
@@ -667,7 +986,14 @@ class SwarmViewModel(
 
     /** ExoPlayer's own `STATE_ENDED` callback for a track (see the hoisted player in [app.swarm.tv.app.MainActivity]'s `SwarmApp`) — advances to [UiState.Player.nextEntry] if there is one, same as pressing "Play now" would on the episode Continue prompt, but immediate and with no prompt (an unbroken "keep playing" queue is the expected music-player behavior, not a per-track confirmation). Does nothing when there's no next track, same as this app's existing end-of-content behavior for episodes: the player just sits at the ended state until the user backs out. */
     fun onTrackPlaybackEnded() {
-        if (activePlayerSession()?.nextEntry != null) playNext()
+        val current = activePlayerSession() ?: return
+        if (current.nextEntry != null) {
+            playNext()
+        } else {
+            current.previous.embeddedCatalog()?.let {
+                releasePlaybackSession(it, current.serverId, current.sessionId)
+            }
+        }
     }
 
     /** Music only — movies/episodes have no shuffle concept and never call this. Flips the flag and, if a track is currently active (full-screen or minimized), immediately recomputes its `nextEntry` under the new mode so the "what's up next" the UI reflects updates right away rather than only on the *next* track change. */
@@ -714,13 +1040,18 @@ class SwarmViewModel(
 
     /** Best-effort, fire-and-forget release of a just-finished player's server-side bandwidth reservation — see [CatalogSession.stopPlayback]. */
     private fun releasePlaybackSession(catalog: UiState.Catalog, serverId: String, sessionId: String) {
-        val device = catalog.devices.find { it.deviceId == serverId } ?: return
         viewModelScope.launch {
             runCatching {
-                withContext(Dispatchers.IO) {
-                    catalogSession.stopPlayback(device, sessionId, clientCertificate, clientKey)
-                }
+                releasePlaybackSessionNow(catalog, serverId, sessionId)
             }.onFailure { Log.w(logTag, "failed to release playback session $sessionId", it) }
+        }
+    }
+
+    /** Awaitable counterpart used when replacing one session with another; the new `/play` must not race the old `/stop`. */
+    private suspend fun releasePlaybackSessionNow(catalog: UiState.Catalog, serverId: String, sessionId: String) {
+        val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute) ?: return
+        withContext(Dispatchers.IO) {
+            catalogSession.stopPlayback(device, sessionId, clientCertificate, clientKey)
         }
     }
 
@@ -772,11 +1103,46 @@ class SwarmViewModel(
      * is what a *successful* negotiation's Back button returns to instead —
      * see [UiState.Player.previous].
      */
-    private fun playEntry(entry: MergedEntry, catalog: UiState.Catalog, previousScreen: UiState, keepMinimized: Boolean = false) {
+    private fun playEntry(
+        entry: MergedEntry,
+        catalog: UiState.Catalog,
+        previousScreen: UiState,
+        keepMinimized: Boolean = false,
+        replaceSession: UiState.Player? = null,
+    ) {
+        // ExoPlayer can report ENDED more than once around teardown, and a
+        // remote button can repeat. Until negotiation commits a new Player
+        // state, both callbacks otherwise see the same old `nextEntry` and
+        // reserve duplicate transcode sessions for it.
+        if (playbackNegotiationJob?.isActive == true) return
+        if (replaceSession != null) {
+            // Drop the client-side reader before doing any network cleanup.
+            // For a full-screen player, Loading occupies the brief handoff;
+            // for a minimized player, removing the mini-session disposes the
+            // same hoisted ExoPlayer immediately. No old song continues while
+            // `/stop` reconnects or the next `/play` is negotiated.
+            if ((_state.value as? UiState.Player)?.sessionId == replaceSession.sessionId) {
+                _state.value = UiState.Loading
+            }
+            if (_minimizedPlayer.value?.sessionId == replaceSession.sessionId) {
+                _minimizedPlayer.value = null
+            }
+        }
         val serverId = entry.sources.first()
-        val device = catalog.devices.find { it.deviceId == serverId }
+        val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute)
         val fingerprint = entry.entry.fingerprint
-        viewModelScope.launch {
+        playbackNegotiationJob = viewModelScope.launch {
+            if (replaceSession != null) {
+                runCatching {
+                    releasePlaybackSessionNow(
+                        catalog,
+                        replaceSession.serverId,
+                        replaceSession.sessionId,
+                    )
+                }.onFailure {
+                    Log.w(logTag, "failed to release playback session ${replaceSession.sessionId}", it)
+                }
+            }
             val resumePositionSecs = watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs ?: 0.0
             val selection = runCatching {
                 requireNotNull(device) { "server no longer in the swarm roster" }
@@ -791,11 +1157,13 @@ class SwarmViewModel(
                 }
             }.getOrElse { error ->
                 Log.e(logTag, "playback negotiation failed", error)
-                _state.value = catalog.copy(playbackError = error.message ?: "Could not prepare playback.")
+                val message = error.message ?: "Could not prepare playback."
+                _state.value = catalog.copy(playbackError = message)
+                notify(message, ClientNotificationKind.ERROR)
                 if (device != null) {
                     reportClientError(
                         device = device,
-                        message = error.message ?: "Could not prepare playback.",
+                        message = message,
                         entryKey = entry.entry.entryKey,
                         assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
                         kind = entry.entry.kind.name.lowercase(),
@@ -828,6 +1196,8 @@ class SwarmViewModel(
                 previous = cleanedPrevious,
                 serverId = serverId,
                 sessionId = selection.sessionId,
+                lyrics = selection.lyrics,
+                subtitles = selection.subtitles,
             )
             // keepMinimized: an autoplay-to-next-track that started while
             // the mini-bar (not the full screen) was showing stays in the
@@ -850,6 +1220,7 @@ class SwarmViewModel(
     fun reportPlaybackRuntimeError(message: String) {
         val current = _state.value
         if (current !is UiState.Player) return
+        notify(message, ClientNotificationKind.ERROR)
         val device = current.previous.embeddedCatalog()?.devices?.find { it.deviceId == current.serverId } ?: return
         reportClientError(
             device = device,
@@ -880,6 +1251,7 @@ class SwarmViewModel(
             assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
             kind = entry.entry.kind.name.lowercase(),
         )
+        notify("Problem report sent.", ClientNotificationKind.SUCCESS)
     }
 
     /**
@@ -941,6 +1313,7 @@ class SwarmViewModel(
             kidModeStore.enable(pin, allowedKinds, allowedGenres, maxMovieRating, maxTvRating)
             _kidModeSettings.value = kidModeStore.get()
             reapplyKidModeToCurrentCatalog()
+            notify("Family mode enabled.", ClientNotificationKind.SUCCESS)
         }
     }
 
@@ -950,6 +1323,7 @@ class SwarmViewModel(
             kidModeStore.updateRules(allowedKinds, allowedGenres, maxMovieRating, maxTvRating)
             _kidModeSettings.value = kidModeStore.get()
             reapplyKidModeToCurrentCatalog()
+            notify("Family mode settings saved.", ClientNotificationKind.SUCCESS)
         }
     }
 
@@ -958,6 +1332,7 @@ class SwarmViewModel(
             kidModeStore.disable()
             _kidModeSettings.value = null
             reapplyKidModeToCurrentCatalog()
+            notify("Family mode disabled.", ClientNotificationKind.WARNING)
         }
     }
 
@@ -1077,9 +1452,9 @@ class SwarmViewModel(
         val current = _state.value
         if (current is UiState.Catalog) {
             if (localSession) {
-                _state.value = UiState.Dashboard(current.swarm, current.devices)
+                _state.value = UiState.Dashboard(current.swarm, current.dashboardDevices)
             } else {
-                _state.value = UiState.Dashboard(current.swarm, current.devices, allSwarms = cachedSwarms)
+                _state.value = UiState.Dashboard(current.swarm, current.dashboardDevices, allSwarms = cachedSwarms)
             }
         }
     }
@@ -1118,6 +1493,7 @@ class SwarmViewModel(
         val token = accessToken ?: return
         val id = swarmId ?: return
         try {
+            _disconnectedServerFingerprints.value = disconnectedServerStore.load(id)
             val roster = api.swarmDevices(token, id)
             _state.value = UiState.Dashboard(roster.swarm, roster.devices, allSwarms = cachedSwarms)
         } catch (e: StunClientError) {
@@ -1127,6 +1503,12 @@ class SwarmViewModel(
                 _state.value = current.copy(
                     devices = current.devices.map { it.copy(online = false) },
                     resyncing = false,
+                    joiningServer = false,
+                    joinServerError = if (current.joiningServer) {
+                        e.message ?: "The server was added, but its swarm could not be loaded."
+                    } else {
+                        current.joinServerError
+                    },
                 )
             } else {
                 _state.value = UiState.Error(e.message ?: "Could not load the swarm roster.")

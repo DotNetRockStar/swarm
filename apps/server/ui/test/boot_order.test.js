@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 //
 // Regression test for a real bug found live *twice*: app.js's boot()
-// (via enterDashboard() -> showTab("details")) calls functions defined in
+// (via enterDashboard() -> showTab("media")) calls functions defined in
 // details.js/swarm.js/media.js -- every one of which loads *after* app.js
 // in index.html's own <script> order. Calling boot() unconditionally at
 // app.js's own top level (how this used to work) races the browser's script
@@ -31,14 +31,25 @@ const fs = require("fs");
 const path = require("path");
 
 const UI_DIR = path.join(__dirname, "..");
+const invokeCalls = [];
+let testLibraryEntries = [];
 
-function invokeStub(command) {
+function invokeStub(command, args) {
+  invokeCalls.push({ command, args });
   switch (command) {
     case "get_settings":
       // Non-empty media_roots is what sends boot() down the enterDashboard()
       // path -- an empty/missing one just shows onboarding, never reaching
       // any of the functions this test exists to guard.
-      return { media_roots: [{ label: "test", path: "/tmp/swarm-boot-order-test" }], has_tmdb_key: false, tmdb_api_key: null };
+      return {
+        media_roots: [{ label: "test", path: "/tmp/swarm-boot-order-test" }],
+        has_tmdb_key: false,
+        streaming_upload_budget_enabled: true,
+        local_transcription_enabled: false,
+        mcp_enabled: false,
+        mcp_port: 7890,
+        mcp_access_token: null,
+      };
     case "get_status":
       return {
         fingerprint: "test-fingerprint",
@@ -47,10 +58,31 @@ function invokeStub(command) {
         entry_count: 0,
         thumbprint: "0".repeat(32),
         streaming_upload_budget_bps: 1000000,
+        streaming_upload_budget_enabled: true,
         active_playback_sessions: 0,
         scanning: false,
       };
+    case "get_transcription_status":
+      return {
+        enabled: false,
+        phase: "disabled",
+        message: "Local subtitle generation is disabled.",
+        model_name: "small.en",
+        model_installed: false,
+        downloaded_bytes: 0,
+        download_total_bytes: 0,
+        queued: 0,
+        completed: 0,
+        failed: 0,
+        total_segments: 0,
+        completed_segments: 0,
+        current_title: null,
+        current_segment: 0,
+        current_total_segments: 0,
+        current_segment_progress: 0,
+      };
     case "list_entries":
+      return testLibraryEntries;
     case "list_media_roots":
     case "list_categories":
     case "list_client_errors":
@@ -89,7 +121,7 @@ async function main() {
       // reference runs -- beforeParse fires before any parsing/script
       // execution starts, so this is the only correct place to install it.
       window.__TAURI__ = {
-        core: { invoke: (command) => Promise.resolve(invokeStub(command)) },
+        core: { invoke: (command, args) => Promise.resolve(invokeStub(command, args)) },
         event: { listen: () => Promise.resolve(() => {}) },
       };
       window.IntersectionObserver = FakeIntersectionObserver;
@@ -128,6 +160,27 @@ async function main() {
   if (!dashVisible) {
     failures.push(`Expected #dashView to be visible after boot (a real, persisted media_roots settings response) but it was hidden${onboardVisible ? " -- fell back to onboarding, the exact symptom of this bug class" : ""}.`);
   }
+  const expectedTabOrder = ["tabBtn-media", "tabBtn-details", "tabBtn-swarm", "tabBtn-notifications", "tabBtn-ai", "tabBtn-about"];
+  const actualTabOrder = [...document.querySelectorAll(".tabnav > button[id^='tabBtn-']")]
+    .map((button) => button.id);
+  if (JSON.stringify(actualTabOrder) !== JSON.stringify(expectedTabOrder)) {
+    failures.push(`Expected tab order ${expectedTabOrder.join(", ")}, got ${actualTabOrder.join(", ")}.`);
+  }
+  if (!document.getElementById("tabBtn-media").classList.contains("tab-active")) {
+    failures.push("Expected Media to be the active default tab after boot.");
+  }
+  if (document.getElementById("tabPanel-media").classList.contains("d-none")) {
+    failures.push("Expected the Media panel to be visible after boot.");
+  }
+  if (!document.getElementById("tabPanel-about").classList.contains("d-none")) {
+    failures.push("Expected the About panel to be hidden when Media is the default.");
+  }
+  if (document.getElementById("transcriptionProgress").classList.contains("d-none")) {
+    failures.push("Expected local subtitle progress to remain visible on the Media tab while disabled.");
+  }
+  if (!document.getElementById("transcriptionProgressText").textContent.includes("disabled")) {
+    failures.push("Expected the Media subtitle panel to render the current durable-worker status.");
+  }
   // Companion regression: index.html's inline `body { visibility: hidden }`
   // guard (a flash-of-onboarding fix, same "wrong view painted first" family
   // as this file's main bug) only ever gets lifted by show() -- if body
@@ -136,6 +189,42 @@ async function main() {
   // show" question this whole file is about.
   if (dom.window.getComputedStyle(document.body).visibility !== "visible") {
     failures.push("Expected document.body to be revealed (visibility: visible) after boot, but it was still hidden.");
+  }
+  if (document.getElementById("statusGrid").textContent.includes("Listening (QUIC)")) {
+    failures.push("Expected the Listening (QUIC) status panel to be removed.");
+  }
+  document.querySelector('[data-info="try-asking"]').click();
+  if (document.getElementById("infoModalBackdrop").classList.contains("d-none")) {
+    failures.push("Expected clicking Try asking to open its information modal.");
+  }
+  if (document.querySelectorAll("#infoModalLinks a").length !== 2) {
+    failures.push("Expected Try asking help to offer both Codex and Claude links.");
+  }
+
+  // Group re-scrape regression: the show action must include episodes from
+  // every season, while the season action must stay scoped to only that
+  // season. Both reuse the real rescrape_entry command sequentially.
+  testLibraryEntries = [
+    { entry_key: "s1e1", kind: "episode", title: "Pilot", relative_path: "Shows/Test/S01/E01.mkv", genres: [], cast: [], show_title: "Test Show", season: 1, episode: 1, like_count: 0 },
+    { entry_key: "s1e2", kind: "episode", title: "Second", relative_path: "Shows/Test/S01/E02.mkv", genres: [], cast: [], show_title: "Test Show", season: 1, episode: 2, like_count: 0 },
+    { entry_key: "s2e1", kind: "episode", title: "Return", relative_path: "Shows/Test/S02/E01.mkv", genres: [], cast: [], show_title: "Test Show", season: 2, episode: 1, like_count: 0 },
+  ];
+  dom.window.eval(`libraryEntries = ${JSON.stringify(testLibraryEntries)}; browsePath = { kind: "show", show: "Test Show" }; renderMediaTab();`);
+  invokeCalls.length = 0;
+  document.getElementById("rescrapeShowBtn")?.click();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const showKeys = invokeCalls.filter(call => call.command === "rescrape_entry").map(call => call.args.entryKey);
+  if (JSON.stringify(showKeys) !== JSON.stringify(["s1e1", "s1e2", "s2e1"])) {
+    failures.push(`Expected show re-scrape to process every season in order, got ${showKeys.join(", ")}.`);
+  }
+
+  dom.window.eval(`browsePath = { kind: "season", show: "Test Show", season: 1 }; renderBrowse();`);
+  invokeCalls.length = 0;
+  document.getElementById("rescrapeSeasonBtn")?.click();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const seasonKeys = invokeCalls.filter(call => call.command === "rescrape_entry").map(call => call.args.entryKey);
+  if (JSON.stringify(seasonKeys) !== JSON.stringify(["s1e1", "s1e2"])) {
+    failures.push(`Expected season re-scrape to process only that season, got ${seasonKeys.join(", ")}.`);
   }
 
   dom.window.close();

@@ -20,6 +20,7 @@ lofty = { workspace = true }
 quinn = { workspace = true }
 reqwest = { workspace = true }
 rand = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"

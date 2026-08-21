@@ -1,7 +1,7 @@
 //! Persisted GUI settings: media root(s) and TMDb API key. Kept separate
 //! from `ServerCore`'s own state (STUN link, library) because these are
-//! needed *before* a core can even be constructed — the packaged app has no
-//! `SWARM_MEDIA_ROOT` env var to fall back on, unlike the headless daemon.
+//! needed *before* a core can even be constructed. The packaged desktop app
+//! deliberately has no environment-only media-root configuration path.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,14 @@ pub struct Settings {
     #[serde(default)]
     media_root: Option<String>,
     pub tmdb_api_key: Option<String>,
+    /// Applies the measured upload budget to internet playback. LAN
+    /// playback always bypasses it regardless of this setting.
+    #[serde(default = "default_streaming_upload_budget_enabled")]
+    pub streaming_upload_budget_enabled: bool,
+    /// Generate English subtitles locally with Whisper. The model and queue
+    /// live in app data; disabling pauses work without discarding progress.
+    #[serde(default)]
+    pub local_transcription_enabled: bool,
     /// Whether the read-only MCP server (see `mcp.rs`) starts alongside the
     /// GUI app's core. Takes effect on next launch/restart — no hot-reload,
     /// same posture as `media_root`'s pre-multi-root upgrade above having no
@@ -30,6 +38,13 @@ pub struct Settings {
     pub mcp_enabled: bool,
     #[serde(default = "default_mcp_port")]
     pub mcp_port: u16,
+    /// Bearer token required by every MCP request.
+    #[serde(default)]
+    pub mcp_access_token: Option<String>,
+}
+
+fn default_streaming_upload_budget_enabled() -> bool {
+    true
 }
 
 fn default_mcp_port() -> u16 {
@@ -44,7 +59,16 @@ fn default_mcp_port() -> u16 {
 // silently disagree (`u16::default()` is `0`, not `default_mcp_port()`).
 impl Default for Settings {
     fn default() -> Self {
-        Settings { media_roots: Vec::new(), media_root: None, tmdb_api_key: None, mcp_enabled: false, mcp_port: default_mcp_port() }
+        Settings {
+            media_roots: Vec::new(),
+            media_root: None,
+            tmdb_api_key: None,
+            streaming_upload_budget_enabled: true,
+            local_transcription_enabled: false,
+            mcp_enabled: false,
+            mcp_port: default_mcp_port(),
+            mcp_access_token: None,
+        }
     }
 }
 
@@ -63,7 +87,10 @@ pub fn load(app_data_dir: &Path) -> Settings {
         .unwrap_or_default();
     if settings.media_roots.is_empty() {
         if let Some(path) = settings.media_root.take() {
-            settings.media_roots.push(MediaRootSetting { label: "local".to_string(), path });
+            settings.media_roots.push(MediaRootSetting {
+                label: "local".to_string(),
+                path,
+            });
         }
     }
     settings
@@ -72,5 +99,34 @@ pub fn load(app_data_dir: &Path) -> Settings {
 pub fn save(app_data_dir: &Path, settings: &Settings) -> std::io::Result<()> {
     std::fs::create_dir_all(app_data_dir)?;
     let json = serde_json::to_string_pretty(settings).unwrap_or_default();
-    std::fs::write(settings_path(app_data_dir), json)
+    let path = settings_path(app_data_dir);
+    std::fs::write(&path, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_settings_keep_the_upload_budget_enabled() {
+        let dir =
+            std::env::temp_dir().join(format!("swarm-settings-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            settings_path(&dir),
+            r#"{"media_roots":[{"label":"local","path":"/media"}],"tmdb_api_key":null,"mcp_enabled":false,"mcp_port":7890}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir);
+        assert!(loaded.streaming_upload_budget_enabled);
+        assert!(!loaded.local_transcription_enabled);
+        assert_eq!(loaded.mcp_access_token, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

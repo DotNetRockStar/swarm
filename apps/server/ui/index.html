@@ -46,8 +46,8 @@
 <div id="onboardSwarmView" class="d-none">
   <div class="card centered-card">
     <h2>Join a swarm (optional)</h2>
-    <p class="muted">Enter the STUN server address and an 8-digit join code generated there. You can do this later from the Swarm card.</p>
-    <label>STUN server URL</label>
+    <p class="muted">Enter the SWARM server address and an 8-digit join code generated there. You can do this later from the Swarm card.</p>
+    <label>SWARM server URL</label>
     <input id="onboardBaseUrl" placeholder="https://swarm.example.com">
     <label>Join code</label>
     <input id="onboardCode" placeholder="12345678" maxlength="8">
@@ -62,24 +62,35 @@
 
 <div id="dashView" class="d-none">
   <div class="tabnav">
-    <button id="tabBtn-about" class="tab-active"><i class="bi bi-info-circle-fill"></i>About</button>
+    <button id="tabBtn-media" class="tab-active"><i class="bi bi-collection-play"></i>Media</button>
     <button id="tabBtn-details"><i class="bi bi-speedometer2"></i>Details</button>
     <button id="tabBtn-swarm"><i class="bi bi-diagram-3"></i>Swarm</button>
     <button id="tabBtn-notifications"><i class="bi bi-bell-fill"></i>Notifications<span id="notificationBadge" class="badge-count d-none">0</span></button>
-    <button id="tabBtn-media"><i class="bi bi-collection-play"></i>Media</button>
     <button id="tabBtn-ai"><i class="bi bi-stars"></i>AI</button>
+    <button id="tabBtn-about"><i class="bi bi-info-circle-fill"></i>About</button>
+    <button id="hideToTrayBtn" class="tray-hide-button" title="Hide this window; the media server will keep running"><i class="bi bi-dash-square"></i>Hide</button>
   </div>
 
   <div id="tabPanel-details" class="d-none">
     <div class="card">
       <h2>Status</h2>
       <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+      <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="uploadBudgetEnabledCheck"> Limit internet streaming to the measured upload budget</label>
+      <p class="muted compact-help">LAN streaming is never throttled. Turn this off to let internet streams use all available upload bandwidth.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2 class="info-trigger" data-info="local-subtitles" tabindex="0" role="button"><i class="bi bi-badge-cc-fill heading-icon"></i>Local subtitles <i class="bi bi-info-circle info-affordance"></i></h2>
+        <label class="checkbox-label transcription-toggle"><input type="checkbox" id="localTranscriptionEnabledCheck"> <i class="bi bi-cpu"></i>Generate with Whisper</label>
+      </div>
+      <p id="localTranscriptionSettingStatus" class="muted compact-help">Loading subtitle settings…</p>
     </div>
 
     <div class="card">
       <h2 class="info-trigger" data-info="media-roots" tabindex="0" role="button">Media roots <i class="bi bi-info-circle info-affordance"></i></h2>
       <div id="mediaRootsList">Loading…</div>
-      <div class="row" style="margin-top:14px">
+      <div class="row add-root-row">
         <input id="addRootLabel" placeholder="Label (e.g. nas-movies)">
         <input id="addRootPath" placeholder="/path/to/media or a mounted network share">
         <button id="chooseAddRootBtn" class="secondary"><i class="bi bi-folder2-open"></i>Browse…</button>
@@ -89,7 +100,6 @@
 
     <div class="card">
       <h2 class="info-trigger" data-info="tmdb-scraping" tabindex="0" role="button">TMDb scraping <i class="bi bi-info-circle info-affordance"></i></h2>
-      <p class="muted">Enables movie/TV metadata and artwork lookups from the Media tab. Free key: themoviedb.org → sign up → Settings → API → Create → request a "Developer" key → paste the v3 API Key (or v4 Read Access Token) below.</p>
       <div class="row">
         <input id="tmdbKeyInput" placeholder="TMDb API key">
         <button id="saveTmdbKeyBtn" class="secondary"><i class="bi bi-key"></i>Save key</button>
@@ -102,13 +112,13 @@
     <div class="card">
       <div class="card-head">
         <h2 class="info-trigger" data-info="lan-network" tabindex="0" role="button">Local network <i class="bi bi-info-circle info-affordance"></i></h2>
-        <button id="openLanPairingBtn"><i class="bi bi-broadcast-pin"></i>Pair a LAN client</button>
+        <button id="openLanPairingBtn"><i class="bi bi-broadcast-pin"></i>Pair a client</button>
       </div>
-      <p class="muted">This server advertises itself to clients on the same LAN automatically. A pairing code is required only the first time a client is trusted; direct connections do not use the STUN server.</p>
+      <p class="muted">Nearby clients find this server automatically. Choose <strong>Pair a client</strong>, then enter the six-digit code on the client the first time it connects.</p>
       <div id="lanPairingStatus" class="d-none" style="margin-top:10px"></div>
       <div id="localPeersList" style="margin-top:12px">Loading…</div>
     </div>
-    <div class="card">
+    <div class="card swarm-remote-card">
       <h2 class="info-trigger" data-info="swarm-concept" tabindex="0" role="button">Swarm <i class="bi bi-info-circle info-affordance"></i></h2>
       <div id="swarmContent">Loading…</div>
     </div>
@@ -128,7 +138,7 @@
     </div>
   </div>
 
-  <div id="tabPanel-media" class="d-none">
+  <div id="tabPanel-media">
     <div class="card">
       <div class="card-head">
         <h2>Library</h2>
@@ -137,6 +147,17 @@
           <button id="scrapeBtn" class="secondary"><i class="bi bi-cloud-download"></i>Scrape metadata</button>
           <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects"><i class="bi bi-tools"></i>Fix classifications</button>
           <button id="rescanBtn"><i class="bi bi-arrow-clockwise"></i>Rescan</button>
+        </div>
+      </div>
+      <div id="transcriptionProgress" class="transcription-progress" aria-live="polite">
+        <div class="transcription-progress-head">
+          <span><i class="bi bi-badge-cc-fill"></i> Local subtitle generation</span>
+          <span id="transcriptionProgressPercent" class="muted">0%</span>
+        </div>
+        <div class="progress-bar"><div id="transcriptionProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
+        <div class="transcription-progress-copy">
+          <span id="transcriptionProgressText" class="muted">Loading status…</span>
+          <span id="transcriptionProgressCounts" class="muted"></span>
         </div>
       </div>
       <div id="scanProgress" class="scrape-progress d-none">
@@ -160,38 +181,40 @@
 
   <div id="tabPanel-ai" class="d-none">
     <div class="card">
-      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button">What is MCP? <i class="bi bi-info-circle info-affordance"></i></h2>
+      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button"><i class="bi bi-stars heading-icon"></i>What is MCP? <i class="bi bi-info-circle info-affordance"></i></h2>
       <p class="muted">MCP lets an AI assistant — Claude, Codex, or any other MCP-compatible client — look things up in your library on your behalf. It's read-only: it can search and check status, but it can't change settings or touch your files.</p>
     </div>
     <div class="card">
-      <h2>Try asking</h2>
+      <h2 class="info-trigger" data-info="try-asking" tabindex="0" role="button"><i class="bi bi-chat-square-text-fill heading-icon"></i>Try asking <i class="bi bi-info-circle info-affordance"></i></h2>
       <p class="muted">Once connected, just ask in plain language — no special syntax needed:</p>
       <div class="ai-console">
-        <div class="ai-console-head"><i class="bi bi-terminal-fill"></i>Claude / Codex</div>
-        <div class="ai-console-line"><span class="ai-console-prompt">&gt;</span> What movies do I have from 2019 that I haven't watched yet?</div>
-        <div class="ai-console-line"><span class="ai-console-prompt">&gt;</span> Is my living room Fire TV online right now?</div>
-        <div class="ai-console-line"><span class="ai-console-prompt">&gt;</span> Find every comedy episode that's had a playback error recently.</div>
-        <div class="ai-console-line"><span class="ai-console-prompt">&gt;</span> Give me a one-line synopsis of every unwatched movie under 90 minutes.</div>
-        <div class="ai-console-line"><span class="ai-console-prompt">&gt;</span> Which of my liked albums haven't I played in a while?</div>
+        <div class="ai-console-head"><i class="bi bi-terminal-fill"></i> Claude / Codex</div>
+        <div class="ai-console-line"><span class="ai-console-prompt">You:</span> What comedies are in my library?</div>
+        <div class="ai-console-line ai-console-response"><span class="ai-console-prompt">AI:</span> I found 18 comedies. A few highlights are <em>Game Night</em>, <em>Palm Springs</em>, and <em>Clue</em>.</div>
       </div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Server</h2></div>
+      <div class="card-head"><h2><i class="bi bi-hdd-network-fill heading-icon"></i>MCP Server</h2></div>
       <div class="row">
         <label class="checkbox-label"><input type="checkbox" id="mcpEnabledCheck"> Enable MCP server</label>
         <input id="mcpPortInput" placeholder="Port (default 7890)" style="flex:0 0 160px">
         <button id="saveMcpSettingsBtn" class="secondary"><i class="bi bi-check-lg"></i>Save</button>
       </div>
-      <p class="muted" style="margin-top:8px">Takes effect on next restart of this app. Reachable from any device on your network — there's no login, so only enable this on a network you trust.</p>
+      <div class="row token-row">
+        <input id="mcpAccessTokenInput" class="mono" readonly placeholder="Create an access token first">
+        <button id="generateMcpTokenBtn" class="secondary"><i class="bi bi-key-fill"></i>Create access token</button>
+        <button id="copyMcpTokenBtn" class="secondary"><i class="bi bi-copy"></i>Copy</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Create a token, enable the server, save, and restart SWARM. Your AI tool sends this token with each MCP request so only clients you configure can access your library.</p>
       <p id="mcpStatus" class="note"></p>
     </div>
     <div class="card" id="mcpConfigCard">
-      <h2>Connect a client</h2>
-      <p class="muted">Add this to your MCP client's config (e.g. Claude Desktop's <span class="mono">claude_desktop_config.json</span>), then restart the client:</p>
+      <h2><i class="bi bi-plug-fill heading-icon"></i>Connect an AI tool</h2>
+      <p class="muted">Add this Streamable HTTP server to your AI tool's MCP configuration. Replace the LAN IP, keep the bearer token private, then restart the AI tool.</p>
       <pre id="mcpConfigSnippet" class="mono" style="background:var(--surface-muted); border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; font-size:.78rem"></pre>
     </div>
     <div class="card">
-      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button">MCP Server API <i class="bi bi-info-circle info-affordance"></i></h2>
+      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button"><i class="bi bi-braces-asterisk heading-icon"></i>MCP Server API <i class="bi bi-info-circle info-affordance"></i></h2>
       <ul class="issue-list" style="background:transparent">
         <li class="info-trigger" data-info="tool-search-library" tabindex="0" role="button">
           <i class="bi bi-search tool-icon"></i>
@@ -213,7 +236,7 @@
     </div>
   </div>
 
-  <div id="tabPanel-about">
+  <div id="tabPanel-about" class="d-none">
     <div class="card about-hero">
       <div class="about-hero-head">
         <img src="badge.png" alt="" class="about-hero-badge">
@@ -309,7 +332,7 @@
     <div class="modal-icon"><i id="infoModalIcon" class="bi"></i></div>
     <h2 id="infoModalTitle"></h2>
     <p id="infoModalBody" class="muted"></p>
-    <a id="infoModalLink" class="modal-link d-none" target="_blank" rel="noopener noreferrer"><span></span><i class="bi bi-box-arrow-up-right"></i></a>
+    <div id="infoModalLinks" class="modal-links"></div>
   </div>
 </div>
 

@@ -64,18 +64,26 @@ pub fn device_type_str(dt: DeviceType) -> &'static str {
     }
 }
 
-async fn owned_swarm(state: &SharedState, user_id: &str, swarm_id: &str) -> ApiResult<SwarmSummary> {
+async fn owned_swarm(
+    state: &SharedState,
+    user_id: &str,
+    swarm_id: &str,
+) -> ApiResult<SwarmSummary> {
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT id, name FROM swarms WHERE id = ? AND owner_user_id = ?")
             .bind(swarm_id)
             .bind(user_id)
             .fetch_optional(&state.db)
             .await?;
-    row.map(|(id, name)| SwarmSummary { id, name }).ok_or_else(|| AppError::not_found("no such swarm"))
+    row.map(|(id, name)| SwarmSummary { id, name })
+        .ok_or_else(|| AppError::not_found("no such swarm"))
 }
 
 #[utoipa::path(get, path = "/api/v1/swarms", responses((status = 200, body = SwarmListResponse)), tag = "swarms")]
-pub async fn list(State(state): State<SharedState>, jar: CookieJar) -> ApiResult<Json<SwarmListResponse>> {
+pub async fn list(
+    State(state): State<SharedState>,
+    jar: CookieJar,
+) -> ApiResult<Json<SwarmListResponse>> {
     let user = require_session(&state, &jar).await?;
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         "SELECT s.id, s.name, COUNT(sd.device_id) FROM swarms s \
@@ -88,7 +96,11 @@ pub async fn list(State(state): State<SharedState>, jar: CookieJar) -> ApiResult
     Ok(Json(SwarmListResponse {
         swarms: rows
             .into_iter()
-            .map(|(id, name, device_count)| SwarmListEntry { id, name, device_count })
+            .map(|(id, name, device_count)| SwarmListEntry {
+                id,
+                name,
+                device_count,
+            })
             .collect(),
     }))
 }
@@ -105,7 +117,10 @@ pub async fn create(
     let user = require_session(&state, &jar).await?;
     let name = req.name.trim().to_string();
     if name.is_empty() || name.len() > 64 {
-        return Err(AppError::bad_request("invalid_name", "swarm name must be 1-64 characters"));
+        return Err(AppError::bad_request(
+            "invalid_name",
+            "swarm name must be 1-64 characters",
+        ));
     }
     let id = new_id();
     sqlx::query("INSERT INTO swarms (id, owner_user_id, name, created_at) VALUES (?, ?, ?, ?)")
@@ -115,7 +130,10 @@ pub async fn create(
         .bind(now())
         .execute(&state.db)
         .await?;
-    Ok((axum::http::StatusCode::CREATED, Json(SwarmSummary { id, name })))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(SwarmSummary { id, name }),
+    ))
 }
 
 #[utoipa::path(delete, path = "/api/v1/swarms/{swarm_id}",
@@ -129,8 +147,13 @@ pub async fn delete(
     require_csrf(&jar, &headers)?;
     let user = require_session(&state, &jar).await?;
     owned_swarm(&state, &user.user_id, &swarm_id).await?;
-    sqlx::query("DELETE FROM swarms WHERE id = ?").bind(&swarm_id).execute(&state.db).await?;
-    Ok(Json(super::auth::StatusResponse { status: "ok".into() }))
+    sqlx::query("DELETE FROM swarms WHERE id = ?")
+        .bind(&swarm_id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(super::auth::StatusResponse {
+        status: "ok".into(),
+    }))
 }
 
 #[utoipa::path(post, path = "/api/v1/swarms/{swarm_id}/codes", request_body = CreateCodeRequest,
@@ -147,7 +170,10 @@ pub async fn create_code(
     owned_swarm(&state, &user.user_id, &swarm_id).await?;
     // Sweep expired codes, then mint (the drone rotates codes aggressively;
     // here every code is independent and single-use).
-    sqlx::query("DELETE FROM join_codes WHERE expires_at < ?").bind(now()).execute(&state.db).await?;
+    sqlx::query("DELETE FROM join_codes WHERE expires_at < ?")
+        .bind(now())
+        .execute(&state.db)
+        .await?;
     let expires_at = now() + state.config.join_code_ttl_secs;
     let device_type_hint = req.device_type_hint.map(device_type_str);
     let mut minted_code = None;
@@ -175,8 +201,15 @@ pub async fn create_code(
             break;
         }
     }
-    let code = minted_code.ok_or_else(|| AppError::internal("could not allocate a unique join code"))?;
-    Ok((axum::http::StatusCode::CREATED, Json(JoinCodeResponse { code, expires_at: rfc3339(expires_at) })))
+    let code =
+        minted_code.ok_or_else(|| AppError::internal("could not allocate a unique join code"))?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(JoinCodeResponse {
+            code,
+            expires_at: rfc3339(expires_at),
+        }),
+    ))
 }
 
 #[utoipa::path(get, path = "/api/v1/swarms/{swarm_id}/devices",
@@ -227,15 +260,17 @@ pub async fn devices(
     }
     let devices = rows
         .into_iter()
-        .map(|(device_id, name, device_type, cert_fingerprint, last_seen_at)| SwarmDevice {
-            online: state.hub.is_online(&device_id),
-            metadata: metadata.remove(&device_id).unwrap_or_default(),
-            device_id,
-            name,
-            device_type: parse_device_type(&device_type),
-            cert_fingerprint,
-            last_seen_at: last_seen_at.map(rfc3339),
-        })
+        .map(
+            |(device_id, name, device_type, cert_fingerprint, last_seen_at)| SwarmDevice {
+                online: state.hub.is_online(&device_id),
+                metadata: metadata.remove(&device_id).unwrap_or_default(),
+                device_id,
+                name,
+                device_type: parse_device_type(&device_type),
+                cert_fingerprint,
+                last_seen_at: last_seen_at.map(rfc3339),
+            },
+        )
         .collect();
     Ok(Json(SwarmDevicesResponse { swarm, devices }))
 }
@@ -254,12 +289,16 @@ pub async fn leave(
 ) -> ApiResult<Json<super::auth::StatusResponse>> {
     let device = require_device(&state, &headers).await?;
     if device.device_id != device_id {
-        return Err(AppError::forbidden("a device may only remove its own swarm membership"));
+        return Err(AppError::forbidden(
+            "a device may only remove its own swarm membership",
+        ));
     }
     sqlx::query("DELETE FROM swarm_devices WHERE swarm_id = ? AND device_id = ?")
         .bind(&swarm_id)
         .bind(&device_id)
         .execute(&state.db)
         .await?;
-    Ok(Json(super::auth::StatusResponse { status: "ok".into() }))
+    Ok(Json(super::auth::StatusResponse {
+        status: "ok".into(),
+    }))
 }

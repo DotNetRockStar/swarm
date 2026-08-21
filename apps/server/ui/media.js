@@ -19,7 +19,54 @@ let kindFilter = "all"; // "all" | "movie" | "episode" | "track"
 // doubles as a browsable, filterable "category".
 let categoryFilter = "all";
 let allCategories = []; // every distinct genre/category currently in use — refreshed alongside libraryEntries
+let groupRescrapeRunning = false;
 const KIND_FILTER_LABELS = { all: "Filter: all kinds", movie: "Filter: Movies", episode: "Filter: Shows", track: "Filter: Music" };
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 MB";
+  return `${(bytes / 1048576).toFixed(bytes >= 104857600 ? 0 : 1)} MB`;
+}
+
+// This panel deliberately lives outside renderMediaTab(), so browsing,
+// searching, or rebuilding the library never interrupts its updates.
+async function refreshTranscriptionProgress() {
+  const fill = document.getElementById("transcriptionProgressFill");
+  if (!fill) return;
+  try {
+    const status = await invoke("get_transcription_status");
+    let percent = 0;
+    if (status.phase === "downloading_model" && status.download_total_bytes > 0) {
+      percent = status.downloaded_bytes / status.download_total_bytes * 100;
+    } else if (status.total_segments > 0) {
+      const partial = status.phase === "transcribing" ? status.current_segment_progress / 100 : 0;
+      percent = (status.completed_segments + partial) / status.total_segments * 100;
+    } else if (status.phase === "idle") {
+      percent = 100;
+    }
+    percent = Math.max(0, Math.min(100, percent));
+    fill.style.width = `${percent}%`;
+    document.getElementById("transcriptionProgressPercent").textContent = `${Math.round(percent)}%`;
+    document.getElementById("transcriptionProgressText").textContent = status.message;
+
+    let counts = "";
+    if (status.phase === "downloading_model") {
+      counts = `${formatBytes(status.downloaded_bytes)} / ${formatBytes(status.download_total_bytes)}`;
+    } else if (status.current_title && status.current_total_segments > 0) {
+      counts = `${status.current_title} · section ${status.current_segment}/${status.current_total_segments}`;
+    } else if (status.total_segments > 0) {
+      counts = `${status.completed} complete · ${status.queued} remaining${status.failed ? ` · ${status.failed} failed` : ""}`;
+    } else if (!status.enabled) {
+      counts = "Enable in Details";
+    }
+    document.getElementById("transcriptionProgressCounts").textContent = counts;
+    document.getElementById("transcriptionProgress").classList.toggle("transcription-progress-active", status.enabled);
+  } catch (_) {
+    document.getElementById("transcriptionProgressText").textContent = "Subtitle status will appear when the media server is ready.";
+    document.getElementById("transcriptionProgressCounts").textContent = "";
+  }
+}
+
+setInterval(refreshTranscriptionProgress, 1000);
 
 // Applies to both the Browse root view and the All-entries table. Matches
 // against every identifying name field, not just title, so searching a
@@ -39,7 +86,7 @@ function filteredEntries() {
 }
 
 async function refreshMedia() {
-  await refreshLibrary();
+  await Promise.all([refreshLibrary(), refreshTranscriptionProgress()]);
 }
 
 async function refreshLibrary() {
@@ -72,7 +119,7 @@ function renderMediaTab() {
     <button class="${mediaSection === "browse" ? "" : "secondary"}" id="mediaSectionBrowseBtn" style="flex:0 0 auto"><i class="bi bi-grid"></i>Browse</button>
     <button class="${mediaSection === "table" ? "" : "secondary"}" id="mediaSectionTableBtn" style="flex:0 0 auto"><i class="bi bi-list-ul"></i>All entries</button>
   </div>
-  <div class="row" style="margin-bottom:14px; align-items:center">
+  <div class="row media-search-row">
     <div class="search-input-wrap" style="flex:2">
       <i class="bi bi-search search-input-icon"></i>
       <input id="mediaSearchInput" class="search-input" placeholder="Search title, artist, show…" value="${esc(searchQuery)}">
@@ -599,6 +646,46 @@ function seasonLabel(season) {
 
 // ---- browse: shows (show → season → episodes) ------------------------------
 
+async function rescrapeEpisodeGroup(entryKeys, scopeLabel, buttonId) {
+  if (groupRescrapeRunning) {
+    showToast("Another show or season re-scrape is already running.", "warning");
+    return;
+  }
+  const keys = [...new Set(entryKeys)];
+  if (!keys.length) {
+    showToast("There are no episodes to re-scrape.", "warning");
+    return;
+  }
+
+  groupRescrapeRunning = true;
+  const button = document.getElementById(buttonId);
+  if (button) button.disabled = true;
+  let succeeded = 0;
+  const failures = [];
+  for (let index = 0; index < keys.length; index += 1) {
+    if (button) button.innerHTML = `<i class="bi bi-arrow-repeat"></i>Re-scraping ${index + 1} of ${keys.length}…`;
+    try {
+      await invoke("rescrape_entry", { entryKey: keys[index], tmdbUrl: null });
+      succeeded += 1;
+    } catch (err) {
+      failures.push(String(err));
+    }
+  }
+
+  groupRescrapeRunning = false;
+  clearArtworkCache();
+  await refreshLibrary();
+  if (!failures.length) {
+    showToast(`Re-scraped ${succeeded} episode${succeeded === 1 ? "" : "s"} in ${scopeLabel}.`, "success");
+  } else {
+    const kind = succeeded === 0 ? "error" : "warning";
+    showToast(
+      `Re-scraped ${succeeded} of ${keys.length} episodes in ${scopeLabel}; ${failures.length} failed. ${failures[0]}`,
+      kind,
+    );
+  }
+}
+
 function renderShow(body, show) {
   const seasons = groupEpisodes(libraryEntries).get(show);
   if (!seasons) { browsePath = { kind: "root" }; return renderBrowse(); }
@@ -609,8 +696,17 @@ function renderShow(body, show) {
       <div class="card-title">${seasonLabel(season)}</div>
       <div class="muted" style="font-size:.75rem">${episodes.length} episode${episodes.length === 1 ? "" : "s"}</div>
     </div>`).join("");
-  body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
+  const episodeKeys = [...seasons.values()].flat().map(episode => episode.entry_key);
+  body.innerHTML = `${breadcrumb(crumbs)}
+    <div class="row media-group-actions">
+      <button id="rescrapeShowBtn" class="secondary"${groupRescrapeRunning ? " disabled" : ""}><i class="bi bi-arrow-repeat"></i>Re-scrape all seasons</button>
+      <span class="muted">Refresh metadata and artwork for all ${episodeKeys.length} episode${episodeKeys.length === 1 ? "" : "s"} in this show.</span>
+    </div>
+    <div class="media-grid">${cards}</div>`;
   wireBreadcrumb(body, crumbs);
+  document.getElementById("rescrapeShowBtn")?.addEventListener("click", () => {
+    rescrapeEpisodeGroup(episodeKeys, show, "rescrapeShowBtn");
+  });
   body.querySelectorAll("[data-season]").forEach(el => el.addEventListener("click", () => {
     browsePath = { kind: "season", show, season: Number(el.dataset.season) };
     renderBrowse();
@@ -631,8 +727,16 @@ function renderSeason(body, show, season) {
       ${likeBadge(ep.like_count)}
       <div class="card-title" title="${esc(ep.scraped_title || ep.title)}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
     </div>`).join("");
-  body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
+  body.innerHTML = `${breadcrumb(crumbs)}
+    <div class="row media-group-actions">
+      <button id="rescrapeSeasonBtn" class="secondary"${groupRescrapeRunning ? " disabled" : ""}><i class="bi bi-arrow-repeat"></i>Re-scrape all episodes</button>
+      <span class="muted">Refresh metadata and artwork for all ${episodes.length} episode${episodes.length === 1 ? "" : "s"} in this season.</span>
+    </div>
+    <div class="media-grid">${cards}</div>`;
   wireBreadcrumb(body, crumbs);
+  document.getElementById("rescrapeSeasonBtn")?.addEventListener("click", () => {
+    rescrapeEpisodeGroup(episodes.map(episode => episode.entry_key), `${show} — ${seasonLabel(season)}`, "rescrapeSeasonBtn");
+  });
   body.querySelectorAll("[data-episode]").forEach(el => el.addEventListener("click", () => {
     browsePath = { kind: "episode-detail", key: el.dataset.episode };
     renderBrowse();

@@ -9,6 +9,9 @@
 package app.swarm.tv.core.client
 
 import app.swarm.tv.core.rest.ApiError
+import app.swarm.tv.core.rest.ActivationStatusResponse
+import app.swarm.tv.core.rest.CreateActivationRequest
+import app.swarm.tv.core.rest.CreateActivationResponse
 import app.swarm.tv.core.rest.JoinSwarmRequest
 import app.swarm.tv.core.rest.RegisterDeviceRequest
 import app.swarm.tv.core.rest.RegisterDeviceResponse
@@ -46,6 +49,12 @@ class StunApiClient(
 
     suspend fun registerDevice(code: String, device: DeviceRegistration): RegisterDeviceResponse =
         postJson("/api/v1/devices/register", RegisterDeviceRequest(code, device), bearer = null)
+
+    suspend fun createActivation(device: DeviceRegistration, accessToken: String? = null): CreateActivationResponse =
+        postJson("/api/v1/activations", CreateActivationRequest(device), bearer = accessToken)
+
+    suspend fun activationStatus(activationId: String, pollToken: String): ActivationStatusResponse =
+        getJson("/api/v1/activations/$activationId", bearer = pollToken)
 
     suspend fun joinSwarm(accessToken: String, code: String): SwarmSummary =
         postJson("/api/v1/swarms/join", JoinSwarmRequest(code), bearer = accessToken)

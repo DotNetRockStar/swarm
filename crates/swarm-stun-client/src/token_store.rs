@@ -32,24 +32,36 @@ impl TokenStore {
     /// `service`/`account` identify the credential in the OS store (e.g.
     /// `("swarm-server", "<device fingerprint>")`); `fallback_path` is used
     /// only if the keyring is unavailable.
-    pub fn new(service: &str, account: &str, fallback_path: PathBuf) -> Result<Self, TokenStoreError> {
+    pub fn new(
+        service: &str,
+        account: &str,
+        fallback_path: PathBuf,
+    ) -> Result<Self, TokenStoreError> {
         let entry = keyring::Entry::new(service, account).map_err(|e| {
             // Entry::new itself only fails on malformed service/account
             // strings, not backend availability — that surfaces per-call.
             std::io::Error::other(e.to_string())
         })?;
-        Ok(Self { entry: Some(entry), fallback_path })
+        Ok(Self {
+            entry: Some(entry),
+            fallback_path,
+        })
     }
 
     /// Skip the OS keyring entirely — always use the permission-restricted
     /// file. For headless deployments with no keyring backend, and for
     /// tests.
     pub fn file_only(fallback_path: PathBuf) -> Self {
-        Self { entry: None, fallback_path }
+        Self {
+            entry: None,
+            fallback_path,
+        }
     }
 
     pub fn save(&self, token: &str) -> Result<(), TokenStoreError> {
-        let Some(entry) = &self.entry else { return write_file(&self.fallback_path, token) };
+        let Some(entry) = &self.entry else {
+            return write_file(&self.fallback_path, token);
+        };
         match entry.set_password(token) {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -60,7 +72,9 @@ impl TokenStore {
     }
 
     pub fn load(&self) -> Result<Option<String>, TokenStoreError> {
-        let Some(entry) = &self.entry else { return read_file(&self.fallback_path) };
+        let Some(entry) = &self.entry else {
+            return read_file(&self.fallback_path);
+        };
         match entry.get_password() {
             Ok(token) => Ok(Some(token)),
             Err(keyring::Error::NoEntry) => read_file(&self.fallback_path),
@@ -76,7 +90,11 @@ impl TokenStore {
             // Best-effort: only the file-removal outcome surfaces below.
             let _ = entry.delete_credential();
         }
-        let file_result = if self.fallback_path.exists() { std::fs::remove_file(&self.fallback_path) } else { Ok(()) };
+        let file_result = if self.fallback_path.exists() {
+            std::fs::remove_file(&self.fallback_path)
+        } else {
+            Ok(())
+        };
         file_result.map_err(TokenStoreError::from)
     }
 }
@@ -130,7 +148,8 @@ mod tests {
 
     #[test]
     fn file_only_store_roundtrips_via_the_public_api() {
-        let path = std::env::temp_dir().join(format!("swarm-token-store-test-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("swarm-token-store-test-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let store = TokenStore::file_only(path.clone());
         assert_eq!(store.load().unwrap(), None);

@@ -17,20 +17,34 @@ use std::time::{Duration, Instant};
 
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRng);
-    Ok(Argon2::default().hash_password(password.as_bytes(), &salt)?.to_string())
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)?
+        .to_string())
 }
 
 pub fn verify_password(password: &str, stored_hash: &str) -> bool {
     PasswordHash::new(stored_hash)
-        .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        .map(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
 /// Small denylist backstop on top of the length rule; a full breached-password
 /// list can replace this later without an API change.
 const COMMON_PASSWORDS: &[&str] = &[
-    "password12", "password123", "qwertyuiop", "1234567890", "letmeincool",
-    "iloveyou12", "adminadmin", "welcome123", "monkey12345", "dragon12345",
+    "password12",
+    "password123",
+    "qwertyuiop",
+    "1234567890",
+    "letmeincool",
+    "iloveyou12",
+    "adminadmin",
+    "welcome123",
+    "monkey12345",
+    "dragon12345",
 ];
 
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
@@ -82,6 +96,41 @@ pub struct BruteForceBlocker {
     state: Mutex<HashMap<IpAddr, Entry>>,
 }
 
+/// Fixed-window successful-allocation limiter. Authentication failure limits
+/// do not stop a valid-looking anonymous caller from filling storage, so
+/// managed-swarm provisioning and TV activation creation use this separate
+/// per-IP budget. Loopback remains exempt for local development and tests.
+pub struct AllocationLimiter {
+    state: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    max: usize,
+    window: Duration,
+}
+
+impl AllocationLimiter {
+    pub fn new(max: usize, window: Duration) -> Self {
+        Self {
+            state: Mutex::new(HashMap::new()),
+            max,
+            window,
+        }
+    }
+
+    pub fn allow(&self, ip: IpAddr) -> bool {
+        if ip.is_loopback() {
+            return true;
+        }
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let entries = state.entry(ip).or_default();
+        entries.retain(|at| now.duration_since(*at) < self.window);
+        if entries.len() >= self.max {
+            return false;
+        }
+        entries.push(now);
+        true
+    }
+}
+
 struct Entry {
     failures: Vec<Instant>,
     blocked_until: Option<Instant>,
@@ -99,7 +148,9 @@ impl Default for BruteForceBlocker {
 
 impl BruteForceBlocker {
     pub fn new() -> Self {
-        Self { state: Mutex::new(HashMap::new()) }
+        Self {
+            state: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn is_blocked(&self, ip: IpAddr) -> bool {
@@ -126,7 +177,10 @@ impl BruteForceBlocker {
         }
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
-        let entry = state.entry(ip).or_insert(Entry { failures: Vec::new(), blocked_until: None });
+        let entry = state.entry(ip).or_insert(Entry {
+            failures: Vec::new(),
+            blocked_until: None,
+        });
         entry.failures.retain(|t| now.duration_since(*t) < WINDOW);
         entry.failures.push(now);
         if entry.failures.len() >= MAX_FAILURES {
@@ -188,5 +242,14 @@ mod tests {
             blocker.record_failure(ip);
         }
         assert!(!blocker.is_blocked(ip));
+    }
+
+    #[test]
+    fn allocation_limiter_enforces_success_budget() {
+        let limiter = AllocationLimiter::new(2, Duration::from_secs(60));
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(limiter.allow(ip));
+        assert!(limiter.allow(ip));
+        assert!(!limiter.allow(ip));
     }
 }

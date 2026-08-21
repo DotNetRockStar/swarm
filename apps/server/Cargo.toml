@@ -1,14 +1,10 @@
 [package]
 name = "swarm-server"
-description = "SWARM media server: library engine + peer QUIC serving. Headless daemon (swarm-serverd) plus the Tauri desktop shell (swarm-server-app)."
+description = "SWARM desktop media server. The server runs inside the Tauri application."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "swarm-serverd"
-
-[[bin]]
-name = "swarm-serverd"
-path = "src/main.rs"
+default-run = "swarm-server-app"
 
 [[bin]]
 name = "swarm-server-app"
@@ -16,15 +12,8 @@ path = "src/gui.rs"
 required-features = ["gui"]
 
 [features]
-default = []
-# rmcp/axum/schemars back the read-only MCP server (see src/mcp.rs) — GUI-only,
-# same as tauri itself: it's started from AppState::core alongside the Tauri
-# app's ServerCore, reading the same settings.json toggle/port the dashboard's
-# AI tab writes. The headless daemon (swarm-serverd) has no settings.json
-# story at all (env-var configured, see config_from_env), so there's nothing
-# for it to read to decide whether to start one — not worth carrying the
-# dependency weight there for a feature it could never turn on.
-gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:rmcp", "dep:axum", "dep:schemars"]
+default = ["gui"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:rmcp", "dep:axum", "dep:schemars"]
 
 [dependencies]
 swarm-core = { workspace = true }
@@ -41,11 +30,15 @@ tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 quinn = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+futures-util = { workspace = true }
+sha1 = "0.10"
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 mdns-sd = "0.21"
-tauri = { version = "2", optional = true }
+tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
 rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }
 axum = { version = "0.8", optional = true }
 schemars = { version = "1", optional = true }

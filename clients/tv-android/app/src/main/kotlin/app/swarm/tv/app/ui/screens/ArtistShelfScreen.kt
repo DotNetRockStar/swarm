@@ -8,9 +8,7 @@
 package app.swarm.tv.app.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -27,7 +25,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -40,12 +37,18 @@ import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
-import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.ArtistGroup
+import app.swarm.tv.core.catalog.MergedEntry
 
 @Composable
-fun ArtistShelfScreen(artists: List<ArtistGroup>, onOpenArtist: (ArtistGroup) -> Unit, onBack: () -> Unit) {
+fun ArtistShelfScreen(
+    artists: List<ArtistGroup>,
+    artworkUrl: (MergedEntry) -> String?,
+    artistPhotoUrl: (MergedEntry) -> String?,
+    onOpenArtist: (ArtistGroup) -> Unit,
+    onBack: () -> Unit,
+) {
     BackHandler(onBack = onBack)
 
     val firstCardFocusRequester = remember { FocusRequester() }
@@ -64,23 +67,22 @@ fun ArtistShelfScreen(artists: List<ArtistGroup>, onOpenArtist: (ArtistGroup) ->
             ) {
                 itemsIndexed(artists) { index, artist ->
                     val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                    val artwork = remember(artist, artworkUrl, artistPhotoUrl) {
+                        artist.artworkUrls(artworkUrl, artistPhotoUrl)
+                    }
                     Card(
                         onClick = { onOpenArtist(artist) },
                         colors = CardDefaults.colors(containerColor = SwarmSurface),
                         modifier = focusModifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(16.dp)) {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(8.dp)).background(SwarmSurfaceMuted),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    artist.artist.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                                    color = SwarmAccent,
-                                    fontSize = 30.sp,
-                                    fontWeight = FontWeight.Black,
-                                )
-                            }
+                            ArtworkImage(
+                                label = artist.artist,
+                                placeholderType = "Artist",
+                                primaryUrl = artwork.artistPhoto,
+                                fallbackUrl = artwork.albumCoverFallback,
+                                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(8.dp)),
+                            )
                             Spacer(Modifier.height(10.dp))
                             Text(artist.artist, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                             Text("${artist.albums.size} album" + if (artist.albums.size == 1) "" else "s", color = SwarmMuted, fontSize = 11.sp)

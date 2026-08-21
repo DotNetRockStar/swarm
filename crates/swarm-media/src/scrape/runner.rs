@@ -15,6 +15,7 @@
 use crate::roots::SharedRootResolver;
 use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
+use crate::scrape::lrclib::{LrclibClient, LrclibError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
 use crate::scrape::tmdb::{ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
 use crate::scrape::wikimedia::WikimediaClient;
@@ -38,6 +39,7 @@ pub struct ScrapeConfig {
     pub musicbrainz_base: Option<String>,
     pub coverart_base: Option<String>,
     pub wikimedia_base: Option<String>,
+    pub lrclib_base: Option<String>,
 }
 
 /// One entry (or, for a music `(artist, album)` group, one representative
@@ -120,7 +122,11 @@ pub struct ScrapeProgress {
 
 impl ScrapeProgress {
     fn new(sender: UnboundedSender<ScrapeProgressEvent>, total: u64) -> Self {
-        Self { sender, total, processed: AtomicU64::new(0) }
+        Self {
+            sender,
+            total,
+            processed: AtomicU64::new(0),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -151,16 +157,47 @@ impl ScrapeProgress {
         });
     }
 
-    fn matched(&self, entry_key: &str, title: &str, scraped_title: Option<String>, genres: Vec<String>, cast: Vec<CastMember>) {
-        self.emit(entry_key, title, ScrapeOutcome::Matched, None, scraped_title, genres, cast);
+    fn matched(
+        &self,
+        entry_key: &str,
+        title: &str,
+        scraped_title: Option<String>,
+        genres: Vec<String>,
+        cast: Vec<CastMember>,
+    ) {
+        self.emit(
+            entry_key,
+            title,
+            ScrapeOutcome::Matched,
+            None,
+            scraped_title,
+            genres,
+            cast,
+        );
     }
 
     fn issue(&self, entry_key: &str, title: &str, outcome: ScrapeOutcome, reason: String) {
-        self.emit(entry_key, title, outcome, Some(reason), None, vec![], vec![]);
+        self.emit(
+            entry_key,
+            title,
+            outcome,
+            Some(reason),
+            None,
+            vec![],
+            vec![],
+        );
     }
 
     fn skipped(&self, entry_key: &str, title: &str) {
-        self.emit(entry_key, title, ScrapeOutcome::Skipped, None, None, vec![], vec![]);
+        self.emit(
+            entry_key,
+            title,
+            ScrapeOutcome::Skipped,
+            None,
+            None,
+            vec![],
+            vec![],
+        );
     }
 }
 
@@ -177,10 +214,21 @@ pub async fn run_bulk_scrape(
     // per entry regardless of prior state, so simply widening which entries
     // are handed in is the whole difference; no separate "overwrite" branch
     // needed in the per-entry scraping logic itself.
-    let entries = if force { library.list().await? } else { library.missing_scrape().await? };
-    let (videos, tracks): (Vec<EntryRecord>, Vec<EntryRecord>) =
-        entries.into_iter().partition(|e| matches!(e.kind, MediaKind::Movie | MediaKind::Episode));
-    let progress = progress_tx.map(|sender| ScrapeProgress::new(sender, (videos.len() + tracks.len()) as u64));
+    let entries = if force {
+        library.list().await?
+    } else {
+        library.missing_scrape().await?
+    };
+    let (videos, tracks): (Vec<EntryRecord>, Vec<EntryRecord>) = entries
+        .into_iter()
+        .partition(|e| matches!(e.kind, MediaKind::Movie | MediaKind::Episode));
+    let lyric_tracks = if force {
+        tracks.clone()
+    } else {
+        library.missing_track_lyrics().await?
+    };
+    let progress =
+        progress_tx.map(|sender| ScrapeProgress::new(sender, (videos.len() + tracks.len()) as u64));
 
     // Movies/episodes (TMDb) and music (MusicBrainz/Cover Art Archive/
     // Wikimedia) hit entirely independent external services with
@@ -201,8 +249,27 @@ pub async fn run_bulk_scrape(
     let mut video_report = BulkScrapeReport::default();
     let mut track_report = BulkScrapeReport::default();
     let (video_result, track_result) = tokio::join!(
-        scrape_videos(library, roots, config, &videos, cancel, &mut video_report, progress.as_ref()),
-        scrape_tracks(library, roots, config, &tracks, cancel, &mut track_report, progress.as_ref()),
+        scrape_videos(
+            library,
+            roots,
+            config,
+            &videos,
+            cancel,
+            &mut video_report,
+            progress.as_ref()
+        ),
+        scrape_tracks(
+            library,
+            roots,
+            config,
+            TrackScrapeEntries {
+                albums: &tracks,
+                lyrics: &lyric_tracks
+            },
+            cancel,
+            &mut track_report,
+            progress.as_ref(),
+        ),
     );
     video_result?;
     track_result?;
@@ -229,18 +296,64 @@ pub async fn run_bulk_scrape(
 /// word, e.g. wouldn't false-positive on a partial match inside a longer
 /// word) and trims what's left.
 const SEARCH_QUERY_NOISE_TOKENS: &[&str] = &[
-    "480p", "720p", "1080p", "2160p", "4k", "bluray", "blu-ray", "webrip", "web-dl", "webdl",
-    "hdtv", "dvdrip", "brrip", "bdrip", "x264", "x265", "h264", "h265", "hevc", "avc", "xvid",
-    "10bit", "8bit", "ddp5", "ddp", "dts", "aac", "ac3", "atmos",
+    "480p",
+    "720p",
+    "1080p",
+    "2160p",
+    "4k",
+    "bluray",
+    "blu-ray",
+    "webrip",
+    "web-dl",
+    "webdl",
+    "hdtv",
+    "dvdrip",
+    "brrip",
+    "bdrip",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "avc",
+    "xvid",
+    "10bit",
+    "8bit",
+    "ddp5",
+    "ddp",
+    "dts",
+    "aac",
+    "ac3",
+    "atmos",
     // Scene-release qualifier tags — describe the *release*, not the movie,
     // but (unlike the codec/resolution tags above) don't reliably follow
     // right after the title: "Proper" can sit between the title and the
     // resolution tag (e.g. "28 Years Later Proper 1080p..."), which used to
     // survive into the search query and broke an otherwise-correct match.
-    "proper", "repack", "rerip", "internal", "limited", "unrated", "extended", "remastered",
-    "theatrical", "directors.cut", "uncut", "retail", "readnfo", "nfofix", "subbed", "dubbed",
+    "proper",
+    "repack",
+    "rerip",
+    "internal",
+    "limited",
+    "unrated",
+    "extended",
+    "remastered",
+    "theatrical",
+    "directors.cut",
+    "uncut",
+    "retail",
+    "readnfo",
+    "nfofix",
+    "subbed",
+    "dubbed",
     // Streaming-service source tags, same reasoning.
-    "amzn", "nf", "dsnp", "hulu", "hmax", "atvp", "pcok",
+    "amzn",
+    "nf",
+    "dsnp",
+    "hulu",
+    "hmax",
+    "atvp",
+    "pcok",
 ];
 
 /// See [`SEARCH_QUERY_NOISE_TOKENS`]. Splits on whitespace, drops every
@@ -250,7 +363,10 @@ fn search_query_for(title: &str) -> String {
     let mut kept = Vec::new();
     for word in title.split_whitespace() {
         let lower = word.to_lowercase();
-        if SEARCH_QUERY_NOISE_TOKENS.iter().any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag) {
+        if SEARCH_QUERY_NOISE_TOKENS
+            .iter()
+            .any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag)
+        {
             break;
         }
         kept.push(word);
@@ -281,7 +397,9 @@ async fn scrape_videos(
         return Ok(());
     };
     let tmdb = match (&config.tmdb_api_base, &config.tmdb_image_base) {
-        (Some(api_base), Some(image_base)) => TmdbClient::with_base_urls(api_key.clone(), api_base, image_base),
+        (Some(api_base), Some(image_base)) => {
+            TmdbClient::with_base_urls(api_key.clone(), api_base, image_base)
+        }
         _ => TmdbClient::new(api_key.clone()),
     };
     // One TMDb TV lookup per show, shared across every episode entry —
@@ -293,9 +411,15 @@ async fn scrape_videos(
             break;
         }
         let outcome = match entry.kind {
-            MediaKind::Movie => tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year).await,
+            MediaKind::Movie => {
+                tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year)
+                    .await
+            }
             MediaKind::Episode => {
-                let raw_query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
+                let raw_query = entry
+                    .show_title
+                    .clone()
+                    .unwrap_or_else(|| entry.title.clone());
                 let query = search_query_for(&raw_query);
                 let key = query.to_lowercase();
                 if !tv_cache.contains_key(&key) {
@@ -308,7 +432,14 @@ async fn scrape_videos(
         };
         match outcome {
             Ok(scraped) => {
-                library.set_scrape_result(&entry.entry_key, Some(&scraped.title), &scraped.genres, &scraped.cast).await?;
+                library
+                    .set_scrape_result(
+                        &entry.entry_key,
+                        Some(&scraped.title),
+                        &scraped.genres,
+                        &scraped.cast,
+                    )
+                    .await?;
                 if let Some(overview) = &scraped.overview {
                     library.set_overview(&entry.entry_key, overview).await?;
                 }
@@ -316,31 +447,66 @@ async fn scrape_videos(
                     library.set_rating(&entry.entry_key, certification).await?;
                 }
                 if let Some(url) = &scraped.poster_url {
-                    save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url).await;
+                    save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url)
+                        .await;
                 }
                 if let Some(url) = &scraped.backdrop_url {
-                    save_video_artwork(library, roots, entry, ArtworkKind::Backdrop, "backdrop", url).await;
+                    save_video_artwork(
+                        library,
+                        roots,
+                        entry,
+                        ArtworkKind::Backdrop,
+                        "backdrop",
+                        url,
+                    )
+                    .await;
                 }
                 report.matched += 1;
                 if let Some(p) = progress {
-                    p.matched(&entry.entry_key, &entry.title, Some(scraped.title.clone()), scraped.genres.clone(), scraped.cast.clone());
+                    p.matched(
+                        &entry.entry_key,
+                        &entry.title,
+                        Some(scraped.title.clone()),
+                        scraped.genres.clone(),
+                        scraped.cast.clone(),
+                    );
                 }
             }
             Err(TmdbError::NotFound) => {
-                library.set_scrape_result(&entry.entry_key, None, &[], &[]).await?;
+                library
+                    .set_scrape_result(&entry.entry_key, None, &[], &[])
+                    .await?;
                 report.not_found += 1;
                 let reason = "no match found on TMDb".to_string();
-                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason: reason.clone() });
+                report.issues.push(ScrapeIssue {
+                    entry_key: entry.entry_key.clone(),
+                    title: entry.title.clone(),
+                    reason: reason.clone(),
+                });
                 if let Some(p) = progress {
-                    p.issue(&entry.entry_key, &entry.title, ScrapeOutcome::NotFound, reason);
+                    p.issue(
+                        &entry.entry_key,
+                        &entry.title,
+                        ScrapeOutcome::NotFound,
+                        reason,
+                    );
                 }
             }
             Err(TmdbError::Unavailable(reason)) => {
                 tracing::warn!(entry = %entry.entry_key, %reason, "tmdb unavailable, will retry next run");
                 report.failed += 1;
-                report.issues.push(ScrapeIssue { entry_key: entry.entry_key.clone(), title: entry.title.clone(), reason: reason.clone() });
+                report.issues.push(ScrapeIssue {
+                    entry_key: entry.entry_key.clone(),
+                    title: entry.title.clone(),
+                    reason: reason.clone(),
+                });
                 if let Some(p) = progress {
-                    p.issue(&entry.entry_key, &entry.title, ScrapeOutcome::Failed, reason);
+                    p.issue(
+                        &entry.entry_key,
+                        &entry.title,
+                        ScrapeOutcome::Failed,
+                        reason,
+                    );
                 }
             }
         }
@@ -356,9 +522,16 @@ async fn save_video_artwork(
     label: &str,
     url: &str,
 ) {
-    let Ok(bytes) = download_bytes(url).await else { return };
-    let filename = format!("{}-tmdb-{label}.jpg", artwork::sanitize_stem(artwork::file_stem(&entry.relative_path)));
-    if let Ok(relative) = artwork::save_artwork(roots, &entry.relative_path, &filename, &bytes).await {
+    let Ok(bytes) = download_bytes(url).await else {
+        return;
+    };
+    let filename = format!(
+        "{}-tmdb-{label}.jpg",
+        artwork::sanitize_stem(artwork::file_stem(&entry.relative_path))
+    );
+    if let Ok(relative) =
+        artwork::save_artwork(roots, &entry.relative_path, &filename, &bytes).await
+    {
         let _ = library.set_artwork(&entry.entry_key, kind, &relative).await;
     }
 }
@@ -370,14 +543,33 @@ struct MusicScrapers {
     mb: MusicBrainzClient,
     coverart: CoverArtClient,
     wikimedia: WikimediaClient,
+    lrclib: LrclibClient,
+}
+
+struct TrackScrapeEntries<'a> {
+    albums: &'a [EntryRecord],
+    lyrics: &'a [EntryRecord],
 }
 
 impl MusicScrapers {
     fn from_config(config: &ScrapeConfig) -> Self {
         Self {
-            mb: config.musicbrainz_base.as_deref().map_or_else(MusicBrainzClient::new, MusicBrainzClient::with_base_url),
-            coverart: config.coverart_base.as_deref().map_or_else(CoverArtClient::new, CoverArtClient::with_base_url),
-            wikimedia: config.wikimedia_base.as_deref().map_or_else(WikimediaClient::new, WikimediaClient::with_base_url),
+            mb: config
+                .musicbrainz_base
+                .as_deref()
+                .map_or_else(MusicBrainzClient::new, MusicBrainzClient::with_base_url),
+            coverart: config
+                .coverart_base
+                .as_deref()
+                .map_or_else(CoverArtClient::new, CoverArtClient::with_base_url),
+            wikimedia: config
+                .wikimedia_base
+                .as_deref()
+                .map_or_else(WikimediaClient::new, WikimediaClient::with_base_url),
+            lrclib: config
+                .lrclib_base
+                .as_deref()
+                .map_or_else(LrclibClient::new, LrclibClient::with_base_url),
         }
     }
 }
@@ -386,7 +578,7 @@ async fn scrape_tracks(
     library: &Library,
     roots: &SharedRootResolver,
     config: &ScrapeConfig,
-    entries: &[EntryRecord],
+    entries: TrackScrapeEntries<'_>,
     cancel: &AtomicBool,
     report: &mut BulkScrapeReport,
     progress: Option<&ScrapeProgress>,
@@ -394,10 +586,13 @@ async fn scrape_tracks(
     let scrapers = MusicScrapers::from_config(config);
 
     let mut groups: HashMap<(String, String), Vec<&EntryRecord>> = HashMap::new();
-    for entry in entries {
+    for entry in entries.albums {
         match (&entry.artist, &entry.album) {
             (Some(artist), Some(album)) if !artist.is_empty() && !album.is_empty() => {
-                groups.entry((artist.clone(), album.clone())).or_default().push(entry);
+                groups
+                    .entry((artist.clone(), album.clone()))
+                    .or_default()
+                    .push(entry);
             }
             _ => {
                 report.skipped += 1;
@@ -412,7 +607,65 @@ async fn scrape_tracks(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        scrape_one_album_group(library, roots, &scrapers, &artist, &album, &group, report, progress).await?;
+        scrape_one_album_group(
+            library, roots, &scrapers, &artist, &album, &group, report, progress,
+        )
+        .await?;
+    }
+    scrape_track_lyrics(library, &scrapers.lrclib, entries.lyrics, cancel).await?;
+    Ok(())
+}
+
+/// Fetch lyrics one track at a time. LRCLIB's exact endpoint uses duration
+/// alongside tags, so this runs after scanning/ffprobe and does not guess
+/// when any required field is absent. Provider outages are retryable; a
+/// definitive 404 is cached as a no-match marker.
+async fn scrape_track_lyrics(
+    library: &Library,
+    lrclib: &LrclibClient,
+    entries: &[EntryRecord],
+    cancel: &AtomicBool,
+) -> sqlx::Result<()> {
+    let mut made_request = false;
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let (Some(artist), Some(album), Some(duration_secs)) = (
+            entry.artist.as_deref(),
+            entry.album.as_deref(),
+            entry.duration_secs,
+        ) else {
+            continue;
+        };
+        if artist.is_empty() || album.is_empty() || duration_secs <= 0.0 {
+            continue;
+        }
+        // LRCLIB explicitly asks batch clients to leave 200–500 ms between
+        // sequential requests. This remains intentionally serial and keeps
+        // a full-library scrape considerate of the free public service.
+        if made_request {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        made_request = true;
+        match lrclib
+            .lookup(&entry.title, artist, album, duration_secs)
+            .await
+        {
+            Ok(lyrics) => library.set_track_lyrics(&entry.entry_key, &lyrics).await?,
+            Err(LrclibError::NotFound) => {
+                library
+                    .mark_track_lyrics_not_found(&entry.entry_key)
+                    .await?
+            }
+            Err(LrclibError::RateLimited(retry_after)) => {
+                tracing::warn!(entry_key = %entry.entry_key, title = %entry.title, ?retry_after, "lrclib rate limited the scrape; honoring Retry-After");
+                tokio::time::sleep(retry_after).await;
+            }
+            Err(LrclibError::Unavailable(reason)) => {
+                tracing::warn!(entry_key = %entry.entry_key, title = %entry.title, %reason, "lrclib unavailable, will retry next run");
+            }
+        }
     }
     Ok(())
 }
@@ -465,7 +718,11 @@ fn search_query_for_album(artist: &str, album: &str) -> String {
         break;
     }
     let cleaned = s.trim_end_matches('-').trim();
-    if cleaned.is_empty() { album.to_string() } else { cleaned.to_string() }
+    if cleaned.is_empty() {
+        album.to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// One (artist, album) group's worth of MusicBrainz + Cover Art Archive +
@@ -485,15 +742,35 @@ async fn scrape_one_album_group(
     report: &mut BulkScrapeReport,
     progress: Option<&ScrapeProgress>,
 ) -> sqlx::Result<()> {
-    let MusicScrapers { mb, coverart, wikimedia } = scrapers;
-    match mb.search_release(artist, &search_query_for_album(artist, album)).await {
+    let MusicScrapers {
+        mb,
+        coverart,
+        wikimedia,
+        ..
+    } = scrapers;
+    match mb
+        .search_release(artist, &search_query_for_album(artist, album))
+        .await
+    {
         Err(MbError::NotFound) => {
             for track in group {
-                library.set_scrape_result(&track.entry_key, None, &[], &[]).await?;
-                let reason = format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\"");
-                report.issues.push(ScrapeIssue { entry_key: track.entry_key.clone(), title: track.title.clone(), reason: reason.clone() });
+                library
+                    .set_scrape_result(&track.entry_key, None, &[], &[])
+                    .await?;
+                let reason =
+                    format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\"");
+                report.issues.push(ScrapeIssue {
+                    entry_key: track.entry_key.clone(),
+                    title: track.title.clone(),
+                    reason: reason.clone(),
+                });
                 if let Some(p) = progress {
-                    p.issue(&track.entry_key, &track.title, ScrapeOutcome::NotFound, reason.clone());
+                    p.issue(
+                        &track.entry_key,
+                        &track.title,
+                        ScrapeOutcome::NotFound,
+                        reason.clone(),
+                    );
                 }
             }
             report.not_found += group.len() as u64;
@@ -501,38 +778,70 @@ async fn scrape_one_album_group(
         Err(MbError::Unavailable(reason)) => {
             tracing::warn!(%artist, %album, %reason, "musicbrainz unavailable, will retry next run");
             for track in group {
-                report.issues.push(ScrapeIssue { entry_key: track.entry_key.clone(), title: track.title.clone(), reason: reason.clone() });
+                report.issues.push(ScrapeIssue {
+                    entry_key: track.entry_key.clone(),
+                    title: track.title.clone(),
+                    reason: reason.clone(),
+                });
                 if let Some(p) = progress {
-                    p.issue(&track.entry_key, &track.title, ScrapeOutcome::Failed, reason.clone());
+                    p.issue(
+                        &track.entry_key,
+                        &track.title,
+                        ScrapeOutcome::Failed,
+                        reason.clone(),
+                    );
                 }
             }
             report.failed += group.len() as u64;
         }
         Ok(release_mbid) => {
             let details = mb.release_lookup(&release_mbid).await.ok();
-            let genres = details.as_ref().map(|d| d.genres.clone()).unwrap_or_default();
+            let genres = details
+                .as_ref()
+                .map(|d| d.genres.clone())
+                .unwrap_or_default();
             for track in group {
-                library.set_scrape_result(&track.entry_key, None, &genres, &[]).await?;
+                library
+                    .set_scrape_result(&track.entry_key, None, &genres, &[])
+                    .await?;
             }
             report.matched += group.len() as u64;
 
             if let Some(first) = group.first() {
                 if let Ok(cover) = coverart.front_cover(&release_mbid).await {
-                    if let Ok(relative) =
-                        artwork::save_artwork(roots, &first.relative_path, "album-cover.jpg", &cover).await
+                    if let Ok(relative) = artwork::save_artwork(
+                        roots,
+                        &first.relative_path,
+                        "album-cover.jpg",
+                        &cover,
+                    )
+                    .await
                     {
                         for track in group {
-                            let _ = library.set_artwork(&track.entry_key, ArtworkKind::Cover, &relative).await;
+                            let _ = library
+                                .set_artwork(&track.entry_key, ArtworkKind::Cover, &relative)
+                                .await;
                         }
                     }
                 }
                 if let Some(artist_mbid) = details.as_ref().and_then(|d| d.artist_mbid.as_deref()) {
                     if let Some(bytes) = fetch_artist_photo(mb, wikimedia, artist_mbid).await {
-                        if let Ok(relative) =
-                            artwork::save_artwork(roots, &first.relative_path, "artist-photo.jpg", &bytes).await
+                        if let Ok(relative) = artwork::save_artwork(
+                            roots,
+                            &first.relative_path,
+                            "artist-photo.jpg",
+                            &bytes,
+                        )
+                        .await
                         {
                             for track in group {
-                                let _ = library.set_artwork(&track.entry_key, ArtworkKind::ArtistPhoto, &relative).await;
+                                let _ = library
+                                    .set_artwork(
+                                        &track.entry_key,
+                                        ArtworkKind::ArtistPhoto,
+                                        &relative,
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -564,9 +873,14 @@ pub async fn scrape_one_video(
     entry: &EntryRecord,
     tmdb_override: Option<TmdbOverride>,
 ) -> Result<ScrapedVideo, ScrapeOneError> {
-    let api_key = config.tmdb_api_key.as_ref().ok_or(ScrapeOneError::NoApiKey)?;
+    let api_key = config
+        .tmdb_api_key
+        .as_ref()
+        .ok_or(ScrapeOneError::NoApiKey)?;
     let tmdb = match (&config.tmdb_api_base, &config.tmdb_image_base) {
-        (Some(api_base), Some(image_base)) => TmdbClient::with_base_urls(api_key.clone(), api_base, image_base),
+        (Some(api_base), Some(image_base)) => {
+            TmdbClient::with_base_urls(api_key.clone(), api_base, image_base)
+        }
         _ => TmdbClient::new(api_key.clone()),
     };
     let media_type = match entry.kind {
@@ -580,15 +894,29 @@ pub async fn scrape_one_video(
             tmdb.details_by_id(id, media_type).await?
         }
         None => match entry.kind {
-            MediaKind::Movie => tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year).await?,
+            MediaKind::Movie => {
+                tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year)
+                    .await?
+            }
             MediaKind::Episode => {
-                let raw_query = entry.show_title.clone().unwrap_or_else(|| entry.title.clone());
-                tmdb.search_and_fetch_tv(&search_query_for(&raw_query)).await?
+                let raw_query = entry
+                    .show_title
+                    .clone()
+                    .unwrap_or_else(|| entry.title.clone());
+                tmdb.search_and_fetch_tv(&search_query_for(&raw_query))
+                    .await?
             }
             MediaKind::Track => unreachable!("checked above"),
         },
     };
-    library.set_scrape_result(&entry.entry_key, Some(&scraped.title), &scraped.genres, &scraped.cast).await?;
+    library
+        .set_scrape_result(
+            &entry.entry_key,
+            Some(&scraped.title),
+            &scraped.genres,
+            &scraped.cast,
+        )
+        .await?;
     if let Some(overview) = &scraped.overview {
         library.set_overview(&entry.entry_key, overview).await?;
     }
@@ -599,7 +927,15 @@ pub async fn scrape_one_video(
         save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url).await;
     }
     if let Some(url) = &scraped.backdrop_url {
-        save_video_artwork(library, roots, entry, ArtworkKind::Backdrop, "backdrop", url).await;
+        save_video_artwork(
+            library,
+            roots,
+            entry,
+            ArtworkKind::Backdrop,
+            "backdrop",
+            url,
+        )
+        .await;
     }
     Ok(scraped)
 }
@@ -623,7 +959,24 @@ pub async fn scrape_one_track(
     let group: Vec<&EntryRecord> = siblings.iter().collect();
     let scrapers = MusicScrapers::from_config(config);
     let mut report = BulkScrapeReport::default();
-    scrape_one_album_group(library, roots, &scrapers, artist, album, &group, &mut report, None).await?;
+    scrape_one_album_group(
+        library,
+        roots,
+        &scrapers,
+        artist,
+        album,
+        &group,
+        &mut report,
+        None,
+    )
+    .await?;
+    scrape_track_lyrics(
+        library,
+        &scrapers.lrclib,
+        &siblings,
+        &AtomicBool::new(false),
+    )
+    .await?;
     Ok(report)
 }
 
@@ -648,7 +1001,11 @@ pub enum ScrapeOneError {
 /// Best-effort artist photo: MusicBrainz artist -> Commons file relation ->
 /// Wikimedia URL resolution -> download. Any step failing just means no
 /// photo this run; it never affects match/not-found/failed accounting.
-async fn fetch_artist_photo(mb: &MusicBrainzClient, wikimedia: &WikimediaClient, artist_mbid: &str) -> Option<Vec<u8>> {
+async fn fetch_artist_photo(
+    mb: &MusicBrainzClient,
+    wikimedia: &WikimediaClient,
+    artist_mbid: &str,
+) -> Option<Vec<u8>> {
     let artist = mb.artist_lookup(artist_mbid).await.ok()?;
     let commons_file = artist.commons_file?;
     let url = wikimedia.resolve_file_url(&commons_file).await.ok()?;
@@ -656,11 +1013,20 @@ async fn fetch_artist_photo(mb: &MusicBrainzClient, wikimedia: &WikimediaClient,
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>, CoverArtError> {
-    let response = reqwest::get(url).await.map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
     if !response.status().is_success() {
-        return Err(CoverArtError::Unavailable(format!("download returned {}", response.status())));
+        return Err(CoverArtError::Unavailable(format!(
+            "download returned {}",
+            response.status()
+        )));
     }
-    response.bytes().await.map(|b| b.to_vec()).map_err(|e| CoverArtError::Unavailable(e.to_string()))
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| CoverArtError::Unavailable(e.to_string()))
 }
 
 #[cfg(test)]
@@ -681,7 +1047,10 @@ mod tests {
         // Both queries below are real filenames that returned zero TMDb
         // results with the noise attached and matched immediately once
         // stripped (verified live against the real API, not assumed).
-        assert_eq!(search_query_for("10 Cloverfield Lane 1080p BluRay x264"), "10 Cloverfield Lane");
+        assert_eq!(
+            search_query_for("10 Cloverfield Lane 1080p BluRay x264"),
+            "10 Cloverfield Lane"
+        );
         assert_eq!(
             search_query_for("28 Days Later 1080p BluRay DDP5 1 x265 10bit-GalaxyRG265"),
             "28 Days Later"
@@ -725,8 +1094,14 @@ mod tests {
 
     #[test]
     fn album_query_strips_leading_year_and_trailing_catalog_code() {
-        assert_eq!(search_query_for_album("ATB", "2004 - No Silence (AVTCD-95770)"), "No Silence");
-        assert_eq!(search_query_for_album("ATB", "2003 - Addicted To Music (BANGCD029)"), "Addicted To Music");
+        assert_eq!(
+            search_query_for_album("ATB", "2004 - No Silence (AVTCD-95770)"),
+            "No Silence"
+        );
+        assert_eq!(
+            search_query_for_album("ATB", "2003 - Addicted To Music (BANGCD029)"),
+            "Addicted To Music"
+        );
     }
 
     #[test]
@@ -736,7 +1111,10 @@ mod tests {
         // stripping the redundant artist prefix too ("The Drums") found
         // the correct release.
         assert_eq!(
-            search_query_for_album("Cosmic Gate", "1999 - Cosmic Gate - The Drums (7243 886923 2 8)"),
+            search_query_for_album(
+                "Cosmic Gate",
+                "1999 - Cosmic Gate - The Drums (7243 886923 2 8)"
+            ),
             "The Drums"
         );
     }
@@ -744,7 +1122,10 @@ mod tests {
     #[test]
     fn album_query_strips_multiple_trailing_bracket_groups() {
         assert_eq!(
-            search_query_for_album("Kyau & Albert", "2009 - Kyau & Albert - Best Of 2002-2009 (EUPH100CD) [CD]"),
+            search_query_for_album(
+                "Kyau & Albert",
+                "2009 - Kyau & Albert - Best Of 2002-2009 (EUPH100CD) [CD]"
+            ),
             "Best Of 2002-2009"
         );
     }
@@ -756,7 +1137,10 @@ mod tests {
 
     #[test]
     fn album_query_that_is_entirely_noise_falls_back_to_the_original() {
-        assert_eq!(search_query_for_album("ATB", "2004 - (CATALOG-1)"), "2004 - (CATALOG-1)");
+        assert_eq!(
+            search_query_for_album("ATB", "2004 - (CATALOG-1)"),
+            "2004 - (CATALOG-1)"
+        );
     }
 
     fn fixture_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -773,9 +1157,26 @@ mod tests {
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
 
-        let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None, false).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &ScrapeConfig::default(),
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            BulkScrapeReport {
+                matched: 0,
+                not_found: 0,
+                failed: 0,
+                skipped: 1,
+                issues: vec![]
+            }
+        );
         // Skipped entries stay unscraped so a later run (with a key) retries them.
         assert_eq!(library.missing_scrape().await.unwrap().len(), 1);
     }
@@ -812,8 +1213,26 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}/img")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 1, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            BulkScrapeReport {
+                matched: 1,
+                not_found: 0,
+                failed: 0,
+                skipped: 0,
+                issues: vec![]
+            }
+        );
 
         let entry = &library.list().await.unwrap()[0];
         assert_eq!(entry.scraped_title.as_deref(), Some("Heat"));
@@ -821,9 +1240,16 @@ mod tests {
         assert_eq!(entry.cast.len(), 1);
         assert_eq!(entry.cast[0].name, "Al Pacino");
         assert_eq!(entry.cast[0].character.as_deref(), Some("Vincent Hanna"));
-        assert_eq!(entry.overview.as_deref(), Some("A group of professional bank robbers start to feel the heat from police."));
+        assert_eq!(
+            entry.overview.as_deref(),
+            Some("A group of professional bank robbers start to feel the heat from police.")
+        );
         assert_eq!(entry.artwork_version, 1);
-        let (art_path, art_version) = library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().unwrap();
+        let (art_path, art_version) = library
+            .artwork(&entry.entry_key, ArtworkKind::Poster)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(art_version, 1);
         assert_eq!(std::fs::read(root.join(&art_path)).unwrap(), vec![9, 9, 9]);
         assert!(library.missing_scrape().await.unwrap().is_empty());
@@ -841,15 +1267,37 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
-            .route("/movie/1", get(|| async { Json(json!({"title": "Wrong Match", "genres": []})) }))
-            .route("/movie/2", get(|| async { Json(json!({"title": "Heat", "genres": [{"name": "Crime"}]})) }));
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 1}]})) }),
+            )
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "Wrong Match", "genres": []})) }),
+            )
+            .route(
+                "/movie/2",
+                get(|| async { Json(json!({"title": "Heat", "genres": [{"name": "Crime"}]})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let config =
-            ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
 
         // First pass: bulk scrape matches the wrong title (simulating a bad match).
-        run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         let entry = library.list().await.unwrap().into_iter().next().unwrap();
         assert_eq!(entry.scraped_title.as_deref(), Some("Wrong Match"));
 
@@ -857,8 +1305,15 @@ mod tests {
         // succeed even though the entry is already "processed" per
         // missing_scrape, and must overwrite the previous (wrong) result.
         assert!(library.missing_scrape().await.unwrap().is_empty());
-        let scraped =
-            scrape_one_video(&library, &resolver(&root), &config, &entry, Some(TmdbOverride::Id(2))).await.unwrap();
+        let scraped = scrape_one_video(
+            &library,
+            &resolver(&root),
+            &config,
+            &entry,
+            Some(TmdbOverride::Id(2)),
+        )
+        .await
+        .unwrap();
         assert_eq!(scraped.title, "Heat");
         let updated = library.get(&entry.entry_key).await.unwrap().unwrap();
         assert_eq!(updated.scraped_title.as_deref(), Some("Heat"));
@@ -877,23 +1332,70 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
-            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": []})) }));
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 1}]})) }),
+            )
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "Heat", "genres": []})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let config =
-            ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
 
-        let first = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        let first = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(first.matched, 1);
-        assert!(library.missing_scrape().await.unwrap().is_empty(), "must be marked processed");
+        assert!(
+            library.missing_scrape().await.unwrap().is_empty(),
+            "must be marked processed"
+        );
 
         // Default (force: false) must not touch an already-processed entry.
-        let second = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
-        assert_eq!(second, BulkScrapeReport::default(), "nothing left to do without force");
+        let second = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            second,
+            BulkScrapeReport::default(),
+            "nothing left to do without force"
+        );
 
         // force: true must re-scrape it anyway, even though it's already processed.
-        let third = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, true).await.unwrap();
-        assert_eq!(third.matched, 1, "force must re-scrape an already-processed entry");
+        let third = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            third.matched, 1,
+            "force must re-scrape an already-processed entry"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -910,17 +1412,26 @@ mod tests {
         // and fail the test, proving the override path never calls search.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let router = Router::new().route("/movie/42", get(|| async { Json(json!({"title": "Direct Hit"})) }));
+        let router = Router::new().route(
+            "/movie/42",
+            get(|| async { Json(json!({"title": "Direct Hit"})) }),
+        );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let config =
-            ScrapeConfig { tmdb_api_key: Some("key".into()), tmdb_api_base: Some(format!("http://{addr}")), tmdb_image_base: Some(format!("http://{addr}")), ..Default::default() };
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
 
         let scraped = scrape_one_video(
             &library,
             &resolver(&root),
             &config,
             &entry,
-            Some(TmdbOverride::Url("https://www.themoviedb.org/movie/42-direct-hit".to_string())),
+            Some(TmdbOverride::Url(
+                "https://www.themoviedb.org/movie/42-direct-hit".to_string(),
+            )),
         )
         .await
         .unwrap();
@@ -934,10 +1445,21 @@ mod tests {
         std::fs::write(root.join("movies/Foo (2020)/Foo.2020.mkv"), vec![0u8; 10]).unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
-        library.set_scrape_result(&library.list().await.unwrap()[0].entry_key, Some("Existing Title"), &[], &[]).await.unwrap();
+        library
+            .set_scrape_result(
+                &library.list().await.unwrap()[0].entry_key,
+                Some("Existing Title"),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
         let entry = library.list().await.unwrap().into_iter().next().unwrap();
 
-        let config = ScrapeConfig { tmdb_api_key: Some("key".into()), ..Default::default() };
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            ..Default::default()
+        };
         let result = scrape_one_video(
             &library,
             &resolver(&root),
@@ -957,8 +1479,16 @@ mod tests {
     async fn pinpoint_track_rescrape_resyncs_the_whole_album_group() {
         let (root, db_path) = fixture_dirs("pinpoint-track");
         std::fs::create_dir_all(root.join("music/Pink Floyd/The Wall")).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"), vec![1u8; 10]).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"), vec![2u8; 10]).unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"),
+            vec![2u8; 10],
+        )
+        .unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
 
@@ -966,14 +1496,34 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mb_base = format!("http://{addr}/mb");
         let router = Router::new()
-            .route("/mb/release/", get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }))
-            .route("/mb/release/rel-1", get(|| async { Json(json!({"genres": [{"name": "Rock"}], "artist-credit": []})) }));
+            .route(
+                "/mb/release/",
+                get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }),
+            )
+            .route(
+                "/mb/release/rel-1",
+                get(|| async { Json(json!({"genres": [{"name": "Rock"}], "artist-credit": []})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let entries = library.list().await.unwrap();
-        let config = ScrapeConfig { musicbrainz_base: Some(mb_base), ..Default::default() };
-        let report = scrape_one_track(&library, &resolver(&root), &config, &entries[0]).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
+        let config = ScrapeConfig {
+            musicbrainz_base: Some(mb_base),
+            ..Default::default()
+        };
+        let report = scrape_one_track(&library, &resolver(&root), &config, &entries[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            BulkScrapeReport {
+                matched: 2,
+                not_found: 0,
+                failed: 0,
+                skipped: 0,
+                issues: vec![]
+            }
+        );
         for entry in library.list().await.unwrap() {
             assert_eq!(entry.genres, vec!["Rock"]);
         }
@@ -988,7 +1538,14 @@ mod tests {
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
         let entry = library.list().await.unwrap().into_iter().next().unwrap();
-        let result = scrape_one_video(&library, &resolver(&root), &ScrapeConfig::default(), &entry, None).await;
+        let result = scrape_one_video(
+            &library,
+            &resolver(&root),
+            &ScrapeConfig::default(),
+            &entry,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(ScrapeOneError::NoApiKey)));
     }
 
@@ -996,11 +1553,18 @@ mod tests {
     async fn not_found_movie_is_marked_processed_not_retried() {
         let (root, db_path) = fixture_dirs("movie-not-found");
         std::fs::create_dir_all(root.join("movies/Unknowable Film")).unwrap();
-        std::fs::write(root.join("movies/Unknowable Film/Unknowable Film.mkv"), vec![0u8; 10]).unwrap();
+        std::fs::write(
+            root.join("movies/Unknowable Film/Unknowable Film.mkv"),
+            vec![0u8; 10],
+        )
+        .unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
 
-        let router = Router::new().route("/search/movie", get(|| async { Json(json!({"results": []})) }));
+        let router = Router::new().route(
+            "/search/movie",
+            get(|| async { Json(json!({"results": []})) }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -1011,7 +1575,16 @@ mod tests {
             tmdb_image_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.matched, 0);
         assert_eq!(report.not_found, 1);
         assert_eq!(report.failed, 0);
@@ -1047,7 +1620,11 @@ mod tests {
         std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
         std::fs::write(root.join("movies/Heat (1995)/Heat.1995.mkv"), vec![0u8; 10]).unwrap();
         std::fs::create_dir_all(root.join("music/Artist/Album")).unwrap();
-        std::fs::write(root.join("music/Artist/Album/01 - Song.flac"), vec![1u8; 10]).unwrap();
+        std::fs::write(
+            root.join("music/Artist/Album/01 - Song.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
         assert_eq!(library.list().await.unwrap().len(), 2);
@@ -1067,7 +1644,10 @@ mod tests {
                     }
                 }),
             )
-            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": []})) }))
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "Heat", "genres": []})) }),
+            )
             .route(
                 "/mb/release/",
                 get(move || {
@@ -1078,7 +1658,10 @@ mod tests {
                     }
                 }),
             )
-            .route("/mb/release/rel-1", get(|| async { Json(json!({"genres": [], "artist-credit": []})) }));
+            .route(
+                "/mb/release/rel-1",
+                get(|| async { Json(json!({"genres": [], "artist-credit": []})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let config = ScrapeConfig {
@@ -1088,11 +1671,29 @@ mod tests {
             musicbrainz_base: Some(format!("http://{addr}/mb")),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(report.matched, 2, "both must still actually succeed: {report:?}");
-        let tmdb_at = tmdb_hit_at.lock().unwrap().expect("TMDb search must have been hit");
-        let mb_at = mb_hit_at.lock().unwrap().expect("MusicBrainz search must have been hit");
+        assert_eq!(
+            report.matched, 2,
+            "both must still actually succeed: {report:?}"
+        );
+        let tmdb_at = tmdb_hit_at
+            .lock()
+            .unwrap()
+            .expect("TMDb search must have been hit");
+        let mb_at = mb_hit_at
+            .lock()
+            .unwrap()
+            .expect("MusicBrainz search must have been hit");
         let gap = tmdb_at.abs_diff(mb_at);
         assert!(
             gap < DELAY,
@@ -1107,8 +1708,16 @@ mod tests {
     async fn music_scrape_groups_by_album_and_shares_cover_art() {
         let (root, db_path) = fixture_dirs("music-e2e");
         std::fs::create_dir_all(root.join("music/Pink Floyd/The Wall")).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"), vec![1u8; 10]).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"), vec![2u8; 10]).unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"),
+            vec![2u8; 10],
+        )
+        .unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
         assert_eq!(library.list().await.unwrap().len(), 2);
@@ -1118,7 +1727,10 @@ mod tests {
         let mb_base = format!("http://{addr}/mb");
         let ca_base = format!("http://{addr}/ca");
         let router = Router::new()
-            .route("/mb/release/", get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }))
+            .route(
+                "/mb/release/",
+                get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }),
+            )
             .route(
                 "/mb/release/rel-1",
                 get(|| async { Json(json!({"genres": [{"name": "Rock"}], "artist-credit": []})) }),
@@ -1138,8 +1750,26 @@ mod tests {
             coverart_base: Some(ca_base),
             ..Default::default()
         };
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), None, false).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 2, not_found: 0, failed: 0, skipped: 0, issues: vec![] });
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            BulkScrapeReport {
+                matched: 2,
+                not_found: 0,
+                failed: 0,
+                skipped: 0,
+                issues: vec![]
+            }
+        );
 
         let entries = library.list().await.unwrap();
         for entry in &entries {
@@ -1147,10 +1777,115 @@ mod tests {
             assert_eq!(entry.artwork_version, 1);
         }
         // Both tracks in the album point at the same physical cover file.
-        let (path_a, _) = library.artwork(&entries[0].entry_key, ArtworkKind::Cover).await.unwrap().unwrap();
-        let (path_b, _) = library.artwork(&entries[1].entry_key, ArtworkKind::Cover).await.unwrap().unwrap();
+        let (path_a, _) = library
+            .artwork(&entries[0].entry_key, ArtworkKind::Cover)
+            .await
+            .unwrap()
+            .unwrap();
+        let (path_b, _) = library
+            .artwork(&entries[1].entry_key, ArtworkKind::Cover)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(path_a, path_b);
         assert_eq!(std::fs::read(root.join(&path_a)).unwrap(), vec![7, 7, 7]);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn bulk_music_scrape_caches_lrclib_lyrics_and_does_not_retry_a_completed_lookup() {
+        let (root, db_path) = fixture_dirs("music-lyrics");
+        std::fs::create_dir_all(root.join("music/Test Artist/Test Album")).unwrap();
+        std::fs::write(
+            root.join("music/Test Artist/Test Album/01 - Test Song.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+        let mut entry = library.list().await.unwrap().into_iter().next().unwrap();
+        entry.duration_secs = Some(213.7);
+        library.upsert(&entry).await.unwrap();
+
+        let lyric_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorder = lyric_hits.clone();
+        let router = Router::new()
+            .route(
+                "/mb/release/",
+                get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }),
+            )
+            .route(
+                "/mb/release/rel-1",
+                get(|| async { Json(json!({"genres": [], "artist-credit": []})) }),
+            )
+            .route(
+                "/ca/release/rel-1",
+                get(|| async { Json(json!({"images": []})) }),
+            )
+            .route(
+                "/lyrics/api/get",
+                get(move || {
+                    let recorder = recorder.clone();
+                    async move {
+                        recorder.fetch_add(1, Ordering::Relaxed);
+                        Json(json!({
+                            "id": 17,
+                            "instrumental": false,
+                            "plainLyrics": "First line\nSecond line",
+                            "syncedLyrics": "[00:01.00]First line\n[00:03.50]Second line",
+                            "lang": "en"
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = ScrapeConfig {
+            musicbrainz_base: Some(format!("http://{addr}/mb")),
+            coverart_base: Some(format!("http://{addr}/ca")),
+            lrclib_base: Some(format!("http://{addr}/lyrics")),
+            ..Default::default()
+        };
+
+        run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let lyrics = library
+            .track_lyrics(&entry.entry_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lyrics.provider_id, Some(17));
+        assert!(lyrics
+            .synced_lyrics
+            .as_deref()
+            .unwrap()
+            .contains("Second line"));
+        assert_eq!(lyric_hits.load(Ordering::Relaxed), 1);
+
+        run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lyric_hits.load(Ordering::Relaxed),
+            1,
+            "cached lyrics must not be fetched on every normal scrape"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -1162,9 +1897,26 @@ mod tests {
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
 
-        let report =
-            run_bulk_scrape(&library, &resolver(&root), &ScrapeConfig::default(), &AtomicBool::new(false), None, false).await.unwrap();
-        assert_eq!(report, BulkScrapeReport { matched: 0, not_found: 0, failed: 0, skipped: 1, issues: vec![] });
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &ScrapeConfig::default(),
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            BulkScrapeReport {
+                matched: 0,
+                not_found: 0,
+                failed: 0,
+                skipped: 1,
+                issues: vec![]
+            }
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -1177,8 +1929,16 @@ mod tests {
         std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
         std::fs::write(root.join("movies/Heat (1995)/Heat.1995.mkv"), vec![0u8; 10]).unwrap();
         std::fs::create_dir_all(root.join("music/Pink Floyd/The Wall")).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"), vec![1u8; 10]).unwrap();
-        std::fs::write(root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"), vec![2u8; 10]).unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/01 - In The Flesh.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("music/Pink Floyd/The Wall/02 - The Thin Ice.flac"),
+            vec![2u8; 10],
+        )
+        .unwrap();
         let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
         scan_root(&library, &root).await.unwrap();
         assert_eq!(library.list().await.unwrap().len(), 3);
@@ -1186,14 +1946,26 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
-            .route("/movie/1", get(|| async { Json(json!({"title": "Heat", "genres": [{"name": "Crime"}]})) }))
-            .route("/mb/release/", get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }))
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 1}]})) }),
+            )
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "Heat", "genres": [{"name": "Crime"}]})) }),
+            )
+            .route(
+                "/mb/release/",
+                get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }),
+            )
             .route(
                 "/mb/release/rel-1",
                 get(|| async { Json(json!({"genres": [{"name": "Rock"}], "artist-credit": []})) }),
             )
-            .route("/ca/release/rel-1", get(|| async { Json(json!({"images": []})) }));
+            .route(
+                "/ca/release/rel-1",
+                get(|| async { Json(json!({"images": []})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let config = ScrapeConfig {
@@ -1205,24 +1977,54 @@ mod tests {
             ..Default::default()
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let report = run_bulk_scrape(&library, &resolver(&root), &config, &AtomicBool::new(false), Some(tx), false).await.unwrap();
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            Some(tx),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.matched, 3);
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
-        assert_eq!(events.len(), 3, "one progress event per entry, got {events:?}");
+        assert_eq!(
+            events.len(),
+            3,
+            "one progress event per entry, got {events:?}"
+        );
         for (i, event) in events.iter().enumerate() {
-            assert_eq!(event.processed, (i + 1) as u64, "processed must increment 1..=total in emission order");
-            assert_eq!(event.total, 3, "total must stay fixed at the entry count known before the loop started");
+            assert_eq!(
+                event.processed,
+                (i + 1) as u64,
+                "processed must increment 1..=total in emission order"
+            );
+            assert_eq!(
+                event.total, 3,
+                "total must stay fixed at the entry count known before the loop started"
+            );
             assert_eq!(event.outcome, ScrapeOutcome::Matched);
         }
-        let movie_event = events.iter().find(|e| e.title.starts_with("Heat")).expect("movie event present");
+        let movie_event = events
+            .iter()
+            .find(|e| e.title.starts_with("Heat"))
+            .expect("movie event present");
         assert_eq!(movie_event.scraped_title.as_deref(), Some("Heat"));
         assert_eq!(movie_event.genres, vec!["Crime"]);
-        let track_events: Vec<_> = events.iter().filter(|e| e.entry_key != movie_event.entry_key).collect();
-        assert_eq!(track_events.len(), 2, "one event per track, not one per album group");
+        let track_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.entry_key != movie_event.entry_key)
+            .collect();
+        assert_eq!(
+            track_events.len(),
+            2,
+            "one event per track, not one per album group"
+        );
         for track_event in track_events {
             // Tracks never get a scraped_title (see scrape_one_album_group) —
             // only genres change.

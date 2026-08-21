@@ -1,4 +1,11 @@
-# Containerized SWARM STUN server
+# Containerized SWARM rendezvous service
+
+This internet-facing service now hosts both signaling/reflection and the
+short-lived TV activation exchange. Media servers provision their own
+private swarms with a stable local owner claim; TVs display a temporary code
+that only the owning media server can approve. The service stores hashes of
+owner claims, device tokens, activation poll tokens, and codes rather than
+their plaintext values.
 
 This Compose project runs the public SWARM rendezvous service and Caddy. Caddy
 terminates HTTPS/WSS on TCP 443; the server receives reflector traffic directly

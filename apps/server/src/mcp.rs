@@ -4,10 +4,8 @@
 //! Streamable HTTP. See `apps/server/ui`'s "AI" dashboard tab for what MCP
 //! is and how to point a client at it.
 //!
-//! GUI-only (see this crate's `gui` Cargo feature and `AppState::core`,
-//! which starts this alongside `ServerCore` when `Settings::mcp_enabled` is
-//! set) — the headless daemon has no settings.json story to read a toggle
-//! from at all, see `gui.rs::mod settings`'s own doc comment.
+//! It starts alongside `ServerCore` when `Settings::mcp_enabled` is set and
+//! shares the desktop application's lifecycle, including while hidden.
 //!
 //! Every tool here is read-only by design (v1 scope, decided explicitly):
 //! an AI client can search/inspect the library and check swarm/error state,
@@ -19,11 +17,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ServerInfo;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use swarm_core::peer::MediaKind;
@@ -130,23 +132,60 @@ impl McpServer {
         Self { core }
     }
 
-    #[tool(description = "Search the media library by title, kind, genre, content rating, and/or liked status. Returns at most 200 matches — narrow the query if you need more precision.")]
-    async fn search_library(&self, Parameters(params): Parameters<SearchLibraryParams>) -> Result<Json<Vec<SearchResultEntry>>, String> {
+    #[tool(
+        description = "Search the media library by title, kind, genre, content rating, and/or liked status. Returns at most 200 matches — narrow the query if you need more precision."
+    )]
+    async fn search_library(
+        &self,
+        Parameters(params): Parameters<SearchLibraryParams>,
+    ) -> Result<Json<Vec<SearchResultEntry>>, String> {
         let entries = self.core.library.list().await.map_err(|e| e.to_string())?;
-        let like_counts = self.core.library.like_counts().await.map_err(|e| e.to_string())?;
+        let like_counts = self
+            .core
+            .library
+            .like_counts()
+            .await
+            .map_err(|e| e.to_string())?;
         let query = params.query.as_deref().map(str::to_lowercase);
         let results = entries
             .into_iter()
-            .filter(|e| params.kind.as_deref().is_none_or(|k| kind_str(e.kind).eq_ignore_ascii_case(k)))
-            .filter(|e| params.genre.as_deref().is_none_or(|g| e.genres.iter().any(|eg| eg.eq_ignore_ascii_case(g))))
-            .filter(|e| params.rating.as_deref().is_none_or(|r| e.rating.as_deref().is_some_and(|er| er.eq_ignore_ascii_case(r))))
-            .filter(|e| !params.liked_only.unwrap_or(false) || like_counts.get(&e.entry_key).copied().unwrap_or(0) > 0)
+            .filter(|e| {
+                params
+                    .kind
+                    .as_deref()
+                    .is_none_or(|k| kind_str(e.kind).eq_ignore_ascii_case(k))
+            })
+            .filter(|e| {
+                params
+                    .genre
+                    .as_deref()
+                    .is_none_or(|g| e.genres.iter().any(|eg| eg.eq_ignore_ascii_case(g)))
+            })
+            .filter(|e| {
+                params.rating.as_deref().is_none_or(|r| {
+                    e.rating
+                        .as_deref()
+                        .is_some_and(|er| er.eq_ignore_ascii_case(r))
+                })
+            })
+            .filter(|e| {
+                !params.liked_only.unwrap_or(false)
+                    || like_counts.get(&e.entry_key).copied().unwrap_or(0) > 0
+            })
             .filter(|e| {
                 query.as_deref().is_none_or(|q| {
-                    let title = e.scraped_title.as_deref().unwrap_or(&e.title).to_lowercase();
+                    let title = e
+                        .scraped_title
+                        .as_deref()
+                        .unwrap_or(&e.title)
+                        .to_lowercase();
                     title.contains(q)
-                        || e.show_title.as_deref().is_some_and(|s| s.to_lowercase().contains(q))
-                        || e.artist.as_deref().is_some_and(|a| a.to_lowercase().contains(q))
+                        || e.show_title
+                            .as_deref()
+                            .is_some_and(|s| s.to_lowercase().contains(q))
+                        || e.artist
+                            .as_deref()
+                            .is_some_and(|a| a.to_lowercase().contains(q))
                 })
             })
             .take(SEARCH_RESULT_LIMIT)
@@ -163,8 +202,13 @@ impl McpServer {
         Ok(Json(results))
     }
 
-    #[tool(description = "Get full details (synopsis, cast, rating, genres, like count) for one library entry by its entry_key.")]
-    async fn get_entry_details(&self, Parameters(params): Parameters<EntryKeyParams>) -> Result<Json<EntryDetails>, String> {
+    #[tool(
+        description = "Get full details (synopsis, cast, rating, genres, like count) for one library entry by its entry_key."
+    )]
+    async fn get_entry_details(
+        &self,
+        Parameters(params): Parameters<EntryKeyParams>,
+    ) -> Result<Json<EntryDetails>, String> {
         let entry = self
             .core
             .library
@@ -172,11 +216,19 @@ impl McpServer {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no library entry with entry_key \"{}\"", params.entry_key))?;
-        let like_counts = self.core.library.like_counts().await.map_err(|e| e.to_string())?;
+        let like_counts = self
+            .core
+            .library
+            .like_counts()
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(Json(EntryDetails {
             like_count: like_counts.get(&entry.entry_key).copied().unwrap_or(0),
             entry_key: entry.entry_key.clone(),
-            title: entry.scraped_title.clone().unwrap_or_else(|| entry.title.clone()),
+            title: entry
+                .scraped_title
+                .clone()
+                .unwrap_or_else(|| entry.title.clone()),
             kind: kind_str(entry.kind).to_string(),
             year: entry.year,
             genres: entry.genres,
@@ -198,14 +250,20 @@ impl McpServer {
         }))
     }
 
-    #[tool(description = "List every device in this server's swarm(s) and whether it's currently online.")]
+    #[tool(
+        description = "List every device in this server's swarm(s) and whether it's currently online."
+    )]
     async fn list_swarm_devices(&self) -> Result<Json<Vec<SwarmDeviceInfo>>, String> {
         let Some(link) = self.core.stun_link().await else {
             return Ok(Json(Vec::new()));
         };
         let mut devices = Vec::new();
         for swarm in link.swarms {
-            let response = self.core.swarm_devices(&swarm.id).await.map_err(|e| e.to_string())?;
+            let response = self
+                .core
+                .swarm_devices(&swarm.id)
+                .await
+                .map_err(|e| e.to_string())?;
             devices.extend(response.devices.into_iter().map(|d| SwarmDeviceInfo {
                 name: d.name,
                 device_type: format!("{:?}", d.device_type).to_lowercase(),
@@ -216,9 +274,16 @@ impl McpServer {
         Ok(Json(devices))
     }
 
-    #[tool(description = "List recent client-reported errors (playback failures, unreachable servers, user-reported asset problems) for triage — newest first.")]
+    #[tool(
+        description = "List recent client-reported errors (playback failures, unreachable servers, user-reported asset problems) for triage — newest first."
+    )]
     async fn list_client_errors(&self) -> Result<Json<Vec<ClientErrorInfo>>, String> {
-        let errors = self.core.library.list_client_errors().await.map_err(|e| e.to_string())?;
+        let errors = self
+            .core
+            .library
+            .list_client_errors()
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(Json(
             errors
                 .into_iter()
@@ -259,17 +324,60 @@ impl ServerHandler for McpServer {
 /// server is meant to be reachable from other devices on the LAN (an AI
 /// client rarely runs on the same machine as a headless media server); the
 /// SDK's default DNS-rebinding protection only allows loopback hosts, which
-/// would silently reject every real LAN request. This is the same trust
-/// model the rest of this app already uses on a home LAN (`/errors/report`
-/// and `/likes/toggle` also trust the caller without further
-/// authentication) — not a new weakening.
-pub async fn serve(core: Arc<ServerCore>, port: u16) -> std::io::Result<()> {
+/// would silently reject every real LAN request. A bearer-token middleware
+/// still authenticates every request before it reaches the MCP service.
+pub async fn serve(core: Arc<ServerCore>, port: u16, access_token: String) -> std::io::Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
-    let service = StreamableHttpService::new(move || Ok(McpServer::new(Arc::clone(&core))), session_manager, config);
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let service = StreamableHttpService::new(
+        move || Ok(McpServer::new(Arc::clone(&core))),
+        session_manager,
+        config,
+    );
+    let router =
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn_with_state(
+                Arc::<str>::from(access_token),
+                require_access_token,
+            ));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(port, "MCP server listening");
     axum::serve(listener, router).await
+}
+
+async fn require_access_token(
+    State(expected): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let authorized = has_valid_bearer(request.headers(), &expected);
+    if !authorized {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
+fn has_valid_bearer(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| provided == expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_bearer_token_is_required_and_must_match() {
+        let mut headers = HeaderMap::new();
+        assert!(!has_valid_bearer(&headers, "secret"));
+        headers.insert(header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
+        assert!(!has_valid_bearer(&headers, "secret"));
+        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+        assert!(has_valid_bearer(&headers, "secret"));
+    }
 }

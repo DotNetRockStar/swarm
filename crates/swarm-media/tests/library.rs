@@ -4,10 +4,10 @@
 
 use std::path::{Path, PathBuf};
 use swarm_core::entry_key::entry_key;
-use swarm_core::peer::MediaKind;
+use swarm_core::peer::{AudioStreamInfo, MediaKind, TrackLyrics};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_root, scan_roots};
-use swarm_media::store::{ArtworkKind, Library};
+use swarm_media::store::{ArtworkKind, EntryRecord, Library, SubtitleRecord};
 
 struct Fixture {
     root: PathBuf,
@@ -29,6 +29,71 @@ fn write(root: &Path, relative: &str, content: &[u8]) {
     let path = root.join(relative);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();
+}
+
+#[tokio::test]
+async fn transcription_queue_resumes_segments_and_cascades_with_media() {
+    let fx = fixture("transcription-queue").await;
+    let entry = EntryRecord {
+        entry_key: "0123456789abcdef01234567".into(),
+        relative_path: "movies/example.mp4".into(),
+        kind: MediaKind::Movie,
+        title: "Example".into(),
+        size: 100,
+        modified_time: 1,
+        fingerprint: "media-fingerprint".into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: Some(1_201.0),
+        video: None,
+        audio: Some(AudioStreamInfo {
+            codec: "aac".into(),
+            channels: 2,
+            bitrate: Some(128_000),
+        }),
+        scraped_title: None,
+        genres: Vec::new(),
+        artwork_version: 0,
+        cast: Vec::new(),
+        overview: None,
+        rating: None,
+    };
+    fx.library.upsert(&entry).await.unwrap();
+    assert_eq!(fx.library.enqueue_missing_transcriptions("small.en", "en", 600).await.unwrap(), 1);
+    let first = fx.library.claim_next_transcription().await.unwrap().unwrap();
+    assert_eq!((first.total_segments, first.completed_segments), (3, 0));
+    fx.library.store_transcription_segment(&entry.entry_key, 0, "[]").await.unwrap();
+
+    // Simulate a real process exit after one durable segment was committed.
+    fx.library.recover_interrupted_transcriptions().await.unwrap();
+    let resumed = fx.library.claim_next_transcription().await.unwrap().unwrap();
+    assert_eq!(resumed.completed_segments, 1);
+    fx.library.store_transcription_segment(&entry.entry_key, 1, "[]").await.unwrap();
+    fx.library.store_transcription_segment(&entry.entry_key, 2, "[]").await.unwrap();
+    fx.library
+        .complete_transcription(&SubtitleRecord {
+            id: "whisper-en".into(),
+            entry_key: entry.entry_key.clone(),
+            language: "en".into(),
+            label: "English — AI generated".into(),
+            source: "whisper".into(),
+            format: "vtt".into(),
+            file_path: "/tmp/example.vtt".into(),
+            fingerprint: entry.fingerprint.clone(),
+        })
+        .await
+        .unwrap();
+    let status = fx.library.transcription_queue_status().await.unwrap();
+    assert_eq!((status.completed, status.completed_segments, status.total_segments), (1, 3, 3));
+
+    fx.library.remove_by_path(&entry.relative_path).await.unwrap();
+    assert!(fx.library.subtitle_tracks(&entry.entry_key).await.unwrap().is_empty());
+    assert_eq!(fx.library.transcription_queue_status().await.unwrap().total_segments, 0);
 }
 
 #[tokio::test]
@@ -393,6 +458,44 @@ async fn clear_scrape_result_reverts_to_unscraped_and_leaves_grouping_fields_unt
     let missing = fx.library.missing_scrape().await.unwrap();
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].entry_key, entry.entry_key);
+}
+
+#[tokio::test]
+async fn track_lyrics_are_relational_cached_and_cleared_with_scrape_data() {
+    let fx = fixture("track-lyrics").await;
+    let relative_path = "music/Artist/Album/01 - Song.flac";
+    write(&fx.root, relative_path, b"fake flac bytes");
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let mut entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    // Fake bytes cannot be probed; give this store-focused test the same
+    // duration a real scanned track would have.
+    entry.duration_secs = Some(213.7);
+    fx.library.upsert(&entry).await.unwrap();
+    assert_eq!(fx.library.missing_track_lyrics().await.unwrap().len(), 1);
+
+    let lyrics = TrackLyrics {
+        provider: "lrclib".into(),
+        provider_id: Some(17),
+        language: Some("en".into()),
+        plain_lyrics: Some("First line\nSecond line".into()),
+        synced_lyrics: Some("[00:01.00]First line\n[00:03.50]Second line".into()),
+        instrumental: false,
+    };
+    fx.library.set_track_lyrics(&entry.entry_key, &lyrics).await.unwrap();
+    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), Some(lyrics.clone()));
+    assert!(fx.library.missing_track_lyrics().await.unwrap().is_empty());
+
+    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None);
+    assert_eq!(fx.library.missing_track_lyrics().await.unwrap().len(), 1);
+
+    fx.library.mark_track_lyrics_not_found(&entry.entry_key).await.unwrap();
+    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None);
+    assert!(fx.library.missing_track_lyrics().await.unwrap().is_empty(), "a fresh 404 must not be retried every run");
+
+    fx.library.set_track_lyrics(&entry.entry_key, &lyrics).await.unwrap();
+    fx.library.remove_by_path(relative_path).await.unwrap();
+    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None, "foreign-key cascade must remove orphaned lyrics");
 }
 
 #[tokio::test]

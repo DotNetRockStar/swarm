@@ -1,0 +1,4 @@
+interface:
+  display_name: "Media Server Background Work"
+  short_description: "Build durable media-server background workers"
+  default_prompt: "Use $media-server-background-work to implement a durable background media-processing feature."

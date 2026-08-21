@@ -31,7 +31,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,7 +40,6 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
-import coil.compose.AsyncImage
 
 @Composable
 fun MovieShelfScreen(movies: List<MergedEntry>, artworkUrl: (MergedEntry) -> String?, onOpenMovie: (MergedEntry) -> Unit, onBack: () -> Unit) {
@@ -67,18 +65,20 @@ fun MovieShelfScreen(movies: List<MergedEntry>, artworkUrl: (MergedEntry) -> Str
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
-                itemsIndexed(movies) { index, movie ->
+                itemsIndexed(
+                    items = movies,
+                    key = { _, movie -> movie.entry.entryKey },
+                    contentType = { _, _ -> "movie" },
+                ) { index, movie ->
                     val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenMovie(movie) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                         Column {
-                            artworkUrl(movie)?.let { url ->
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                                )
-                            }
+                            ArtworkImage(
+                                label = movie.entry.scrapedTitle ?: movie.entry.title,
+                                placeholderType = "Movie",
+                                primaryUrl = artworkUrl(movie),
+                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                            )
                             Column(Modifier.padding(14.dp)) {
                                 Text(
                                     movie.entry.scrapedTitle ?: movie.entry.title,

@@ -47,12 +47,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
-import app.swarm.tv.app.ui.theme.SwarmAccent
-import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmMuted
-import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 import coil.compose.AsyncImage
@@ -99,15 +96,13 @@ fun MovieDetailScreen(
 
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 28.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                artworkUrl(entry)?.let { url ->
-                    AsyncImage(
-                        model = url,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.width(170.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)),
-                    )
-                    Spacer(Modifier.width(32.dp))
-                }
+                ArtworkImage(
+                    label = entry.entry.scrapedTitle ?: entry.entry.title,
+                    placeholderType = "Movie",
+                    primaryUrl = artworkUrl(entry),
+                    modifier = Modifier.width(170.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)),
+                )
+                Spacer(Modifier.width(32.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
                         entry.entry.scrapedTitle ?: entry.entry.title,
@@ -139,16 +134,13 @@ fun MovieDetailScreen(
                         Button(
                             onClick = { onPlay(entry) },
                             modifier = Modifier.focusRequester(playFocusRequester),
-                            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                            colors = swarmActionButtonColors(),
                         ) {
                             Text("Play", fontWeight = FontWeight.Bold)
                         }
                         Button(
                             onClick = onToggleLike,
-                            colors = ButtonDefaults.colors(
-                                containerColor = if (isLiked) SwarmAccentHot else SwarmSurfaceMuted,
-                                contentColor = if (isLiked) Color(0xFF3A0420) else SwarmText,
-                            ),
+                            colors = swarmActionButtonColors(),
                         ) {
                             Text(if (isLiked) "♥ Liked" else "♡ Like", fontSize = 13.sp)
                         }
@@ -163,7 +155,7 @@ fun MovieDetailScreen(
                         Button(
                             onClick = { onReportProblem(entry); problemReported = true },
                             enabled = !problemReported,
-                            colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+                            colors = swarmActionButtonColors(),
                         ) {
                             Text(if (problemReported) "Reported ✓" else "Report a problem", fontSize = 13.sp)
                         }

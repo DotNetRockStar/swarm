@@ -24,12 +24,19 @@ use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_p2p::endpoint::{read_body, read_request, send_request, write_response_header};
 use swarm_p2p::identity::ensure_identity;
 use swarm_p2p::pin::AllowedPeers;
-use swarm_server::punch_connect::{initiate_punch_connection, respond_to_punch_offer, ReceivedOffer};
+use swarm_server::punch_connect::{
+    initiate_punch_connection, respond_to_punch_offer, ReceivedOffer,
+};
 use swarm_stun_client::{SignalingClient, StunClient};
 
 async fn spawn_stun_server() -> String {
-    let db_path = std::env::temp_dir().join(format!("swarm-punch-connect-stun-{}.sqlite", stun_server::security::new_id()));
-    let db = stun_server::db::connect(db_path.to_str().unwrap()).await.unwrap();
+    let db_path = std::env::temp_dir().join(format!(
+        "swarm-punch-connect-stun-{}.sqlite",
+        stun_server::security::new_id()
+    ));
+    let db = stun_server::db::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
     let config = StunConfig {
         database_path: db_path.display().to_string(),
         http_bind: "127.0.0.1:0".parse().unwrap(),
@@ -37,15 +44,36 @@ async fn spawn_stun_server() -> String {
         public_url: "http://test.invalid".into(),
         session_ttl_secs: 3600,
         join_code_ttl_secs: 900,
+        activation_ttl_secs: 600,
+        managed_swarm_lease_secs: 2_592_000,
+        managed_swarm_max_clients: 20,
         smtp: None,
     };
-    let state =
-        Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new(), mailer: Mailer::from_config(None) });
+    let state = Arc::new(AppState {
+        db,
+        hub: Hub::new(),
+        config,
+        blocker: BruteForceBlocker::new(),
+        activation_allocations: stun_server::security::AllocationLimiter::new(
+            20,
+            std::time::Duration::from_secs(3600),
+        ),
+        managed_swarm_allocations: stun_server::security::AllocationLimiter::new(
+            5,
+            std::time::Duration::from_secs(3600),
+        ),
+        mailer: Mailer::from_config(None),
+    });
     let router = build_router(state, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     format!("http://{addr}")
 }
@@ -89,13 +117,21 @@ impl Browser {
                 _ => {}
             }
         }
-        Self { client, base: base.to_string(), session, csrf }
+        Self {
+            client,
+            base: base.to_string(),
+            session,
+            csrf,
+        }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{path}", self.base))
-            .header("cookie", format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf))
+            .header(
+                "cookie",
+                format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf),
+            )
             .header("x-swarm-csrf", &self.csrf)
     }
 
@@ -116,7 +152,10 @@ impl Browser {
 
     async fn create_code(&self, swarm_id: &str) -> String {
         let body: serde_json::Value = self
-            .request(reqwest::Method::POST, &format!("/api/v1/swarms/{swarm_id}/codes"))
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/swarms/{swarm_id}/codes"),
+            )
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -162,7 +201,10 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
         app_version: "0.1.0".into(),
         metadata: Default::default(),
     };
-    let a_reg = StunClient::new(&stun_base).register_device(&a_code, a_registration).await.unwrap();
+    let a_reg = StunClient::new(&stun_base)
+        .register_device(&a_code, a_registration)
+        .await
+        .unwrap();
 
     let b_code = browser.create_code(&swarm_id).await;
     let b_registration = DeviceRegistration {
@@ -174,12 +216,19 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
         app_version: "0.1.0".into(),
         metadata: Default::default(),
     };
-    let b_reg = StunClient::new(&stun_base).register_device(&b_code, b_registration).await.unwrap();
+    let b_reg = StunClient::new(&stun_base)
+        .register_device(&b_code, b_registration)
+        .await
+        .unwrap();
 
     let (a_signaling, mut a_rx) =
-        SignalingClient::connect(&stun_base, &a_reg.access_token, &a_reg.device_id, None).await.unwrap();
+        SignalingClient::connect(&stun_base, &a_reg.access_token, &a_reg.device_id, None)
+            .await
+            .unwrap();
     let (b_signaling, mut b_rx) =
-        SignalingClient::connect(&stun_base, &b_reg.access_token, &b_reg.device_id, None).await.unwrap();
+        SignalingClient::connect(&stun_base, &b_reg.access_token, &b_reg.device_id, None)
+            .await
+            .unwrap();
 
     let b_allowed = AllowedPeers::new();
     b_allowed.replace([a_identity.fingerprint.clone()]);
@@ -195,13 +244,35 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
     let responder = async {
         let offer = loop {
             match b_rx.recv().await.expect("b's signaling channel closed") {
-                SignalMessage::Signal { from: Some(from), payload: SignalPayload::Offer { punch_id, candidates, cert_fingerprint }, .. } => {
-                    break ReceivedOffer { from, punch_id, candidates, cert_fingerprint };
+                SignalMessage::Signal {
+                    from: Some(from),
+                    payload:
+                        SignalPayload::Offer {
+                            punch_id,
+                            candidates,
+                            cert_fingerprint,
+                        },
+                    ..
+                } => {
+                    break ReceivedOffer {
+                        from,
+                        punch_id,
+                        candidates,
+                        cert_fingerprint,
+                    };
                 }
                 _ => continue,
             }
         };
-        respond_to_punch_offer(&b_signaling, &mut b_rx, reflector_addr, offer, &b_identity, b_allowed).await
+        respond_to_punch_offer(
+            &b_signaling,
+            &mut b_rx,
+            reflector_addr,
+            offer,
+            &b_identity,
+            b_allowed,
+        )
+        .await
     };
 
     let (a_connection, b_connection) = tokio::join!(initiator, responder);
@@ -214,7 +285,13 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
         let (mut send, mut recv) = b_connection.accept_bi().await.unwrap();
         let request = read_request(&mut recv).await.unwrap();
         assert_eq!(request.path, "/ping");
-        let header = PeerResponseHeader { status: 200, len: 4, content_type: None, content_range: None, etag: None };
+        let header = PeerResponseHeader {
+            status: 200,
+            len: 4,
+            content_type: None,
+            content_range: None,
+            etag: None,
+        };
         write_response_header(&mut send, &header).await.unwrap();
         send.write_all(b"pong").await.unwrap();
         send.finish().ok();
@@ -224,7 +301,14 @@ async fn full_offer_answer_punch_confirm_and_quic_connect() {
         let _ = b_connection.closed().await;
     });
 
-    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None, playback: None, error_report: None, like: None };
+    let request = PeerRequest {
+        path: "/ping".into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: None,
+    };
     let (header, mut recv) = send_request(&a_connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

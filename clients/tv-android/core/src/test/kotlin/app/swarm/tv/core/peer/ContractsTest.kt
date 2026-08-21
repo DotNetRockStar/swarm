@@ -102,8 +102,32 @@ class ContractsTest {
             encoded,
         )
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(
-            """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000,"session_id":"session"}""",
+            """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000,"session_id":"session","lyrics":{"provider":"lrclib","provider_id":17,"language":"en","plain_lyrics":"First line","synced_lyrics":"[00:01.00]First line","instrumental":false},"subtitles":[{"id":"whisper-en","language":"en","label":"English — AI generated","source":"whisper","path":"/subtitles/030fe19c72f2665e6efd018a/whisper-en.vtt"}]}""",
         )
-        assertEquals(PlaybackPlan(PlaybackMode.HLS, "/hls/session/master.m3u8", 4_160_000, "session"), plan)
+        assertEquals(
+            PlaybackPlan(
+                PlaybackMode.HLS,
+                "/hls/session/master.m3u8",
+                4_160_000,
+                "session",
+                TrackLyrics(
+                    provider = "lrclib",
+                    providerId = 17,
+                    language = "en",
+                    plainLyrics = "First line",
+                    syncedLyrics = "[00:01.00]First line",
+                ),
+                listOf(
+                    SubtitleTrack(
+                        id = "whisper-en",
+                        language = "en",
+                        label = "English — AI generated",
+                        source = "whisper",
+                        path = "/subtitles/030fe19c72f2665e6efd018a/whisper-en.vtt",
+                    ),
+                ),
+            ),
+            plan,
+        )
     }
 }

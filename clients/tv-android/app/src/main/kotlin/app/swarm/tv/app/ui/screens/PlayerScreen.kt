@@ -29,6 +29,9 @@ package app.swarm.tv.app.ui.screens
 
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
+import android.content.res.ColorStateList
+import android.view.ViewGroup
+import android.widget.ImageButton
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -53,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -60,18 +64,20 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
+import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
+import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmMuted
-import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
+import app.swarm.tv.core.peer.SubtitleTrack
 import kotlinx.coroutines.delay
 
 private const val CONTINUE_COUNTDOWN_SECS = 8
@@ -91,6 +97,7 @@ fun PlayerScreen(
     resumePositionSecs: Double,
     positionOffsetSecs: Double,
     maxBitrate: Long,
+    subtitles: List<SubtitleTrack>,
     hasNext: Boolean,
     nextTitle: String?,
     onBack: () -> Unit,
@@ -110,7 +117,7 @@ fun PlayerScreen(
     // again rather than staying permanently dismissed from the first play.
     var isLoading by remember(url) { mutableStateOf(true) }
 
-    val player = remember(url, maxBitrate) {
+    val player = remember(url, maxBitrate, subtitles) {
         // The HTTP URL is loopback, so Media3's network-type-based initial
         // estimate describes the TV's Wi-Fi rather than the media server's
         // constrained uplink. Start conservatively; segment transfer samples
@@ -120,7 +127,21 @@ fun PlayerScreen(
             .setInitialBitrateEstimate(initialBitrate)
             .build()
         ExoPlayer.Builder(context).setBandwidthMeter(bandwidthMeter).build().apply {
-            setMediaItem(MediaItem.Builder().setUri(Uri.parse(url)).setMediaId(title).build())
+            val subtitleConfigurations = subtitles.map { track ->
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(track.language)
+                    .setLabel(track.label)
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                    .build()
+            }
+            setMediaItem(
+                MediaItem.Builder()
+                    .setUri(Uri.parse(url))
+                    .setMediaId(title)
+                    .setSubtitleConfigurations(subtitleConfigurations)
+                    .build(),
+            )
             if (resumePositionSecs > 0) {
                 seekTo((resumePositionSecs * 1000).toLong())
             }
@@ -190,7 +211,12 @@ fun PlayerScreen(
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> PlayerView(ctx).apply { useController = true } },
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = true
+                    applySwarmPlaybackControlColors(this)
+                }
+            },
             // Real bug, found live: autoplaying the next episode creates a
             // brand-new ExoPlayer (`remember(url, maxBitrate)` above keys on
             // the new url), but `factory` only ever runs once for a given
@@ -219,6 +245,23 @@ fun PlayerScreen(
     }
 }
 
+/** Media3 owns the movie/show transport UI, so tint its native buttons with
+ * the same white -> cyan -> hot interaction sequence as Compose actions. */
+private fun applySwarmPlaybackControlColors(root: ViewGroup) {
+    val states = arrayOf(
+        intArrayOf(android.R.attr.state_pressed),
+        intArrayOf(android.R.attr.state_focused),
+        intArrayOf(),
+    )
+    val colors = intArrayOf(SwarmAccentHot.toArgb(), SwarmAccent.toArgb(), Color.White.toArgb())
+    for (index in 0 until root.childCount) {
+        when (val child = root.getChildAt(index)) {
+            is ImageButton -> child.imageTintList = ColorStateList(states, colors)
+            is ViewGroup -> applySwarmPlaybackControlColors(child)
+        }
+    }
+}
+
 @Composable
 private fun ContinueOverlay(nextTitle: String?, onPlayNow: () -> Unit, onCancel: () -> Unit) {
     var secondsLeft by remember { mutableStateOf(CONTINUE_COUNTDOWN_SECS) }
@@ -242,12 +285,12 @@ private fun ContinueOverlay(nextTitle: String?, onPlayNow: () -> Unit, onCancel:
                 Button(
                     onClick = onPlayNow,
                     modifier = Modifier.focusRequester(playNowFocusRequester),
-                    colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                    colors = swarmActionButtonColors(),
                 ) {
                     Text("Play now ($secondsLeft)", color = Color(0xFF04263A), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
-                Button(onClick = onCancel, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)) {
-                    Text("Cancel", color = SwarmText, fontSize = 14.sp)
+                Button(onClick = onCancel, colors = swarmActionButtonColors()) {
+                    Text("Cancel", fontSize = 14.sp)
                 }
             }
         }

@@ -31,8 +31,13 @@ use swarm_stun_client::{SignalingClient, SignalingError, StunClient};
 use tokio::sync::mpsc;
 
 async fn spawn_stun_server() -> String {
-    let db_path = std::env::temp_dir().join(format!("swarm-signaling-stun-{}.sqlite", stun_server::security::new_id()));
-    let db = stun_server::db::connect(db_path.to_str().unwrap()).await.unwrap();
+    let db_path = std::env::temp_dir().join(format!(
+        "swarm-signaling-stun-{}.sqlite",
+        stun_server::security::new_id()
+    ));
+    let db = stun_server::db::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
     let config = StunConfig {
         database_path: db_path.display().to_string(),
         http_bind: "127.0.0.1:0".parse().unwrap(),
@@ -40,15 +45,36 @@ async fn spawn_stun_server() -> String {
         public_url: "http://test.invalid".into(),
         session_ttl_secs: 3600,
         join_code_ttl_secs: 900,
+        activation_ttl_secs: 600,
+        managed_swarm_lease_secs: 2_592_000,
+        managed_swarm_max_clients: 20,
         smtp: None,
     };
-    let state =
-        Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new(), mailer: Mailer::from_config(None) });
+    let state = Arc::new(AppState {
+        db,
+        hub: Hub::new(),
+        config,
+        blocker: BruteForceBlocker::new(),
+        activation_allocations: stun_server::security::AllocationLimiter::new(
+            20,
+            std::time::Duration::from_secs(3600),
+        ),
+        managed_swarm_allocations: stun_server::security::AllocationLimiter::new(
+            5,
+            std::time::Duration::from_secs(3600),
+        ),
+        mailer: Mailer::from_config(None),
+    });
     let router = build_router(state, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     format!("http://{addr}")
 }
@@ -94,13 +120,21 @@ impl Browser {
                 _ => {}
             }
         }
-        Self { client, base: base.to_string(), session, csrf }
+        Self {
+            client,
+            base: base.to_string(),
+            session,
+            csrf,
+        }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{path}", self.base))
-            .header("cookie", format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf))
+            .header(
+                "cookie",
+                format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf),
+            )
             .header("x-swarm-csrf", &self.csrf)
     }
 
@@ -121,7 +155,10 @@ impl Browser {
 
     async fn create_code(&self, swarm_id: &str) -> String {
         let body: serde_json::Value = self
-            .request(reqwest::Method::POST, &format!("/api/v1/swarms/{swarm_id}/codes"))
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/swarms/{swarm_id}/codes"),
+            )
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -149,14 +186,26 @@ fn registration(name: &str, fingerprint_byte: &str) -> DeviceRegistration {
 
 /// Registers a fresh device into `swarm_id` via a freshly minted join code
 /// and returns `(device_id, access_token)`.
-async fn register_device(browser: &Browser, stun_base: &str, swarm_id: &str, name: &str, fp_byte: &str) -> (String, String) {
+async fn register_device(
+    browser: &Browser,
+    stun_base: &str,
+    swarm_id: &str,
+    name: &str,
+    fp_byte: &str,
+) -> (String, String) {
     let code = browser.create_code(swarm_id).await;
-    let response = StunClient::new(stun_base).register_device(&code, registration(name, fp_byte)).await.unwrap();
+    let response = StunClient::new(stun_base)
+        .register_device(&code, registration(name, fp_byte))
+        .await
+        .unwrap();
     (response.device_id, response.access_token)
 }
 
 async fn expect_signal(rx: &mut mpsc::UnboundedReceiver<SignalMessage>) -> SignalMessage {
-    tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().expect("channel closed unexpectedly")
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .expect("channel closed unexpectedly")
 }
 
 #[tokio::test]
@@ -166,7 +215,9 @@ async fn hello_ack_reports_a_real_session() {
     let swarm_id = browser.create_swarm("Home").await;
     let (device_id, token) = register_device(&browser, &stun_base, &swarm_id, "dev", "aa").await;
 
-    let (client, _rx) = SignalingClient::connect(&stun_base, &token, &device_id, None).await.unwrap();
+    let (client, _rx) = SignalingClient::connect(&stun_base, &token, &device_id, None)
+        .await
+        .unwrap();
     assert!(!client.session_id.is_empty());
     assert!(client.observed_addr.contains("127.0.0.1"));
     assert_eq!(client.reflector_ports, vec![443, 3478]);
@@ -180,12 +231,18 @@ async fn presence_fires_on_swarm_mate_connect_and_disconnect() {
     let (a_id, a_token) = register_device(&browser, &stun_base, &swarm_id, "a", "aa").await;
     let (b_id, b_token) = register_device(&browser, &stun_base, &swarm_id, "b", "bb").await;
 
-    let (_a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None).await.unwrap();
-    let (b, mut b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None).await.unwrap();
+    let (_a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None)
+        .await
+        .unwrap();
+    let (b, mut b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None)
+        .await
+        .unwrap();
 
     // A sees B come online (B connected after A).
     match expect_signal(&mut a_rx).await {
-        SignalMessage::Presence { device_id, online, .. } => {
+        SignalMessage::Presence {
+            device_id, online, ..
+        } => {
             assert_eq!(device_id, b_id);
             assert!(online);
         }
@@ -197,7 +254,9 @@ async fn presence_fires_on_swarm_mate_connect_and_disconnect() {
     drop(b);
 
     match expect_signal(&mut a_rx).await {
-        SignalMessage::Presence { device_id, online, .. } => {
+        SignalMessage::Presence {
+            device_id, online, ..
+        } => {
             assert_eq!(device_id, b_id);
             assert!(!online);
         }
@@ -213,13 +272,21 @@ async fn signal_relays_between_swarm_mates_with_from_stamped() {
     let (a_id, a_token) = register_device(&browser, &stun_base, &swarm_id, "a", "aa").await;
     let (b_id, b_token) = register_device(&browser, &stun_base, &swarm_id, "b", "bb").await;
 
-    let (a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None).await.unwrap();
-    let (_b, mut b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None).await.unwrap();
+    let (a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None)
+        .await
+        .unwrap();
+    let (_b, mut b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None)
+        .await
+        .unwrap();
     let _ = expect_signal(&mut a_rx).await; // A's presence-of-B notification, not under test here
 
     let offer = SignalPayload::Offer {
         punch_id: "p1".into(),
-        candidates: vec![Candidate { kind: CandidateKind::Lan, ip: "192.168.1.10".into(), port: 40000 }],
+        candidates: vec![Candidate {
+            kind: CandidateKind::Lan,
+            ip: "192.168.1.10".into(),
+            port: 40000,
+        }],
         cert_fingerprint: "aa".repeat(32),
     };
     a.send_signal(&b_id, offer.clone()).unwrap();
@@ -237,16 +304,28 @@ async fn signal_relays_between_swarm_mates_with_from_stamped() {
 #[tokio::test]
 async fn signal_across_swarms_is_rejected() {
     let stun_base = spawn_stun_server().await;
-    let browser = Browser::login_fresh_account(&stun_base, "signaling-cross-swarm@example.com").await;
+    let browser =
+        Browser::login_fresh_account(&stun_base, "signaling-cross-swarm@example.com").await;
     let swarm_a = browser.create_swarm("Home").await;
     let swarm_b = browser.create_swarm("Cabin").await;
     let (a_id, a_token) = register_device(&browser, &stun_base, &swarm_a, "a", "aa").await;
     let (b_id, b_token) = register_device(&browser, &stun_base, &swarm_b, "b", "bb").await;
 
-    let (a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None).await.unwrap();
-    let (_b, _b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None).await.unwrap();
+    let (a, mut a_rx) = SignalingClient::connect(&stun_base, &a_token, &a_id, None)
+        .await
+        .unwrap();
+    let (_b, _b_rx) = SignalingClient::connect(&stun_base, &b_token, &b_id, None)
+        .await
+        .unwrap();
 
-    a.send_signal(&b_id, SignalPayload::Punched { punch_id: "p1".into(), ok: true }).unwrap();
+    a.send_signal(
+        &b_id,
+        SignalPayload::Punched {
+            punch_id: "p1".into(),
+            ok: true,
+        },
+    )
+    .unwrap();
 
     match expect_signal(&mut a_rx).await {
         SignalMessage::Error { code, .. } => assert_eq!(code, "not_swarm_mates"),
@@ -261,6 +340,8 @@ async fn a_bad_token_is_rejected_at_hello() {
     let swarm_id = browser.create_swarm("Home").await;
     let (device_id, _token) = register_device(&browser, &stun_base, &swarm_id, "dev", "aa").await;
 
-    let err = SignalingClient::connect(&stun_base, "not-the-real-token", &device_id, None).await.unwrap_err();
+    let err = SignalingClient::connect(&stun_base, "not-the-real-token", &device_id, None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, SignalingError::Rejected { code, .. } if code == "unauthorized"));
 }

@@ -75,7 +75,7 @@ async function refreshSwarm() {
 
   if (!link) {
     content.innerHTML = `
-      <p class="muted"><i class="bi bi-link-45deg"></i> Not linked to a STUN server yet.</p>
+      <p class="muted"><i class="bi bi-link-45deg"></i> Not linked to a SWARM server yet.</p>
       <div class="row">
         <input id="joinBaseUrl" placeholder="https://swarm.example.com">
         <input id="joinCode" placeholder="12345678" maxlength="8">
@@ -99,13 +99,18 @@ async function refreshSwarm() {
 
   content.innerHTML = `
     <div class="grid">
-      ${stat("STUN server", link.base_url, false, "stun-server-address")}
+      ${stat("SWARM server", link.base_url, false, "stun-server-address")}
       ${stat("Trusted peers", link.allowed_peer_count, false, "trusted-peers")}
     </div>
-    <p class="muted" style="margin-top:10px">
-      Join codes are generated from the STUN server's own admin page:
-      <span class="mono">${esc(link.base_url)}</span>
-    </p>
+    <div class="card" style="background:var(--surface-muted); margin-top:14px">
+      <div class="card-head"><strong><i class="bi bi-tv"></i> Add a TV</strong></div>
+      <p class="muted">On the TV, choose <strong>Connect through SWARM</strong>. Enter the temporary code shown there to review and approve that TV.</p>
+      <div class="row">
+        <input id="activationCode" inputmode="numeric" placeholder="8-digit TV code" maxlength="8">
+        <button id="approveTvBtn"><i class="bi bi-shield-check"></i>Review TV</button>
+      </div>
+      <div id="activationReview" class="d-none" style="margin-top:10px"></div>
+    </div>
     <div id="swarmList" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px">
       <input id="moreCode" placeholder="Join code for another swarm" maxlength="8">
@@ -114,10 +119,41 @@ async function refreshSwarm() {
     </div>`;
 
   const swarmList = document.getElementById("swarmList");
+  document.getElementById("approveTvBtn").addEventListener("click", async () => {
+    const code = document.getElementById("activationCode").value.replace(/\D/g, "");
+    if (code.length !== 8) {
+      showToast("Enter the 8-digit code shown on the TV.", "error");
+      return;
+    }
+    const review = document.getElementById("activationReview");
+    try {
+      const pending = await invoke("lookup_tv_activation", { code });
+      review.classList.remove("d-none");
+      review.innerHTML = `<div class="note">
+        <strong>${esc(pending.device_name)}</strong><br>
+        <span class="muted">${esc(pending.platform)} · expires ${esc(new Date(pending.expires_at).toLocaleTimeString())}</span>
+        <button id="confirmTvBtn" style="margin-left:12px"><i class="bi bi-check-lg"></i>Approve this TV</button>
+      </div>`;
+      document.getElementById("confirmTvBtn").addEventListener("click", async () => {
+        try {
+          await invoke("approve_tv_activation", { activationId: pending.activation_id });
+          showToast(`${pending.device_name} was added to this swarm.`, "success");
+          document.getElementById("activationCode").value = "";
+          review.classList.add("d-none");
+          for (const swarm of link.swarms) loadRoster(swarm.id);
+        } catch (err) {
+          showToast(String(err), "error");
+        }
+      });
+    } catch (err) {
+      review.classList.add("d-none");
+      showToast(String(err), "error");
+    }
+  });
   swarmList.innerHTML = link.swarms.map(s => `
     <div class="card" style="background:var(--surface-muted); margin-bottom:10px">
       <div class="card-head">
-        <strong><i class="bi bi-diagram-3" style="color:var(--accent); margin-right:6px"></i>${esc(s.name)}</strong>
+        <strong class="swarm-name"><i class="bi bi-diagram-3"></i><span>${esc(s.name)}</span></strong>
         <button class="danger" data-leave-swarm="${esc(s.id)}"><i class="bi bi-box-arrow-right"></i>Leave</button>
       </div>
       <div id="roster-${esc(s.id)}" class="muted">Loading roster…</div>

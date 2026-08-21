@@ -17,14 +17,17 @@ import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import coil.size.Precision
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import okhttp3.Dispatcher
+import okhttp3.OkHttpClient
 
 class SwarmApplication : Application(), ImageLoaderFactory {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val artworkCache = ArtworkCache()
+    private val artworkCache by lazy { ArtworkCache(this) }
 
     override fun onCreate() {
         super.onCreate()
@@ -36,6 +39,16 @@ class SwarmApplication : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
+            .okHttpClient {
+                OkHttpClient.Builder()
+                    .dispatcher(
+                        Dispatcher().apply {
+                            maxRequests = 4
+                            maxRequestsPerHost = 4
+                        },
+                    )
+                    .build()
+            }
             .components {
                 add(artworkCache)
                 // ImageDecoderDecoder needs API 28 (Android 9); Fire TV
@@ -60,24 +73,29 @@ class SwarmApplication : Application(), ImageLoaderFactory {
             // holding the bytes. Leaving both caches at Coil's
             // platform-computed defaults (a percentage of *current*
             // available memory/storage) is a real risk specifically on Fire
-            // TV hardware, where the low-end Stick models run with as little
-            // as ~1-1.5GB total RAM shared with ExoPlayer/Compose/the OS —
-            // explicit, generous floors here mean artwork survives both a
-            // Lazy-list scroll (memory cache) and a cold navigation back to
-            // a previously-browsed screen or a fresh app launch within the
-            // TTL window (disk cache — unaffected by memory pressure at
-            // all), instead of silently shrinking under whatever memory
-            // happens to be free at the moment.
-            .memoryCache { MemoryCache.Builder(this).maxSizePercent(0.3).build() }
+            // TV hardware, where memory is shared with ExoPlayer, Compose,
+            // and the OS. A fixed cap is more predictable than a large percentage on
+            // Fire TV devices, and leaves headroom for Compose, Media3, and
+            // the platform without immediately evicting visible card art.
+            .memoryCache { MemoryCache.Builder(this).maxSizeBytes(48 * 1024 * 1024).build() }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("coil_artwork_cache"))
                     .maxSizeBytes(200L * 1024 * 1024)
                     .build()
             }
-            // Smooths over the rare genuine re-fetch (first view of an
-            // image, or a real TTL expiry) so even that case reads as a
-            // quick fade-in rather than a jarring blank flash.
-            .crossfade(true)
+            // TV sticks have few fast cores and a relatively small app
+            // heap. Bound fetch/decode work so a newly composed shelf
+            // cannot turn into a burst that competes with focus and frame
+            // rendering, and decode close to (not above) the card's target.
+            .fetcherDispatcher(Dispatchers.IO.limitedParallelism(4))
+            .decoderDispatcher(Dispatchers.Default.limitedParallelism(2))
+            .bitmapFactoryMaxParallelism(2)
+            .precision(Precision.INEXACT)
+            // Simultaneous fades across a shelf cost render frames. Fixed
+            // placeholders retain card geometry without animating every
+            // bitmap onto the screen.
+            .crossfade(false)
+            .eventListenerFactory { ArtworkEventListener(isDebuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) }
             .build()
 }

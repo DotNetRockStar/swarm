@@ -86,6 +86,13 @@ struct Rendition {
     audio_bps: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HlsReservation {
+    reserved_bps: u64,
+    enforce_budget: bool,
+    budget_exempt: bool,
+}
+
 impl Rendition {
     fn peak_total(self) -> u64 {
         self.peak_video_bps + self.audio_bps
@@ -142,6 +149,9 @@ enum SessionKind {
 struct Session {
     kind: SessionKind,
     reserved_bps: u64,
+    /// LAN sessions never consume the internet-uplink budget, including if
+    /// the global preference is toggled while they are active.
+    budget_exempt: bool,
     rate_limiter: Arc<SessionRateLimiter>,
     last_access: Instant,
     in_use: usize,
@@ -150,6 +160,29 @@ struct Session {
 #[derive(Default)]
 struct State {
     sessions: HashMap<String, Session>,
+}
+
+/**
+ * Count ffmpeg processes that are actually still running. Completed HLS
+ * sessions retain their generated files for playback, but no longer consume
+ * a transcode slot; a child-less HLS session is still starting and does.
+ */
+fn active_hls_processes(state: &mut State) -> usize {
+    state
+        .sessions
+        .values_mut()
+        .map(|session| match &mut session.kind {
+            SessionKind::Hls {
+                child: Some(child), ..
+            } => match child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) | Err(_) => true,
+            },
+            SessionKind::Hls { child: None, .. } => true,
+            SessionKind::Direct { .. } => false,
+        })
+        .filter(|active| *active)
+        .count()
 }
 
 pub struct SessionFile {
@@ -184,7 +217,8 @@ impl SessionRateLimiter {
     /// already-running session's throttle reflects it immediately rather
     /// than only affecting sessions negotiated after the update.
     pub fn set_rate_bps(&self, rate_bps: u64) {
-        self.rate_bps.store(rate_bps, std::sync::atomic::Ordering::Relaxed);
+        self.rate_bps
+            .store(rate_bps, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn wait_for(&self, bytes: usize) {
@@ -214,6 +248,7 @@ pub struct TranscodeManager {
     /// see `set_max_upload_bps`. Starts equal to `config.max_upload_bps`,
     /// so behavior is unchanged until something actually updates it.
     max_upload_bps: std::sync::atomic::AtomicU64,
+    upload_budget_enabled: std::sync::atomic::AtomicBool,
     state: Mutex<State>,
     global_rate_limiter: Arc<SessionRateLimiter>,
 }
@@ -226,6 +261,7 @@ impl TranscodeManager {
         let manager = Arc::new(Self {
             config,
             max_upload_bps,
+            upload_budget_enabled: std::sync::atomic::AtomicBool::new(true),
             state: Mutex::new(State::default()),
             global_rate_limiter,
         });
@@ -245,7 +281,9 @@ impl TranscodeManager {
     /// (the configured/default value until a real measurement overrides
     /// it), not the static config value alone.
     pub fn usable_upload_bps(&self) -> u64 {
-        let max = self.max_upload_bps.load(std::sync::atomic::Ordering::Relaxed);
+        let max = self
+            .max_upload_bps
+            .load(std::sync::atomic::Ordering::Relaxed);
         let reserve = self.config.reserve_percent.min(90) as u64;
         max.saturating_mul(100 - reserve) / 100
     }
@@ -257,8 +295,37 @@ impl TranscodeManager {
     /// actually being sent by sessions already in flight), so a change
     /// takes effect immediately rather than only for future sessions.
     pub fn set_max_upload_bps(&self, bps: u64) {
-        self.max_upload_bps.store(bps, std::sync::atomic::Ordering::Relaxed);
-        self.global_rate_limiter.set_rate_bps(self.usable_upload_bps());
+        self.max_upload_bps
+            .store(bps, std::sync::atomic::Ordering::Relaxed);
+        self.global_rate_limiter
+            .set_rate_bps(if self.upload_budget_enabled() {
+                self.usable_upload_bps()
+            } else {
+                0
+            });
+    }
+
+    pub fn upload_budget_enabled(&self) -> bool {
+        self.upload_budget_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enables/disables both admission control and byte pacing. LAN
+    /// connections are separately exempted by the request-serving layer.
+    pub fn set_upload_budget_enabled(&self, enabled: bool) {
+        self.upload_budget_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.global_rate_limiter
+            .set_rate_bps(if enabled { self.usable_upload_bps() } else { 0 });
+        for session in self.state.lock().unwrap().sessions.values() {
+            session
+                .rate_limiter
+                .set_rate_bps(if enabled { session.reserved_bps } else { 0 });
+        }
+    }
+
+    pub fn should_throttle(&self, is_lan: bool) -> bool {
+        self.upload_budget_enabled() && !is_lan
     }
 
     pub fn active_sessions(&self) -> usize {
@@ -287,9 +354,15 @@ impl TranscodeManager {
         entry: &EntryRecord,
         media_path: &Path,
         preferences: &PlaybackPreferences,
+        is_lan: bool,
     ) -> Result<PlaybackPlan, TranscodeError> {
         self.expire_idle();
-        let available = self.available_bps()?;
+        let enforce_budget = self.should_throttle(is_lan);
+        let available = if enforce_budget {
+            self.available_bps()?
+        } else {
+            u64::MAX
+        };
         let client_limit = preferences.capabilities.max_bitrate.min(available);
 
         if preferences.prefer_direct {
@@ -300,12 +373,16 @@ impl TranscodeManager {
                             entry_key: entry.entry_key.clone(),
                         },
                         source_peak,
+                        enforce_budget,
+                        is_lan,
                     )?;
                     return Ok(PlaybackPlan {
                         mode: PlaybackMode::Direct,
                         path: format!("/stream/{id}/media"),
                         max_bitrate: source_peak,
                         session_id: id,
+                        lyrics: None,
+                        subtitles: Vec::new(),
                     });
                 }
             }
@@ -334,7 +411,11 @@ impl TranscodeManager {
                     media_path,
                     preferences.start_position_secs,
                     &[],
-                    audio_bps,
+                    HlsReservation {
+                        reserved_bps: audio_bps,
+                        enforce_budget,
+                        budget_exempt: is_lan,
+                    },
                 )
                 .await;
         }
@@ -366,7 +447,11 @@ impl TranscodeManager {
             media_path,
             preferences.start_position_secs,
             &variants,
-            reserved_bps,
+            HlsReservation {
+                reserved_bps,
+                enforce_budget,
+                budget_exempt: is_lan,
+            },
         )
         .await
     }
@@ -433,6 +518,7 @@ impl TranscodeManager {
         let reserved: u64 = state
             .sessions
             .values()
+            .filter(|session| !session.budget_exempt)
             .map(|session| session.reserved_bps)
             .sum();
         Ok(self.usable_upload_bps().saturating_sub(reserved))
@@ -441,14 +527,23 @@ impl TranscodeManager {
     /// Only ever called for `SessionKind::Direct` (see `plan()`) — no
     /// max_sessions check for the same reason as `available_bps()` above;
     /// direct play is bandwidth-limited only, never process-limited.
-    fn reserve(&self, kind: SessionKind, reserved_bps: u64) -> Result<String, TranscodeError> {
+    fn reserve(
+        &self,
+        kind: SessionKind,
+        reserved_bps: u64,
+        enforce_budget: bool,
+        budget_exempt: bool,
+    ) -> Result<String, TranscodeError> {
         let mut state = self.state.lock().unwrap();
         let already_reserved: u64 = state
             .sessions
             .values()
+            .filter(|session| !session.budget_exempt)
             .map(|session| session.reserved_bps)
             .sum();
-        if already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps() {
+        if enforce_budget
+            && already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps()
+        {
             return Err(TranscodeError::Bandwidth);
         }
         let id = session_id();
@@ -457,6 +552,7 @@ impl TranscodeManager {
             Session {
                 kind,
                 reserved_bps,
+                budget_exempt,
                 rate_limiter: Arc::new(SessionRateLimiter::new(reserved_bps)),
                 last_access: Instant::now(),
                 in_use: 0,
@@ -471,8 +567,13 @@ impl TranscodeManager {
         media_path: &Path,
         start_position_secs: u64,
         variants: &[Rendition],
-        reserved_bps: u64,
+        reservation: HlsReservation,
     ) -> Result<PlaybackPlan, TranscodeError> {
+        let HlsReservation {
+            reserved_bps,
+            enforce_budget,
+            budget_exempt,
+        } = reservation;
         std::fs::create_dir_all(&self.config.session_dir).map_err(TranscodeError::Workspace)?;
         let id = session_id();
         let directory = self.config.session_dir.join(&id);
@@ -491,11 +592,7 @@ impl TranscodeManager {
             // Only count other Hls sessions here — a concurrently-open Direct
             // session holds no ffmpeg process and shouldn't spend a slot of
             // this specifically process/CPU-oriented limit.
-            let transcode_sessions = state
-                .sessions
-                .values()
-                .filter(|session| matches!(session.kind, SessionKind::Hls { .. }))
-                .count();
+            let transcode_sessions = active_hls_processes(&mut state);
             if transcode_sessions >= self.config.max_sessions.max(1) {
                 let _ = std::fs::remove_dir_all(&directory);
                 return Err(TranscodeError::Capacity);
@@ -503,9 +600,12 @@ impl TranscodeManager {
             let already_reserved: u64 = state
                 .sessions
                 .values()
+                .filter(|session| !session.budget_exempt)
                 .map(|session| session.reserved_bps)
                 .sum();
-            if already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps() {
+            if enforce_budget
+                && already_reserved.saturating_add(reserved_bps) > self.usable_upload_bps()
+            {
                 let _ = std::fs::remove_dir_all(&directory);
                 return Err(TranscodeError::Bandwidth);
             }
@@ -517,6 +617,7 @@ impl TranscodeManager {
                         child: None,
                     },
                     reserved_bps,
+                    budget_exempt,
                     rate_limiter: Arc::new(SessionRateLimiter::new(reserved_bps)),
                     last_access: Instant::now(),
                     in_use: 0,
@@ -554,6 +655,8 @@ impl TranscodeManager {
             path: format!("/hls/{id}/master.m3u8"),
             max_bitrate: reserved_bps,
             session_id: id,
+            lyrics: None,
+            subtitles: Vec::new(),
         })
     }
 
@@ -970,6 +1073,60 @@ mod tests {
     }
 
     #[test]
+    fn upload_budget_can_be_disabled_and_never_applies_on_lan() {
+        let manager = TranscodeManager::new(TranscodeConfig::disabled(
+            std::env::temp_dir().join("swarm-budget-toggle-test"),
+        ));
+        assert!(manager.should_throttle(false));
+        assert!(!manager.should_throttle(true));
+        manager.set_upload_budget_enabled(false);
+        assert!(!manager.should_throttle(false));
+        assert_eq!(manager.global_rate_limiter().rate_bps(), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_hls_jobs_no_longer_consume_transcode_capacity() {
+        let mut completed_child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        assert!(completed_child.wait().await.unwrap().success());
+
+        let session = |kind| Session {
+            kind,
+            reserved_bps: 128_000,
+            budget_exempt: true,
+            rate_limiter: Arc::new(SessionRateLimiter::new(0)),
+            last_access: Instant::now(),
+            in_use: 0,
+        };
+        let mut state = State::default();
+        state.sessions.insert(
+            "finished".into(),
+            session(SessionKind::Hls {
+                directory: PathBuf::from("finished"),
+                child: Some(completed_child),
+            }),
+        );
+        assert_eq!(active_hls_processes(&mut state), 0);
+
+        // `None` is the short interval after a session is reserved but
+        // before spawn_ffmpeg installs its child handle; it must still hold
+        // a slot so simultaneous negotiations cannot exceed the limit.
+        state.sessions.insert(
+            "starting".into(),
+            session(SessionKind::Hls {
+                directory: PathBuf::from("starting"),
+                child: None,
+            }),
+        );
+        state.sessions.insert(
+            "direct".into(),
+            session(SessionKind::Direct {
+                entry_key: "track".into(),
+            }),
+        );
+        assert_eq!(active_hls_processes(&mut state), 1);
+    }
+
+    #[test]
     fn direct_play_requires_container_codec_and_budget_compatibility() {
         let mut compatible = entry();
         compatible.relative_path = "movies/example.mp4".into();
@@ -1009,6 +1166,8 @@ mod tests {
                     entry_key: "a".into(),
                 },
                 4_160_000,
+                true,
+                false,
             )
             .unwrap();
         let second = manager
@@ -1017,6 +1176,8 @@ mod tests {
                     entry_key: "b".into(),
                 },
                 2_128_000,
+                true,
+                false,
             )
             .unwrap();
         assert_eq!(manager.reserved_bps(), 6_288_000);
@@ -1025,7 +1186,9 @@ mod tests {
                 SessionKind::Direct {
                     entry_key: "c".into()
                 },
-                1_096_000
+                1_096_000,
+                true,
+                false,
             ),
             Err(TranscodeError::Bandwidth)
         ));
@@ -1108,7 +1271,10 @@ mod tests {
         let mut prefs = preferences();
         prefs.prefer_direct = false;
 
-        let plan = manager.plan(&source_entry, &source, &prefs).await.unwrap();
+        let plan = manager
+            .plan(&source_entry, &source, &prefs, false)
+            .await
+            .unwrap();
         assert_eq!(plan.mode, PlaybackMode::Hls);
         let relative = plan.path.splitn(4, '/').nth(3).unwrap();
         let session = plan.path.split('/').nth(2).unwrap();

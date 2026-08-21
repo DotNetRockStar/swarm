@@ -14,6 +14,7 @@
 mod mcp;
 mod settings;
 
+use rand::RngCore;
 use settings::{MediaRootSetting, Settings};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +22,8 @@ use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
 use swarm_server::{ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -32,6 +35,17 @@ struct AppState {
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+fn configured_rendezvous_url() -> Option<String> {
+    std::env::var("SWARM_RENDEZVOUS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("SWARM_RENDEZVOUS_URL")
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 impl AppState {
@@ -50,10 +64,8 @@ impl AppState {
                 let config = ServerConfig {
                     media_roots: to_media_roots(&settings.media_roots),
                     data_dir: dir,
-                    // Same SWARM_PEER_BIND convention as the headless binary
-                    // (see config_from_env) — lets the GUI run on a different
-                    // port than a headless instance for side-by-side testing,
-                    // since both otherwise default to the identical 8543.
+                    // This remains an environment override for development and
+                    // managed deployments; ordinary desktop users never need it.
                     bind: std::env::var("SWARM_PEER_BIND")
                         .unwrap_or_else(|_| "0.0.0.0:8543".into())
                         .parse()
@@ -76,15 +88,22 @@ impl AppState {
                     // STUN server's own row is the real revocation
                     // authority), so this is the right trade-off here.
                     token_store_mode: TokenStoreMode::FileOnly,
+                    managed_rendezvous_url: configured_rendezvous_url(),
                 };
                 let core = ServerCore::start(config).await.map_err(|e| e.to_string())?;
+                core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
+                core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 if settings.mcp_enabled {
-                    let mcp_core = Arc::clone(&core);
-                    tokio::spawn(async move {
-                        if let Err(err) = mcp::serve(mcp_core, settings.mcp_port).await {
-                            tracing::error!(%err, "MCP server stopped");
-                        }
-                    });
+                    if let Some(access_token) = settings.mcp_access_token.filter(|token| !token.is_empty()) {
+                        let mcp_core = Arc::clone(&core);
+                        tokio::spawn(async move {
+                            if let Err(err) = mcp::serve(mcp_core, settings.mcp_port, access_token).await {
+                                tracing::error!(%err, "MCP server stopped");
+                            }
+                        });
+                    } else {
+                        tracing::error!("MCP server is enabled but has no access token; create one in the AI tab");
+                    }
                 }
                 Ok(core)
             })
@@ -98,9 +117,17 @@ impl AppState {
     /// error, when no core exists yet (e.g. mid first-run onboarding, before
     /// any folder has ever been chosen): `OnceCell::get` never triggers
     /// initialization, so onboarding is unaffected.
-    async fn apply_live_roots(&self, roots: &[MediaRootSetting]) -> Result<Option<RescanResult>, String> {
-        let Some(core) = self.core.get() else { return Ok(None) };
-        let report = core.update_media_roots(to_media_roots(roots)).await.map_err(|e| e.to_string())?;
+    async fn apply_live_roots(
+        &self,
+        roots: &[MediaRootSetting],
+    ) -> Result<Option<RescanResult>, String> {
+        let Some(core) = self.core.get() else {
+            return Ok(None);
+        };
+        let report = core
+            .update_media_roots(to_media_roots(roots))
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(Some(RescanResult {
             added: report.added,
             updated: report.updated,
@@ -111,15 +138,24 @@ impl AppState {
 }
 
 fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
-    settings.iter().map(|r| MediaRoot { label: r.label.clone(), path: PathBuf::from(&r.path) }).collect()
+    settings
+        .iter()
+        .map(|r| MediaRoot {
+            label: r.label.clone(),
+            path: PathBuf::from(&r.path),
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
 struct SettingsView {
     media_roots: Vec<MediaRootSetting>,
     has_tmdb_key: bool,
+    streaming_upload_budget_enabled: bool,
+    local_transcription_enabled: bool,
     mcp_enabled: bool,
     mcp_port: u16,
+    mcp_access_token: Option<String>,
 }
 
 #[tauri::command]
@@ -128,8 +164,11 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
     Ok(SettingsView {
         media_roots: settings.media_roots,
         has_tmdb_key: settings.tmdb_api_key.is_some(),
+        streaming_upload_budget_enabled: settings.streaming_upload_budget_enabled,
+        local_transcription_enabled: settings.local_transcription_enabled,
         mcp_enabled: settings.mcp_enabled,
         mcp_port: settings.mcp_port,
+        mcp_access_token: settings.mcp_access_token,
     })
 }
 
@@ -146,10 +185,15 @@ async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<String>, String> {
 /// Does not affect an already-running core — see the module docs.
 #[tauri::command]
 async fn choose_media_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let Some(path) = pick_folder(&app).await? else { return Ok(None) };
+    let Some(path) = pick_folder(&app).await? else {
+        return Ok(None);
+    };
     let dir = app_data_dir(&app)?;
     let mut settings = settings::load(&dir);
-    settings.media_roots = vec![MediaRootSetting { label: "local".to_string(), path: path.clone() }];
+    settings.media_roots = vec![MediaRootSetting {
+        label: "local".to_string(),
+        path: path.clone(),
+    }];
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     Ok(Some(path))
 }
@@ -221,7 +265,10 @@ async fn add_media_root(
     settings.media_roots.push(MediaRootSetting { label, path });
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     let rescan = state.apply_live_roots(&settings.media_roots).await?;
-    Ok(MediaRootsResult { media_roots: settings.media_roots, rescan })
+    Ok(MediaRootsResult {
+        media_roots: settings.media_roots,
+        rescan,
+    })
 }
 
 /// Removes a configured root by label. Refuses to remove the last remaining
@@ -241,15 +288,66 @@ async fn remove_media_root(
     settings.media_roots.retain(|r| r.label != label);
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     let rescan = state.apply_live_roots(&settings.media_roots).await?;
-    Ok(MediaRootsResult { media_roots: settings.media_roots, rescan })
+    Ok(MediaRootsResult {
+        media_roots: settings.media_roots,
+        rescan,
+    })
 }
 
 #[tauri::command]
 async fn set_tmdb_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
     let mut settings: Settings = settings::load(&dir);
-    settings.tmdb_api_key = if key.trim().is_empty() { None } else { Some(key.trim().to_string()) };
+    settings.tmdb_api_key = if key.trim().is_empty() {
+        None
+    } else {
+        Some(key.trim().to_string())
+    };
     settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_streaming_upload_budget_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.streaming_upload_budget_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    if let Some(core) = state.core.get() {
+        core.set_streaming_upload_budget_enabled(enabled);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_local_transcription_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.local_transcription_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let core = state.core(&app).await?;
+    core.set_local_transcription_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_transcription_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<swarm_server::transcription::TranscriptionStatus, String> {
+    state
+        .core(&app)
+        .await?
+        .transcription_status()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Both take effect on next launch/restart, not live — see `mcp.rs`'s doc
@@ -272,8 +370,28 @@ async fn set_mcp_port(app: tauri::AppHandle, port: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_status(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<ServerStatus, String> {
-    state.core(&app).await?.status().await.map_err(|e| e.to_string())
+async fn generate_mcp_access_token(app: tauri::AppHandle) -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = format!("swarm_mcp_{}", hex::encode(bytes));
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.mcp_access_token = Some(token.clone());
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    Ok(token)
+}
+
+#[tauri::command]
+async fn get_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ServerStatus, String> {
+    state
+        .core(&app)
+        .await?
+        .status()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -293,7 +411,10 @@ struct RescanResult {
 const SCAN_PROGRESS_EVENT: &str = "scan-progress";
 
 #[tauri::command]
-async fn rescan(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<RescanResult, String> {
+async fn rescan(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<RescanResult, String> {
     let core = state.core(&app).await?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = app.clone();
@@ -326,7 +447,10 @@ async fn reclassify_library(
     state: tauri::State<'_, AppState>,
 ) -> Result<swarm_media::store::ReclassifyReport, String> {
     let core = state.core(&app).await?;
-    core.library.reclassify_all(&core.media_roots).await.map_err(|e| e.to_string())
+    core.library
+        .reclassify_all(&core.media_roots)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -359,10 +483,17 @@ struct EntrySummary {
 }
 
 #[tauri::command]
-async fn list_entries(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<EntrySummary>, String> {
+async fn list_entries(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<EntrySummary>, String> {
     let core = state.core(&app).await?;
     let entries = core.library.list().await.map_err(|e| e.to_string())?;
-    let like_counts = core.library.like_counts().await.map_err(|e| e.to_string())?;
+    let like_counts = core
+        .library
+        .like_counts()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(entries
         .into_iter()
         .map(|entry| EntrySummary {
@@ -395,9 +526,15 @@ async fn list_entries(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
 /// `Library::distinct_genres`'s doc comment for why genres double as
 /// categories rather than this being a separate concept.
 #[tauri::command]
-async fn list_categories(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+async fn list_categories(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, String> {
     let core = state.core(&app).await?;
-    core.library.distinct_genres().await.map_err(|e| e.to_string())
+    core.library
+        .distinct_genres()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Raw bytes for one entry's artwork slot, for the Media tab's browse view to
@@ -414,10 +551,13 @@ async fn get_artwork_bytes(
     kind: String,
 ) -> Result<Option<Vec<u8>>, String> {
     let core = state.core(&app).await?;
-    let artwork_kind =
-        swarm_media::store::ArtworkKind::parse(&kind).ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
-    let Some((relative_path, _version)) =
-        core.library.artwork(&entry_key, artwork_kind).await.map_err(|e| e.to_string())?
+    let artwork_kind = swarm_media::store::ArtworkKind::parse(&kind)
+        .ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
+    let Some((relative_path, _version)) = core
+        .library
+        .artwork(&entry_key, artwork_kind)
+        .await
+        .map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
@@ -435,7 +575,11 @@ async fn get_artwork_bytes(
 const SCRAPE_PROGRESS_EVENT: &str = "scrape-progress";
 
 #[tauri::command]
-async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>, force: bool) -> Result<BulkScrapeReport, String> {
+async fn run_scrape(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    force: bool,
+) -> Result<BulkScrapeReport, String> {
     let core = state.core(&app).await?;
     let tmdb_api_key = settings::load(&app_data_dir(&app)?).tmdb_api_key;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -448,7 +592,16 @@ async fn run_scrape(app: tauri::AppHandle, state: tauri::State<'_, AppState>, fo
             let _ = emitter.emit(SCRAPE_PROGRESS_EVENT, event);
         }
     });
-    let result = core.run_scrape(ScrapeConfig { tmdb_api_key, ..Default::default() }, Some(tx), force).await;
+    let result = core
+        .run_scrape(
+            ScrapeConfig {
+                tmdb_api_key,
+                ..Default::default()
+            },
+            Some(tx),
+            force,
+        )
+        .await;
     // Dropping the last sender (above) closes the channel, so `forward`
     // exits its loop on its own — awaiting it here just makes sure every
     // already-queued event is actually emitted before this command returns
@@ -469,9 +622,16 @@ async fn rescrape_entry(
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
     let tmdb_api_key = settings::load(&app_data_dir(&app)?).tmdb_api_key;
-    let config = ScrapeConfig { tmdb_api_key, ..Default::default() };
-    let tmdb_override = tmdb_url.filter(|u| !u.trim().is_empty()).map(swarm_media::scrape::TmdbOverride::Url);
-    core.rescrape_entry(&entry_key, config, tmdb_override).await.map_err(|e| e.to_string())
+    let config = ScrapeConfig {
+        tmdb_api_key,
+        ..Default::default()
+    };
+    let tmdb_override = tmdb_url
+        .filter(|u| !u.trim().is_empty())
+        .map(swarm_media::scrape::TmdbOverride::Url);
+    core.rescrape_entry(&entry_key, config, tmdb_override)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Manually override an entry's display title, genre/category list,
@@ -495,10 +655,16 @@ async fn set_manual_metadata(
         .await
         .map_err(|e| e.to_string())?;
     if let Some(overview) = overview {
-        core.library.set_overview(&entry_key, &overview).await.map_err(|e| e.to_string())?;
+        core.library
+            .set_overview(&entry_key, &overview)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     if let Some(rating) = rating {
-        core.library.set_rating(&entry_key, &rating).await.map_err(|e| e.to_string())?;
+        core.library
+            .set_rating(&entry_key, &rating)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -527,7 +693,13 @@ async fn set_manual_kind(
         other => return Err(format!("unknown asset kind \"{other}\"")),
     };
     core.library
-        .set_manual_kind(&entry_key, kind, artist.as_deref(), album.as_deref(), show_title.as_deref())
+        .set_manual_kind(
+            &entry_key,
+            kind,
+            artist.as_deref(),
+            album.as_deref(),
+            show_title.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -548,18 +720,31 @@ async fn upload_artwork(
     bytes: Vec<u8>,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
-    let artwork_kind =
-        swarm_media::store::ArtworkKind::parse(&kind).ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
+    let artwork_kind = swarm_media::store::ArtworkKind::parse(&kind)
+        .ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
     let extension = extension.trim().trim_start_matches('.').to_lowercase();
     if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") {
         return Err(format!("unsupported image extension \"{extension}\""));
     }
-    let entry = core.library.get(&entry_key).await.map_err(|e| e.to_string())?.ok_or("no such entry")?;
-    let filename = format!("manual-{}.{extension}", artwork_kind.route_segment());
-    let relative = swarm_media::scrape::artwork::save_artwork(&core.media_roots, &entry.relative_path, &filename, &bytes)
+    let entry = core
+        .library
+        .get(&entry_key)
         .await
-        .map_err(|e| e.to_string())?;
-    core.library.set_artwork(&entry_key, artwork_kind, &relative).await.map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+        .ok_or("no such entry")?;
+    let filename = format!("manual-{}.{extension}", artwork_kind.route_segment());
+    let relative = swarm_media::scrape::artwork::save_artwork(
+        &core.media_roots,
+        &entry.relative_path,
+        &filename,
+        &bytes,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    core.library
+        .set_artwork(&entry_key, artwork_kind, &relative)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Manually uploaded artwork shared across a whole client-side-computed
@@ -588,8 +773,8 @@ async fn upload_group_artwork(
     bytes: Vec<u8>,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
-    let artwork_kind =
-        swarm_media::store::ArtworkKind::parse(&kind).ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
+    let artwork_kind = swarm_media::store::ArtworkKind::parse(&kind)
+        .ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
     let extension = extension.trim().trim_start_matches('.').to_lowercase();
     if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") {
         return Err(format!("unsupported image extension \"{extension}\""));
@@ -597,13 +782,26 @@ async fn upload_group_artwork(
     let Some(first_key) = entry_keys.first() else {
         return Err("no entries to attach artwork to".to_string());
     };
-    let first = core.library.get(first_key).await.map_err(|e| e.to_string())?.ok_or("no such entry")?;
-    let filename = format!("manual-{}.{extension}", artwork_kind.route_segment());
-    let relative = swarm_media::scrape::artwork::save_artwork(&core.media_roots, &first.relative_path, &filename, &bytes)
+    let first = core
+        .library
+        .get(first_key)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .ok_or("no such entry")?;
+    let filename = format!("manual-{}.{extension}", artwork_kind.route_segment());
+    let relative = swarm_media::scrape::artwork::save_artwork(
+        &core.media_roots,
+        &first.relative_path,
+        &filename,
+        &bytes,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     for entry_key in &entry_keys {
-        core.library.set_artwork(entry_key, artwork_kind, &relative).await.map_err(|e| e.to_string())?;
+        core.library
+            .set_artwork(entry_key, artwork_kind, &relative)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -616,9 +814,17 @@ async fn upload_group_artwork(
 /// was already gone, or a flaky network mount) never fails the command
 /// itself — the database state is what actually matters here.
 #[tauri::command]
-async fn clear_scraped_metadata(app: tauri::AppHandle, state: tauri::State<'_, AppState>, entry_key: String) -> Result<(), String> {
+async fn clear_scraped_metadata(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+) -> Result<(), String> {
     let core = state.core(&app).await?;
-    let cleared_paths = core.library.clear_scrape_result(&entry_key).await.map_err(|e| e.to_string())?;
+    let cleared_paths = core
+        .library
+        .clear_scrape_result(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?;
     for relative_path in cleared_paths {
         let path = core.media_roots.resolve(&relative_path);
         let _ = tokio::fs::remove_file(&path).await;
@@ -645,10 +851,19 @@ async fn get_swarm_link(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<SwarmLinkView>, String> {
     let core = state.core(&app).await?;
-    let Some(link) = core.stun_link().await else { return Ok(None) };
+    let Some(link) = core.stun_link().await else {
+        return Ok(None);
+    };
     Ok(Some(SwarmLinkView {
         base_url: link.base_url,
-        swarms: link.swarms.into_iter().map(|s| SwarmSummaryView { id: s.id, name: s.name }).collect(),
+        swarms: link
+            .swarms
+            .into_iter()
+            .map(|s| SwarmSummaryView {
+                id: s.id,
+                name: s.name,
+            })
+            .collect(),
         allowed_peer_count: core.allowed.len(),
     }))
 }
@@ -680,7 +895,9 @@ async fn revoke_local_peer(
     fingerprint: String,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
-    core.revoke_local_peer(&fingerprint).await.map_err(|e| e.to_string())
+    core.revoke_local_peer(&fingerprint)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -692,8 +909,14 @@ async fn join_swarm(
     device_name: String,
 ) -> Result<SwarmSummaryView, String> {
     let core = state.core(&app).await?;
-    let swarm = core.register_with_stun(&base_url, &code, &device_name).await.map_err(|e| e.to_string())?;
-    Ok(SwarmSummaryView { id: swarm.id, name: swarm.name })
+    let swarm = core
+        .register_with_stun(&base_url, &code, &device_name)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(SwarmSummaryView {
+        id: swarm.id,
+        name: swarm.name,
+    })
 }
 
 #[tauri::command]
@@ -703,12 +926,45 @@ async fn join_additional_swarm(
     code: String,
 ) -> Result<SwarmSummaryView, String> {
     let core = state.core(&app).await?;
-    let swarm = core.join_additional_swarm(&code).await.map_err(|e| e.to_string())?;
-    Ok(SwarmSummaryView { id: swarm.id, name: swarm.name })
+    let swarm = core
+        .join_additional_swarm(&code)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(SwarmSummaryView {
+        id: swarm.id,
+        name: swarm.name,
+    })
 }
 
 #[tauri::command]
-async fn resync_swarm(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<usize, String> {
+async fn lookup_tv_activation(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<swarm_core::rest::ActivationPreview, String> {
+    let core = state.core(&app).await?;
+    core.lookup_activation(&code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn approve_tv_activation(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    activation_id: String,
+) -> Result<swarm_core::rest::ActivationStatusResponse, String> {
+    let core = state.core(&app).await?;
+    core.approve_activation(&activation_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resync_swarm(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<usize, String> {
     let core = state.core(&app).await?;
     core.resync().await.map_err(|e| e.to_string())
 }
@@ -716,7 +972,11 @@ async fn resync_swarm(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
 /// Leave one joined swarm, keeping the STUN link (and other memberships)
 /// intact — see `ServerCore::leave_swarm`.
 #[tauri::command]
-async fn leave_swarm(app: tauri::AppHandle, state: tauri::State<'_, AppState>, swarm_id: String) -> Result<(), String> {
+async fn leave_swarm(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    swarm_id: String,
+) -> Result<(), String> {
     let core = state.core(&app).await?;
     core.leave_swarm(&swarm_id).await.map_err(|e| e.to_string())
 }
@@ -735,7 +995,9 @@ async fn get_swarm_devices(
     swarm_id: String,
 ) -> Result<swarm_core::rest::SwarmDevicesResponse, String> {
     let core = state.core(&app).await?;
-    core.swarm_devices(&swarm_id).await.map_err(|e| e.to_string())
+    core.swarm_devices(&swarm_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Wire shape for the swarm page's Errors panel — a plain struct rather than
@@ -777,9 +1039,16 @@ impl From<swarm_media::store::ClientErrorRecord> for ClientErrorView {
 /// `swarm_core::peer::ClientErrorReport`), newest first, for the swarm
 /// page's Errors panel.
 #[tauri::command]
-async fn list_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<ClientErrorView>, String> {
+async fn list_client_errors(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ClientErrorView>, String> {
     let core = state.core(&app).await?;
-    let errors = core.library.list_client_errors().await.map_err(|e| e.to_string())?;
+    let errors = core
+        .library
+        .list_client_errors()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(errors.into_iter().map(ClientErrorView::from).collect())
 }
 
@@ -787,21 +1056,40 @@ async fn list_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppSt
 /// [`list_client_errors`] so the badge can refresh cheaply without pulling
 /// every error's full body down each time.
 #[tauri::command]
-async fn client_error_count(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<u64, String> {
+async fn client_error_count(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<u64, String> {
     let core = state.core(&app).await?;
-    core.library.client_error_count().await.map_err(|e| e.to_string())
+    core.library
+        .client_error_count()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn delete_client_error(app: tauri::AppHandle, state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+async fn delete_client_error(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
     let core = state.core(&app).await?;
-    core.library.delete_client_error(id).await.map_err(|e| e.to_string())
+    core.library
+        .delete_client_error(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn clear_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn clear_client_errors(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let core = state.core(&app).await?;
-    core.library.clear_client_errors().await.map_err(|e| e.to_string())
+    core.library
+        .clear_client_errors()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // The dashboard's info modal (apps/server/ui/app.js's INFO_TOPICS) links out to
@@ -817,16 +1105,98 @@ async fn clear_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppS
 // to JS directly.
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+const MAIN_WINDOW_LABEL: &str = "main";
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Hiding the desktop window deliberately leaves [`AppState`] and its
+/// [`ServerCore`] alive. Playback, LAN discovery, and remote connections keep
+/// running until the user chooses Quit from the tray menu.
+#[tauri::command]
+fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "main window is unavailable".to_string())?
+        .hide()
+        .map_err(|error| error.to_string())
+}
+
+fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "tray-show", "Show SWARM", true, None::<&str>)?;
+    let running = MenuItem::with_id(
+        app,
+        "tray-running",
+        "Media server continues while hidden",
+        false,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit SWARM", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &running, &separator, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("swarm-server")
+        .menu(&menu)
+        .tooltip("SWARM Media Server")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-show" => show_main_window(app),
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // Must be registered first: a second launch simply reveals the
+        // already-running window instead of starting a competing server.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { core: OnceCell::new() })
+        .setup(|app| {
+            install_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == MAIN_WINDOW_LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .manage(AppState {
+            core: OnceCell::new(),
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            hide_to_tray,
             open_external_url,
             choose_media_folder,
             pick_folder_path,
@@ -836,8 +1206,12 @@ fn main() {
             add_media_root,
             remove_media_root,
             set_tmdb_api_key,
+            set_streaming_upload_budget_enabled,
+            set_local_transcription_enabled,
+            get_transcription_status,
             set_mcp_enabled,
             set_mcp_port,
+            generate_mcp_access_token,
             get_status,
             rescan,
             reclassify_library,
@@ -857,6 +1231,8 @@ fn main() {
             revoke_local_peer,
             join_swarm,
             join_additional_swarm,
+            lookup_tv_activation,
+            approve_tv_activation,
             resync_swarm,
             leave_swarm,
             get_swarm_devices,
@@ -865,6 +1241,13 @@ fn main() {
             delete_client_error,
             clear_client_errors,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to launch SWARM Server");
+        .build(tauri::generate_context!())
+        .expect("failed to build SWARM Server");
+
+    app.run(|app, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            show_main_window(app);
+        }
+    });
 }

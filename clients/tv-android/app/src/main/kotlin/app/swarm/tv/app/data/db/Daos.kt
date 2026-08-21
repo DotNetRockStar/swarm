@@ -95,6 +95,9 @@ interface KidModeDao {
 
 @Dao
 interface LocalServerConnectionDao {
+    @Query("SELECT * FROM local_server_connection ORDER BY last_connected_at DESC")
+    suspend fun list(): List<LocalServerConnectionEntity>
+
     @Query("SELECT * FROM local_server_connection ORDER BY last_connected_at DESC LIMIT 1")
     suspend fun mostRecent(): LocalServerConnectionEntity?
 

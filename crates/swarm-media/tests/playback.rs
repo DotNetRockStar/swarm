@@ -6,7 +6,7 @@ use swarm_core::peer::{
     PlaybackPreferences, VideoStreamInfo,
 };
 use swarm_media::serve::{Body, MediaService};
-use swarm_media::store::{EntryRecord, Library};
+use swarm_media::store::{EntryRecord, Library, SubtitleRecord};
 use swarm_media::transcode::TranscodeConfig;
 
 fn request(path: String) -> PeerRequest {
@@ -72,6 +72,22 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         rating: None,
     };
     library.upsert(&entry).await.unwrap();
+    let subtitle_path = root.join("subtitles").join("example.vtt");
+    std::fs::create_dir_all(subtitle_path.parent().unwrap()).unwrap();
+    std::fs::write(&subtitle_path, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n").unwrap();
+    library
+        .complete_transcription(&SubtitleRecord {
+            id: "whisper-en".into(),
+            entry_key: entry.entry_key.clone(),
+            language: "en".into(),
+            label: "English — AI generated".into(),
+            source: "whisper".into(),
+            format: "vtt".into(),
+            file_path: subtitle_path.to_string_lossy().to_string(),
+            fingerprint: entry.fingerprint.clone(),
+        })
+        .await
+        .unwrap();
 
     let service = MediaService::with_transcoding(
         library,
@@ -107,6 +123,14 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
     let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
     assert_eq!(plan.mode, PlaybackMode::Direct);
     assert_eq!(plan.max_bitrate, 1_000_000);
+    assert_eq!(plan.subtitles.len(), 1);
+    let subtitles = service.resolve(&request(plan.subtitles[0].path.clone())).await;
+    assert_eq!(subtitles.header.status, 200);
+    assert_eq!(subtitles.header.content_type.as_deref(), Some("text/vtt; charset=utf-8"));
+    let Body::Bytes(subtitle_body) = subtitles.body else {
+        panic!("subtitle must be served as bytes")
+    };
+    assert!(String::from_utf8(subtitle_body).unwrap().contains("Hello"));
 
     let mut media_request = request(plan.path.clone());
     media_request.range = Some(ByteRange::FromTo {
@@ -116,6 +140,23 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
     let media = service.resolve(&media_request).await;
     assert_eq!((media.header.status, media.header.len), (206, 100));
     assert_eq!(service.transcode_manager().reserved_bps(), 1_000_000);
+
+    // The first internet session already holds budget. A second internet
+    // negotiation is therefore rejected, while the identical request from
+    // the LAN bypasses admission control and succeeds.
+    service.transcode_manager().set_max_upload_bps(1_000_000);
+    let internet_retry = service.resolve(&negotiation).await;
+    assert_ne!(internet_retry.header.status, 200);
+    let lan_retry = service.resolve_for_network(&negotiation, true).await;
+    assert_eq!(lan_retry.header.status, 200);
+
+    // Raw file serving on LAN also omits both the global and per-session
+    // byte pacers.
+    let lan_media = service.resolve_for_network(&media_request, true).await;
+    let Body::File { rate_limiters, .. } = lan_media.body else {
+        panic!("direct media must resolve to a file")
+    };
+    assert!(rate_limiters.is_empty());
 
     let session_id = plan.path.split('/').nth(2).unwrap();
     service.transcode_manager().finish_use(session_id);
@@ -224,14 +265,26 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
     // Simulates "froze, pressed back, tried to play again" without ever
     // calling /stop: the reservation is still held, so this must still fail.
     let stuck_retry = service.resolve(&negotiate()).await;
-    assert_eq!(stuck_retry.header.status, 429, "budget must still be held by the first, unreleased session");
+    assert_eq!(
+        stuck_retry.header.status, 429,
+        "budget must still be held by the first, unreleased session"
+    );
 
-    let stop = service.resolve(&request(format!("/stop/{}", plan.session_id))).await;
+    let stop = service
+        .resolve(&request(format!("/stop/{}", plan.session_id)))
+        .await;
     assert_eq!(stop.header.status, 200);
-    assert_eq!(service.transcode_manager().reserved_bps(), 0, "release must free the whole reservation immediately, not just mark it idle");
+    assert_eq!(
+        service.transcode_manager().reserved_bps(),
+        0,
+        "release must free the whole reservation immediately, not just mark it idle"
+    );
 
     let retry_after_stop = service.resolve(&negotiate()).await;
-    assert_eq!(retry_after_stop.header.status, 200, "retry must succeed right away now, not after waiting out idle_timeout");
+    assert_eq!(
+        retry_after_stop.header.status, 200,
+        "retry must succeed right away now, not after waiting out idle_timeout"
+    );
 
     drop(service);
     let _ = std::fs::remove_dir_all(root);
@@ -332,7 +385,10 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             like: None,
         };
         let resolved = service.resolve(&negotiation).await;
-        assert_eq!(resolved.header.status, 200, "negotiation for {entry_key} must not be capacity-limited");
+        assert_eq!(
+            resolved.header.status, 200,
+            "negotiation for {entry_key} must not be capacity-limited"
+        );
         let Body::Bytes(body) = resolved.body else {
             panic!("playback plan must be JSON")
         };

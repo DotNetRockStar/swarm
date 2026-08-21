@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Runs a real SWARM STUN server + a real headless media server + the Tauri
-# media server GUI, all locally, for manual testing — the first two are the
-# same binaries every automated test in this repo spawns as subprocesses,
-# just left running so you can point a browser, curl, or a real device
-# (Fire TV, phone, whatever) at them yourself; the GUI is the same
-# ServerCore wrapped in a window, for visually checking onboarding/library/
-# swarm state instead of only curl+logs. Ctrl+C stops all three, and
+# Runs a real SWARM server + the Tauri media server GUI locally for manual
+# testing. The GUI contains the real ServerCore, so it is the only media
+# server started by this script; this keeps LAN discovery from showing a
+# second media server alongside it. Ctrl+C stops both processes, and
 # actually stops them — see the cleanup() note below on why that isn't
 # as trivial as it sounds with `cargo run` in the mix.
 #
@@ -15,22 +12,15 @@
 # screen and in your browser if you're setting the account up from a
 # different machine.
 #
-# First run: open the STUN server's web UI (URL printed below), create an
-# account and a swarm, and mint a join code. Then either:
-#   - paste the code into the GUI window this script already opened, or
-#   - stop this script and re-run with the code so the headless daemon
-#     auto-registers on startup (see SWARM_STUN_CODE below).
+# First run: open the SWARM server's web UI (URL printed below), create an
+# account and a swarm, and mint a join code. Then paste the code into the
+# GUI window this script already opened.
 #
 # Env vars (all optional):
 #   SWARM_STUN_PORT      STUN server HTTP port (default 8080)
-#   SWARM_PEER_PORT      headless media server's peer QUIC port (default 8543)
-#   SWARM_GUI_PEER_PORT  GUI media server's peer QUIC port (default 8544) —
-#                        must differ from SWARM_PEER_PORT since both are
-#                        real ServerCore instances bound at the same time
-#   SWARM_RUN_DIR     where local state (sqlite dbs, media root) lives (default .run)
-#   SWARM_STUN_URL / SWARM_STUN_CODE   set both to auto-register the media
-#                     server into a swarm on startup (see main.rs)
-#   RUST_LOG          default "info"
+#   SWARM_GUI_PEER_PORT  GUI media server's peer QUIC port (default 8544)
+#   SWARM_RUN_DIR        where local SWARM server state lives (default .run)
+#   RUST_LOG             default "info"
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -41,7 +31,6 @@ fi
 
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
 STUN_PORT="${SWARM_STUN_PORT:-8080}"
-PEER_PORT="${SWARM_PEER_PORT:-8543}"
 GUI_PEER_PORT="${SWARM_GUI_PEER_PORT:-8544}"
 # The STUN server's own reflector, not otherwise surfaced here — needed so
 # cleanup() can free them too; keep in sync with config.rs's default if that
@@ -49,7 +38,7 @@ GUI_PEER_PORT="${SWARM_GUI_PEER_PORT:-8544}"
 REFLECTOR_PORTS="9443 3478"
 export RUST_LOG="${RUST_LOG:-info}"
 
-mkdir -p "$RUN_DIR/stun-data" "$RUN_DIR/server-data" "$RUN_DIR/media"
+mkdir -p "$RUN_DIR/stun-data"
 
 # Prefers a real network interface over a VPN tunnel's virtual address.
 # swarm_p2p::local_addr's routing-table-probe trick (UDP "connect" to a
@@ -125,7 +114,7 @@ cleanup() {
     done
     wait 2>/dev/null || true
     sleep 0.3
-    for port in "$STUN_PORT" "$PEER_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
+    for port in "$STUN_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
         kill_port "$port"
     done
 }
@@ -138,15 +127,15 @@ trap cleanup EXIT INT TERM
 # instead of just working. Same kill_port() cleanup() already uses on the
 # way out, run once on the way in too.
 echo "==> Checking for already-running SWARM processes on our ports..."
-for port in "$STUN_PORT" "$PEER_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
+for port in "$STUN_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
     kill_port "$port"
 done
 
-echo "==> Building swarm-stun-server + swarm-serverd + the GUI (debug)..."
-cargo build --bin swarm-stun-server --bin swarm-serverd
-cargo build -p swarm-server --features gui --bin swarm-server-app
+echo "==> Building swarm-stun-server + the media server GUI (debug)..."
+cargo build --bin swarm-stun-server
+cargo build -p swarm-server
 
-echo "==> Starting STUN server on 0.0.0.0:$STUN_PORT ..."
+echo "==> Starting SWARM rendezvous service on 0.0.0.0:$STUN_PORT ..."
 # swarm-stun-server defaults SWARM_STATIC_DIR to the relative path "static",
 # resolved against the process's cwd — which `cargo run` leaves as wherever
 # it was invoked from (this script's repo root), not the crate's own
@@ -160,29 +149,18 @@ SWARM_STATIC_DIR="apps/stun-server/static" \
     cargo run -q --bin swarm-stun-server &
 pids+=($!)
 
-# Real startup-order race, not theoretical: with SWARM_STUN_CODE set for
-# auto-registration, swarm-serverd's one registration attempt at startup
-# fired before swarm-stun-server had actually bound its listener yet
-# (both processes start ~simultaneously as background jobs) — a silent,
-# non-fatal "could not reach STUN server" that left the media server
-# running but unregistered, with no automatic retry. Block on real
-# readiness instead of guessing a sleep duration.
-echo "==> Waiting for the STUN server to be ready ..."
+# Wait for real readiness instead of guessing a sleep duration, so the GUI
+# never opens before the local SWARM server is available.
+echo "==> Waiting for the SWARM service to be ready ..."
 for _ in $(seq 1 50); do
     curl -s -o /dev/null "http://127.0.0.1:$STUN_PORT/health" && break
     sleep 0.2
 done
 
-echo "==> Starting media server (peer QUIC on 0.0.0.0:$PEER_PORT, media root $RUN_DIR/media) ..."
-SWARM_MEDIA_ROOT="$RUN_DIR/media" \
-SWARM_DATA_DIR="$RUN_DIR/server-data" \
-SWARM_PEER_BIND="0.0.0.0:$PEER_PORT" \
-    cargo run -q --bin swarm-serverd &
-pids+=($!)
-
 echo "==> Opening the media server GUI (peer QUIC on 0.0.0.0:$GUI_PEER_PORT) ..."
 SWARM_PEER_BIND="0.0.0.0:$GUI_PEER_PORT" \
-    cargo run -q -p swarm-server --features gui --bin swarm-server-app &
+SWARM_RENDEZVOUS_URL="http://$LAN_IP:$STUN_PORT" \
+    cargo run -q -p swarm-server &
 pids+=($!)
 
 cat <<EOF
@@ -192,23 +170,16 @@ SWARM is running, reachable from this machine and from your LAN:
   local  http://127.0.0.1:$STUN_PORT   (browser on this machine, Swagger at /api/docs)
   LAN    http://$LAN_IP:$STUN_PORT   <- use this one in the Fire TV client / other devices
 
-  Headless media server: peer QUIC on port $PEER_PORT (both addresses above)
-                         drop files into $RUN_DIR/media to serve them
-  GUI media server:      a separate window should now be open, peer QUIC on
-                         port $GUI_PEER_PORT — pick its own media folder there
+  GUI media server: a separate window should now be open, peer QUIC on
+                    port $GUI_PEER_PORT — pick its media folder there
 
-First time here: open the STUN URL above, create an account and a
-swarm, and mint a join code. Then link a media server to it — paste
-the code into the GUI window this script just opened, or stop this
-script (Ctrl+C) and re-run with:
+The media server creates and owns its swarm automatically. To add a TV,
+start SWARM activation on the TV and enter its temporary code in the
+media server's Swarm page. The account/join-code UI remains available as
+a compatibility fallback.
 
-  SWARM_STUN_URL=http://$LAN_IP:$STUN_PORT SWARM_STUN_CODE=<code> ./run_now.sh
-
-(that auto-registers the headless server only — the GUI always joins
-via its own window)
-
-Ctrl+C to stop everything — the STUN server, both media servers, and
-the GUI window all shut down together.
+Ctrl+C to stop everything — the SWARM server and GUI media server shut
+down together.
 --------------------------------------------------------------------
 EOF
 

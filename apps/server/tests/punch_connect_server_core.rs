@@ -19,9 +19,9 @@ use stun_server::security::BruteForceBlocker;
 use stun_server::state::AppState;
 use swarm_core::peer::{CatalogThumbprint, PeerRequest};
 use swarm_core::rest::{DeviceRegistration, DeviceType};
+use swarm_media::roots::MediaRoot;
 use swarm_p2p::endpoint::{read_body, send_request};
 use swarm_p2p::identity::ensure_identity;
-use swarm_media::roots::MediaRoot;
 use swarm_server::punch_connect::initiate_punch_connection;
 use swarm_server::{ServerConfig, ServerCore, TokenStoreMode};
 use swarm_stun_client::{SignalingClient, StunClient};
@@ -33,8 +33,13 @@ async fn spawn_stun_server_with_reflector() -> (String, SocketAddr) {
     tokio::spawn(stun_server::reflector::run(reflector_port));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let db_path = std::env::temp_dir().join(format!("swarm-punch-core-stun-{}.sqlite", stun_server::security::new_id()));
-    let db = stun_server::db::connect(db_path.to_str().unwrap()).await.unwrap();
+    let db_path = std::env::temp_dir().join(format!(
+        "swarm-punch-core-stun-{}.sqlite",
+        stun_server::security::new_id()
+    ));
+    let db = stun_server::db::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
     let config = StunConfig {
         database_path: db_path.display().to_string(),
         http_bind: "127.0.0.1:0".parse().unwrap(),
@@ -42,17 +47,41 @@ async fn spawn_stun_server_with_reflector() -> (String, SocketAddr) {
         public_url: "http://test.invalid".into(),
         session_ttl_secs: 3600,
         join_code_ttl_secs: 900,
+        activation_ttl_secs: 600,
+        managed_swarm_lease_secs: 2_592_000,
+        managed_swarm_max_clients: 20,
         smtp: None,
     };
-    let state =
-        Arc::new(AppState { db, hub: Hub::new(), config, blocker: BruteForceBlocker::new(), mailer: Mailer::from_config(None) });
+    let state = Arc::new(AppState {
+        db,
+        hub: Hub::new(),
+        config,
+        blocker: BruteForceBlocker::new(),
+        activation_allocations: stun_server::security::AllocationLimiter::new(
+            20,
+            std::time::Duration::from_secs(3600),
+        ),
+        managed_swarm_allocations: stun_server::security::AllocationLimiter::new(
+            5,
+            std::time::Duration::from_secs(3600),
+        ),
+        mailer: Mailer::from_config(None),
+    });
     let router = build_router(state, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
-    (format!("http://{addr}"), format!("127.0.0.1:{reflector_port}").parse().unwrap())
+    (
+        format!("http://{addr}"),
+        format!("127.0.0.1:{reflector_port}").parse().unwrap(),
+    )
 }
 
 struct Browser {
@@ -94,13 +123,21 @@ impl Browser {
                 _ => {}
             }
         }
-        Self { client, base: base.to_string(), session, csrf }
+        Self {
+            client,
+            base: base.to_string(),
+            session,
+            csrf,
+        }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{path}", self.base))
-            .header("cookie", format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf))
+            .header(
+                "cookie",
+                format!("swarm_session={}; swarm_csrf={}", self.session, self.csrf),
+            )
             .header("x-swarm-csrf", &self.csrf)
     }
 
@@ -121,7 +158,10 @@ impl Browser {
 
     async fn create_code(&self, swarm_id: &str) -> String {
         let body: serde_json::Value = self
-            .request(reqwest::Method::POST, &format!("/api/v1/swarms/{swarm_id}/codes"))
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/swarms/{swarm_id}/codes"),
+            )
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -141,11 +181,15 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
     let media_root = base.join("media");
     std::fs::create_dir_all(&media_root).unwrap();
     let config = ServerConfig {
-        media_roots: vec![MediaRoot { label: "local".to_string(), path: media_root }],
+        media_roots: vec![MediaRoot {
+            label: "local".to_string(),
+            path: media_root,
+        }],
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: None,
     };
     let core = ServerCore::start(config).await.unwrap();
     core
@@ -159,7 +203,10 @@ async fn registering_with_stun_leaves_the_server_ready_to_accept_a_punched_conne
 
     let server = spawn_media_server("server").await;
     let server_code = browser.create_code(&swarm_id).await;
-    server.register_with_stun(&stun_base, &server_code, "Server").await.unwrap();
+    server
+        .register_with_stun(&stun_base, &server_code, "Server")
+        .await
+        .unwrap();
     let server_device_id = server.stun_link().await.unwrap().device_id;
 
     // A plain client identity — not a ServerCore, just what the Fire TV
@@ -178,14 +225,23 @@ async fn registering_with_stun_leaves_the_server_ready_to_accept_a_punched_conne
         app_version: "0.1.0".into(),
         metadata: Default::default(),
     };
-    let client_reg = StunClient::new(&stun_base).register_device(&client_code, client_registration).await.unwrap();
+    let client_reg = StunClient::new(&stun_base)
+        .register_device(&client_code, client_registration)
+        .await
+        .unwrap();
 
     // The server's roster sync is on a 30s timer; force it so the freshly
     // joined client is in AllowedPeers before the punch attempt below.
     server.resync().await.unwrap();
 
-    let (client_signaling, mut client_rx) =
-        SignalingClient::connect(&stun_base, &client_reg.access_token, &client_reg.device_id, None).await.unwrap();
+    let (client_signaling, mut client_rx) = SignalingClient::connect(
+        &stun_base,
+        &client_reg.access_token,
+        &client_reg.device_id,
+        None,
+    )
+    .await
+    .unwrap();
 
     // No call to respond_to_punch_offer anywhere in this test — the server
     // is expected to answer entirely on its own, exactly as it would for a
@@ -201,7 +257,14 @@ async fn registering_with_stun_leaves_the_server_ready_to_accept_a_punched_conne
     .await
     .unwrap();
 
-    let request = PeerRequest { path: "/catalog/thumbprint".into(), range: None, if_none_match: None, playback: None, error_report: None, like: None };
+    let request = PeerRequest {
+        path: "/catalog/thumbprint".into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: None,
+    };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

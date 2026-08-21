@@ -53,6 +53,7 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![client_identity.fingerprint.clone()],
         token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: None,
     };
     let core = ServerCore::start(config).await.unwrap();
     // The initial scan now runs in the background (see ServerCore::start's
