@@ -14,6 +14,12 @@ Three planes. The STUN server coordinates; media never touches it.
 - **Device access_token** — opaque 256-bit bearer issued when an 8-digit, single-use, ~15-minute, swarm-scoped join code is redeemed at `POST /api/v1/devices/register`. Stored hashed server-side (revocation = delete row); stored encrypted on-device (OS keychain / Android Keystore).
 - **Device certificate** — self-signed, generated on first run, key never leaves the device. Its SHA-256 fingerprint is submitted at registration (the TOFU moment) and re-confirmed inside `signal` offers/answers. Peer authorization = *shares ≥1 swarm AND presented cert's fingerprint matches the pinned roster entry*, enforced at QUIC accept. No CA, no hostname verification.
 
+### STUN-free LAN discovery and pairing
+
+Media servers also advertise `_swarm-peer._udp.local.` over mDNS with their QUIC port, certificate fingerprint, and local pairing port. Android clients browse that service with DNS-SD and construct the same pinned `SwarmDevice` shape used by a STUN roster; catalog and playback traffic therefore continue over the existing mutually authenticated QUIC transport and never pass through the pairing socket.
+
+Discovery is not authorization. For a first connection, the server owner explicitly opens a five-minute, single-use pairing window in the desktop app and enters its six-digit code on the client. The client submits its name and certificate fingerprint from a private/link-local source address. The server persists that fingerprint in `server-state.sqlite` and adds it to `AllowedPeers`. Later launches can connect directly to the rediscovered server without STUN or another code. Revoking the local peer removes it from both persistent storage and the live allow-list.
+
 ## Signaling session
 
 1. Device opens WSS, sends `hello {protocol_version, access_token, device_id, capabilities?}`.

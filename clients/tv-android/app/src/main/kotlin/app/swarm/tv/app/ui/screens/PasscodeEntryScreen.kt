@@ -1,15 +1,17 @@
 /**
- * Onboarding screen: STUN server URL + device name (free text — the one
- * place this app uses phone-style Material3 fields, since there's no D-pad-
- * friendly way to avoid occasional text entry here) and the 8-digit join
- * code, entered via a D-pad-navigable number grid rather than the system
- * keyboard, per the plan's Fire TV UX requirements.
+ * Onboarding screen: automatically discovered LAN media servers first, with
+ * direct reconnect for an already-trusted certificate or a six-digit code
+ * for first-time pairing. STUN URL + its eight-digit join code remain below
+ * as the remote-network path. Free text uses phone-style Material3 fields
+ * because TV Material3 does not provide one; both numeric codes use the
+ * D-pad-navigable number grid rather than the system keyboard.
  */
 package app.swarm.tv.app.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -35,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import app.swarm.tv.R
+import app.swarm.tv.app.data.LanServer
 import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
 import app.swarm.tv.app.ui.theme.SwarmAccent
@@ -48,10 +51,16 @@ fun PasscodeEntryScreen(
     isSubmitting: Boolean,
     errorMessage: String?,
     defaultDeviceName: String,
+    lanServers: List<LanServer>,
+    lanPairingBusy: Boolean,
+    onConnectLan: (server: LanServer, deviceName: String) -> Unit,
+    onPairLan: (server: LanServer, code: String, deviceName: String) -> Unit,
     onSubmit: (baseUrl: String, code: String, deviceName: String) -> Unit,
 ) {
     var baseUrl by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    var lanCode by remember { mutableStateOf("") }
+    var selectedLanService by remember { mutableStateOf<String?>(null) }
     // Resolved from the TV itself (see resolveDeviceName) — still a plain
     // editable field, so a real device name that's wrong/undesired can
     // just be typed over before submitting, same as always.
@@ -81,22 +90,69 @@ fun PasscodeEntryScreen(
         Text("SWARM", color = SwarmAccent, fontSize = 32.sp, fontWeight = FontWeight.Black)
         Text("Stream Whatever, Anywhere — Remote Media", color = SwarmMuted, fontSize = 12.sp)
         Spacer(Modifier.height(8.dp))
-        Text("Join a swarm to stream from your servers", color = SwarmMuted, fontSize = 16.sp)
+        Text("Connect to a media server", color = SwarmMuted, fontSize = 16.sp)
         Spacer(Modifier.height(32.dp))
+
+        TvOutlinedTextField(
+            value = deviceName,
+            onValueChange = { deviceName = it },
+            label = { Text("Device name") },
+            colors = fieldColors(),
+            modifier = Modifier.width(420.dp),
+        )
+        Spacer(Modifier.height(24.dp))
+
+        Text("Servers on this network", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        if (lanServers.isEmpty()) {
+            Text("Searching your LAN…", color = SwarmMuted, fontSize = 14.sp)
+        } else {
+            lanServers.forEach { server ->
+                Column(modifier = Modifier.width(520.dp).padding(vertical = 8.dp)) {
+                    Text(server.name, color = SwarmText, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${server.host}:${server.peerPort}", color = SwarmMuted, fontSize = 12.sp)
+                    Spacer(Modifier.height(7.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { onConnectLan(server, deviceName) },
+                            enabled = !lanPairingBusy && !isSubmitting,
+                            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                        ) { Text(if (lanPairingBusy) "Connecting…" else "Connect", fontWeight = FontWeight.Bold) }
+                        Button(
+                            onClick = {
+                                selectedLanService = server.serviceName
+                                lanCode = ""
+                            },
+                            enabled = !lanPairingBusy && !isSubmitting,
+                        ) { Text("Pair first time") }
+                    }
+                }
+            }
+        }
+
+        val selectedLanServer = lanServers.firstOrNull { it.serviceName == selectedLanService }
+        if (selectedLanServer != null) {
+            Spacer(Modifier.height(14.dp))
+            Text("LAN pairing code for ${selectedLanServer.name}", color = SwarmMuted, fontSize = 14.sp)
+            Spacer(Modifier.height(10.dp))
+            NumberPadEntry(value = lanCode, maxLength = 6, onValueChange = { lanCode = it }, enabled = !lanPairingBusy)
+            Spacer(Modifier.height(14.dp))
+            Button(
+                onClick = { onPairLan(selectedLanServer, lanCode, deviceName) },
+                enabled = !lanPairingBusy && lanCode.length == 6,
+                colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+            ) { Text(if (lanPairingBusy) "Pairing…" else "Pair and connect", fontWeight = FontWeight.Bold) }
+        }
+
+        Spacer(Modifier.height(36.dp))
+        Text("Or connect through a STUN server", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
 
         TvOutlinedTextField(
             value = baseUrl,
             onValueChange = { baseUrl = it },
             label = { Text("STUN server URL") },
             placeholder = { Text("https://swarm.example.com") },
-            colors = fieldColors(),
-            modifier = Modifier.width(420.dp),
-        )
-        Spacer(Modifier.height(12.dp))
-        TvOutlinedTextField(
-            value = deviceName,
-            onValueChange = { deviceName = it },
-            label = { Text("Device name") },
             colors = fieldColors(),
             modifier = Modifier.width(420.dp),
         )
@@ -130,4 +186,3 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedLabelColor = SwarmMuted,
     cursorColor = SwarmAccent,
 )
-

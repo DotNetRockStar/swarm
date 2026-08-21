@@ -47,11 +47,12 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   via `aapt dump badging`: `LEANBACK_LAUNCHER` present,
   `android.hardware.touchscreen` explicitly not required,
   `android.software.leanback` required, no Google-Play-Services dependency.
-  Screens: passcode entry (STUN URL + device name as free text — the one
-  place this app uses phone-style Material3 fields, since TV Material3 has
-  no text-entry component — plus the 8-digit join code via a D-pad-navigable
-  number grid, not the system keyboard) and a swarm dashboard (server roster
-  with online/offline status, resync button). `AndroidTokenStore` wraps
+  Screens: connection landing page (automatically discovered LAN servers,
+  first-time 6-digit LAN pairing, plus STUN URL/device name and its 8-digit
+  join code) and a swarm dashboard (server roster with online/offline status,
+  resync button). A saved STUN session takes startup priority; otherwise the
+  most recently connected LAN server is restored directly to the dashboard,
+  and onboarding appears only when neither exists. `AndroidTokenStore` wraps
   `androidx.security.crypto.EncryptedSharedPreferences` (Keystore-backed
   AES256-GCM) for the access token; `AndroidDeviceIdentity` generates a real
   `AndroidKeyStore` EC keypair with an auto-issued self-signed certificate

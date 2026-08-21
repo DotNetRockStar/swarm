@@ -5,6 +5,7 @@
 //! (`swarm-server-app`) drive this same surface.
 
 mod bandwidth;
+pub mod lan;
 pub mod punch_connect;
 mod state_db;
 
@@ -33,7 +34,7 @@ use tokio::sync::Mutex;
 
 use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
 
-pub use state_db::StunLinkRecord;
+pub use state_db::{LocalPeerRecord, StunLinkRecord};
 
 /// How often a linked server re-fetches its swarms' rosters. Not push-based
 /// yet (that lands with WSS presence in Phase 4) — polling is the Phase 2/3
@@ -105,6 +106,7 @@ pub struct ServerCore {
     service: Arc<MediaService>,
     data_dir: PathBuf,
     state_db: Arc<state_db::StateDb>,
+    lan_service: lan::LanService,
     /// Fingerprints from `ServerConfig::allowed_fingerprints` — kept
     /// separate so a roster sync can rebuild `allowed` as
     /// `static_fingerprints ∪ swarm_roster` without losing the static set.
@@ -185,9 +187,17 @@ impl ServerCore {
         let static_fingerprints: Vec<String> =
             config.allowed_fingerprints.iter().map(|f| f.trim().to_lowercase()).collect();
         let allowed = AllowedPeers::new();
-        allowed.replace(static_fingerprints.iter().cloned());
+        let local_fingerprints = state_db.local_peers().await?.into_iter().map(|peer| peer.fingerprint);
+        allowed.replace(static_fingerprints.iter().cloned().chain(local_fingerprints));
         let endpoint = swarm_p2p::endpoint::listen(config.bind, &identity, allowed.clone())?;
         let listen_addr = endpoint.local_addr()?;
+        let lan_service = lan::LanService::start(
+            identity.fingerprint.clone(),
+            listen_addr,
+            allowed.clone(),
+            Arc::clone(&state_db),
+        )
+        .await?;
 
         // Seed the streaming budget from the last real measurement (if
         // any) right at construction, so a restart doesn't fall back to
@@ -214,6 +224,7 @@ impl ServerCore {
             service,
             data_dir: config.data_dir,
             state_db,
+            lan_service,
             static_fingerprints,
             token_store_mode: config.token_store_mode,
             stun: Mutex::new(None),
@@ -489,6 +500,23 @@ impl ServerCore {
         self.sync_roster().await
     }
 
+    /// Opens the time-limited, single-use LAN pairing window advertised over
+    /// mDNS. Discovery remains available all the time; only authorization is
+    /// gated by this explicit user action.
+    pub async fn open_lan_pairing(&self) -> lan::PairingStatus {
+        self.lan_service.open_pairing_window().await
+    }
+
+    pub async fn local_peers(&self) -> Result<Vec<LocalPeerRecord>, ServerError> {
+        Ok(self.state_db.local_peers().await?)
+    }
+
+    pub async fn revoke_local_peer(&self, fingerprint: &str) -> Result<(), ServerError> {
+        self.state_db.remove_local_peer(fingerprint).await?;
+        self.sync_roster().await?;
+        Ok(())
+    }
+
     async fn restore_stun_link(self: Arc<Self>) {
         let Some(link) = self.state_db.load_stun_link().await.unwrap_or_else(|err| {
             tracing::warn!(%err, "could not read saved STUN link; starting unlinked");
@@ -607,7 +635,13 @@ impl ServerCore {
     /// transient STUN outage must never silently strand connected peers.
     async fn sync_roster(&self) -> Result<usize, ServerError> {
         let guard = self.stun.lock().await;
-        let Some(ctx) = guard.as_ref() else { return Ok(0) };
+        let mut fingerprints: HashSet<String> = self.static_fingerprints.iter().cloned().collect();
+        fingerprints.extend(self.state_db.local_peers().await?.into_iter().map(|peer| peer.fingerprint));
+        let Some(ctx) = guard.as_ref() else {
+            let count = fingerprints.len();
+            self.allowed.replace(fingerprints);
+            return Ok(count);
+        };
 
         // Best-effort: keep the connectable address peers see on the STUN
         // roster fresh (DHCP renewal, wifi reconnect, ...). Never blocks or
@@ -621,7 +655,6 @@ impl ServerCore {
             tracing::debug!(%err, "failed to self-report peer address this cycle");
         }
 
-        let mut fingerprints: HashSet<String> = self.static_fingerprints.iter().cloned().collect();
         for swarm in &ctx.link.swarms {
             match ctx.client.swarm_devices(&ctx.access_token, &swarm.id).await {
                 Ok(roster) => {

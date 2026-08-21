@@ -69,8 +69,57 @@ document.getElementById("clearClientErrorsBtn").addEventListener("click", async 
   }
 });
 
+function formatFingerprint(fingerprint) {
+  return `${fingerprint.slice(0, 12)}…${fingerprint.slice(-8)}`;
+}
+
+async function loadLocalPeers() {
+  const list = document.getElementById("localPeersList");
+  try {
+    const peers = await invoke("list_local_peers");
+    list.innerHTML = peers.length ? `<table>
+      <thead><tr><th>Name</th><th>Paired</th><th>Certificate</th><th></th></tr></thead>
+      <tbody>${peers.map(peer => `<tr>
+        <td>${esc(peer.name)}</td>
+        <td>${esc(new Date(peer.paired_at * 1000).toLocaleString())}</td>
+        <td class="mono" title="${esc(peer.fingerprint)}">${esc(formatFingerprint(peer.fingerprint))}</td>
+        <td><button class="danger" data-revoke-local="${esc(peer.fingerprint)}"><i class="bi bi-x-lg"></i>Revoke</button></td>
+      </tr>`).join("")}</tbody>
+    </table>` : `<p class="muted">No LAN clients have been paired yet.</p>`;
+    list.querySelectorAll("[data-revoke-local]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await invoke("revoke_local_peer", { fingerprint: btn.dataset.revokeLocal });
+          showToast("LAN client revoked.", "success");
+          await loadLocalPeers();
+        } catch (err) {
+          showToast(String(err), "error");
+        }
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<p class="muted">Unable to load paired LAN clients.</p>`;
+    showToast(String(err), "error");
+  }
+}
+
+document.getElementById("openLanPairingBtn").addEventListener("click", async () => {
+  const status = document.getElementById("lanPairingStatus");
+  try {
+    const pairing = await invoke("open_lan_pairing");
+    status.classList.remove("d-none");
+    status.innerHTML = `<div class="note">
+      Enter this code on the client within five minutes:
+      <strong class="mono" style="font-size:1.4rem; margin-left:8px">${esc(pairing.code)}</strong>
+    </div>`;
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+});
+
 async function refreshSwarm() {
   loadClientErrors();
+  loadLocalPeers();
   const content = document.getElementById("swarmContent");
   let link;
   try {

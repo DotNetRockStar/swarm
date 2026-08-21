@@ -1,6 +1,6 @@
 /**
  * A D-pad-navigable numeric keypad plus its digit-slot display row — every
- * numeric-code entry in this app (the 8-digit STUN join code on
+ * numeric-code entry in this app (the 8-digit STUN join code and 6-digit LAN pairing code on
  * [app.swarm.tv.app.ui.screens.PasscodeEntryScreen] and
  * [app.swarm.tv.app.ui.screens.SwarmSettingsScreen]'s "join another swarm",
  * and the new 4-digit Kid Mode PIN) uses this same widget rather than the

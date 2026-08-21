@@ -94,3 +94,25 @@ data class KidModeSettingsEntity(
     /** Null means "no rating restriction on shows". */
     @ColumnInfo(name = "max_tv_rating") val maxTvRating: String?,
 )
+
+/**
+ * A LAN server this client has successfully authenticated with. The
+ * certificate fingerprint is the stable identity; host/ports are cached
+ * discovery data and are refreshed whenever mDNS resolves the same server
+ * again. Keeping every successful server lets the most recently used one be
+ * restored without discarding older pairings.
+ */
+@Entity(
+    tableName = "local_server_connection",
+    indices = [Index(value = ["last_connected_at"])],
+)
+data class LocalServerConnectionEntity(
+    @PrimaryKey @ColumnInfo(name = "cert_fingerprint") val certFingerprint: String,
+    @ColumnInfo(name = "service_name") val serviceName: String,
+    val name: String,
+    val host: String,
+    @ColumnInfo(name = "peer_port") val peerPort: Int,
+    @ColumnInfo(name = "pairing_port") val pairingPort: Int,
+    @ColumnInfo(name = "device_name") val deviceName: String,
+    @ColumnInfo(name = "last_connected_at") val lastConnectedAt: Long,
+)

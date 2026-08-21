@@ -32,9 +32,12 @@ import app.swarm.tv.app.data.AndroidAppSettingsStore
 import app.swarm.tv.app.data.AndroidConnectionStore
 import app.swarm.tv.app.data.AndroidDeviceIdentity
 import app.swarm.tv.app.data.AndroidKidModeStore
+import app.swarm.tv.app.data.AndroidLanConnectionStore
 import app.swarm.tv.app.data.AndroidLikedEntriesStore
 import app.swarm.tv.app.data.AndroidTokenStore
 import app.swarm.tv.app.data.KidModeSettings
+import app.swarm.tv.app.data.LanDiscoveryManager
+import app.swarm.tv.app.data.LanServer
 import app.swarm.tv.app.data.AndroidWatchStateStore
 import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
@@ -79,6 +82,8 @@ class MainActivity : ComponentActivity() {
         val settingsStore = AndroidAppSettingsStore(applicationContext)
         val likedEntriesStore = AndroidLikedEntriesStore(applicationContext)
         val kidModeStore = AndroidKidModeStore(applicationContext)
+        val lanDiscovery = LanDiscoveryManager(applicationContext)
+        val lanConnectionStore = AndroidLanConnectionStore(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val defaultDeviceName = resolveDeviceName(applicationContext)
         val certFingerprint = AndroidDeviceIdentity.ensureFingerprint()
@@ -87,7 +92,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, connectionStore, settingsStore, likedEntriesStore, kidModeStore) as T
+                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, connectionStore, settingsStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore) as T
         }
 
         setContent {
@@ -99,9 +104,17 @@ class MainActivity : ComponentActivity() {
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
                     val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
+                    val lanServers by viewModel.lanServers.collectAsState()
+                    val lanPairingBusy by viewModel.lanPairingBusy.collectAsState()
+                    val lanError by viewModel.lanError.collectAsState()
                     SwarmApp(
                         state = state,
                         defaultDeviceName = defaultDeviceName,
+                        lanServers = lanServers,
+                        lanPairingBusy = lanPairingBusy,
+                        lanError = lanError,
+                        onConnectLan = viewModel::connectLanServer,
+                        onPairLan = viewModel::pairLanServer,
                         isLiked = { entry -> entry.entry.fingerprint in likedFingerprints },
                         onToggleLike = viewModel::toggleLike,
                         kidModeSettings = kidModeSettings,
@@ -159,6 +172,11 @@ class MainActivity : ComponentActivity() {
 private fun SwarmApp(
     state: UiState,
     defaultDeviceName: String,
+    lanServers: List<LanServer>,
+    lanPairingBusy: Boolean,
+    lanError: String?,
+    onConnectLan: (server: LanServer, deviceName: String) -> Unit,
+    onPairLan: (server: LanServer, code: String, deviceName: String) -> Unit,
     isLiked: (MergedEntry) -> Boolean,
     onToggleLike: (MergedEntry) -> Unit,
     kidModeSettings: KidModeSettings?,
@@ -304,11 +322,38 @@ private fun SwarmApp(
             is UiState.Loading ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { SwarmLoadingIndicator() }
             is UiState.PasscodeEntry ->
-                PasscodeEntryScreen(isSubmitting = false, errorMessage = null, defaultDeviceName = defaultDeviceName, onSubmit = onSubmit)
+                PasscodeEntryScreen(
+                    isSubmitting = false,
+                    errorMessage = lanError,
+                    defaultDeviceName = defaultDeviceName,
+                    lanServers = lanServers,
+                    lanPairingBusy = lanPairingBusy,
+                    onConnectLan = onConnectLan,
+                    onPairLan = onPairLan,
+                    onSubmit = onSubmit,
+                )
             is UiState.Registering ->
-                PasscodeEntryScreen(isSubmitting = true, errorMessage = null, defaultDeviceName = defaultDeviceName, onSubmit = onSubmit)
+                PasscodeEntryScreen(
+                    isSubmitting = true,
+                    errorMessage = lanError,
+                    defaultDeviceName = defaultDeviceName,
+                    lanServers = lanServers,
+                    lanPairingBusy = lanPairingBusy,
+                    onConnectLan = onConnectLan,
+                    onPairLan = onPairLan,
+                    onSubmit = onSubmit,
+                )
             is UiState.Error ->
-                PasscodeEntryScreen(isSubmitting = false, errorMessage = state.message, defaultDeviceName = defaultDeviceName, onSubmit = onSubmit)
+                PasscodeEntryScreen(
+                    isSubmitting = false,
+                    errorMessage = state.message,
+                    defaultDeviceName = defaultDeviceName,
+                    lanServers = lanServers,
+                    lanPairingBusy = lanPairingBusy,
+                    onConnectLan = onConnectLan,
+                    onPairLan = onPairLan,
+                    onSubmit = onSubmit,
+                )
             is UiState.Dashboard ->
                 SwarmDashboardScreen(state.swarm, state.devices, state.resyncing, onResync, onBrowseCatalog, onOpenSettings)
             is UiState.Settings ->

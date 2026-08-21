@@ -48,6 +48,8 @@ Three apps:
 1. Register on the STUN server web UI, create a **swarm** (a private device group), and generate an 8-digit join code.
 2. Enter the code on a device (server app or TV client). The device registers — submitting its metadata and its self-signed certificate fingerprint — and receives an access token (stored encrypted on-device).
 3. Devices in the same swarm find each other via STUN presence, exchange hole-punch candidates over WSS signaling, punch, and connect **directly** over QUIC with mutually pinned certificates. No relay exists; media flows only device-to-device.
+
+On the same LAN, STUN is optional: the media server advertises itself over mDNS, the TV client lists it automatically, and a short-lived six-digit code establishes certificate trust the first time. Later LAN connections reuse that persisted trust and go directly over QUIC.
 4. Clients merge the catalogs of every server in their swarms (keyed on content fingerprints, so the same file on two servers is one entry with two sources) and pick the best source at play time. Direct play when the client can decode the file; otherwise the server transcodes to HLS with an adaptive bitrate ladder.
 
 Full protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md). Design lineage: patterns ported from [Batocera Fleet Federation / Batocera.Drone](../batocera-fleet-federation/) (pairing/pinning, transport selection, library delta-sync, transcode sessions); originals of the recovered protocol references are in [docs/reference/](docs/reference/).

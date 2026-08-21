@@ -220,6 +220,22 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         return Result(CatalogMerger.merge(manifestsByServer), unreachable)
     }
 
+    /** Lightweight authenticated reachability check used by the dashboard's Resync action. */
+    suspend fun probe(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): Boolean {
+        repeat(2) {
+            val connection = connectionFor(device, clientCertificate, clientKey) ?: return@repeat
+            val reachable = runCatching {
+                val response = connection.request("/catalog/thumbprint")
+                response.body.readBytes()
+                response.header.status == 200
+            }.getOrDefault(false)
+            if (reachable) return true
+            connections.remove(device.deviceId)
+            runCatching { connection.close() }
+        }
+        return false
+    }
+
     /**
      * Resolves (connecting fresh if necessary) the raw [PeerQuicClient] for
      * [device] — used directly by [preparePlayback]/[stopPlayback]/

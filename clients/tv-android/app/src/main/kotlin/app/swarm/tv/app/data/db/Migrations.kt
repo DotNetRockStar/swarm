@@ -46,4 +46,26 @@ private val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2)
+/** Persists successful STUN-free LAN connections for dashboard restoration. */
+private val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS local_server_connection (" +
+                "cert_fingerprint TEXT NOT NULL PRIMARY KEY, " +
+                "service_name TEXT NOT NULL, " +
+                "name TEXT NOT NULL, " +
+                "host TEXT NOT NULL, " +
+                "peer_port INTEGER NOT NULL, " +
+                "pairing_port INTEGER NOT NULL, " +
+                "device_name TEXT NOT NULL, " +
+                "last_connected_at INTEGER NOT NULL" +
+                ")",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_local_server_connection_last_connected_at " +
+                "ON local_server_connection(last_connected_at)",
+        )
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)

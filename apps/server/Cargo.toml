@@ -42,6 +42,7 @@ rand = { workspace = true }
 hex = { workspace = true }
 quinn = { workspace = true }
 reqwest = { workspace = true }
+mdns-sd = "0.21"
 tauri = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }

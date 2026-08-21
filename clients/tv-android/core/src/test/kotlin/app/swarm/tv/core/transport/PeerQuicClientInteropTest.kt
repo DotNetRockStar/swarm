@@ -71,6 +71,7 @@ import okhttp3.Request
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -366,6 +367,8 @@ class PeerQuicClientInteropTest {
 
                 assertEquals(listOf("srv-offline"), result.unreachable.map { it.deviceId })
                 assertEquals(1, result.entries.size)
+                assertTrue(session.probe(device, client.certificate, client.privateKey))
+                assertFalse(session.probe(unreachableDevice, client.certificate, client.privateKey))
                 val entry = result.entries.single()
                 assertEquals(listOf("srv1"), entry.sources)
                 assertEquals(movieBytes.size.toLong(), entry.entry.size)

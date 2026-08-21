@@ -652,6 +652,36 @@ async fn get_swarm_link(
     }))
 }
 
+/// Opens a short-lived, single-use pairing window for a client discovered on
+/// the local network. This path is independent of the configured STUN link.
+#[tauri::command]
+async fn open_lan_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<swarm_server::lan::PairingStatus, String> {
+    let core = state.core(&app).await?;
+    Ok(core.open_lan_pairing().await)
+}
+
+#[tauri::command]
+async fn list_local_peers(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<swarm_server::LocalPeerRecord>, String> {
+    let core = state.core(&app).await?;
+    core.local_peers().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn revoke_local_peer(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    fingerprint: String,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.revoke_local_peer(&fingerprint).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn join_swarm(
     app: tauri::AppHandle,
@@ -803,6 +833,9 @@ fn main() {
             upload_group_artwork,
             clear_scraped_metadata,
             get_swarm_link,
+            open_lan_pairing,
+            list_local_peers,
+            revoke_local_peer,
             join_swarm,
             join_additional_swarm,
             resync_swarm,

@@ -31,6 +31,13 @@ pub struct StunLinkRecord {
     pub swarms: Vec<SwarmSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LocalPeerRecord {
+    pub fingerprint: String,
+    pub name: String,
+    pub paired_at: i64,
+}
+
 pub struct StateDb {
     pool: SqlitePool,
 }
@@ -63,6 +70,12 @@ impl StateDb {
                 measured_at INTEGER NOT NULL,
                 upload_bps INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS local_peer (
+                fingerprint TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                paired_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_peer_paired_at ON local_peer(paired_at DESC);
             "#,
         )
         .execute(&pool)
@@ -137,6 +150,38 @@ impl StateDb {
                 .await?;
         Ok(row.map(|(bps,)| bps as u64))
     }
+
+    pub async fn save_local_peer(&self, fingerprint: &str, name: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO local_peer (fingerprint, name, paired_at) VALUES (?, ?, ?) \
+             ON CONFLICT(fingerprint) DO UPDATE SET name = excluded.name, paired_at = excluded.paired_at",
+        )
+        .bind(fingerprint)
+        .bind(name)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn local_peers(&self) -> sqlx::Result<Vec<LocalPeerRecord>> {
+        let rows: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT fingerprint, name, paired_at FROM local_peer ORDER BY paired_at DESC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(fingerprint, name, paired_at)| LocalPeerRecord { fingerprint, name, paired_at })
+            .collect())
+    }
+
+    pub async fn remove_local_peer(&self, fingerprint: &str) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM local_peer WHERE fingerprint = ?")
+            .bind(fingerprint)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 fn now() -> i64 {
@@ -210,6 +255,24 @@ mod tests {
         db.record_bandwidth_measurement(7_500_000).await.unwrap();
         assert_eq!(db.latest_bandwidth_measurement().await.unwrap(), Some(7_500_000));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn local_peers_persist_and_can_be_revoked() {
+        let dir = std::env::temp_dir().join(format!("swarm-state-db-local-peer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = StateDb::open(&dir).await.unwrap();
+        let fingerprint = "ab".repeat(32);
+
+        db.save_local_peer(&fingerprint, "Living Room TV").await.unwrap();
+        let peers = db.local_peers().await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].fingerprint, fingerprint);
+        assert_eq!(peers[0].name, "Living Room TV");
+
+        db.remove_local_peer(&fingerprint).await.unwrap();
+        assert!(db.local_peers().await.unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

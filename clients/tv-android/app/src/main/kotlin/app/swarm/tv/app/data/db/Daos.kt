@@ -92,3 +92,15 @@ interface KidModeDao {
     @Query("DELETE FROM kid_mode_settings")
     suspend fun clear()
 }
+
+@Dao
+interface LocalServerConnectionDao {
+    @Query("SELECT * FROM local_server_connection ORDER BY last_connected_at DESC LIMIT 1")
+    suspend fun mostRecent(): LocalServerConnectionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: LocalServerConnectionEntity)
+
+    @Query("DELETE FROM local_server_connection WHERE cert_fingerprint = :fingerprint")
+    suspend fun delete(fingerprint: String)
+}

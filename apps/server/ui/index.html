@@ -100,6 +100,15 @@
   <div id="tabPanel-swarm" class="d-none">
     <div class="card">
       <div class="card-head">
+        <h2>Local network</h2>
+        <button id="openLanPairingBtn"><i class="bi bi-broadcast-pin"></i>Pair a LAN client</button>
+      </div>
+      <p class="muted">This server advertises itself to clients on the same LAN automatically. A pairing code is required only the first time a client is trusted; direct connections do not use the STUN server.</p>
+      <div id="lanPairingStatus" class="d-none" style="margin-top:10px"></div>
+      <div id="localPeersList" style="margin-top:12px">Loading…</div>
+    </div>
+    <div class="card">
+      <div class="card-head">
         <h2>Client errors</h2>
         <div class="card-head-actions">
           <span id="clientErrorsCount" class="muted" style="font-size:.8rem"></span>
@@ -195,7 +204,7 @@
     </div>
     <div class="card">
       <h2>Only who you invite</h2>
-      <p class="muted">A device joins your swarm only with an 8-digit join code you generate yourself. There's no public directory, no discovery of other people's servers, and no way for a stranger to stumble onto yours — the join code is the only door in, and you control who gets one.</p>
+      <p class="muted">Internet-connected devices join through STUN with an 8-digit code. On your local network, this server is discoverable automatically, but a client still needs the separate short-lived LAN pairing code the first time. Both paths pin device certificates, and trusted LAN clients can be revoked from the Swarm tab.</p>
     </div>
     <div class="card">
       <h2>What the coordination account actually stores</h2>

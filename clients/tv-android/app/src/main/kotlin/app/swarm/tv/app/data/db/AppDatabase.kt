@@ -6,8 +6,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [ServerConnectionEntity::class, SwarmEntity::class, AppSettingsEntity::class, KidModeSettingsEntity::class],
-    version = 2,
+    entities = [
+        ServerConnectionEntity::class,
+        SwarmEntity::class,
+        AppSettingsEntity::class,
+        KidModeSettingsEntity::class,
+        LocalServerConnectionEntity::class,
+    ],
+    version = 3,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -15,6 +21,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun swarmDao(): SwarmDao
     abstract fun appSettingsDao(): AppSettingsDao
     abstract fun kidModeDao(): KidModeDao
+    abstract fun localServerConnectionDao(): LocalServerConnectionDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
