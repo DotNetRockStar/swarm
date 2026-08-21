@@ -941,6 +941,8 @@ mod tests {
             genres: vec![],
             artwork_version: 0,
             cast: vec![],
+            overview: None,
+            rating: None,
         }
     }
 

@@ -28,6 +28,8 @@
 package app.swarm.tv.core.transport
 
 import app.swarm.tv.core.peer.ByteRange
+import app.swarm.tv.core.peer.ClientErrorReport
+import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.PeerRequest
 import app.swarm.tv.core.peer.PeerResponseHeader
 import app.swarm.tv.core.peer.PlaybackPreferences
@@ -81,6 +83,8 @@ interface PeerConnection {
         range: ByteRange? = null,
         ifNoneMatch: String? = null,
         playback: PlaybackPreferences? = null,
+        errorReport: ClientErrorReport? = null,
+        like: LikeToggle? = null,
     ): PeerResponse
 }
 
@@ -155,9 +159,16 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
      * across concurrent requests on the same connection).
      */
     @Throws(IOException::class)
-    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?): PeerResponse {
+    override fun request(
+        path: String,
+        range: ByteRange?,
+        ifNoneMatch: String?,
+        playback: PlaybackPreferences?,
+        errorReport: ClientErrorReport?,
+        like: LikeToggle?,
+    ): PeerResponse {
         val stream: QuicStream = connection.createStream(true)
-        val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback)) + "\n"
+        val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback, errorReport, like)) + "\n"
         stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }
 
         val input = stream.inputStream

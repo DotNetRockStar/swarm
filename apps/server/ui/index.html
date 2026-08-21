@@ -5,6 +5,21 @@
 <title>SWARM Server — Stream Whatever, Anywhere</title>
 <link rel="stylesheet" href="vendor/bootstrap-icons/bootstrap-icons.min.css">
 <link rel="stylesheet" href="style.css">
+<!--
+  Real bug, found live: onboardFolderView/onboardSwarmView/dashView all
+  start `class="d-none"` in the markup below, but that class is defined in
+  the external style.css — loaded over a separate request/file read that
+  isn't guaranteed to finish before the webview's first paint. On a slow
+  enough load, the raw HTML (onboardFolderView first in document order)
+  briefly painted un-hidden before style.css caught up, showing the
+  onboarding "Welcome to SWARM" card for a moment even on an install that
+  was always going straight to the dashboard. This inline style is parsed
+  as part of the very first chunk of HTML, before any external file round
+  trip, so it can never race — app.js's show() (apps/server/ui/app.js)
+  reveals the body itself the first time it actually knows which view to
+  display, once boot() has resolved.
+-->
+<style>body { visibility: hidden; }</style>
 </head>
 <body>
 <header>
@@ -25,7 +40,6 @@
     <p class="tagline centered">Stream Whatever, Anywhere — Remote Media</p>
     <p class="muted">Choose the folder with your music and video. SWARM will scan it and can stream from it to devices in your swarm.</p>
     <button id="chooseFolderBtn" style="margin-top:14px"><i class="bi bi-folder2-open"></i>Choose media folder…</button>
-    <p id="folderError" class="error"></p>
   </div>
 </div>
 
@@ -43,15 +57,16 @@
       <button id="onboardJoinBtn"><i class="bi bi-box-arrow-in-right"></i>Join swarm</button>
       <button id="onboardSkipBtn" class="secondary"><i class="bi bi-skip-forward"></i>Skip for now</button>
     </div>
-    <p id="onboardError" class="error"></p>
   </div>
 </div>
 
 <div id="dashView" class="d-none">
   <div class="tabnav">
     <button id="tabBtn-details" class="tab-active"><i class="bi bi-speedometer2"></i>Details</button>
-    <button id="tabBtn-swarm"><i class="bi bi-diagram-3"></i>Swarm</button>
+    <button id="tabBtn-swarm"><i class="bi bi-diagram-3"></i>Swarm<span id="errorBadge" class="badge-count d-none">0</span></button>
     <button id="tabBtn-media"><i class="bi bi-collection-play"></i>Media</button>
+    <button id="tabBtn-ai"><i class="bi bi-stars"></i>AI</button>
+    <button id="tabBtn-security"><i class="bi bi-shield-check"></i>Security</button>
   </div>
 
   <div id="tabPanel-details">
@@ -69,12 +84,11 @@
         <button id="chooseAddRootBtn" class="secondary"><i class="bi bi-folder2-open"></i>Browse…</button>
         <button id="addRootBtn"><i class="bi bi-plus-lg"></i>Add root</button>
       </div>
-      <p id="mediaRootsError" class="error"></p>
     </div>
 
     <div class="card">
       <h2>TMDb scraping</h2>
-      <p class="muted">Enables movie/TV metadata and artwork lookups from the Media tab. Get a free key at themoviedb.org.</p>
+      <p class="muted">Enables movie/TV metadata and artwork lookups from the Media tab. Free key: themoviedb.org → sign up → Settings → API → Create → request a "Developer" key → paste the v3 API Key (or v4 Read Access Token) below.</p>
       <div class="row">
         <input id="tmdbKeyInput" placeholder="TMDb API key">
         <button id="saveTmdbKeyBtn" class="secondary"><i class="bi bi-key"></i>Save key</button>
@@ -84,6 +98,17 @@
   </div>
 
   <div id="tabPanel-swarm" class="d-none">
+    <div class="card">
+      <div class="card-head">
+        <h2>Client errors</h2>
+        <div class="card-head-actions">
+          <span id="clientErrorsCount" class="muted" style="font-size:.8rem"></span>
+          <button id="clearClientErrorsBtn" class="secondary d-none"><i class="bi bi-check2-all"></i>Clear all</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:-6px">Errors reported back by client devices (playback failures, unreachable servers, etc.) — sent here for triage. Delete an entry once you've resolved it.</p>
+      <div id="clientErrorsList" style="margin-top:10px">Loading…</div>
+    </div>
     <div class="card">
       <h2>Swarm</h2>
       <div id="swarmContent">Loading…</div>
@@ -95,28 +120,102 @@
       <div class="card-head">
         <h2>Library</h2>
         <div class="card-head-actions">
-          <span id="scanNote" class="note"></span>
           <label class="checkbox-label"><input type="checkbox" id="forceScrapeCheck"> Redownload / override existing</label>
           <button id="scrapeBtn" class="secondary"><i class="bi bi-cloud-download"></i>Scrape metadata</button>
           <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects"><i class="bi bi-tools"></i>Fix classifications</button>
           <button id="rescanBtn"><i class="bi bi-arrow-clockwise"></i>Rescan</button>
         </div>
       </div>
+      <div id="scanProgress" class="scrape-progress d-none">
+        <div class="progress-bar"><div id="scanProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
+        <span id="scanProgressText" class="muted" style="font-size:.8rem"></span>
+      </div>
       <div id="scrapeProgress" class="scrape-progress d-none">
         <div class="progress-bar"><div id="scrapeProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
         <span id="scrapeProgressText" class="muted" style="font-size:.8rem"></span>
       </div>
-      <ul id="scrapeIssues" class="issue-list d-none"></ul>
+      <div id="scrapeIssuesWrap" class="d-none">
+        <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:6px">
+          <span id="scrapeIssuesCount" class="muted" style="font-size:.8rem"></span>
+          <button id="dismissScrapeIssuesBtn" class="secondary" style="padding:3px 10px; font-size:.75rem"><i class="bi bi-x-lg"></i>Dismiss</button>
+        </div>
+        <ul id="scrapeIssues" class="issue-list"></ul>
+      </div>
       <div id="library">Loading…</div>
+    </div>
+  </div>
+
+  <div id="tabPanel-ai" class="d-none">
+    <div class="card">
+      <h2>What is MCP?</h2>
+      <p class="muted">The Model Context Protocol (MCP) is an open standard that lets an AI assistant — Claude Desktop, Claude Code, or any other MCP-compatible client — talk directly to this server: search your library, look up an entry's details, check which swarm devices are online, and review recent client errors. It's read-only; the assistant can look, not touch — it can't change settings, trigger a rescan, or edit metadata.</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Server</h2></div>
+      <div class="row">
+        <label class="checkbox-label"><input type="checkbox" id="mcpEnabledCheck"> Enable MCP server</label>
+        <input id="mcpPortInput" placeholder="Port (default 7890)" style="flex:0 0 160px">
+        <button id="saveMcpSettingsBtn" class="secondary"><i class="bi bi-check-lg"></i>Save</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Takes effect on next restart of this app. Reachable from any device on your network — there's no login, so only enable this on a network you trust.</p>
+      <p id="mcpStatus" class="note"></p>
+    </div>
+    <div class="card" id="mcpConfigCard">
+      <h2>Connect a client</h2>
+      <p class="muted">Add this to your MCP client's config (e.g. Claude Desktop's <span class="mono">claude_desktop_config.json</span>), then restart the client:</p>
+      <pre id="mcpConfigSnippet" class="mono" style="background:var(--surface-muted); border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; font-size:.78rem"></pre>
+    </div>
+    <div class="card">
+      <h2>Available tools</h2>
+      <ul class="issue-list" style="background:transparent">
+        <li><span class="issue-title">search_library</span> — <span class="muted">find entries by title, kind, genre, rating, or liked status</span></li>
+        <li><span class="issue-title">get_entry_details</span> — <span class="muted">full synopsis, cast, rating, and genres for one entry</span></li>
+        <li><span class="issue-title">list_swarm_devices</span> — <span class="muted">which devices in your swarm are online</span></li>
+        <li><span class="issue-title">list_client_errors</span> — <span class="muted">recent playback/report issues, for triage</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div id="tabPanel-security" class="d-none">
+    <div class="card">
+      <h2>The short version</h2>
+      <p class="muted">Your media never leaves your own devices. There's no cloud server storing your files, no upload step, and no company that could see what you watch or listen to. When you press play, your Fire TV (or other client) connects <em>directly</em> to your own server and streams the file straight from it — nothing in between ever has a copy.</p>
+    </div>
+    <div class="card">
+      <h2>Direct, device-to-device streaming</h2>
+      <p class="muted">Every stream goes straight from your server to your client over a private connection — the same way two phone calls don't route through a switchboard operator anymore. No third-party server ever sits in the middle relaying, caching, or seeing the video/audio itself.</p>
+    </div>
+    <div class="card">
+      <h2>What the STUN server actually does (and doesn't)</h2>
+      <p class="muted">Two devices behind separate home routers usually can't just dial each other directly — routers weren't built to accept an unsolicited connection. The STUN server's only job is introductions: it tells your two devices what address to reach each other at, the same way a switchboard used to just connect two lines and then get out of the way. Once that handshake finishes, your devices talk to each other directly — the STUN server is never in the path your media actually travels, and it has no way to see, log, or store any of it.</p>
+    </div>
+    <div class="card">
+      <h2>Encryption and identity</h2>
+      <p class="muted">Every device-to-device connection is encrypted with TLS 1.3 — the same encryption standard used by online banking. It's also <em>mutual</em>: your server and your client each present a certificate and check the other's, so a device can't stream from your server (or accept a connection claiming to be it) unless it's genuinely one you've invited. An eavesdropper on the network sees only encrypted noise, not your file names or the video itself.</p>
+    </div>
+    <div class="card">
+      <h2>Only who you invite</h2>
+      <p class="muted">A device joins your swarm only with an 8-digit join code you generate yourself. There's no public directory, no discovery of other people's servers, and no way for a stranger to stumble onto yours — the join code is the only door in, and you control who gets one.</p>
+    </div>
+    <div class="card">
+      <h2>What the coordination account actually stores</h2>
+      <p class="muted">Signing in to generate join codes needs an account (an email address and a password), the same as almost any online service — that account lives on the STUN server, separate from your media server entirely. Your password is one-way hashed, never stored as readable text, and neither is any device's access token. What's stored is the bare minimum to introduce your devices to each other: an email for login, each device's name and a fingerprint of its certificate, and nothing about your library — no file names, folder paths, watch history, or the media itself.</p>
+    </div>
+    <div class="card">
+      <h2>On your device</h2>
+      <p class="muted">Your Fire TV's login token and private key are stored using the device's own hardware-backed secure storage (Android Keystore) — not as a plain file anything on the device could just read. If you're on the same home network as your server, your client can even connect directly by local address, skipping the STUN handshake entirely.</p>
     </div>
   </div>
 </div>
 
 </main>
 
+<div id="toastStack" aria-live="polite"></div>
+
 <script src="app.js"></script>
 <script src="details.js"></script>
 <script src="swarm.js"></script>
 <script src="media.js"></script>
+<script src="ai.js"></script>
 </body>
 </html>

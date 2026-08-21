@@ -15,10 +15,10 @@ class CatalogGroupingTest {
         entry = CatalogEntry(entryKey = fp, fingerprint = fp, kind = MediaKind.TRACK, title = title, size = 1000, artist = artist, album = album, trackNumber = trackNumber),
     )
 
-    private fun episode(fp: String, show: String?, season: Int?, episode: Int?, title: String = fp) = MergedEntry(
+    private fun episode(fp: String, show: String?, season: Int?, episode: Int?, title: String = fp, scrapedTitle: String? = null) = MergedEntry(
         fingerprint = fp,
         sources = listOf("server-a"),
-        entry = CatalogEntry(entryKey = fp, fingerprint = fp, kind = MediaKind.EPISODE, title = title, size = 1000, showTitle = show, season = season, episode = episode),
+        entry = CatalogEntry(entryKey = fp, fingerprint = fp, kind = MediaKind.EPISODE, title = title, size = 1000, showTitle = show, season = season, episode = episode, scrapedTitle = scrapedTitle),
     )
 
     @Test
@@ -110,6 +110,43 @@ class CatalogGroupingTest {
         val shows = CatalogGrouping.groupEpisodesByShowSeason(entries)
         val stranger = episode("gone", "Some Other Show", 1, 1)
         assertNull(CatalogGrouping.nextEpisode(stranger, shows))
+    }
+
+    @Test
+    fun `two differently-named show folders merge when their episodes agree on a scraped title`() {
+        // Real bug: "Law & Order SVU" and "Law & Order Special Victims
+        // Unit" are the same series stored under two different on-disk
+        // show folder names — the path-derived show title alone can't tell
+        // they're the same, but a matching TMDb scrape can.
+        val entries = listOf(
+            episode("a1", "Law & Order SVU", 1, 1, scrapedTitle = "Law & Order: Special Victims Unit"),
+            episode("a2", "Law & Order SVU", 1, 2, scrapedTitle = "Law & Order: Special Victims Unit"),
+            episode("b1", "Law & Order Special Victims Unit", 2, 1, scrapedTitle = "Law & Order: Special Victims Unit"),
+        )
+        val shows = CatalogGrouping.groupEpisodesByShowSeason(entries)
+        assertEquals(1, shows.size)
+        assertEquals("Law & Order: Special Victims Unit", shows[0].show)
+        assertEquals(listOf(1, 2), shows[0].seasons.map { it.season })
+    }
+
+    @Test
+    fun `show folders with no scraped title consensus stay separate`() {
+        val entries = listOf(episode("a1", "Show A", 1, 1), episode("b1", "Show B", 1, 1))
+        val shows = CatalogGrouping.groupEpisodesByShowSeason(entries)
+        assertEquals(2, shows.size)
+    }
+
+    @Test
+    fun `nextEpisode still works across a season boundary for a merged show`() {
+        val entries = listOf(
+            episode("a1", "Law & Order SVU", 1, 1, scrapedTitle = "Law & Order: SVU"),
+            episode("a2", "Law & Order SVU", 1, 2, scrapedTitle = "Law & Order: SVU"),
+            episode("b1", "Law & Order Special Victims Unit", 2, 1, scrapedTitle = "Law & Order: SVU"),
+        )
+        val shows = CatalogGrouping.groupEpisodesByShowSeason(entries)
+        val last = entries.first { it.fingerprint == "a2" }
+        val next = CatalogGrouping.nextEpisode(last, shows)
+        assertEquals("b1", next?.fingerprint)
     }
 
     @Test

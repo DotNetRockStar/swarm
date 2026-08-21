@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 /// Request header line. `path` uses the fixed peer route vocabulary:
 /// `/catalog/thumbprint`, `/catalog/manifest`, `/art/{entry_key}/{kind}`,
 /// `/play/{entry_key}` (playback negotiation), `/stream/{session}/media`
-/// (budgeted direct play), and `/hls/{session}/...` (transcode).
+/// (budgeted direct play), `/hls/{session}/...` (transcode),
+/// `/errors/report` (client-observed error triage — see
+/// [`ClientErrorReport`]), and `/likes/toggle` (see [`LikeToggle`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerRequest {
@@ -27,6 +29,57 @@ pub struct PeerRequest {
     /// direct/remux/transcode decision without trusting the rendezvous tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback: Option<PlaybackPreferences>,
+    /// Present only on `/errors/report`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_report: Option<ClientErrorReport>,
+    /// Present only on `/likes/toggle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub like: Option<LikeToggle>,
+}
+
+/// A device's like/unlike of one asset, reported over the same authenticated
+/// peer connection `ClientErrorReport` rides in on — same self-reported-
+/// identity trust model, same "carried as a field on `PeerRequest`" shape.
+/// `liked` carries the *desired end state* (not "flip whatever it currently
+/// is"), so a D-pad button retry after a dropped response is naturally
+/// idempotent — see `Library::set_like`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LikeToggle {
+    pub device_id: String,
+    pub device_name: String,
+    pub entry_key: String,
+    pub liked: bool,
+}
+
+/// A client-observed error (playback failure, unreachable server, etc.),
+/// reported back over the same authenticated peer connection so it can be
+/// triaged from the server's own swarm page instead of only ever being
+/// visible in on-device logs nobody's looking at. `POST`-shaped despite the
+/// otherwise GET-shaped peer route vocabulary — carried as a field on
+/// [`PeerRequest`] rather than a raw body, matching how `playback` already
+/// rides along on `/play/{entry_key}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientErrorReport {
+    pub device_id: String,
+    pub device_name: String,
+    /// The asset involved, when the error is tied to one (playback
+    /// failures) rather than general (catalog unreachable, registration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub message: String,
+    /// Free-form extra detail for triage — HTTP status, stack trace, the
+    /// URL/path involved, etc. Not structured further: what's useful varies
+    /// too much by error source to be worth a schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Client-observed wall-clock time, unix milliseconds.
+    pub occurred_at_ms: i64,
 }
 
 /// What a player can consume and where it wants playback to begin. The
@@ -173,6 +226,18 @@ pub struct CatalogEntry {
     /// Scraper overlay, movies/episodes only — empty for tracks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cast: Vec<CastMember>,
+    /// Synopsis — TMDb's own, or a manual override. `None` for tracks and
+    /// anything not yet scraped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    /// US content rating — TMDb's own, or a manual override. `None` for
+    /// tracks, anything not yet scraped, or without a US certification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<String>,
+    /// Number of distinct devices that currently have this liked
+    /// (`entry_likes`, one row per device — see `Library::like_counts`).
+    #[serde(default)]
+    pub like_count: u32,
 }
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
@@ -219,6 +284,27 @@ mod tests {
             }),
             if_none_match: None,
             playback: None,
+            error_report: None,
+            like: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<PeerRequest>(&json).unwrap(), req);
+    }
+
+    #[test]
+    fn like_toggle_roundtrip() {
+        let req = PeerRequest {
+            path: "/likes/toggle".into(),
+            range: None,
+            if_none_match: None,
+            playback: None,
+            error_report: None,
+            like: Some(LikeToggle {
+                device_id: "device-1".into(),
+                device_name: "Living Room TV".into(),
+                entry_key: "030fe19c72f2665e6efd018a".into(),
+                liked: true,
+            }),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(serde_json::from_str::<PeerRequest>(&json).unwrap(), req);
@@ -244,6 +330,8 @@ mod tests {
                 start_position_secs: 42,
                 prefer_direct: true,
             }),
+            error_report: None,
+            like: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(serde_json::from_str::<PeerRequest>(&json).unwrap(), request);
@@ -295,6 +383,9 @@ mod tests {
                     CastMember { name: "Leonardo DiCaprio".into(), character: Some("Cobb".into()) },
                     CastMember { name: "Ellen Page".into(), character: None },
                 ],
+                overview: Some("A thief who steals corporate secrets through dream-sharing technology.".into()),
+                rating: Some("PG-13".into()),
+                like_count: 3,
             }],
             removed: vec![],
         };

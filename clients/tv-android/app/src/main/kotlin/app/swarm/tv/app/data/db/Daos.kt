@@ -77,3 +77,18 @@ interface AppSettingsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: AppSettingsEntity)
 }
+
+@Dao
+interface KidModeDao {
+    @Query("SELECT * FROM kid_mode_settings WHERE id = $SINGLETON_ROW_ID")
+    suspend fun get(): KidModeSettingsEntity?
+
+    @Query("SELECT * FROM kid_mode_settings WHERE id = $SINGLETON_ROW_ID")
+    fun observe(): Flow<KidModeSettingsEntity?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: KidModeSettingsEntity)
+
+    @Query("DELETE FROM kid_mode_settings")
+    suspend fun clear()
+}

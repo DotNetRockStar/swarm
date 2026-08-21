@@ -14,6 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,7 +28,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +49,11 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.data.KidModeSettings
+import app.swarm.tv.app.data.RatingScale
+import app.swarm.tv.app.ui.components.NumberPadEntry
+import app.swarm.tv.app.ui.components.SelectableChip
+import app.swarm.tv.app.ui.components.TvOutlinedTextField
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -56,6 +62,7 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
+import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmSummary
 
 @Composable
@@ -74,6 +81,11 @@ fun SwarmSettingsScreen(
     onUpdateDeviceName: (name: String) -> Unit,
     onUpdateArtworkCacheMinutes: (minutes: Int) -> Unit,
     onBack: () -> Unit,
+    kidModeSettings: KidModeSettings?,
+    availableGenres: List<String>,
+    onEnableKidMode: (pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
+    onUpdateKidModeRules: (allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
+    onDisableKidMode: () -> Unit,
 ) {
     var code by remember { mutableStateOf("") }
     var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
@@ -104,11 +116,10 @@ fun SwarmSettingsScreen(
         Text("Connection", color = SwarmMuted, fontSize = 14.sp)
         Spacer(Modifier.height(12.dp))
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            TvOutlinedTextField(
                 value = baseUrlField,
                 onValueChange = { baseUrlField = it },
                 label = { Text("STUN server URL") },
-                singleLine = true,
                 colors = fieldColors(),
                 modifier = Modifier.width(420.dp),
             )
@@ -122,11 +133,10 @@ fun SwarmSettingsScreen(
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            TvOutlinedTextField(
                 value = deviceNameField,
                 onValueChange = { deviceNameField = it },
                 label = { Text("Device name") },
-                singleLine = true,
                 colors = fieldColors(),
                 modifier = Modifier.width(420.dp),
             )
@@ -194,15 +204,7 @@ fun SwarmSettingsScreen(
         Spacer(Modifier.height(32.dp))
         Text("Join another swarm", color = SwarmMuted, fontSize = 14.sp)
         Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            for (i in 0 until 8) DigitSlot(code.getOrNull(i))
-        }
-        Spacer(Modifier.height(16.dp))
-        NumberPad(
-            enabled = !busy,
-            onDigit = { d -> if (code.length < 8) code += d },
-            onBackspace = { if (code.isNotEmpty()) code = code.dropLast(1) },
-        )
+        NumberPadEntry(value = code, maxLength = 8, onValueChange = { code = it }, enabled = !busy)
         Spacer(Modifier.height(16.dp))
         Button(
             onClick = { onJoin(code); code = "" },
@@ -215,6 +217,271 @@ fun SwarmSettingsScreen(
         errorMessage?.let {
             Spacer(Modifier.height(16.dp))
             Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+        }
+
+        Spacer(Modifier.height(32.dp))
+        KidModeCard(
+            kidModeSettings = kidModeSettings,
+            availableGenres = availableGenres,
+            onEnable = onEnableKidMode,
+            onUpdateRules = onUpdateKidModeRules,
+            onDisable = onDisableKidMode,
+        )
+    }
+}
+
+// --- Kid Mode -----------------------------------------------------------
+
+/**
+ * A small state machine local to this card, not [SwarmViewModel]: every
+ * step here (typing a PIN, drafting rules before Save) is transient
+ * editing-in-progress UI state with no reason to survive leaving this
+ * screen, the same reasoning `searchText`/`showFilterOverlay` in
+ * [CatalogScreen] stay local `remember`ed state instead of living in the
+ * ViewModel.
+ */
+private enum class KidModeStep {
+    /** Nothing being edited — just the current on/off status and one button. */
+    COLLAPSED,
+    /** Already enabled; re-entering the PIN is required before rules become visible/editable. */
+    ENTER_PIN,
+    /** First-ever setup: choosing a new PIN. */
+    SET_PIN,
+    /** First-ever setup: re-entering the just-chosen PIN to catch typos before it's saved. */
+    CONFIRM_PIN,
+    /** PIN already verified (or being set for the first time) — kind/genre/rating rules are visible and editable. */
+    EDIT_RULES,
+}
+
+private const val KID_MODE_PIN_LENGTH = 4
+
+@Composable
+private fun KidModeCard(
+    kidModeSettings: KidModeSettings?,
+    availableGenres: List<String>,
+    onEnable: (pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
+    onUpdateRules: (allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
+    onDisable: () -> Unit,
+) {
+    val isEnabled = kidModeSettings?.enabled == true
+    var step by remember { mutableStateOf(KidModeStep.COLLAPSED) }
+    var pinField by remember(step) { mutableStateOf("") }
+    var pinError by remember(step) { mutableStateOf(false) }
+    // Only meaningful mid-setup, between SET_PIN and CONFIRM_PIN.
+    var pendingNewPin by remember { mutableStateOf<String?>(null) }
+
+    // Draft rules, seeded from the current settings (or sensible "allow
+    // everything" defaults for a first-ever setup) whenever rules actually
+    // become editable — not on every recomposition, which would stomp
+    // in-progress edits.
+    var draftKinds by remember { mutableStateOf(setOf(MediaKind.MOVIE, MediaKind.EPISODE, MediaKind.TRACK)) }
+    var draftGenres by remember { mutableStateOf<Set<String>?>(null) }
+    var draftMaxMovieRating by remember { mutableStateOf<String?>(null) }
+    var draftMaxTvRating by remember { mutableStateOf<String?>(null) }
+    fun seedDraftFromCurrent() {
+        draftKinds = kidModeSettings?.allowedKinds?.takeIf { it.isNotEmpty() } ?: setOf(MediaKind.MOVIE, MediaKind.EPISODE, MediaKind.TRACK)
+        draftGenres = kidModeSettings?.allowedGenres
+        draftMaxMovieRating = kidModeSettings?.maxMovieRating
+        draftMaxTvRating = kidModeSettings?.maxTvRating
+    }
+
+    Text("Kid Mode", color = SwarmMuted, fontSize = 14.sp)
+    Spacer(Modifier.height(12.dp))
+
+    when (step) {
+        KidModeStep.COLLAPSED -> {
+            Text(
+                if (isEnabled) "On — restricting what's shown across this app." else "Off — the full library is browsable.",
+                color = SwarmText,
+                fontSize = 14.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    if (isEnabled) {
+                        step = KidModeStep.ENTER_PIN
+                    } else {
+                        pendingNewPin = null
+                        step = KidModeStep.SET_PIN
+                    }
+                },
+                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+            ) {
+                Text(if (isEnabled) "Manage Kid Mode" else "Turn on Kid Mode")
+            }
+        }
+        KidModeStep.ENTER_PIN -> {
+            Text("Enter the PIN to manage Kid Mode", color = SwarmText, fontSize = 14.sp)
+            Spacer(Modifier.height(12.dp))
+            NumberPadEntry(
+                value = pinField,
+                maxLength = KID_MODE_PIN_LENGTH,
+                onValueChange = { entered ->
+                    pinField = entered
+                    if (entered.length == KID_MODE_PIN_LENGTH) {
+                        if (kidModeSettings?.pinMatches(entered) == true) {
+                            seedDraftFromCurrent()
+                            step = KidModeStep.EDIT_RULES
+                        } else {
+                            pinError = true
+                            pinField = ""
+                        }
+                    }
+                },
+            )
+            if (pinError) {
+                Spacer(Modifier.height(10.dp))
+                Text("Wrong PIN.", color = SwarmAccentHot, fontSize = 13.sp)
+            }
+        }
+        KidModeStep.SET_PIN -> {
+            Text("Choose a $KID_MODE_PIN_LENGTH-digit PIN", color = SwarmText, fontSize = 14.sp)
+            Spacer(Modifier.height(12.dp))
+            NumberPadEntry(
+                value = pinField,
+                maxLength = KID_MODE_PIN_LENGTH,
+                onValueChange = { entered ->
+                    pinField = entered
+                    if (entered.length == KID_MODE_PIN_LENGTH) {
+                        pendingNewPin = entered
+                        seedDraftFromCurrent()
+                        step = KidModeStep.CONFIRM_PIN
+                    }
+                },
+            )
+        }
+        KidModeStep.CONFIRM_PIN -> {
+            Text("Confirm the PIN", color = SwarmText, fontSize = 14.sp)
+            Spacer(Modifier.height(12.dp))
+            NumberPadEntry(
+                value = pinField,
+                maxLength = KID_MODE_PIN_LENGTH,
+                onValueChange = { entered ->
+                    pinField = entered
+                    if (entered.length == KID_MODE_PIN_LENGTH) {
+                        if (entered == pendingNewPin) {
+                            step = KidModeStep.EDIT_RULES
+                        } else {
+                            pinError = true
+                            pinField = ""
+                            pendingNewPin = null
+                            step = KidModeStep.SET_PIN
+                        }
+                    }
+                },
+            )
+            if (pinError) {
+                Spacer(Modifier.height(10.dp))
+                Text("Didn't match — start over.", color = SwarmAccentHot, fontSize = 13.sp)
+            }
+        }
+        KidModeStep.EDIT_RULES -> {
+            KidModeRulesEditor(
+                availableGenres = availableGenres,
+                allowedKinds = draftKinds,
+                onToggleKind = { kind -> draftKinds = if (kind in draftKinds) draftKinds - kind else draftKinds + kind },
+                allowedGenres = draftGenres,
+                onToggleGenre = { genre ->
+                    draftGenres = when {
+                        draftGenres == null -> setOf(genre)
+                        genre in draftGenres!! && draftGenres!!.size == 1 -> null
+                        genre in draftGenres!! -> draftGenres!! - genre
+                        else -> draftGenres!! + genre
+                    }
+                },
+                maxMovieRating = draftMaxMovieRating,
+                onSelectMaxMovieRating = { draftMaxMovieRating = it },
+                maxTvRating = draftMaxTvRating,
+                onSelectMaxTvRating = { draftMaxTvRating = it },
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        val pin = pendingNewPin
+                        if (pin != null) {
+                            onEnable(pin, draftKinds, draftGenres, draftMaxMovieRating, draftMaxTvRating)
+                        } else {
+                            onUpdateRules(draftKinds, draftGenres, draftMaxMovieRating, draftMaxTvRating)
+                        }
+                        pendingNewPin = null
+                        step = KidModeStep.COLLAPSED
+                    },
+                    enabled = draftKinds.isNotEmpty(),
+                    colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                ) {
+                    Text("Save", fontWeight = FontWeight.Bold)
+                }
+                if (isEnabled) {
+                    Button(
+                        onClick = { onDisable(); step = KidModeStep.COLLAPSED },
+                        colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmAccentHot),
+                    ) {
+                        Text("Turn off Kid Mode")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun KidModeRulesEditor(
+    availableGenres: List<String>,
+    allowedKinds: Set<MediaKind>,
+    onToggleKind: (MediaKind) -> Unit,
+    allowedGenres: Set<String>?,
+    onToggleGenre: (String) -> Unit,
+    maxMovieRating: String?,
+    onSelectMaxMovieRating: (String?) -> Unit,
+    maxTvRating: String?,
+    onSelectMaxTvRating: (String?) -> Unit,
+) {
+    Text("Allowed", color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(8.dp))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SelectableChip("Movies", isSelected = MediaKind.MOVIE in allowedKinds, onClick = { onToggleKind(MediaKind.MOVIE) })
+        SelectableChip("Shows", isSelected = MediaKind.EPISODE in allowedKinds, onClick = { onToggleKind(MediaKind.EPISODE) })
+        SelectableChip("Music", isSelected = MediaKind.TRACK in allowedKinds, onClick = { onToggleKind(MediaKind.TRACK) })
+    }
+    if (allowedKinds.isEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text("At least one type must stay allowed.", color = SwarmAccentHot, fontSize = 12.sp)
+    }
+
+    if (availableGenres.isNotEmpty()) {
+        Spacer(Modifier.height(16.dp))
+        Text("Genres (tap to restrict — none selected means all genres)", color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (genre in availableGenres) {
+                SelectableChip(genre, isSelected = allowedGenres?.contains(genre) == true, onClick = { onToggleGenre(genre) })
+            }
+        }
+    }
+
+    if (MediaKind.MOVIE in allowedKinds) {
+        Spacer(Modifier.height(16.dp))
+        Text("Max movie rating", color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SelectableChip("No limit", isSelected = maxMovieRating == null, onClick = { onSelectMaxMovieRating(null) })
+            for (rating in RatingScale.MOVIE_ORDER) {
+                SelectableChip(rating, isSelected = rating == maxMovieRating, onClick = { onSelectMaxMovieRating(rating) })
+            }
+        }
+    }
+
+    if (MediaKind.EPISODE in allowedKinds) {
+        Spacer(Modifier.height(16.dp))
+        Text("Max show rating", color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SelectableChip("No limit", isSelected = maxTvRating == null, onClick = { onSelectMaxTvRating(null) })
+            for (rating in RatingScale.TV_ORDER) {
+                SelectableChip(rating, isSelected = rating == maxTvRating, onClick = { onSelectMaxTvRating(rating) })
+            }
         }
     }
 }
@@ -264,46 +531,3 @@ private fun SwarmRow(swarm: SwarmSummary, isActive: Boolean, busy: Boolean, onSe
     }
 }
 
-@Composable
-private fun DigitSlot(digit: Char?) {
-    Box(
-        modifier = Modifier
-            .size(40.dp, 52.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (digit != null) SwarmSurfaceMuted else SwarmSurface),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(digit?.toString() ?: "", color = SwarmText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-private val padRows = listOf(
-    listOf('1', '2', '3'),
-    listOf('4', '5', '6'),
-    listOf('7', '8', '9'),
-    listOf(null, '0', '<'),
-)
-
-@Composable
-private fun NumberPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        for (row in padRows) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (key in row) {
-                    Box(modifier = Modifier.size(64.dp)) {
-                        if (key != null) {
-                            Button(
-                                onClick = { if (key == '<') onBackspace() else onDigit(key) },
-                                enabled = enabled,
-                                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                                modifier = Modifier.size(64.dp),
-                            ) {
-                                Text(if (key == '<') "⌫" else key.toString(), fontSize = 22.sp)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}

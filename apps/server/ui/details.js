@@ -13,14 +13,13 @@ async function refreshTmdbKeyField() {
 
 document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => {
   const input = document.getElementById("tmdbKeyInput");
-  const status = document.getElementById("tmdbKeyStatus");
   try {
     await invoke("set_tmdb_api_key", { key: input.value });
     input.value = "";
     await refreshTmdbKeyField();
+    showToast("TMDb key saved.", "success");
   } catch (err) {
-    status.classList.add("error");
-    status.textContent = String(err);
+    showToast(String(err), "error");
   }
 });
 
@@ -40,7 +39,8 @@ async function refreshStatus() {
       stat("Device fingerprint", status.fingerprint, true) +
       stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);
   } catch (err) {
-    grid.innerHTML = `<div class="stat"><div class="label error">Error</div><div class="value">${esc(err)}</div></div>`;
+    grid.innerHTML = `<p class="muted">Unable to load status.</p>`;
+    showToast(String(err), "error");
   }
 }
 
@@ -55,21 +55,18 @@ async function refreshMediaRoots() {
       </div>`).join("");
     list.querySelectorAll("[data-remove-root]").forEach(btn => {
       btn.addEventListener("click", async () => {
-        const errorEl = document.getElementById("mediaRootsError");
-        errorEl.classList.add("error");
-        errorEl.textContent = "";
         try {
           const result = await invoke("remove_media_root", { label: btn.dataset.removeRoot });
           await refreshMediaRoots();
-          describeRootChange(errorEl, result);
+          describeRootChange(result);
         } catch (err) {
-          errorEl.classList.add("error");
-          errorEl.textContent = String(err);
+          showToast(String(err), "error");
         }
       });
     });
   } catch (err) {
-    list.innerHTML = `<p class="error">${esc(err)}</p>`;
+    list.innerHTML = `<p class="muted">Unable to load media roots.</p>`;
+    showToast(String(err), "error");
   }
 }
 
@@ -77,17 +74,13 @@ async function refreshMediaRoots() {
 // was already running (this change took effect immediately, no restart), or
 // nothing if it's still first-run onboarding (there's no core yet to apply
 // it to; the choice is just saved for when one starts).
-function describeRootChange(errorEl, result) {
+function describeRootChange(result) {
   if (!result.rescan) return;
   const { added, updated, removed, unchanged } = result.rescan;
-  errorEl.classList.remove("error");
-  errorEl.textContent = `Applied — scanned now: +${added} added, ${updated} updated, ${removed} removed, ${unchanged} unchanged.`;
+  showToast(`Applied — scanned now: +${added} added, ${updated} updated, ${removed} removed, ${unchanged} unchanged.`, "success");
 }
 
 document.getElementById("addRootBtn").addEventListener("click", async () => {
-  const errorEl = document.getElementById("mediaRootsError");
-  errorEl.classList.add("error");
-  errorEl.textContent = "";
   const label = document.getElementById("addRootLabel");
   const path = document.getElementById("addRootPath");
   try {
@@ -95,10 +88,9 @@ document.getElementById("addRootBtn").addEventListener("click", async () => {
     label.value = "";
     path.value = "";
     await refreshMediaRoots();
-    describeRootChange(errorEl, result);
+    describeRootChange(result);
   } catch (err) {
-    errorEl.classList.add("error");
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
   }
 });
 

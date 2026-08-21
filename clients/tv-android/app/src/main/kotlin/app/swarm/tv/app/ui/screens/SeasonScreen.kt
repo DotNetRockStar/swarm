@@ -1,28 +1,28 @@
 /**
  * One show: a list of its seasons, drilling into an episode grid on
  * selection — same local-state pattern as [AlbumScreen] (see its doc
- * comment for the rationale). Selecting an episode calls [onOpenEpisode]
- * (a real [app.swarm.tv.app.data.UiState] transition, since episode detail
- * needs Play + Continue/next-episode wiring, unlike a track).
+ * comment for the rationale). Selecting an episode calls [onPlayEpisode]
+ * directly — no separate detail screen in between, so getting to an
+ * episode never takes more than season -> episode -> playing.
  */
 package app.swarm.tv.app.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,7 +57,7 @@ import coil.compose.AsyncImage
 fun SeasonScreen(
     show: ShowGroup,
     artworkUrl: (MergedEntry) -> String?,
-    onOpenEpisode: (MergedEntry) -> Unit,
+    onPlayEpisode: (MergedEntry) -> Unit,
     onBack: () -> Unit,
 ) {
     var selectedSeason by remember(show) { mutableStateOf<SeasonGroup?>(null) }
@@ -65,30 +65,61 @@ fun SeasonScreen(
 
     val season = selectedSeason
     if (season == null) {
-        SeasonList(show, onOpenSeason = { selectedSeason = it }, onBack = onBack)
+        SeasonList(show, artworkUrl, onOpenSeason = { selectedSeason = it }, onBack = onBack)
     } else {
-        EpisodeGrid(show, season, artworkUrl, onOpenEpisode, onBack = { selectedSeason = null })
+        EpisodeGrid(show, season, artworkUrl, onPlayEpisode, onBack = { selectedSeason = null })
     }
 }
 
 @Composable
-private fun SeasonList(show: ShowGroup, onOpenSeason: (SeasonGroup) -> Unit, onBack: () -> Unit) {
-    val firstRowFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(show) { if (show.seasons.isNotEmpty()) firstRowFocusRequester.requestFocus() }
+private fun SeasonList(show: ShowGroup, artworkUrl: (MergedEntry) -> String?, onOpenSeason: (SeasonGroup) -> Unit, onBack: () -> Unit) {
+    val firstCardFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(show) { if (show.seasons.isNotEmpty()) firstCardFocusRequester.requestFocus() }
 
-    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(40.dp)) {
+    Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(show.show, color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
             Button(onClick = onBack, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)) { Text("Back") }
         }
         Spacer(Modifier.height(24.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            for ((index, season) in show.seasons.withIndex()) {
-                val focusModifier = if (index == 0) Modifier.focusRequester(firstRowFocusRequester) else Modifier
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(5),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            // Room for tv-material3's focus-scale animation on edge cards — see CatalogScreen.kt.
+            contentPadding = PaddingValues(12.dp),
+        ) {
+            itemsIndexed(show.seasons) { index, season ->
+                val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                // No distinct per-season poster concept exists server-side
+                // (TMDb TV scraping here is show-level only) — this falls
+                // back to this season's own first episode's artwork, the
+                // same representative-entry fallback the browse page's own
+                // show card already uses (CatalogScreen.kt's ShowShelfRow),
+                // just scoped to this one season instead of the whole show.
+                val seasonArt = season.episodes.firstOrNull()?.let(artworkUrl)
                 Card(onClick = { onOpenSeason(season) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(seasonLabel(season.season), color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        Text("${season.episodes.size} episode" + if (season.episodes.size == 1) "" else "s", color = SwarmMuted, fontSize = 13.sp)
+                    Column {
+                        if (seasonArt != null) {
+                            AsyncImage(
+                                model = seasonArt,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                InitialBadge(seasonLabel(season.season))
+                            }
+                        }
+                        Column(Modifier.padding(14.dp)) {
+                            Text(seasonLabel(season.season), color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            Spacer(Modifier.height(4.dp))
+                            Text("${season.episodes.size} episode" + if (season.episodes.size == 1) "" else "s", color = SwarmMuted, fontSize = 11.sp)
+                        }
                     }
                 }
             }
@@ -101,7 +132,7 @@ private fun EpisodeGrid(
     show: ShowGroup,
     season: SeasonGroup,
     artworkUrl: (MergedEntry) -> String?,
-    onOpenEpisode: (MergedEntry) -> Unit,
+    onPlayEpisode: (MergedEntry) -> Unit,
     onBack: () -> Unit,
 ) {
     val firstCardFocusRequester = remember { FocusRequester() }
@@ -113,10 +144,16 @@ private fun EpisodeGrid(
             Button(onClick = onBack, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)) { Text("Back") }
         }
         Spacer(Modifier.height(24.dp))
-        LazyVerticalGrid(columns = GridCells.Fixed(4), verticalArrangement = Arrangement.spacedBy(20.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(4),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            // Room for tv-material3's focus-scale animation on edge cards — see CatalogScreen.kt.
+            contentPadding = PaddingValues(12.dp),
+        ) {
             itemsIndexed(season.episodes) { index, episode ->
                 val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
-                Card(onClick = { onOpenEpisode(episode) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
+                Card(onClick = { onPlayEpisode(episode) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                     Column {
                         artworkUrl(episode)?.let { url ->
                             AsyncImage(
@@ -132,7 +169,7 @@ private fun EpisodeGrid(
                                 color = SwarmMuted,
                                 fontSize = 11.sp,
                             )
-                            Text(episode.entry.scrapedTitle ?: episode.entry.title, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                            Text(episode.entry.scrapedTitle ?: episode.entry.title, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                         }
                     }
                 }

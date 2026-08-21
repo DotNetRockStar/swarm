@@ -113,6 +113,8 @@ impl MediaService {
         match request_path {
             "/catalog/thumbprint" => self.thumbprint().await,
             "/catalog/manifest" => self.manifest().await,
+            "/errors/report" => self.report_error(request).await,
+            "/likes/toggle" => self.set_like(request).await,
             path => {
                 if let Some(entry_key) = path.strip_prefix("/media/") {
                     self.media(entry_key, request).await
@@ -153,17 +155,55 @@ impl MediaService {
     }
 
     async fn manifest(&self) -> Resolved {
-        let (Ok(thumbprint), Ok(entries)) =
-            (self.library.thumbprint().await, self.library.list().await)
+        let (Ok(thumbprint), Ok(entries), Ok(like_counts)) =
+            (self.library.thumbprint().await, self.library.list().await, self.library.like_counts().await)
         else {
             return status(500);
         };
         let manifest = CatalogManifest {
             thumbprint,
-            entries: entries.iter().map(|e| e.to_catalog_entry()).collect(),
+            entries: entries
+                .iter()
+                .map(|e| {
+                    let mut catalog_entry = e.to_catalog_entry();
+                    catalog_entry.like_count = like_counts.get(&e.entry_key).copied().unwrap_or(0);
+                    catalog_entry
+                })
+                .collect(),
             removed: Vec::new(),
         };
         json_response(200, &manifest)
+    }
+
+    /// `/errors/report` — a client persists a [`swarm_core::peer::ClientErrorReport`]
+    /// here for later triage on this server's own swarm page, rather than it
+    /// only ever existing in on-device logs nobody's looking at.
+    async fn report_error(&self, request: &PeerRequest) -> Resolved {
+        let Some(report) = &request.error_report else {
+            return status(400);
+        };
+        if report.device_id.is_empty() || report.message.is_empty() {
+            return status(400);
+        }
+        match self.library.record_client_error(report).await {
+            Ok(()) => status(204),
+            Err(_) => status(500),
+        }
+    }
+
+    /// `/likes/toggle` — see [`swarm_core::peer::LikeToggle`]'s doc comment
+    /// for the idempotent-desired-end-state semantics.
+    async fn set_like(&self, request: &PeerRequest) -> Resolved {
+        let Some(like) = &request.like else {
+            return status(400);
+        };
+        if like.device_id.is_empty() || like.entry_key.is_empty() {
+            return status(400);
+        }
+        match self.library.set_like(&like.entry_key, &like.device_id, &like.device_name, like.liked).await {
+            Ok(()) => status(204),
+            Err(_) => status(500),
+        }
     }
 
     async fn media(&self, entry_key: &str, request: &PeerRequest) -> Resolved {

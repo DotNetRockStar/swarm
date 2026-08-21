@@ -40,6 +40,17 @@ pub struct EntryRecord {
     /// Scraper overlay, movies/episodes only — empty for tracks (music has
     /// no cast concept).
     pub cast: Vec<CastMember>,
+    /// Synopsis — TMDb's own for movies/episodes (auto-populated at scrape
+    /// time), or a manual override via [`Library::set_overview`]. `None`
+    /// for tracks (no synopsis concept) and for anything not yet scraped.
+    pub overview: Option<String>,
+    /// US content rating — MPAA-style (`"PG-13"`) for a movie, TV Parental
+    /// Guidelines-style (`"TV-14"`) for a show — TMDb's own (auto-populated
+    /// at scrape time, see `scrape::tmdb::ScrapedVideo::certification`) or a
+    /// manual override via [`Library::set_rating`]. `None` for tracks (no
+    /// rating concept) and for anything not yet scraped or without a US
+    /// certification on file.
+    pub rating: Option<String>,
 }
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
@@ -97,6 +108,45 @@ pub struct PendingChange {
     pub operation: String,
 }
 
+/// [`Library::snapshot`]'s per-entry summary — just enough for
+/// `scan::scan_roots` to detect a real content change (`size`/
+/// `modified_time`) and whether artwork-recovery is worth attempting
+/// (`has_artwork`, true if any of the four artwork columns is set) without
+/// a second per-entry query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownEntry {
+    pub size: u64,
+    pub modified_time: i64,
+    pub fingerprint: String,
+    pub has_artwork: bool,
+    /// Set by [`Library::set_manual_kind`] — a scan that finds this file
+    /// *unchanged* never touches `kind`/grouping anyway (its whole record is
+    /// skipped), but a scan that finds it *changed on disk* (re-encoded,
+    /// replaced) would otherwise re-derive and overwrite them from the path
+    /// alone via `classify()`, silently reverting the override. `scan_roots`
+    /// checks this flag specifically for that case.
+    pub kind_overridden: bool,
+}
+
+/// A stored [`swarm_core::peer::ClientErrorReport`] — `received_at_ms` is the
+/// server's own clock, kept alongside the client-reported `occurred_at_ms`
+/// since the two can disagree (clock skew, queued-then-flushed reports) and
+/// triage cares about both: when it happened on the device, and when this
+/// server actually found out about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientErrorRecord {
+    pub id: i64,
+    pub device_id: String,
+    pub device_name: String,
+    pub entry_key: Option<String>,
+    pub asset_title: Option<String>,
+    pub kind: Option<String>,
+    pub message: String,
+    pub context: Option<String>,
+    pub occurred_at_ms: i64,
+    pub received_at_ms: i64,
+}
+
 fn kind_str(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Movie => "movie",
@@ -149,6 +199,26 @@ impl Library {
                 entry_key TEXT PRIMARY KEY,
                 operation TEXT NOT NULL CHECK (operation IN ('upsert','delete'))
             );
+            CREATE TABLE IF NOT EXISTS client_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                entry_key TEXT,
+                asset_title TEXT,
+                kind TEXT,
+                message TEXT NOT NULL,
+                context TEXT,
+                occurred_at_ms INTEGER NOT NULL,
+                received_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_client_errors_received ON client_errors(received_at_ms DESC);
+            CREATE TABLE IF NOT EXISTS entry_likes (
+                entry_key TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                liked_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (entry_key, device_id)
+            );
             "#,
         )
         .execute(&pool)
@@ -165,22 +235,34 @@ impl Library {
             ("cover_relative_path", "TEXT"),
             ("artist_art_relative_path", "TEXT"),
             ("artwork_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("overview", "TEXT"),
+            ("kind_overridden", "INTEGER NOT NULL DEFAULT 0"),
+            ("rating", "TEXT"),
         ] {
             ensure_column(&pool, "library_entries", column, ddl_type).await?;
         }
         Ok(Self { pool })
     }
 
-    /// (size, modified_time, fingerprint) per relative path — the scanner's
-    /// change-detection snapshot.
-    pub async fn snapshot(&self) -> sqlx::Result<HashMap<String, (u64, i64, String)>> {
-        let rows: Vec<(String, i64, i64, String)> =
-            sqlx::query_as("SELECT relative_path, size, modified_time, fingerprint FROM library_entries")
-                .fetch_all(&self.pool)
-                .await?;
+    /// [`KnownEntry`] per relative path — the scanner's change-detection
+    /// snapshot.
+    pub async fn snapshot(&self) -> sqlx::Result<HashMap<String, KnownEntry>> {
+        type Row = (String, i64, i64, String, Option<String>, Option<String>, Option<String>, Option<String>, i64);
+        let rows: Vec<Row> =
+            sqlx::query_as(
+                "SELECT relative_path, size, modified_time, fingerprint, \
+                 poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path, \
+                 kind_overridden \
+                 FROM library_entries",
+            )
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .into_iter()
-            .map(|(path, size, mtime, fingerprint)| (path, (size as u64, mtime, fingerprint)))
+            .map(|(path, size, mtime, fingerprint, poster, backdrop, cover, artist, kind_overridden)| {
+                let has_artwork = poster.is_some() || backdrop.is_some() || cover.is_some() || artist.is_some();
+                (path, KnownEntry { size: size as u64, modified_time: mtime, fingerprint, has_artwork, kind_overridden: kind_overridden != 0 })
+            })
             .collect())
     }
 
@@ -404,6 +486,102 @@ impl Library {
         Ok(())
     }
 
+    /// Manually moves an entry to a different [`MediaKind`] — the escape
+    /// hatch for files `classify()` structurally can't get right from the
+    /// path/extension alone (a music video sitting in a movies/shows folder
+    /// as an .mkv, indistinguishable from a real movie/episode without
+    /// actually watching it). Clears whichever grouping fields don't apply
+    /// to the new kind (a former Track's `artist`/`album`/`track_number`
+    /// don't belong on a Movie, a former Episode's `show_title`/`season`/
+    /// `episode` don't either) so stale cross-kind data never lingers and
+    /// confuses a later regroup. Sets `kind_overridden = 1`, which
+    /// `reclassify_all` and `scan_roots` both check to keep this from being
+    /// silently reverted by a later "Fix classifications" run or by the
+    /// file changing on disk (re-encoded, replaced) — see [`KnownEntry`]'s
+    /// doc comment for the latter.
+    pub async fn set_manual_kind(
+        &self,
+        entry_key: &str,
+        kind: MediaKind,
+        artist: Option<&str>,
+        album: Option<&str>,
+        show_title: Option<&str>,
+    ) -> sqlx::Result<()> {
+        let (artist, album, show_title) = match kind {
+            MediaKind::Track => (artist, album, None),
+            MediaKind::Episode => (None, None, show_title),
+            MediaKind::Movie => (None, None, None),
+        };
+        sqlx::query(
+            "UPDATE library_entries SET kind = ?, artist = ?, album = ?, show_title = ?, \
+             season = NULL, episode = NULL, track_number = NULL, kind_overridden = 1 \
+             WHERE entry_key = ?",
+        )
+        .bind(kind_str(kind))
+        .bind(artist)
+        .bind(album)
+        .bind(show_title)
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Sets the synopsis directly — used both by a scrape (writing TMDb's
+    /// own overview right after `set_scrape_result`) and by a manual GUI
+    /// edit. Kept as its own method rather than folded into
+    /// `set_scrape_result`/`set_manual_metadata`: tracks have no synopsis
+    /// concept at all, so every existing call site for those two methods
+    /// would otherwise need a new always-irrelevant parameter.
+    pub async fn set_overview(&self, entry_key: &str, overview: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE library_entries SET overview = ? WHERE entry_key = ?")
+            .bind(overview)
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the US content rating directly — same status/call shape as
+    /// [`Self::set_overview`] (a scrape writes TMDb's own certification
+    /// right after `set_scrape_result`; a manual GUI edit calls this too).
+    pub async fn set_rating(&self, entry_key: &str, rating: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE library_entries SET rating = ? WHERE entry_key = ?")
+            .bind(rating)
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every distinct, non-empty genre value currently assigned to any
+    /// entry, sorted case-insensitively — backs the GUI's category picker
+    /// ("assign to an existing category" instead of retyping one from
+    /// scratch each time). Genres are stored per-entry as a JSON array
+    /// rather than a normalized join table (matching how `cast`/`genres`
+    /// have always been treated here — display overlay, not a relational
+    /// concept), so this reads every row and unions them in memory; fine at
+    /// library scale (a few thousand rows), called only when the GUI opens
+    /// the picker, not on any hot path.
+    pub async fn distinct_genres(&self) -> sqlx::Result<Vec<String>> {
+        let rows: Vec<(Option<String>,)> = sqlx::query_as("SELECT DISTINCT genres_json FROM library_entries WHERE genres_json IS NOT NULL")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (genres_json,) in rows {
+            let Some(genres_json) = genres_json else { continue };
+            let genres: Vec<String> = serde_json::from_str(&genres_json).unwrap_or_default();
+            for g in genres {
+                if !g.is_empty() {
+                    set.insert(g);
+                }
+            }
+        }
+        let mut list: Vec<String> = set.into_iter().collect();
+        list.sort_by_key(|g| g.to_lowercase());
+        Ok(list)
+    }
+
     /// Store a downloaded artwork image's path (relative to the media root,
     /// alongside the source file) and bump the version that backs its etag.
     pub async fn set_artwork(&self, entry_key: &str, kind: ArtworkKind, relative_path: &str) -> sqlx::Result<()> {
@@ -442,8 +620,8 @@ impl Library {
         let cleared_paths: Vec<String> = [row.0, row.1, row.2, row.3].into_iter().flatten().collect();
 
         sqlx::query(
-            "UPDATE library_entries SET scraped_title = NULL, genres_json = NULL, cast_json = NULL, \
-             poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
+            "UPDATE library_entries SET scraped_title = NULL, genres_json = NULL, cast_json = NULL, overview = NULL, \
+             rating = NULL, poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
              artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
         )
         .bind(entry_key)
@@ -465,28 +643,65 @@ impl Library {
     /// the underlying file to change.
     ///
     /// An entry is left completely untouched (including its existing scrape
-    /// data) unless its `kind`/`show_title`/`season`/`episode` actually
-    /// differ from what it's currently stored as. When they do differ, the
-    /// old scrape result can no longer be trusted (it was very possibly
-    /// produced by searching under the wrong classification entirely — e.g.
-    /// bonus content scraped as if it were a standalone movie) — this reuses
+    /// data) unless its `kind`/`show_title`/`season`/`episode`/`artist`/
+    /// `album`/`track_number` actually differ from what it's currently
+    /// stored as. When they do differ, the old scrape result can no longer
+    /// be trusted (it was very possibly produced by searching under the
+    /// wrong classification entirely — e.g. bonus content scraped as if it
+    /// were a standalone movie, or a track scraped under a garbage
+    /// folder-derived artist/album) — this reuses
     /// [`Self::clear_scrape_result`] for exactly those entries, so they come
     /// out the other side freshly eligible for a correct re-scrape.
-    pub async fn reclassify_all(&self) -> sqlx::Result<ReclassifyReport> {
-        type ReclassifyRow = (String, String, String, Option<String>, Option<i64>, Option<i64>);
+    pub async fn reclassify_all(&self, roots: &crate::roots::SharedRootResolver) -> sqlx::Result<ReclassifyReport> {
+        type ReclassifyRow =
+            (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, i64);
         let mut report = ReclassifyReport::default();
         let rows: Vec<ReclassifyRow> = sqlx::query_as(
-            "SELECT entry_key, relative_path, kind, show_title, season, episode FROM library_entries",
+            "SELECT entry_key, relative_path, kind, show_title, season, episode, artist, album, track_number, kind_overridden \
+             FROM library_entries",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        for (entry_key, relative_path, old_kind, old_show_title, old_season, old_episode) in rows {
-            let Some(classified) = crate::classify::classify(&relative_path) else { continue };
+        for (
+            entry_key,
+            relative_path,
+            old_kind,
+            old_show_title,
+            old_season,
+            old_episode,
+            old_artist,
+            old_album,
+            old_track_number,
+            kind_overridden,
+        ) in rows
+        {
+            // A manually-reclassified entry (see `set_manual_kind`) must
+            // never be silently reverted by a bulk path-based re-derivation
+            // — that's the entire reason this flag exists.
+            if kind_overridden != 0 {
+                report.unchanged += 1;
+                continue;
+            }
+            // Classified from the path *under its owning root*, never the
+            // possibly `{label}/`-prefixed stored form — see scan_roots's
+            // identical reasoning for why classify()'s top-anchored audio
+            // grouping must never see a root's label as though it were a
+            // real folder.
+            let (_, path_under_root) = roots.split(&relative_path);
+            let Some(classified) = crate::classify::classify(&path_under_root) else { continue };
             let new_kind = kind_str(classified.kind);
             let new_season = classified.season.map(i64::from);
             let new_episode = classified.episode.map(i64::from);
-            if new_kind == old_kind && classified.show_title == old_show_title && new_season == old_season && new_episode == old_episode {
+            let new_track_number = classified.track_number.map(i64::from);
+            if new_kind == old_kind
+                && classified.show_title == old_show_title
+                && new_season == old_season
+                && new_episode == old_episode
+                && classified.artist == old_artist
+                && classified.album == old_album
+                && new_track_number == old_track_number
+            {
                 report.unchanged += 1;
                 continue;
             }
@@ -511,6 +726,120 @@ impl Library {
             report.changed += 1;
         }
         Ok(report)
+    }
+
+    /// Persists a client-reported error (`/errors/report`) for later triage
+    /// from the swarm page. `received_at_ms` is stamped here, from this
+    /// machine's own clock — see [`ClientErrorRecord`]'s doc comment.
+    pub async fn record_client_error(&self, report: &swarm_core::peer::ClientErrorReport) -> sqlx::Result<()> {
+        let received_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO client_errors \
+             (device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&report.device_id)
+        .bind(&report.device_name)
+        .bind(&report.entry_key)
+        .bind(&report.asset_title)
+        .bind(&report.kind)
+        .bind(&report.message)
+        .bind(&report.context)
+        .bind(report.occurred_at_ms)
+        .bind(received_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Newest first — matches how the swarm page's Errors panel wants to
+    /// present them (most recent triage-worthy thing first).
+    pub async fn list_client_errors(&self) -> sqlx::Result<Vec<ClientErrorRecord>> {
+        type Row = (i64, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, i64, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms \
+             FROM client_errors ORDER BY received_at_ms DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms)| {
+                ClientErrorRecord {
+                    id,
+                    device_id,
+                    device_name,
+                    entry_key,
+                    asset_title,
+                    kind,
+                    message,
+                    context,
+                    occurred_at_ms,
+                    received_at_ms,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn client_error_count(&self) -> sqlx::Result<u64> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM client_errors").fetch_one(&self.pool).await?;
+        Ok(count as u64)
+    }
+
+    pub async fn delete_client_error(&self, id: i64) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM client_errors WHERE id = ?").bind(id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn clear_client_errors(&self) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM client_errors").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Idempotent toggle (`/likes/toggle`): `liked = true` upserts this
+    /// device's like, `liked = false` removes it — safe to send the same
+    /// desired end-state repeatedly (a D-pad button retry) without double-
+    /// counting or erroring on "already liked"/"wasn't liked". Device
+    /// identity is self-reported the same way `record_client_error`'s is —
+    /// see that method's doc comment; this route has the identical trust
+    /// model.
+    pub async fn set_like(&self, entry_key: &str, device_id: &str, device_name: &str, liked: bool) -> sqlx::Result<()> {
+        if liked {
+            let liked_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            sqlx::query(
+                "INSERT INTO entry_likes (entry_key, device_id, device_name, liked_at_ms) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (entry_key, device_id) DO UPDATE SET device_name = excluded.device_name, liked_at_ms = excluded.liked_at_ms",
+            )
+            .bind(entry_key)
+            .bind(device_id)
+            .bind(device_name)
+            .bind(liked_at_ms)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query("DELETE FROM entry_likes WHERE entry_key = ? AND device_id = ?")
+                .bind(entry_key)
+                .bind(device_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Like count per entry, for every entry with at least one like — one
+    /// grouped query for the whole manifest rather than a per-entry lookup,
+    /// same reasoning as [`Self::distinct_genres`] reading everything in one
+    /// pass instead of N queries.
+    pub async fn like_counts(&self) -> sqlx::Result<HashMap<String, u32>> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT entry_key, COUNT(*) FROM entry_likes GROUP BY entry_key").fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(entry_key, count)| (entry_key, count as u32)).collect())
     }
 }
 
@@ -538,7 +867,7 @@ async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl_type: &
 const ENTRY_SELECT: &str =
     "SELECT entry_key, relative_path, kind, title, size, modified_time, fingerprint, artist, album, \
      track_number, show_title, season, episode, duration_secs, video_json, audio_json, \
-     scraped_title, genres_json, artwork_version, year, cast_json FROM library_entries";
+     scraped_title, genres_json, artwork_version, year, cast_json, overview, rating FROM library_entries";
 
 #[derive(sqlx::FromRow)]
 struct EntryRow {
@@ -563,6 +892,8 @@ struct EntryRow {
     artwork_version: i64,
     year: Option<i64>,
     cast_json: Option<String>,
+    overview: Option<String>,
+    rating: Option<String>,
 }
 
 impl From<EntryRow> for EntryRecord {
@@ -591,6 +922,8 @@ impl From<EntryRow> for EntryRecord {
             artwork_version: row.artwork_version as u32,
             year: row.year.map(|n| n as u32),
             cast: row.cast_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
+            overview: row.overview,
+            rating: row.rating,
         }
     }
 }
@@ -617,6 +950,14 @@ impl EntryRecord {
             artwork_etag: (self.artwork_version > 0).then(|| format!("v{}", self.artwork_version)),
             year: self.year,
             cast: self.cast.iter().map(|c| swarm_core::peer::CastMember { name: c.name.clone(), character: c.character.clone() }).collect(),
+            overview: self.overview.clone(),
+            rating: self.rating.clone(),
+            // Not derivable from a single row — `serve.rs`'s `manifest()`
+            // overwrites this with a real count from `Library::like_counts`
+            // after mapping every entry, the same reason `artwork_etag`
+            // needs the row's own `artwork_version` but `like_count` needs a
+            // separate, whole-table aggregate query instead.
+            like_count: 0,
         }
     }
 }

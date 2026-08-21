@@ -38,8 +38,36 @@ object CatalogGrouping {
             }
     }
 
+    /**
+     * Two on-disk show folders can hold the same real series under
+     * different names ("Law & Order SVU" vs. "Law & Order Special Victims
+     * Unit") — the path-derived show title alone can never tell them apart
+     * (and by design never should: a bad scrape must never be able to split
+     * or corrupt a grouping that's otherwise correct — see the Rust side's
+     * `classify.rs` module doc comment). A *matching* scrape is different:
+     * if episodes under two different show titles agree on the same
+     * TMDb-confirmed `scrapedTitle`, that's real external corroboration,
+     * not something a bad scrape could coincidentally produce for two
+     * unrelated folders. So: fold any show title whose episodes have a
+     * clear `scrapedTitle` consensus into that canonical key, purely for
+     * display grouping — the underlying entries and their path-derived
+     * fields are never touched. Mirrors `canonicalShowKeys` in the server
+     * GUI's `media.js`.
+     */
+    private fun canonicalShowKeys(episodes: List<MergedEntry>): Map<String, String> {
+        val scrapedCounts = mutableMapOf<String, MutableMap<String, Int>>()
+        for (e in episodes) {
+            val scraped = e.entry.scrapedTitle?.takeIf { it.isNotBlank() } ?: continue
+            val counts = scrapedCounts.getOrPut(showNameOf(e)) { mutableMapOf() }
+            counts[scraped] = (counts[scraped] ?: 0) + 1
+        }
+        return scrapedCounts.mapValues { (_, counts) -> counts.maxByOrNull { it.value }!!.key }
+    }
+
     fun groupEpisodesByShowSeason(entries: List<MergedEntry>): List<ShowGroup> {
-        val byShow = entries.filter { it.entry.kind == MediaKind.EPISODE }.groupBy { showNameOf(it) }
+        val episodes = entries.filter { it.entry.kind == MediaKind.EPISODE }
+        val canonicalFor = canonicalShowKeys(episodes)
+        val byShow = episodes.groupBy { canonicalFor[showNameOf(it)] ?: showNameOf(it) }
         return byShow.entries
             .sortedWith(compareBy({ it.key == UNKNOWN_SHOW }, { it.key.lowercase() }))
             .map { (show, showEntries) ->
@@ -56,15 +84,49 @@ object CatalogGrouping {
      * same season if one exists, else episode 1 of the next season, else
      * null (end of the show, or [current] isn't a known episode of a known
      * show in [shows] — e.g. it was removed from the catalog mid-playback).
+     * Finds [current]'s show by scanning for its fingerprint rather than by
+     * name equality against `showNameOf(current)` — [shows]' own key may be
+     * a merged canonical name (see [canonicalShowKeys]) that no longer
+     * equals the raw path-derived show title on [current].
      */
     fun nextEpisode(current: MergedEntry, shows: List<ShowGroup>): MergedEntry? {
-        val show = shows.find { it.show == showNameOf(current) } ?: return null
+        val show = shows.find { g -> g.seasons.any { s -> s.episodes.any { it.fingerprint == current.fingerprint } } } ?: return null
         val seasonIndex = show.seasons.indexOfFirst { it.season == current.entry.season }
         if (seasonIndex == -1) return null
         val episodeIndex = show.seasons[seasonIndex].episodes.indexOfFirst { it.fingerprint == current.fingerprint }
         if (episodeIndex == -1) return null
         show.seasons[seasonIndex].episodes.getOrNull(episodeIndex + 1)?.let { return it }
         return show.seasons.getOrNull(seasonIndex + 1)?.episodes?.firstOrNull()
+    }
+
+    /**
+     * The track after [current], same "keep playing" concept as
+     * [nextEpisode] — sequential (next track in the same album, else track
+     * 1 of the next album, else null at the end of the artist's discography
+     * or if [current] is no longer in [artists]) when [shuffle] is false.
+     * When [shuffle] is true, picks uniformly at random from every *other*
+     * track on the same album — scoped to the album [current] is actually
+     * on, not the artist's whole discography or the whole library, so
+     * "shuffle" means "shuffle what I'm listening to," matching what a user
+     * who opened this one album to listen to it would expect. Falls back to
+     * [current] itself if the album has only one track (nothing else to
+     * shuffle to) rather than returning null and silently stopping.
+     */
+    fun nextTrack(current: MergedEntry, artists: List<ArtistGroup>, shuffle: Boolean): MergedEntry? {
+        val artistIndex = artists.indexOfFirst { a -> a.albums.any { al -> al.tracks.any { it.fingerprint == current.fingerprint } } }
+        if (artistIndex == -1) return null
+        val artist = artists[artistIndex]
+        val albumIndex = artist.albums.indexOfFirst { al -> al.tracks.any { it.fingerprint == current.fingerprint } }
+        if (albumIndex == -1) return null
+        val album = artist.albums[albumIndex]
+        if (shuffle) {
+            val others = album.tracks.filter { it.fingerprint != current.fingerprint }
+            return others.randomOrNull() ?: current
+        }
+        val trackIndex = album.tracks.indexOfFirst { it.fingerprint == current.fingerprint }
+        if (trackIndex == -1) return null
+        album.tracks.getOrNull(trackIndex + 1)?.let { return it }
+        return artist.albums.getOrNull(albumIndex + 1)?.tracks?.firstOrNull()
     }
 
     private val trackOrder = compareBy<MergedEntry>({ it.entry.trackNumber == null }, { it.entry.trackNumber ?: Int.MAX_VALUE }, { it.entry.title.lowercase() })

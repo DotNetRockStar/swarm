@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use swarm_core::entry_key::entry_key;
 use swarm_core::peer::MediaKind;
-use swarm_media::roots::MediaRoot;
+use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_root, scan_roots};
-use swarm_media::store::Library;
+use swarm_media::store::{ArtworkKind, Library};
 
 struct Fixture {
     root: PathBuf,
@@ -114,6 +114,175 @@ async fn scan_add_modify_rename_delete() {
     assert_eq!(changes[0].entry_key, track.entry_key);
 }
 
+// --- real bug, found live: a network mount dropping mid-session made an
+// unreachable root look identical to "the user deleted every file", and a
+// rescan wiped the entire local library even though the real files were
+// untouched on the still-alive remote share. Two independent guards, tested
+// separately: the root directory itself failing to even list (a dropped
+// mount is usually a hard I/O error), and a root that's still readable but
+// suspiciously empty (belt-and-suspenders for any other root-level glitch
+// that isn't a hard error).
+
+#[tokio::test]
+async fn rescan_of_a_root_that_stops_existing_refuses_to_wipe_the_known_library() {
+    let fx = fixture("root-disappears").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 1);
+    assert_eq!(fx.library.list().await.unwrap().len(), 1);
+
+    // Simulate a dropped network mount: the root path itself stops
+    // resolving to anything readable (unlike a real deletion, where the
+    // parent directory stays readable and just returns fewer entries).
+    std::fs::remove_dir_all(&fx.root).unwrap();
+
+    let result = scan_root(&fx.library, &fx.root).await;
+    assert!(result.is_err(), "a root that vanished entirely must be a hard error, not an empty scan");
+    assert_eq!(fx.library.list().await.unwrap().len(), 1, "the known library must survive an unreachable root untouched");
+}
+
+#[tokio::test]
+async fn rescan_that_finds_zero_files_anywhere_refuses_to_wipe_a_nonempty_known_library() {
+    let fx = fixture("suspicious-empty").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 1);
+
+    // Root directory still exists and is readable, but every file under it
+    // is gone — the "readable but empty" case `SuspiciousEmptyScan` guards,
+    // distinct from the hard-I/O-error case above.
+    std::fs::remove_file(fx.root.join("movies/Heat (1995)/Heat.1995.mkv")).unwrap();
+
+    let result = scan_root(&fx.library, &fx.root).await;
+    assert!(result.is_err(), "finding 0 files against a nonempty known library must refuse, not wipe everything");
+    assert_eq!(fx.library.list().await.unwrap().len(), 1, "the known library must survive untouched");
+}
+
+#[tokio::test]
+async fn a_genuinely_empty_root_on_first_scan_is_not_treated_as_suspicious() {
+    // No known entries yet — an empty root the very first time is completely
+    // normal (a fresh install, or a root that's legitimately empty so far),
+    // not a signal anything's wrong.
+    let fx = fixture("first-scan-empty").await;
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!((report.added, report.removed), (0, 0));
+}
+
+#[tokio::test]
+async fn rescan_relinks_artwork_files_still_on_disk_after_the_catalog_row_is_gone() {
+    // Real gap, found live: scraped artwork lives as a plain file beside the
+    // source media, entirely independent of the SQLite catalog — it
+    // survives a catalog wipe even though the DB row referencing it
+    // doesn't. A brand-new row (this test simulates the DB-row-lost, file-
+    // still-there case directly, without needing a real wipe) must relink
+    // whatever's already sitting in `images/` rather than leaving artwork
+    // unset until a full re-scrape.
+    let fx = fixture("artwork-recovery").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 1);
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+
+    // Simulate a completed prior scrape: a real poster file on disk, in the
+    // exact convention `save_video_artwork` uses, plus the DB pointer a
+    // real scrape would have written.
+    let images_dir = fx.root.join("movies/Heat (1995)/images");
+    std::fs::create_dir_all(&images_dir).unwrap();
+    let poster_path = images_dir.join("Heat_1995-tmdb-poster.jpg");
+    std::fs::write(&poster_path, b"fake poster bytes").unwrap();
+    fx.library
+        .set_artwork(&entry.entry_key, ArtworkKind::Poster, "movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg")
+        .await
+        .unwrap();
+    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_some());
+
+    // Simulate the catalog row being lost (a wipe) without touching the
+    // real file on disk — same entry_key will be produced by the rescan
+    // below, since it's purely path-derived.
+    fx.library.remove_by_path(&entry.relative_path).await.unwrap();
+    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 1, "the row is gone, so this is a fresh add again, not an update");
+    let recovered = fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap();
+    assert_eq!(recovered.map(|(path, _)| path), Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string()));
+}
+
+#[tokio::test]
+async fn rescan_relinks_artwork_for_an_already_known_unchanged_entry_too() {
+    // Real bug, found live: entries added by a scan that ran *before*
+    // artwork recovery existed stay "unchanged" (same size/mtime) forever
+    // on every later rescan — the fast-path `continue` never even reaches
+    // the artwork check, so they'd otherwise never recover their real,
+    // still-on-disk artwork short of a full library wipe.
+    let fx = fixture("artwork-recovery-unchanged").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 1);
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+
+    // A poster file appears on disk (e.g. from a scrape this test doesn't
+    // otherwise simulate) but nothing ever links it in the DB.
+    let images_dir = fx.root.join("movies/Heat (1995)/images");
+    std::fs::create_dir_all(&images_dir).unwrap();
+    std::fs::write(images_dir.join("Heat_1995-tmdb-poster.jpg"), b"fake poster bytes").unwrap();
+    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+
+    // Same file, unchanged — a normal rescan must still pick up the
+    // artwork sitting right next to it.
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.unchanged, 1);
+    let recovered = fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap();
+    assert_eq!(recovered.map(|(path, _)| path), Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string()));
+}
+
+#[tokio::test]
+async fn artwork_recovery_never_cross_links_a_sibling_movies_poster() {
+    // Real bug, found live and visually confirmed (screenshot): movies that
+    // share one `images/` folder (a flat movie root with no per-movie
+    // subfolder — the overwhelmingly common real-world layout) all got the
+    // *same* poster — whichever one the directory listing happened to
+    // return, regardless of which movie it actually belonged to. Every
+    // movie in a shared folder must only ever pick up its own,
+    // stem-matched poster/backdrop.
+    let fx = fixture("artwork-no-cross-link").await;
+    write(&fx.root, "10 Cloverfield Lane (2016).mkv", b"a");
+    write(&fx.root, "Jaws 2 (1978).mkv", b"b");
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 2);
+
+    // Both movies' posters land in the SAME shared images/ folder, since
+    // both files are direct siblings at the media root. Filenames match
+    // `sanitize_stem`'s real output exactly (parens preserved).
+    let images_dir = fx.root.join("images");
+    std::fs::create_dir_all(&images_dir).unwrap();
+    std::fs::write(images_dir.join("10 Cloverfield Lane (2016)-tmdb-poster.jpg"), b"cloverfield poster").unwrap();
+    std::fs::write(images_dir.join("Jaws 2 (1978)-tmdb-poster.jpg"), b"jaws poster").unwrap();
+
+    // Force both entries through the recovery path (as if the catalog had
+    // just been rebuilt) by clearing their DB rows and rescanning — the
+    // same real-world trigger the live bug was hit through.
+    let entries = fx.library.list().await.unwrap();
+    for e in &entries {
+        fx.library.remove_by_path(&e.relative_path).await.unwrap();
+    }
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, 2);
+
+    let jaws = fx.library.list().await.unwrap().into_iter().find(|e| e.relative_path.starts_with("Jaws")).unwrap();
+    let cloverfield =
+        fx.library.list().await.unwrap().into_iter().find(|e| e.relative_path.starts_with("10 Cloverfield")).unwrap();
+
+    let jaws_poster = fx.library.artwork(&jaws.entry_key, ArtworkKind::Poster).await.unwrap();
+    let cloverfield_poster = fx.library.artwork(&cloverfield.entry_key, ArtworkKind::Poster).await.unwrap();
+
+    assert_eq!(jaws_poster.map(|(p, _)| p), Some("images/Jaws 2 (1978)-tmdb-poster.jpg".to_string()));
+    assert_eq!(
+        cloverfield_poster.map(|(p, _)| p),
+        Some("images/10 Cloverfield Lane (2016)-tmdb-poster.jpg".to_string())
+    );
+}
+
 #[tokio::test]
 async fn single_root_scan_roots_matches_scan_root_byte_for_byte() {
     // Backward-compat guarantee: scan_root (single PathBuf) must still
@@ -147,7 +316,7 @@ async fn two_roots_with_the_same_relative_path_get_distinct_entry_keys() {
         MediaRoot { label: "local".to_string(), path: root_a.clone() },
         MediaRoot { label: "nas".to_string(), path: root_b.clone() },
     ];
-    let report = scan_roots(&library, &roots).await.unwrap();
+    let report = scan_roots(&library, &roots, None).await.unwrap();
     assert_eq!(report.added, 2);
 
     let entries = library.list().await.unwrap();
@@ -227,6 +396,138 @@ async fn clear_scrape_result_reverts_to_unscraped_and_leaves_grouping_fields_unt
 }
 
 #[tokio::test]
+async fn set_overview_round_trips_and_clear_scrape_result_wipes_it() {
+    let fx = fixture("overview").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(entry.overview, None);
+
+    fx.library.set_overview(&entry.entry_key, "A group of professional bank robbers...").await.unwrap();
+    let with_overview = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(with_overview.overview.as_deref(), Some("A group of professional bank robbers..."));
+
+    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(reverted.overview, None);
+}
+
+#[tokio::test]
+async fn set_rating_round_trips_and_clear_scrape_result_wipes_it() {
+    let fx = fixture("rating").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(entry.rating, None);
+
+    fx.library.set_rating(&entry.entry_key, "R").await.unwrap();
+    let with_rating = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(with_rating.rating.as_deref(), Some("R"));
+    assert_eq!(with_rating.to_catalog_entry().rating.as_deref(), Some("R"));
+
+    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(reverted.rating, None);
+}
+
+#[tokio::test]
+async fn distinct_genres_unions_across_entries_and_sorts_case_insensitively() {
+    let fx = fixture("distinct-genres").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &[1u8; 10]);
+    write(&fx.root, "movies/Alien (1979)/Alien.1979.mkv", &[1u8; 10]);
+    write(&fx.root, "movies/Amelie (2001)/Amelie.2001.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entries = fx.library.list().await.unwrap();
+
+    // No genres assigned to any entry yet.
+    assert_eq!(fx.library.distinct_genres().await.unwrap(), Vec::<String>::new());
+
+    for entry in &entries {
+        let genres: &[String] = if entry.title.starts_with("Heat") {
+            &["Crime".to_string(), "action".to_string()]
+        } else if entry.title.starts_with("Alien") {
+            &["Sci-Fi".to_string(), "action".to_string()] // "action" exactly repeated -> collapses to one
+        } else {
+            &[] // Amelie contributes nothing
+        };
+        fx.library.set_manual_metadata(&entry.entry_key, None, Some(genres)).await.unwrap();
+    }
+
+    // Exact-string dedup ("action" from both entries collapses to one), sorted
+    // case-insensitively (lowercase "action" sorts with the Cs/Ss on its letter,
+    // not after every uppercase-initial entry the way a plain byte sort would).
+    assert_eq!(fx.library.distinct_genres().await.unwrap(), vec!["action".to_string(), "Crime".to_string(), "Sci-Fi".to_string()]);
+}
+
+#[tokio::test]
+async fn set_manual_kind_moves_a_movie_to_a_track_and_clears_movie_only_fields() {
+    // A music video sitting under movies/ as an .mkv — exactly the real
+    // scenario this escape hatch exists for.
+    let fx = fixture("manual-kind-to-track").await;
+    write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(entry.kind, MediaKind::Movie);
+
+    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+    let moved = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(moved.kind, MediaKind::Track);
+    assert_eq!(moved.artist.as_deref(), Some("The Artist"));
+    assert_eq!(moved.album.as_deref(), Some("The Album"));
+    assert_eq!(moved.show_title, None);
+
+    // Moving it again, to Episode, must clear the artist/album a Track move just set.
+    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Episode, None, None, Some("Some Show")).await.unwrap();
+    let moved_again = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(moved_again.kind, MediaKind::Episode);
+    assert_eq!(moved_again.show_title.as_deref(), Some("Some Show"));
+    assert_eq!(moved_again.artist, None);
+    assert_eq!(moved_again.album, None);
+}
+
+#[tokio::test]
+async fn set_manual_kind_survives_fix_classifications() {
+    let fx = fixture("manual-kind-survives-reclassify").await;
+    write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+
+    let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
+    let report = fx.library.reclassify_all(&roots).await.unwrap();
+    assert_eq!(report.changed, 0);
+    assert_eq!(report.unchanged, 1);
+
+    let after = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(after.kind, MediaKind::Track);
+    assert_eq!(after.artist.as_deref(), Some("The Artist"));
+}
+
+#[tokio::test]
+async fn set_manual_kind_survives_a_rescan_after_the_file_changes_on_disk() {
+    let fx = fixture("manual-kind-survives-rescan").await;
+    write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+
+    // Change the file's content (different size, so scan_roots takes the
+    // "changed" path, not the "unchanged, skip entirely" fast path).
+    write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 999]);
+    let roots = vec![MediaRoot { label: "local".into(), path: fx.root.clone() }];
+    let report = scan_roots(&fx.library, &roots, None).await.unwrap();
+    assert_eq!(report.updated, 1);
+
+    let after = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    // Kind/grouping preserved from the override, not reverted to Movie...
+    assert_eq!(after.kind, MediaKind::Track);
+    assert_eq!(after.artist.as_deref(), Some("The Artist"));
+    assert_eq!(after.album.as_deref(), Some("The Album"));
+    // ...but the technical fields did pick up the real on-disk change.
+    assert_eq!(after.size, 999);
+}
+
+#[tokio::test]
 async fn thumbprint_is_order_independent_and_content_sensitive() {
     let fx_a = fixture("tp-a").await;
     let fx_b = fixture("tp-b").await;
@@ -276,6 +577,8 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
         genres: vec![],
         artwork_version: 0,
         cast: vec![],
+        overview: None,
+        rating: None,
     };
     fx.library.upsert(&wrong_entry).await.unwrap();
     // upsert() deliberately never writes scrape/artwork columns (a rescan
@@ -313,11 +616,14 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
         genres: vec![],
         artwork_version: 0,
         cast: vec![],
+        overview: None,
+        rating: None,
     };
     fx.library.upsert(&correct_entry).await.unwrap();
     fx.library.set_scrape_result(&correct_entry.entry_key, Some("Dexter"), &["Drama".to_string()], &[]).await.unwrap();
 
-    let report = fx.library.reclassify_all().await.unwrap();
+    let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
+    let report = fx.library.reclassify_all(&roots).await.unwrap();
     assert_eq!(report.changed, 1);
     assert_eq!(report.unchanged, 1);
 
@@ -336,4 +642,63 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
     let untouched = fx.library.get(&correct_entry.entry_key).await.unwrap().unwrap();
     assert_eq!(untouched.scraped_title.as_deref(), Some("Dexter"), "already-correct entries must be left completely untouched");
     assert_eq!(untouched.genres, vec!["Drama".to_string()]);
+}
+
+/// Companion to the bonus-content case above, guarding the other real bug
+/// this same fix landed for: `reclassify_all`'s "unchanged" fast path used
+/// to compare only kind/show_title/season/episode — never artist/album/
+/// track_number — so it silently skipped every audio track whose *only*
+/// wrong field was its (bottom-anchored, pre-fix) artist/album, even though
+/// `classify()` itself had already been corrected. A track's kind never
+/// changes (always `Track`) and show_title/season/episode are always None
+/// for audio, so without comparing artist/album too this reclassify would
+/// have reported the whole library "unchanged" and repaired nothing.
+#[tokio::test]
+async fn reclassify_all_repairs_a_track_whose_only_wrong_fields_are_artist_and_album() {
+    use swarm_media::store::EntryRecord;
+
+    let fx = fixture("reclassify-music").await;
+
+    // A real DJ-mix-style deep nesting — classify() now correctly reads
+    // artist/album from the top two folders, but this row was written the
+    // old (bottom-anchored) way: garbage folder names one level up from the
+    // file ended up as "artist"/"album".
+    let relative = "Gabriel & Dresden/Organized Natures/01-29/29/track.mp3";
+    let wrong_entry = EntryRecord {
+        entry_key: entry_key(relative),
+        relative_path: relative.to_string(),
+        kind: MediaKind::Track,
+        title: "track".to_string(),
+        size: 10,
+        modified_time: 0,
+        fingerprint: "fp1".to_string(),
+        artist: Some("01-29".to_string()),
+        album: Some("29".to_string()),
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: None,
+        video: None,
+        audio: None,
+        scraped_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+        overview: None,
+        rating: None,
+    };
+    fx.library.upsert(&wrong_entry).await.unwrap();
+    fx.library.set_scrape_result(&wrong_entry.entry_key, Some("29 - Unknown"), &[], &[]).await.unwrap();
+
+    let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
+    let report = fx.library.reclassify_all(&roots).await.unwrap();
+    assert_eq!(report.changed, 1);
+    assert_eq!(report.unchanged, 0);
+
+    let fixed = fx.library.get(&wrong_entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(fixed.artist.as_deref(), Some("Gabriel & Dresden"));
+    assert_eq!(fixed.album.as_deref(), Some("Organized Natures"));
+    assert_eq!(fixed.scraped_title, None, "stale wrong scrape data must be cleared, not just relabeled");
 }

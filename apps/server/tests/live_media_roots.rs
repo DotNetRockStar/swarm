@@ -20,7 +20,7 @@ fn deterministic_bytes(len: usize, seed: u8) -> Vec<u8> {
 }
 
 fn no_range(path: &str) -> PeerRequest {
-    PeerRequest { path: path.into(), range: None, if_none_match: None, playback: None }
+    PeerRequest { path: path.into(), range: None, if_none_match: None, playback: None, error_report: None, like: None }
 }
 
 #[tokio::test]

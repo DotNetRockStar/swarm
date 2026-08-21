@@ -15,6 +15,8 @@ fn request(path: String) -> PeerRequest {
         range: None,
         if_none_match: None,
         playback: None,
+        error_report: None,
+        like: None,
     }
 }
 
@@ -66,6 +68,8 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         genres: vec![],
         artwork_version: 0,
         cast: vec![],
+        overview: None,
+        rating: None,
     };
     library.upsert(&entry).await.unwrap();
 
@@ -92,6 +96,8 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
             start_position_secs: 0,
             prefer_direct: true,
         }),
+        error_report: None,
+        like: None,
     };
     let resolved = service.resolve(&negotiation).await;
     assert_eq!(resolved.header.status, 200);
@@ -172,6 +178,8 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
         genres: vec![],
         artwork_version: 0,
         cast: vec![],
+        overview: None,
+        rating: None,
     };
     library.upsert(&entry).await.unwrap();
 
@@ -201,6 +209,8 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
             start_position_secs: 0,
             prefer_direct: true,
         }),
+        error_report: None,
+        like: None,
     };
 
     let first = service.resolve(&negotiate()).await;
@@ -286,6 +296,8 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             genres: vec![],
             artwork_version: 0,
             cast: vec![],
+            overview: None,
+            rating: None,
         };
         library.upsert(&entry).await.unwrap();
         entry_keys.push(entry_key);
@@ -316,6 +328,8 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
                 start_position_secs: 0,
                 prefer_direct: true,
             }),
+            error_report: None,
+            like: None,
         };
         let resolved = service.resolve(&negotiation).await;
         assert_eq!(resolved.header.status, 200, "negotiation for {entry_key} must not be capacity-limited");

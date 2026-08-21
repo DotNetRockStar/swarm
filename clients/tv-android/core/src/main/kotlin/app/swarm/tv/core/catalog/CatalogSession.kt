@@ -17,7 +17,10 @@ package app.swarm.tv.core.catalog
 
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.capability.CapabilityProfile
+import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.CatalogManifest
+import app.swarm.tv.core.peer.ClientErrorReport
+import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.peer.PlaybackPlan
 import app.swarm.tv.core.peer.PlaybackPreferences
@@ -26,7 +29,9 @@ import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmJson
 import app.swarm.tv.core.signal.SignalMessage
+import app.swarm.tv.core.transport.PeerConnection
 import app.swarm.tv.core.transport.PeerQuicClient
+import app.swarm.tv.core.transport.PeerResponse
 import app.swarm.tv.core.transport.connectToServer
 import app.swarm.tv.core.transport.initiatePunchConnection
 import java.net.InetSocketAddress
@@ -34,6 +39,7 @@ import java.io.IOException
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 
 /**
@@ -87,6 +93,8 @@ private class RouteMemory {
 class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     private val connections = mutableMapOf<String, PeerQuicClient>()
     private val routeMemory = RouteMemory()
+    /** Which devices already have a [ReconnectingConnection] registered with [proxy] — see [connectionFor]'s doc comment on why that registration must happen at most once per device, never repeated on a reconnect. */
+    private val proxyRegisteredDevices = mutableSetOf<String>()
 
     /**
      * Set once a signaling session is available (typically right after
@@ -130,8 +138,9 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             // — confirmed live: QUIC dropped it well under a minute after its
             // last request. Evict and retry once with a fresh connection,
             // same self-heal refresh()/fetchManifest already does for browse.
+            // Only the raw connection is evicted here, never the proxy
+            // registration itself — see ReconnectingConnection's doc comment.
             connections.remove(device.deviceId)
-            proxy.unregister(device.deviceId)
             connection = connectionFor(device, clientCertificate, clientKey)
                 ?: throw IOException("server is no longer connected")
             connection.request(path = "/play/$entryKey", playback = preferences)
@@ -159,6 +168,36 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         runCatching { connection.request(path = "/stop/$sessionId") }
     }
 
+    /**
+     * Sends [report] to [device] for triage on that server's own swarm page
+     * — see `swarm_core::peer::ClientErrorReport`'s doc comment for why this
+     * rides the authenticated peer connection rather than a separate HTTP
+     * call. Best-effort and silent on failure, same posture as
+     * [stopPlayback]: a device too unreachable to accept an error report is
+     * itself unremarkable (it's very possibly *why* the original error
+     * happened), and this must never itself become a second point of
+     * failure in an error-handling path.
+     */
+    suspend fun reportError(device: SwarmDevice, report: ClientErrorReport, clientCertificate: X509Certificate, clientKey: PrivateKey) {
+        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        runCatching { connection.request(path = "/errors/report", errorReport = report) }
+    }
+
+    /**
+     * Sends a like/unlike toggle to [device] — see
+     * `swarm_core::peer::LikeToggle`'s doc comment. Best-effort and silent
+     * on failure, same posture as [reportError]/[stopPlayback]: the local
+     * liked-state (see [app.swarm.tv.app.data.AndroidLikedEntriesStore])
+     * already updated optimistically before this is called, so a dropped
+     * request just means the server-side aggregate count/dashboard listing
+     * lags until the next successful toggle — never blocks or reverts the
+     * client's own UI.
+     */
+    suspend fun toggleLike(device: SwarmDevice, like: LikeToggle, clientCertificate: X509Certificate, clientKey: PrivateKey) {
+        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        runCatching { connection.request(path = "/likes/toggle", like = like) }
+    }
+
     suspend fun refresh(devices: List<SwarmDevice>, clientCertificate: X509Certificate, clientKey: PrivateKey): Result {
         val manifestsByServer = mutableMapOf<String, CatalogManifest>()
         val unreachable = mutableListOf<SwarmDevice>()
@@ -181,6 +220,19 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         return Result(CatalogMerger.merge(manifestsByServer), unreachable)
     }
 
+    /**
+     * Resolves (connecting fresh if necessary) the raw [PeerQuicClient] for
+     * [device] — used directly by [preparePlayback]/[stopPlayback]/
+     * [reportError]/[refresh], each of which already has its own
+     * deliberate, narrowly-scoped retry-once-on-failure logic for the one
+     * request it's making. [ReconnectingConnection] is the *other* consumer
+     * of this method: registered once with [proxy] the first time a device
+     * connects, it calls back in here on every failure so anything routed
+     * through the loopback proxy (chiefly artwork — many concurrent,
+     * unattended fetches with no caller left to notice and retry) gets the
+     * same self-healing without each of *those* call sites needing to know
+     * anything about reconnection.
+     */
     private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
         connections[device.deviceId]?.let { return it }
 
@@ -220,8 +272,45 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
 
         routeMemory.record(device.deviceId, route)
         connections[device.deviceId] = connection
-        proxy.register(device.deviceId, connection)
+        // Registered once, ever, per device — a reconnect after this
+        // (this same branch, later, once `connections[device.deviceId]` has
+        // been cleared by a failure elsewhere) must not register a second
+        // wrapper on top of the still-live first one; the wrapper always
+        // looks up the *current* raw connection dynamically at request
+        // time, so it never goes stale on its own.
+        if (proxyRegisteredDevices.add(device.deviceId)) {
+            proxy.register(device.deviceId, ReconnectingConnection(device, clientCertificate, clientKey))
+        }
         return connection
+    }
+
+    /**
+     * A [PeerConnection] that transparently reconnects through
+     * [connectionFor] on failure instead of just failing — see
+     * [connectionFor]'s doc comment for why this exists (artwork fetches
+     * over the loopback proxy have no caller left to notice a dead
+     * connection and retry the way [preparePlayback]/[refresh] do for
+     * themselves). `runBlocking` is safe here: [PeerConnection.request] is
+     * called from [PeerLoopbackProxy]'s own cached-thread-pool worker
+     * threads, never the caller's main/UI thread.
+     */
+    private inner class ReconnectingConnection(
+        private val device: SwarmDevice,
+        private val clientCertificate: X509Certificate,
+        private val clientKey: PrivateKey,
+    ) : PeerConnection {
+        override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?, errorReport: ClientErrorReport?, like: LikeToggle?): PeerResponse {
+            val current = connections[device.deviceId]
+                ?: runBlocking { connectionFor(device, clientCertificate, clientKey) }
+                ?: throw IOException("server is no longer connected")
+            return try {
+                current.request(path, range, ifNoneMatch, playback, errorReport, like)
+            } catch (e: IOException) {
+                connections.remove(device.deviceId)
+                val fresh = runBlocking { connectionFor(device, clientCertificate, clientKey) } ?: throw e
+                fresh.request(path, range, ifNoneMatch, playback, errorReport, like)
+            }
+        }
     }
 
     private fun fetchManifest(serverId: String, connection: PeerQuicClient): CatalogManifest? {
@@ -230,16 +319,24 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             SwarmJson.decodeFromString<CatalogManifest>(response.body.readBytes().decodeToString())
         }.onFailure { it.printStackTrace() }.getOrNull()
         if (manifest == null) {
-            // Stale connection (peer restarted, network dropped) — drop it so the next refresh reconnects.
+            // Stale connection (peer restarted, network dropped) — drop the
+            // raw connection so the next refresh (or a ReconnectingConnection
+            // handling an artwork fetch in the meantime) reconnects. The
+            // proxy registration itself stays — see ReconnectingConnection's
+            // doc comment.
             connections.remove(serverId)
-            proxy.unregister(serverId)
             runCatching { connection.close() }
         }
         return manifest
     }
 
     override fun close() {
-        connections.keys.forEach(proxy::unregister)
+        // Every device that ever got a ReconnectingConnection registered,
+        // not just connections.keys — a device whose raw connection died
+        // and was evicted (awaiting self-heal on next use) would otherwise
+        // keep its wrapper registered with the proxy past this session's end.
+        proxyRegisteredDevices.forEach(proxy::unregister)
+        proxyRegisteredDevices.clear()
         connections.values.forEach { runCatching { it.close() } }
         connections.clear()
     }

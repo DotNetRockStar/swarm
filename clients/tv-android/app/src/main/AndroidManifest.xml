@@ -19,6 +19,17 @@
         android:required="true" />
     <!-- No microphone/camera features are declared or used. -->
 
+    <!-- Without this, some real TV hardware falls back to a compatibility-
+         mode letterboxed window instead of a true fullscreen one — the app
+         renders centered with unused space around it rather than filling
+         the actual screen. -->
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:resizeable="true"
+        android:xlargeScreens="true" />
+
     <application
         android:name="app.swarm.tv.app.SwarmApplication"
         android:allowBackup="false"

@@ -7,13 +7,77 @@
 // login. Codes are generated from the STUN server's own admin page; this tab
 // links there for convenience instead of duplicating that flow.
 
+// ---- Swarm tab: client-reported errors --------------------------------------
+//
+// Clients (currently the Fire TV app) call `/errors/report` over their
+// existing authenticated peer connection whenever something fails on their
+// end — playback prep, an unreachable server, etc. — so it lands somewhere
+// a human will actually see it instead of only ever existing in on-device
+// logs. This panel is that somewhere: newest first, delete once triaged.
+//
+// refreshErrorBadge() itself lives in app.js, not here — see that file's
+// comment for why (real bug, found live: this file loads after app.js, so a
+// call to a same-named function *defined* here but invoked from app.js's own
+// boot path could run before this file had finished loading/executing).
+
+async function loadClientErrors() {
+  const list = document.getElementById("clientErrorsList");
+  const countEl = document.getElementById("clientErrorsCount");
+  const clearBtn = document.getElementById("clearClientErrorsBtn");
+  try {
+    const errors = await invoke("list_client_errors");
+    countEl.textContent = errors.length ? `${errors.length} error${errors.length === 1 ? "" : "s"}` : "";
+    clearBtn.classList.toggle("d-none", errors.length === 0);
+    list.innerHTML = errors.length ? errors.map(e => `
+      <div class="client-error-row">
+        <div style="flex:1; min-width:0">
+          <div class="client-error-message">${esc(e.message)}</div>
+          <div class="client-error-meta">
+            <span><i class="bi bi-clock"></i> ${esc(new Date(e.occurred_at_ms).toLocaleString())}</span>
+            <span><i class="bi bi-tv"></i> ${esc(e.device_name)}</span>
+            ${e.asset_title ? `<span><i class="bi bi-film"></i> ${esc(e.asset_title)}</span>` : ""}
+            ${e.kind ? `<span>${esc(e.kind)}</span>` : ""}
+          </div>
+          ${e.context ? `<div class="client-error-context">${esc(e.context)}</div>` : ""}
+        </div>
+        <button class="danger" data-delete-error="${e.id}" style="padding:5px 10px; font-size:.75rem" title="Delete"><i class="bi bi-x-lg"></i></button>
+      </div>`).join("") : `<p class="muted">No client errors reported.</p>`;
+    list.querySelectorAll("[data-delete-error]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await invoke("delete_client_error", { id: Number(btn.dataset.deleteError) });
+          await loadClientErrors();
+        } catch (err) {
+          showToast(String(err), "error");
+        }
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<p class="muted">Unable to load client errors.</p>`;
+    showToast(String(err), "error");
+  }
+  await refreshErrorBadge();
+}
+
+document.getElementById("clearClientErrorsBtn").addEventListener("click", async () => {
+  try {
+    await invoke("clear_client_errors");
+    showToast("Cleared client errors.", "success");
+    await loadClientErrors();
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+});
+
 async function refreshSwarm() {
+  loadClientErrors();
   const content = document.getElementById("swarmContent");
   let link;
   try {
     link = await invoke("get_swarm_link");
   } catch (err) {
-    content.innerHTML = `<p class="error">${esc(err)}</p>`;
+    content.innerHTML = `<p class="muted">Unable to load swarm status.</p>`;
+    showToast(String(err), "error");
     return;
   }
 
@@ -24,19 +88,18 @@ async function refreshSwarm() {
         <input id="joinBaseUrl" placeholder="https://swarm.example.com">
         <input id="joinCode" placeholder="12345678" maxlength="8">
         <button id="joinBtn"><i class="bi bi-box-arrow-in-right"></i>Join swarm</button>
-      </div>
-      <p id="joinError" class="error"></p>`;
+      </div>`;
     document.getElementById("joinBtn").addEventListener("click", async () => {
-      const errorEl = document.getElementById("joinError");
       try {
         await invoke("join_swarm", {
           baseUrl: document.getElementById("joinBaseUrl").value,
           code: document.getElementById("joinCode").value,
           deviceName: "SWARM Server",
         });
+        showToast("Joined swarm.", "success");
         await refreshSwarm();
       } catch (err) {
-        errorEl.textContent = String(err);
+        showToast(String(err), "error");
       }
     });
     return;
@@ -56,8 +119,7 @@ async function refreshSwarm() {
       <input id="moreCode" placeholder="Join code for another swarm" maxlength="8">
       <button id="joinMoreBtn" class="secondary"><i class="bi bi-box-arrow-in-right"></i>Join another swarm</button>
       <button id="resyncBtn" class="secondary"><i class="bi bi-arrow-repeat"></i>Resync now</button>
-    </div>
-    <p id="swarmActionError" class="error"></p>`;
+    </div>`;
 
   const swarmList = document.getElementById("swarmList");
   swarmList.innerHTML = link.swarms.map(s => `
@@ -74,32 +136,32 @@ async function refreshSwarm() {
   }
   swarmList.querySelectorAll("[data-leave-swarm]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const errorEl = document.getElementById("swarmActionError");
       try {
         await invoke("leave_swarm", { swarmId: btn.dataset.leaveSwarm });
+        showToast("Left swarm.", "success");
         await refreshSwarm();
       } catch (err) {
-        errorEl.textContent = String(err);
+        showToast(String(err), "error");
       }
     });
   });
 
   document.getElementById("joinMoreBtn").addEventListener("click", async () => {
-    const errorEl = document.getElementById("swarmActionError");
     try {
       await invoke("join_additional_swarm", { code: document.getElementById("moreCode").value });
+      showToast("Joined swarm.", "success");
       await refreshSwarm();
     } catch (err) {
-      errorEl.textContent = String(err);
+      showToast(String(err), "error");
     }
   });
   document.getElementById("resyncBtn").addEventListener("click", async () => {
-    const errorEl = document.getElementById("swarmActionError");
     try {
       await invoke("resync_swarm");
+      showToast("Resynced.", "success");
       await refreshSwarm();
     } catch (err) {
-      errorEl.textContent = String(err);
+      showToast(String(err), "error");
     }
   });
 }
@@ -128,6 +190,7 @@ async function loadRoster(swarmId) {
         ${metaKeys.map(k => `<td class="mono">${esc((d.metadata || {})[k] ?? "—")}</td>`).join("")}
       </tr>`).join("") + `</tbody></table>`;
   } catch (err) {
-    el.innerHTML = `<span class="error">${esc(err)}</span>`;
+    el.innerHTML = `<span class="muted">Unable to load roster.</span>`;
+    showToast(String(err), "error");
   }
 }

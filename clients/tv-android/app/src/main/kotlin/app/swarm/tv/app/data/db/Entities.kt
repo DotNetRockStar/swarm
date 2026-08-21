@@ -67,3 +67,30 @@ data class AppSettingsEntity(
     @PrimaryKey val id: Long = SINGLETON_ROW_ID,
     @ColumnInfo(name = "artwork_cache_minutes") val artworkCacheMinutes: Int,
 )
+
+/**
+ * Parental content controls — another singleton row, same pattern as
+ * [AppSettingsEntity]. [pinHash]/[pinSalt] gate *managing* this feature
+ * (opening this section in Settings to view/edit/disable it), not a
+ * session-level unlock exposed anywhere else — see
+ * [app.swarm.tv.app.data.RatingScale] for how [maxMovieRating]/[maxTvRating]
+ * get compared against a real entry's rating. [allowedKinds]/[allowedGenres]
+ * are comma-joined rather than a Room `TypeConverter`-backed collection —
+ * simplest thing that works for two short string lists nothing else needs
+ * to query into.
+ */
+@Entity(tableName = "kid_mode_settings")
+data class KidModeSettingsEntity(
+    @PrimaryKey val id: Long = SINGLETON_ROW_ID,
+    val enabled: Boolean,
+    @ColumnInfo(name = "pin_hash") val pinHash: String,
+    @ColumnInfo(name = "pin_salt") val pinSalt: String,
+    /** Comma-joined [app.swarm.tv.core.peer.MediaKind] names, e.g. "MOVIE,TRACK". Empty string means nothing is allowed (not "no restriction"). */
+    @ColumnInfo(name = "allowed_kinds") val allowedKinds: String,
+    /** Comma-joined genre names. Null means "every genre allowed" — the same "no filter" meaning `null` already carries throughout this app's genre-filter UI. */
+    @ColumnInfo(name = "allowed_genres") val allowedGenres: String?,
+    /** Null means "no rating restriction on movies". */
+    @ColumnInfo(name = "max_movie_rating") val maxMovieRating: String?,
+    /** Null means "no rating restriction on shows". */
+    @ColumnInfo(name = "max_tv_rating") val maxTvRating: String?,
+)

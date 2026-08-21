@@ -11,6 +11,7 @@
 #   ./deploy_tv.sh                  # uses $SWARM_TV_IP, or the sole device already in `adb devices`
 #   ./deploy_tv.sh 192.168.0.148    # connects to this IP first (find it: Settings -> My Fire TV -> About -> Network)
 #   ./deploy_tv.sh -f                # also tails logcat after a clean launch, until Ctrl+C
+#   ./deploy_tv.sh -c                # uninstall first (wipes the device's saved STUN link/swarms/token) — see below
 #
 # Env vars:
 #   SWARM_TV_IP     default target IP if none is passed as an argument
@@ -33,10 +34,12 @@ PACKAGE="app.swarm.tv"
 ACTIVITY="$PACKAGE/app.swarm.tv.app.MainActivity"
 
 FOLLOW=0
+CLEAN=0
 TARGET=""
 for arg in "$@"; do
     case "$arg" in
         -f|--follow) FOLLOW=1 ;;
+        -c|--clean) CLEAN=1 ;;
         *) TARGET="$arg" ;;
     esac
 done
@@ -73,17 +76,25 @@ fi
 echo "==> Building debug APK ..."
 ./gradlew :app:assembleDebug
 
-# Full uninstall before installing, not just an in-place replace — cheap
-# insurance against any stale per-package state on the device rather than
-# a proven requirement. (A real ClassNotFoundException crash was chased
-# down to this device's dex handling before the actual cause turned out
-# to be a manifest/package-name mismatch unrelated to install semantics —
-# see swarm-real-device-debugging skill. Left in as a low-cost precaution,
-# not because reinstalling without it was ever confirmed to fail.)
-echo "==> Uninstalling any previous install of $PACKAGE on $SERIAL ..."
-"$ADB" -s "$SERIAL" uninstall "$PACKAGE" || true
+# Real bug, found live: an unconditional uninstall-before-install here wiped
+# the device's saved STUN link/swarm membership/access token (Room DB +
+# EncryptedSharedPreferences, both in the app's private data dir, both gone
+# on uninstall) on *every single redeploy* — reported as "the TV doesn't
+# save the STUN server/device name/SWARM info across resets/redeploy", which
+# was this script doing exactly that on every run, not a real persistence
+# bug in the app itself (AndroidConnectionStore/AndroidTokenStore round-trip
+# correctly otherwise). `gradlew installDebug` already does a plain
+# replace-in-place install (`adb install -r` semantics) on its own — no
+# uninstall needed for the normal case. -c/--clean opts back into the old
+# uninstall-first behavior for when that's actually wanted (recovering from
+# a genuinely corrupted install, or deliberately testing first-run
+# onboarding from a clean slate).
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> --clean: uninstalling any previous install of $PACKAGE on $SERIAL (this wipes its saved STUN link/swarms/token) ..."
+    "$ADB" -s "$SERIAL" uninstall "$PACKAGE" || true
+fi
 
-echo "==> Installing on $SERIAL ..."
+echo "==> Installing on $SERIAL (in place; add -c/--clean for a fresh uninstall first) ..."
 ANDROID_SERIAL="$SERIAL" ./gradlew :app:installDebug
 
 echo "==> Force-stopping any previous run and clearing logcat ..."

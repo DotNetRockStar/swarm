@@ -309,6 +309,12 @@ async fn scrape_videos(
         match outcome {
             Ok(scraped) => {
                 library.set_scrape_result(&entry.entry_key, Some(&scraped.title), &scraped.genres, &scraped.cast).await?;
+                if let Some(overview) = &scraped.overview {
+                    library.set_overview(&entry.entry_key, overview).await?;
+                }
+                if let Some(certification) = &scraped.certification {
+                    library.set_rating(&entry.entry_key, certification).await?;
+                }
                 if let Some(url) = &scraped.poster_url {
                     save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url).await;
                 }
@@ -411,6 +417,57 @@ async fn scrape_tracks(
     Ok(())
 }
 
+/// Cleans a classify()-derived album name before sending it to
+/// MusicBrainz's search — real libraries embed a release year, the
+/// artist's own name, and/or catalog-number/edition metadata directly in
+/// the album folder name (`"2004 - No Silence (AVTCD-95770)"`,
+/// `"Cosmic Gate - The Drums (7243 886923 2 8)"`), none of which
+/// MusicBrainz's search can match against as-is. Confirmed live against the
+/// real MusicBrainz API for both patterns: the raw folder names found zero
+/// results; the cleaned forms ("No Silence", "The Drums") found the correct
+/// release, in the second case only after *also* stripping the redundant
+/// leading artist name. Strips, in order: a leading `NNNN - ` year prefix,
+/// a leading `"<artist> - "` prefix matching `artist` (case-insensitive —
+/// real libraries duplicate the artist name into the album folder more
+/// often once the year prefix is already gone), then repeatedly strips
+/// trailing `(...)`/`[...]` groups (catalog numbers, edition/format tags
+/// like `[2CD]` often stack more than one). Falls back to the original text
+/// if cleaning would leave nothing — same "never send an empty query"
+/// guard as [search_query_for].
+fn search_query_for_album(artist: &str, album: &str) -> String {
+    let mut s = album.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() > 4 && bytes[..4].iter().all(u8::is_ascii_digit) {
+        if let Some(after_dash) = s[4..].trim_start().strip_prefix('-') {
+            s = after_dash.trim_start();
+        }
+    }
+    if s.len() > artist.len() && s[..artist.len()].eq_ignore_ascii_case(artist) {
+        if let Some(after_dash) = s[artist.len()..].trim_start().strip_prefix('-') {
+            s = after_dash.trim_start();
+        }
+    }
+    loop {
+        let trimmed = s.trim_end();
+        if let Some(rest) = trimmed.strip_suffix(')') {
+            if let Some(open) = rest.rfind('(') {
+                s = rest[..open].trim_end();
+                continue;
+            }
+        }
+        if let Some(rest) = trimmed.strip_suffix(']') {
+            if let Some(open) = rest.rfind('[') {
+                s = rest[..open].trim_end();
+                continue;
+            }
+        }
+        s = trimmed;
+        break;
+    }
+    let cleaned = s.trim_end_matches('-').trim();
+    if cleaned.is_empty() { album.to_string() } else { cleaned.to_string() }
+}
+
 /// One (artist, album) group's worth of MusicBrainz + Cover Art Archive +
 /// Wikimedia work — release-level data applied to every track in the group
 /// (see the module docs on why this is per-album, not per-track). Shared by
@@ -429,7 +486,7 @@ async fn scrape_one_album_group(
     progress: Option<&ScrapeProgress>,
 ) -> sqlx::Result<()> {
     let MusicScrapers { mb, coverart, wikimedia } = scrapers;
-    match mb.search_release(artist, album).await {
+    match mb.search_release(artist, &search_query_for_album(artist, album)).await {
         Err(MbError::NotFound) => {
             for track in group {
                 library.set_scrape_result(&track.entry_key, None, &[], &[]).await?;
@@ -532,6 +589,12 @@ pub async fn scrape_one_video(
         },
     };
     library.set_scrape_result(&entry.entry_key, Some(&scraped.title), &scraped.genres, &scraped.cast).await?;
+    if let Some(overview) = &scraped.overview {
+        library.set_overview(&entry.entry_key, overview).await?;
+    }
+    if let Some(certification) = &scraped.certification {
+        library.set_rating(&entry.entry_key, certification).await?;
+    }
     if let Some(url) = &scraped.poster_url {
         save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url).await;
     }
@@ -655,6 +718,47 @@ mod tests {
         assert_eq!(search_query_for("1080p x264"), "1080p x264");
     }
 
+    // --- search_query_for_album: real-library-confirmed album name cleanup ---
+    // Real bug, confirmed live against the real MusicBrainz API: the raw
+    // folder name "2004 - No Silence (AVTCD-95770)" found zero results;
+    // "No Silence" found the correct release at the top score.
+
+    #[test]
+    fn album_query_strips_leading_year_and_trailing_catalog_code() {
+        assert_eq!(search_query_for_album("ATB", "2004 - No Silence (AVTCD-95770)"), "No Silence");
+        assert_eq!(search_query_for_album("ATB", "2003 - Addicted To Music (BANGCD029)"), "Addicted To Music");
+    }
+
+    #[test]
+    fn album_query_strips_a_redundant_leading_artist_name() {
+        // Real bug, confirmed live: the year-only-stripped form ("Cosmic
+        // Gate - The Drums") still found zero MusicBrainz results; only
+        // stripping the redundant artist prefix too ("The Drums") found
+        // the correct release.
+        assert_eq!(
+            search_query_for_album("Cosmic Gate", "1999 - Cosmic Gate - The Drums (7243 886923 2 8)"),
+            "The Drums"
+        );
+    }
+
+    #[test]
+    fn album_query_strips_multiple_trailing_bracket_groups() {
+        assert_eq!(
+            search_query_for_album("Kyau & Albert", "2009 - Kyau & Albert - Best Of 2002-2009 (EUPH100CD) [CD]"),
+            "Best Of 2002-2009"
+        );
+    }
+
+    #[test]
+    fn album_query_with_no_noise_is_unchanged() {
+        assert_eq!(search_query_for_album("Pink Floyd", "The Wall"), "The Wall");
+    }
+
+    #[test]
+    fn album_query_that_is_entirely_noise_falls_back_to_the_original() {
+        assert_eq!(search_query_for_album("ATB", "2004 - (CATALOG-1)"), "2004 - (CATALOG-1)");
+    }
+
     fn fixture_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("swarm-scrape-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -694,11 +798,12 @@ mod tests {
                 get(|| async {
                     Json(json!({
                         "title": "Heat", "genres": [{"name": "Crime"}], "poster_path": "/p.jpg",
+                        "overview": "A group of professional bank robbers start to feel the heat from police.",
                         "credits": {"cast": [{"name": "Al Pacino", "character": "Vincent Hanna"}]}
                     }))
                 }),
             )
-            .route("/img/w500/p.jpg", get(|| async { [9u8, 9, 9] }));
+            .route("/img/w342/p.jpg", get(|| async { [9u8, 9, 9] }));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let config = ScrapeConfig {
@@ -716,6 +821,7 @@ mod tests {
         assert_eq!(entry.cast.len(), 1);
         assert_eq!(entry.cast[0].name, "Al Pacino");
         assert_eq!(entry.cast[0].character.as_deref(), Some("Vincent Hanna"));
+        assert_eq!(entry.overview.as_deref(), Some("A group of professional bank robbers start to feel the heat from police."));
         assert_eq!(entry.artwork_version, 1);
         let (art_path, art_version) = library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().unwrap();
         assert_eq!(art_version, 1);

@@ -19,13 +19,31 @@
  *    migration file once applied, it's a historical record of what ran on
  *    real installs; a wrong step gets fixed by adding a new, later one.
  *
- * Empty today: version 1 is the schema's initial creation, which Room
- * derives directly from the `@Entity` annotations for a fresh install —
- * there is nothing to migrate *from* yet. The first real entry lands here
- * the day version 1 needs to change under installs that already exist.
+ * Version 1 is the schema's initial creation, which Room derives directly
+ * from the `@Entity` annotations for a fresh install — nothing to migrate
+ * *from* there.
  */
 package app.swarm.tv.app.data.db
 
 import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
-val MIGRATIONS: Array<Migration> = arrayOf()
+/** Adds [KidModeSettingsEntity]'s table — a fresh install skips this (Room derives version 2's schema directly from the `@Entity` annotations), only an install upgrading from version 1 actually runs this SQL. */
+private val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS kid_mode_settings (" +
+                "id INTEGER NOT NULL PRIMARY KEY, " +
+                "enabled INTEGER NOT NULL, " +
+                "pin_hash TEXT NOT NULL, " +
+                "pin_salt TEXT NOT NULL, " +
+                "allowed_kinds TEXT NOT NULL, " +
+                "allowed_genres TEXT, " +
+                "max_movie_rating TEXT, " +
+                "max_tv_rating TEXT" +
+                ")",
+        )
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2)

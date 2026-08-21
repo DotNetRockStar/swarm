@@ -12,6 +12,8 @@ import app.swarm.tv.core.catalog.ShowGroup
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
+import app.swarm.tv.core.peer.ClientErrorReport
+import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
@@ -32,8 +34,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 sealed class UiState {
+    /**
+     * The real initial state — shown only until [SwarmViewModel.restoreSession]
+     * decides whether there's a saved session to resume. Real bug, found
+     * live: this used to start straight at [PasscodeEntry] and only switch
+     * away from it once a *successful* restore completed, so a real device
+     * with a fully saved session still showed the "enter STUN URL/passcode"
+     * screen for however long establishSignaling()+loadRoster()'s network
+     * round trips took (a few real seconds) before snapping to Dashboard —
+     * indistinguishable from a genuine first-run/signed-out device the
+     * whole time it was showing. [Loading] is what's on screen during that
+     * gap instead; [PasscodeEntry] is now reached only once restoration has
+     * actually concluded there's nothing to resume.
+     */
+    data object Loading : UiState()
     data object PasscodeEntry : UiState()
     data object Registering : UiState()
     data class Dashboard(
@@ -51,6 +68,8 @@ sealed class UiState {
         val artworkCacheMinutes: Int,
         val busy: Boolean = false,
         val error: String? = null,
+        /** Every distinct genre currently in the last-browsed catalog — backs Kid Mode's genre allow-list picker. Empty until [browseCatalog] has actually run once (Settings is only ever reached from [Dashboard], before that) — the picker degrades to "no genre restriction available yet" rather than erroring. */
+        val availableGenres: List<String> = emptyList(),
     ) : UiState()
     data class Catalog(
         val swarm: SwarmSummary,
@@ -64,14 +83,14 @@ sealed class UiState {
     data class ArtistShelf(val catalog: Catalog, val artists: List<ArtistGroup>) : UiState()
     /** One artist's albums; [AlbumScreen] handles the album-grid<->track-list sub-navigation locally. */
     data class ArtistAlbums(val catalog: Catalog, val artists: List<ArtistGroup>, val artist: ArtistGroup) : UiState()
-    /** Movies: Movies row -> here (detail before play) -> [Player]. */
-    data class MovieDetail(val catalog: Catalog, val entry: MergedEntry) : UiState()
+    /** Movies: Movies row -> here (all movies, "Browse all") -> [MovieDetail]. */
+    data class MovieShelf(val catalog: Catalog, val movies: List<MergedEntry>) : UiState()
+    /** Movies: Movies row or [MovieShelf] -> here (detail before play) -> [Player]. [previous] is whichever of those it was opened from, so Back returns to the right one — same reasoning as [Player.previous]. */
+    data class MovieDetail(val previous: UiState, val entry: MergedEntry) : UiState()
     /** Shows: Shows row -> here (grouped, replacing the old flat-episode shelf) -> [ShowSeasons]. */
     data class ShowShelf(val catalog: Catalog, val shows: List<ShowGroup>) : UiState()
     /** One show's seasons; [SeasonScreen] handles the season-list<->episode-grid sub-navigation locally. */
     data class ShowSeasons(val catalog: Catalog, val shows: List<ShowGroup>, val show: ShowGroup) : UiState()
-    /** One episode's detail before play. */
-    data class EpisodeDetail(val catalog: Catalog, val shows: List<ShowGroup>, val show: ShowGroup, val entry: MergedEntry) : UiState()
     data class Player(
         val url: String,
         val title: String,
@@ -84,12 +103,35 @@ sealed class UiState {
         val entry: MergedEntry,
         /** Precomputed at negotiation time: the next episode if [entry] is an Episode and one follows it, else null. */
         val nextEntry: MergedEntry?,
-        val previous: Catalog,
+        /**
+         * The exact screen [play] was called from — [Catalog] if played
+         * from the flat shelf, or the originating [MovieDetail]/
+         * [ArtistAlbums]/[ShowSeasons] otherwise, so Back returns to where
+         * the user actually was instead of always the top-level catalog.
+         * Real bug, found live: this used to be typed as plain [Catalog]
+         * (every `play` call site unwrapped its own nested state down to
+         * just the embedded catalog before storing it here), so leaving
+         * playback from three levels deep in Show/Artist browsing always
+         * dropped the user back at the flat browse page. See
+         * [embeddedCatalog] for how the pieces that still need a plain
+         * [Catalog] (device lookup, next-episode lookup) get it back out.
+         */
+        val previous: UiState,
         /** Which server negotiated [sessionId] — both needed to release its bandwidth reservation on exit, see [SwarmViewModel.releasePlaybackSession]. */
         val serverId: String,
         val sessionId: String,
     ) : UiState()
     data class Error(val message: String) : UiState()
+}
+
+/** The [UiState.Catalog] embedded in any screen built on top of it — every browse/detail state carries one. */
+private fun UiState.embeddedCatalog(): UiState.Catalog? = when (this) {
+    is UiState.Catalog -> this
+    is UiState.ArtistAlbums -> catalog
+    is UiState.MovieShelf -> catalog
+    is UiState.MovieDetail -> previous.embeddedCatalog()
+    is UiState.ShowSeasons -> catalog
+    else -> null
 }
 
 /**
@@ -121,10 +163,31 @@ class SwarmViewModel(
     private val watchStateStore: WatchStateStore,
     private val connectionStore: AndroidConnectionStore,
     private val settingsStore: AndroidAppSettingsStore,
+    private val likedEntriesStore: AndroidLikedEntriesStore,
+    private val kidModeStore: AndroidKidModeStore,
 ) : ViewModel() {
-    private val _state = MutableStateFlow<UiState>(UiState.PasscodeEntry)
+    private val _state = MutableStateFlow<UiState>(UiState.Loading)
     private val logTag = "SwarmViewModel"
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /** In-memory mirror of [likedEntriesStore], loaded once in [init] — see that store's own doc comment for why the UI never reads through it directly. */
+    private val _likedFingerprints = MutableStateFlow<Set<String>>(emptySet())
+    val likedFingerprints: StateFlow<Set<String>> = _likedFingerprints.asStateFlow()
+
+    /** Loaded once in [init], refreshed on every [enableKidMode]/[updateKidModeRules]/[disableKidMode] — [browseCatalog] filters through this every time it applies a fresh manifest, see that function. */
+    private val _kidModeSettings = MutableStateFlow<KidModeSettings?>(null)
+    val kidModeSettings: StateFlow<KidModeSettings?> = _kidModeSettings.asStateFlow()
+
+    /** The last successfully-browsed catalog's genres — see [UiState.Settings.availableGenres]'s doc comment for why this can't just be read off [UiState.Settings] itself. */
+    private var lastKnownGenres: List<String> = emptyList()
+
+    /** Music-only "keep playing but pick something else" mode — see [CatalogGrouping.nextTrack] and [toggleShuffle]. */
+    private val _shuffleEnabled = MutableStateFlow(false)
+    val shuffleEnabled: StateFlow<Boolean> = _shuffleEnabled.asStateFlow()
+
+    /** Non-null exactly when a track is playing in the background after [minimizePlayback] — see [activePlayerSession]. */
+    private val _minimizedPlayer = MutableStateFlow<UiState.Player?>(null)
+    val minimizedPlayer: StateFlow<UiState.Player?> = _minimizedPlayer.asStateFlow()
 
     private var client: StunApiClient? = null
     private var accessToken: String? = null
@@ -142,23 +205,26 @@ class SwarmViewModel(
 
     init {
         viewModelScope.launch { restoreSession() }
+        viewModelScope.launch { _likedFingerprints.value = likedEntriesStore.loadAll() }
+        viewModelScope.launch { _kidModeSettings.value = kidModeStore.get() }
     }
 
     /**
-     * Cold-start session resume: previously this app always began at
-     * [UiState.PasscodeEntry] regardless of any prior registration — every
-     * launch meant re-entering the STUN URL and a fresh passcode, since
-     * nothing was ever read back from [tokenStore]/[connectionStore]. Now
-     * that both are actually written on registration (see
-     * [saveCurrentConnection]), restore from them here; leaves the app at
-     * [UiState.PasscodeEntry] (unchanged behavior) for a genuinely first-
-     * ever launch, a signed-out state, or if the saved swarm list is empty
-     * (nothing a Dashboard could show).
+     * Cold-start session resume, run once from [init] while [UiState.Loading]
+     * is showing. Falls back to [UiState.PasscodeEntry] for a genuinely
+     * first-ever launch, a signed-out state, or if the saved swarm list is
+     * empty (nothing a Dashboard could show) — every early-return path here
+     * must set that explicitly now, since [Loading] (not [PasscodeEntry])
+     * is the flow's actual starting value; see [Loading]'s own doc comment
+     * for why.
      */
     private suspend fun restoreSession() {
-        val token = tokenStore.load() ?: return
-        val saved = connectionStore.get() ?: return
-        if (saved.swarms.isEmpty() || saved.activeSwarmId == null) return
+        val token = tokenStore.load()
+        val saved = token?.let { connectionStore.get() }
+        if (token == null || saved == null || saved.swarms.isEmpty() || saved.activeSwarmId == null) {
+            _state.value = UiState.PasscodeEntry
+            return
+        }
         accessToken = token
         deviceId = saved.deviceId
         swarmId = saved.activeSwarmId
@@ -233,6 +299,7 @@ class SwarmViewModel(
                 baseUrl = baseUrl.orEmpty(),
                 deviceName = deviceName.orEmpty(),
                 artworkCacheMinutes = artworkCacheMinutes,
+                availableGenres = lastKnownGenres,
             )
         }
     }
@@ -362,13 +429,49 @@ class SwarmViewModel(
         viewModelScope.launch {
             // CatalogSession.refresh blocks on real network I/O (connect + one
             // request per server) — never run it on the Main dispatcher.
-            val result = withContext(Dispatchers.IO) {
-                catalogSession.refresh(current.devices, clientCertificate, clientKey)
+            //
+            // Real bug, found live: refresh() itself fails open per-device
+            // (a dead peer just lands in Result.unreachable), but nothing
+            // ever bounded the *whole* call — PeerQuicClient.request has a
+            // connect timeout but no read timeout on the response body, so
+            // a manifest fetch that stalls partway through (or is just
+            // very slow — a real library can now be thousands of entries,
+            // far past anything tested on real hardware before) hung here
+            // forever with `loading` never flipping back to false: an
+            // infinite spinner with no visible error. `withTimeoutOrNull`
+            // turns that into the same "server(s) not reachable" state the
+            // UI already renders for a normal per-device failure, rather
+            // than a wholly new error path. 30s is a starting estimate,
+            // not measured against a real large-catalog transfer — revisit
+            // once real hardware timing is known.
+            val result = withTimeoutOrNull(30_000) {
+                withContext(Dispatchers.IO) {
+                    catalogSession.refresh(current.devices, clientCertificate, clientKey)
+                }
             }
-            Log.i(logTag, "browseCatalog() refresh done: entries=${result.entries.size} unreachable=${result.unreachable.size}")
+            if (result == null) {
+                Log.w(logTag, "browseCatalog() timed out waiting on ${current.devices.size} device(s)")
+            } else {
+                Log.i(logTag, "browseCatalog() refresh done: entries=${result.entries.size} unreachable=${result.unreachable.size}")
+            }
             val stateNow = _state.value
             if (stateNow is UiState.Catalog) {
-                _state.value = stateNow.copy(entries = result.entries, loading = false, unreachable = result.unreachable)
+                _state.value = if (result != null) {
+                    // lastKnownGenres is derived from the *full*, unfiltered
+                    // manifest (not what's about to be kept below) — the
+                    // Kid Mode rules editor needs to offer every genre in
+                    // the real library to restrict, including ones a
+                    // currently-active restriction is already hiding, or a
+                    // parent could never widen an existing restriction back
+                    // out again.
+                    lastKnownGenres = result.entries.flatMap { it.entry.genres }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+                    stateNow.copy(entries = applyKidModeFilter(result.entries), loading = false, unreachable = result.unreachable)
+                } else {
+                    // Same "which devices were actually dialed" filter refresh()
+                    // itself applies, so the count shown matches what a
+                    // completed (non-timed-out) refresh would have reported.
+                    stateNow.copy(loading = false, unreachable = current.devices.filter { it.deviceType != DeviceType.CLIENT })
+                }
             }
         }
     }
@@ -392,31 +495,97 @@ class SwarmViewModel(
         return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/backdrop")
     }
 
+    /** Track-only fallback visual for the music player when no cover art was scraped — an artist photo reads better as "something to look at" than a blank/placeholder square. Same best-effort gate as [artworkUrl]; a 404 just fails the image load silently. */
+    fun artistPhotoUrl(entry: MergedEntry): String? {
+        if (entry.entry.artworkEtag == null) return null
+        return catalogSession.urlFor(entry.sources.first(), "/art/${entry.entry.entryKey}/artist")
+    }
+
     /**
      * Negotiates a budgeted direct/HLS session on the first connected
      * source, resuming where a previous watch left off unless it was
      * already finished. Callable from the top-level [Catalog] screen or
      * from any of the hierarchical browse/detail screens built on top of
-     * it (they all carry their originating [Catalog] — see [playEntry]).
+     * it — the exact current screen (not just its embedded [Catalog]) is
+     * what Back returns to, see [UiState.Player.previous].
      */
     fun play(entry: MergedEntry) {
-        val catalog = when (val current = _state.value) {
-            is UiState.Catalog -> current
-            is UiState.ArtistAlbums -> current.catalog
-            is UiState.MovieDetail -> current.catalog
-            is UiState.EpisodeDetail -> current.catalog
-            else -> return
-        }
-        playEntry(entry, catalog)
+        val current = _state.value
+        val catalog = current.embeddedCatalog() ?: return
+        playEntry(entry, catalog, previousScreen = current)
     }
 
-    /** Finds and plays the episode after [UiState.Player.entry] — see [CatalogGrouping.nextEpisode]. No-op if there isn't one. */
+    /**
+     * Finds and plays whatever comes after the *currently active* session's
+     * entry — [UiState.Player.entry] if the full player screen is showing,
+     * or [minimizedPlayer]'s if music is playing in the background while
+     * the user browses elsewhere (see [activePlayerSession]). No-op if
+     * neither is active or there's no next entry ([UiState.Player.nextEntry],
+     * from [CatalogGrouping.nextEpisode]/[CatalogGrouping.nextTrack]).
+     */
     fun playNext() {
-        val current = _state.value
-        if (current !is UiState.Player) return
+        val current = activePlayerSession() ?: return
         val next = current.nextEntry ?: return
-        releasePlaybackSession(current.previous, current.serverId, current.sessionId)
-        playEntry(next, current.previous)
+        val catalog = current.previous.embeddedCatalog() ?: return
+        val wasMinimized = _minimizedPlayer.value != null
+        releasePlaybackSession(catalog, current.serverId, current.sessionId)
+        // Carries the same `previous` forward (not just `catalog`) so Back
+        // after auto-playing into a second, third, ... episode/track still
+        // returns to the screen the user actually started browsing from,
+        // not somewhere reset to the flat catalog. keepMinimized preserves
+        // "still in the background" across the track change instead of
+        // popping the full screen back up just because playback advanced.
+        playEntry(next, catalog, previousScreen = current.previous, keepMinimized = wasMinimized)
+    }
+
+    /** Whichever [UiState.Player] is actually live right now — the full screen's own state, or a session still playing in the background after [minimizePlayback]. At most one is ever non-null. */
+    private fun activePlayerSession(): UiState.Player? = (_state.value as? UiState.Player) ?: _minimizedPlayer.value
+
+    /** ExoPlayer's own `STATE_ENDED` callback for a track (see the hoisted player in [app.swarm.tv.app.MainActivity]'s `SwarmApp`) — advances to [UiState.Player.nextEntry] if there is one, same as pressing "Play now" would on the episode Continue prompt, but immediate and with no prompt (an unbroken "keep playing" queue is the expected music-player behavior, not a per-track confirmation). Does nothing when there's no next track, same as this app's existing end-of-content behavior for episodes: the player just sits at the ended state until the user backs out. */
+    fun onTrackPlaybackEnded() {
+        if (activePlayerSession()?.nextEntry != null) playNext()
+    }
+
+    /** Music only — movies/episodes have no shuffle concept and never call this. Flips the flag and, if a track is currently active (full-screen or minimized), immediately recomputes its `nextEntry` under the new mode so the "what's up next" the UI reflects updates right away rather than only on the *next* track change. */
+    fun toggleShuffle() {
+        _shuffleEnabled.value = !_shuffleEnabled.value
+        val current = activePlayerSession() ?: return
+        if (current.entry.entry.kind != MediaKind.TRACK) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+        val next = CatalogGrouping.nextTrack(current.entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), _shuffleEnabled.value)
+        val updated = current.copy(nextEntry = next)
+        if (_minimizedPlayer.value != null) _minimizedPlayer.value = updated else _state.value = updated
+    }
+
+    /**
+     * "Minimize to tray": leaves the full music player screen for whatever
+     * screen it was opened from (same navigation [stopPlayback] would land
+     * on), but — unlike [stopPlayback] — keeps the session alive in
+     * [minimizedPlayer] instead of releasing it, so the hoisted player in
+     * `SwarmApp` keeps playing in the background while the user browses.
+     * No-op for anything that isn't a track — movies/episodes have no
+     * minimize button in the first place, but this guards the ViewModel
+     * method too rather than trusting the UI alone.
+     */
+    fun minimizePlayback() {
+        val current = _state.value
+        if (current !is UiState.Player || current.entry.entry.kind != MediaKind.TRACK) return
+        _minimizedPlayer.value = current
+        _state.value = current.previous
+    }
+
+    /** Re-enters the full music player screen for whatever's playing in the background — same session, same ExoPlayer instance (keyed on sessionId in `SwarmApp`), no re-negotiation. */
+    fun restoreMinimizedPlayback() {
+        val minimized = _minimizedPlayer.value ?: return
+        _minimizedPlayer.value = null
+        _state.value = minimized
+    }
+
+    /** Stops a minimized session entirely (the mini-bar's own stop control) without returning to the full player screen first. */
+    fun stopMinimizedPlayback() {
+        val minimized = _minimizedPlayer.value ?: return
+        _minimizedPlayer.value = null
+        minimized.previous.embeddedCatalog()?.let { releasePlaybackSession(it, minimized.serverId, minimized.sessionId) }
     }
 
     /** Best-effort, fire-and-forget release of a just-finished player's server-side bandwidth reservation — see [CatalogSession.stopPlayback]. */
@@ -432,6 +601,39 @@ class SwarmViewModel(
     }
 
     /**
+     * Best-effort, fire-and-forget report of a client-observed error back to
+     * [device] — see [CatalogSession.reportError]'s doc comment for why
+     * failures here are swallowed rather than surfaced. Reports the error to
+     * the specific server the failure is about (rather than every reachable
+     * server) since that's the one whose swarm page a human would actually
+     * be looking at to triage it.
+     */
+    private fun reportClientError(device: SwarmDevice, message: String, entryKey: String? = null, assetTitle: String? = null, kind: String? = null) {
+        val id = deviceId ?: return
+        val name = deviceName ?: "Fire TV"
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.reportError(
+                        device,
+                        ClientErrorReport(
+                            deviceId = id,
+                            deviceName = name,
+                            entryKey = entryKey,
+                            assetTitle = assetTitle,
+                            kind = kind,
+                            message = message,
+                            occurredAtMs = System.currentTimeMillis(),
+                        ),
+                        clientCertificate,
+                        clientKey,
+                    )
+                }
+            }.onFailure { Log.w(logTag, "failed to report client error to ${device.deviceId}", it) }
+        }
+    }
+
+    /**
      * The actual negotiation, shared by [play] and [playNext]. A failed
      * negotiation always surfaces on the top-level [catalog] screen (same
      * recovery behavior this had before hierarchical browsing existed,
@@ -442,9 +644,11 @@ class SwarmViewModel(
      * not a silent one: acceptable for now since it can't lose any state
      * (browsing this deep is cheap to redo) and matches this codebase's
      * existing single-error-surface convention rather than adding
-     * per-screen error UI to every new detail/list screen.
+     * per-screen error UI to every new detail/list screen. [previousScreen]
+     * is what a *successful* negotiation's Back button returns to instead —
+     * see [UiState.Player.previous].
      */
-    private fun playEntry(entry: MergedEntry, catalog: UiState.Catalog) {
+    private fun playEntry(entry: MergedEntry, catalog: UiState.Catalog, previousScreen: UiState, keepMinimized: Boolean = false) {
         val serverId = entry.sources.first()
         val device = catalog.devices.find { it.deviceId == serverId }
         val fingerprint = entry.entry.fingerprint
@@ -464,15 +668,30 @@ class SwarmViewModel(
             }.getOrElse { error ->
                 Log.e(logTag, "playback negotiation failed", error)
                 _state.value = catalog.copy(playbackError = error.message ?: "Could not prepare playback.")
+                if (device != null) {
+                    reportClientError(
+                        device = device,
+                        message = error.message ?: "Could not prepare playback.",
+                        entryKey = entry.entry.entryKey,
+                        assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
+                        kind = entry.entry.kind.name.lowercase(),
+                    )
+                }
                 return@launch
             }
             val isHls = selection.mode == PlaybackMode.HLS
-            val nextEntry = if (entry.entry.kind == MediaKind.EPISODE) {
-                CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
-            } else {
-                null
+            val nextEntry = when (entry.entry.kind) {
+                MediaKind.EPISODE -> CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
+                MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), _shuffleEnabled.value)
+                MediaKind.MOVIE -> null
             }
-            _state.value = UiState.Player(
+            // A stale error only ever lives on a flat Catalog screen (the
+            // only state playbackError is ever set on — see this
+            // function's own failure branch above) — clear it there so it
+            // doesn't reappear on Back after a *successful* play; nothing
+            // to clear on the other, richer previousScreen types.
+            val cleanedPrevious = if (previousScreen is UiState.Catalog) previousScreen.copy(playbackError = null) else previousScreen
+            val playerState = UiState.Player(
                 url = selection.url,
                 title = entry.entry.scrapedTitle ?: entry.entry.title,
                 fingerprint = fingerprint,
@@ -482,11 +701,158 @@ class SwarmViewModel(
                 mediaDurationSecs = entry.entry.durationSecs,
                 entry = entry,
                 nextEntry = nextEntry,
-                previous = catalog.copy(playbackError = null),
+                previous = cleanedPrevious,
                 serverId = serverId,
                 sessionId = selection.sessionId,
             )
+            // keepMinimized: an autoplay-to-next-track that started while
+            // the mini-bar (not the full screen) was showing stays in the
+            // background instead of popping the full player back up just
+            // because the track changed underneath it — see [playNext].
+            if (keepMinimized) _minimizedPlayer.value = playerState else _state.value = playerState
         }
+    }
+
+    /**
+     * Reports an ExoPlayer runtime failure (network drop mid-playback, a
+     * codec/decoder error, and the like) that happened *after* negotiation
+     * already succeeded — distinct from [playEntry]'s own failure branch,
+     * which only ever covers the "couldn't even start" case. [PlayerScreen]
+     * calls this from its `Player.Listener.onPlayerError`; a no-op if the
+     * current screen isn't actually a [UiState.Player] by the time it fires
+     * (can race a fast Back-press) or its originating server can no longer
+     * be resolved.
+     */
+    fun reportPlaybackRuntimeError(message: String) {
+        val current = _state.value
+        if (current !is UiState.Player) return
+        val device = current.previous.embeddedCatalog()?.devices?.find { it.deviceId == current.serverId } ?: return
+        reportClientError(
+            device = device,
+            message = message,
+            entryKey = current.entry.entry.entryKey,
+            assetTitle = current.entry.entry.scrapedTitle ?: current.entry.entry.title,
+            kind = current.entry.entry.kind.name.lowercase(),
+        )
+    }
+
+    /**
+     * User-initiated, from a "Report a problem" button on an asset's detail
+     * page — distinct from [reportPlaybackRuntimeError] (an automatic report
+     * ExoPlayer's own error callback fires) in that this fires whether or
+     * not anything actually broke visibly: a user might notice wrong
+     * artwork, a mislabeled title, or audio out of sync, none of which
+     * throws a [androidx.media3.common.PlaybackException]. Lands in the
+     * same place either way — the server's swarm page "Client errors"
+     * panel — since triage doesn't care which path found the problem.
+     */
+    fun reportAssetProblem(entry: MergedEntry) {
+        val catalog = _state.value.embeddedCatalog() ?: return
+        val device = catalog.devices.find { it.deviceId == entry.sources.first() } ?: return
+        reportClientError(
+            device = device,
+            message = "User reported a problem with this asset from its detail page.",
+            entryKey = entry.entry.entryKey,
+            assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
+            kind = entry.entry.kind.name.lowercase(),
+        )
+    }
+
+    /**
+     * Toggles [entry]'s liked state — optimistic: [_likedFingerprints] and
+     * [likedEntriesStore] both update immediately (instant heart-icon
+     * feedback, no round trip on the critical path), then the toggle fires
+     * at the first device in [MergedEntry.sources] (same "pick a
+     * representative source" pattern [reportAssetProblem] already uses)
+     * best-effort — see [CatalogSession.toggleLike]'s doc comment for why a
+     * dropped request here never needs to revert the local UI.
+     */
+    fun toggleLike(entry: MergedEntry) {
+        val fingerprint = entry.entry.fingerprint
+        val liked = fingerprint !in _likedFingerprints.value
+        _likedFingerprints.value = if (liked) _likedFingerprints.value + fingerprint else _likedFingerprints.value - fingerprint
+        viewModelScope.launch { likedEntriesStore.setLiked(fingerprint, liked) }
+
+        val catalog = _state.value.embeddedCatalog() ?: return
+        val device = catalog.devices.find { it.deviceId == entry.sources.first() } ?: return
+        val id = deviceId ?: return
+        val name = deviceName ?: "Fire TV"
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.toggleLike(
+                        device,
+                        LikeToggle(deviceId = id, deviceName = name, entryKey = entry.entry.entryKey, liked = liked),
+                        clientCertificate,
+                        clientKey,
+                    )
+                }
+            }.onFailure { Log.w(logTag, "failed to toggle like for ${entry.entry.entryKey}", it) }
+        }
+    }
+
+    // --- Kid Mode ---
+
+    /** True if [entry] passes the currently-active Kid Mode rules (or Kid Mode isn't on at all) — the one predicate every entry point into [applyKidModeFilter] shares. */
+    private fun kidModeAllows(entry: MergedEntry, settings: KidModeSettings): Boolean {
+        val e = entry.entry
+        if (e.kind !in settings.allowedKinds) return false
+        if (settings.allowedGenres != null && e.genres.none { it in settings.allowedGenres }) return false
+        return when (e.kind) {
+            MediaKind.MOVIE -> RatingScale.isAllowed(e.rating, settings.maxMovieRating, RatingScale.MOVIE_ORDER)
+            MediaKind.EPISODE -> RatingScale.isAllowed(e.rating, settings.maxTvRating, RatingScale.TV_ORDER)
+            MediaKind.TRACK -> true
+        }
+    }
+
+    /** No-op (returns [entries] unchanged) when Kid Mode isn't enabled — the single chokepoint [browseCatalog] filters every fresh manifest through, so restricted content can't surface via search, genre shelves, or any "Browse all" grid just because one screen forgot to re-check. */
+    private fun applyKidModeFilter(entries: List<MergedEntry>): List<MergedEntry> {
+        val settings = _kidModeSettings.value?.takeIf { it.enabled } ?: return entries
+        return entries.filter { kidModeAllows(it, settings) }
+    }
+
+    /** Turns Kid Mode on for the first time (or fully replaces the PIN + rules of an already-on one) — see [AndroidKidModeStore.enable]. Immediately re-filters the currently-browsed catalog, if any, so the new restriction takes effect without waiting for the next [browseCatalog]. */
+    fun enableKidMode(pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) {
+        viewModelScope.launch {
+            kidModeStore.enable(pin, allowedKinds, allowedGenres, maxMovieRating, maxTvRating)
+            _kidModeSettings.value = kidModeStore.get()
+            reapplyKidModeToCurrentCatalog()
+        }
+    }
+
+    /** Edits the content rules on an already-enabled Kid Mode without touching its PIN — see [AndroidKidModeStore.updateRules]. */
+    fun updateKidModeRules(allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) {
+        viewModelScope.launch {
+            kidModeStore.updateRules(allowedKinds, allowedGenres, maxMovieRating, maxTvRating)
+            _kidModeSettings.value = kidModeStore.get()
+            reapplyKidModeToCurrentCatalog()
+        }
+    }
+
+    fun disableKidMode() {
+        viewModelScope.launch {
+            kidModeStore.disable()
+            _kidModeSettings.value = null
+            reapplyKidModeToCurrentCatalog()
+        }
+    }
+
+    /**
+     * Re-applies the Kid Mode filter to whatever's *currently* shown in
+     * [UiState.Catalog.entries] — the full unfiltered manifest isn't kept
+     * around separately, so this can only re-filter what's already there,
+     * not restore something already filtered out. Correct for tightening a
+     * restriction (strictly removes entries) but a newly-*widened* one
+     * (raising a max rating, adding a genre back) only fully reflects
+     * everything again after the next manual resync/re-browse. Acceptable
+     * trade-off: Kid Mode is managed from the Settings screen, reached from
+     * Dashboard, not mid-browse, so the common case is "browse fresh right
+     * after," not "watch this list retroactively grow while already
+     * looking at it."
+     */
+    private fun reapplyKidModeToCurrentCatalog() {
+        val current = _state.value
+        if (current is UiState.Catalog) _state.value = current.copy(entries = applyKidModeFilter(current.entries))
     }
 
     // --- Hierarchical browsing: Music (Artist -> Album -> Track) ---
@@ -520,13 +886,24 @@ class SwarmViewModel(
 
     fun openMovieDetail(entry: MergedEntry) {
         val current = _state.value
-        if (current !is UiState.Catalog) return
+        if (current !is UiState.Catalog && current !is UiState.MovieShelf) return
         _state.value = UiState.MovieDetail(current, entry)
     }
 
     fun backFromMovieDetail() {
         val current = _state.value
-        if (current is UiState.MovieDetail) _state.value = current.catalog
+        if (current is UiState.MovieDetail) _state.value = current.previous
+    }
+
+    fun openMovieShelf() {
+        val current = _state.value
+        if (current !is UiState.Catalog) return
+        _state.value = UiState.MovieShelf(current, current.entries.filter { it.entry.kind == MediaKind.MOVIE })
+    }
+
+    fun backFromMovieShelf() {
+        val current = _state.value
+        if (current is UiState.MovieShelf) _state.value = current.catalog
     }
 
     // --- Hierarchical browsing: Shows (Show -> Season -> Episode) ---
@@ -556,17 +933,6 @@ class SwarmViewModel(
         if (current is UiState.ShowSeasons) _state.value = UiState.ShowShelf(current.catalog, current.shows)
     }
 
-    fun openEpisodeDetail(entry: MergedEntry) {
-        val current = _state.value
-        if (current !is UiState.ShowSeasons) return
-        _state.value = UiState.EpisodeDetail(current.catalog, current.shows, current.show, entry)
-    }
-
-    fun backFromEpisodeDetail() {
-        val current = _state.value
-        if (current is UiState.EpisodeDetail) _state.value = UiState.ShowSeasons(current.catalog, current.shows, current.show)
-    }
-
     /** Called when [PlayerScreen] is disposed with where playback ended up — "watched" is a simple near-the-end heuristic, not a precise "credits rolled" signal. */
     fun savePlaybackPosition(fingerprint: String, positionSecs: Double, durationSecs: Double) {
         viewModelScope.launch {
@@ -578,7 +944,7 @@ class SwarmViewModel(
     fun stopPlayback() {
         val current = _state.value
         if (current is UiState.Player) {
-            releasePlaybackSession(current.previous, current.serverId, current.sessionId)
+            current.previous.embeddedCatalog()?.let { releasePlaybackSession(it, current.serverId, current.sessionId) }
             _state.value = current.previous
         }
     }

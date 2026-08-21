@@ -13,6 +13,12 @@ let mediaSection = "browse"; // "browse" | "table"
 let browsePath = { kind: "root" }; // breadcrumb state — see renderBrowse()
 let searchQuery = "";
 let kindFilter = "all"; // "all" | "movie" | "episode" | "track"
+// Categories = genres — auto-populated by scraping, and/or assigned by hand
+// in the edit panel (see manageRow's category picker). Not a separate
+// concept/table: every distinct genre value in use anywhere in the library
+// doubles as a browsable, filterable "category".
+let categoryFilter = "all";
+let allCategories = []; // every distinct genre/category currently in use — refreshed alongside libraryEntries
 const KIND_FILTER_LABELS = { all: "Filter: all kinds", movie: "Filter: Movies", episode: "Filter: Shows", track: "Filter: Music" };
 
 // Applies to both the Browse root view and the All-entries table. Matches
@@ -24,6 +30,7 @@ function filteredEntries() {
   const q = searchQuery.trim().toLowerCase();
   return libraryEntries.filter(e => {
     if (kindFilter !== "all" && e.kind !== kindFilter) return false;
+    if (categoryFilter !== "all" && !(e.genres || []).includes(categoryFilter)) return false;
     if (!q) return true;
     return [e.scraped_title, e.title, e.artist, e.album, e.show_title]
       .filter(Boolean)
@@ -38,9 +45,10 @@ async function refreshMedia() {
 async function refreshLibrary() {
   const library = document.getElementById("library");
   try {
-    libraryEntries = await invoke("list_entries");
+    [libraryEntries, allCategories] = await Promise.all([invoke("list_entries"), invoke("list_categories")]);
   } catch (err) {
-    library.innerHTML = `<p class="error">${esc(err)}</p>`;
+    library.innerHTML = `<p class="muted">Unable to load library.</p>`;
+    showToast(String(err), "error");
     return;
   }
   renderMediaTab();
@@ -78,6 +86,13 @@ function renderMediaTab() {
       </select>
       <i class="bi bi-funnel icon-select-icon"></i>
     </div>
+    <div class="icon-select-wrap">
+      <select id="mediaCategoryFilter" class="icon-select${categoryFilter !== "all" ? " icon-select-active" : ""}" title="${categoryFilter === "all" ? "Filter: all categories" : `Filter: ${categoryFilter}`}">
+        <option value="all">All categories</option>
+        ${allCategories.map(c => `<option value="${esc(c)}"${c === categoryFilter ? " selected" : ""}>${esc(c)}</option>`).join("")}
+      </select>
+      <i class="bi bi-tags icon-select-icon"></i>
+    </div>
   </div>`;
   container.innerHTML = toggle + `<div id="mediaSectionBody"></div>`;
   document.getElementById("mediaSectionBrowseBtn").addEventListener("click", () => {
@@ -100,6 +115,14 @@ function renderMediaTab() {
     kindFilter = event.target.value;
     kindFilterSelect.title = KIND_FILTER_LABELS[kindFilter];
     kindFilterSelect.classList.toggle("icon-select-active", kindFilter !== "all");
+    if (mediaSection === "browse") browsePath = { kind: "root" };
+    renderMediaResults();
+  });
+  const categoryFilterSelect = document.getElementById("mediaCategoryFilter");
+  categoryFilterSelect.addEventListener("change", (event) => {
+    categoryFilter = event.target.value;
+    categoryFilterSelect.title = categoryFilter === "all" ? "Filter: all categories" : `Filter: ${categoryFilter}`;
+    categoryFilterSelect.classList.toggle("icon-select-active", categoryFilter !== "all");
     if (mediaSection === "browse") browsePath = { kind: "root" };
     renderMediaResults();
   });
@@ -128,10 +151,42 @@ function groupTracks(entries) {
   return byArtist; // Map<artist, Map<album, EntrySummary[]>>
 }
 
-function groupEpisodes(entries) {
-  const byShow = new Map();
-  for (const e of entries.filter(e => e.kind === "episode")) {
+// Two on-disk show folders can hold the same real series under different
+// names ("Law & Order SVU" vs. "Law & Order Special Victims Unit") — the
+// path-derived `show_title` alone can never tell them apart (and by design
+// never should: a bad scrape must never be able to split or corrupt a
+// grouping that's otherwise correct — see classify.rs's module doc
+// comment). A *matching* scrape is different: if episodes under two
+// different show_titles agree on the same TMDb-confirmed `scraped_title`,
+// that's real external corroboration, not something a bad scrape could
+// coincidentally produce for two unrelated folders. So: fold any show_title
+// whose episodes have a clear scraped_title consensus into that canonical
+// key, purely for display grouping — the underlying entries and their
+// path-derived fields are never touched.
+function canonicalShowKeys(episodes) {
+  const scrapedCounts = new Map(); // show_title -> Map<scraped_title, count>
+  for (const e of episodes) {
     const show = e.show_title || "Unknown Show";
+    if (!e.scraped_title) continue;
+    if (!scrapedCounts.has(show)) scrapedCounts.set(show, new Map());
+    const counts = scrapedCounts.get(show);
+    counts.set(e.scraped_title, (counts.get(e.scraped_title) || 0) + 1);
+  }
+  const canonicalFor = new Map(); // show_title -> canonical display key
+  for (const [show, counts] of scrapedCounts) {
+    const [topScraped] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    canonicalFor.set(show, topScraped);
+  }
+  return canonicalFor;
+}
+
+function groupEpisodes(entries) {
+  const episodes = entries.filter(e => e.kind === "episode");
+  const canonicalFor = canonicalShowKeys(episodes);
+  const byShow = new Map();
+  for (const e of episodes) {
+    const rawShow = e.show_title || "Unknown Show";
+    const show = canonicalFor.get(rawShow) || rawShow;
     const season = e.season ?? -1; // -1 = "Unknown Season" bucket, sorts first
     if (!byShow.has(show)) byShow.set(show, new Map());
     const seasons = byShow.get(show);
@@ -152,8 +207,54 @@ function groupEpisodes(entries) {
 // placeholder synchronously, then swap in a blob: URL once bytes arrive.
 // Failure (no artwork of that kind) just leaves the placeholder — never an
 // error the user needs to see.
+//
+// Grid thumbnails (`card-art` — Movies/Shows/Music browse grids, where
+// dozens can render on screen at once) load on demand, as they actually
+// scroll into view, rather than all at once: `artImg` registers them with a
+// shared `IntersectionObserver` instead of fetching immediately. Single-
+// image detail views (a movie's own poster/backdrop, `detail-poster`/
+// `detail-backdrop`) still load eagerly — there's only ever one or two on
+// screen, so there's no batch-load cost to avoid, and deferring them would
+// just make detail pages look broken on open.
+
+// rootMargin starts the fetch a little before a card is actually on
+// screen, so scrolling doesn't visibly outrun the image loading in.
+const artworkObserver = new IntersectionObserver(
+  (entries) => {
+    for (const observed of entries) {
+      if (!observed.isIntersecting) continue;
+      artworkObserver.unobserve(observed.target);
+      const { entryKey, kind } = observed.target.dataset;
+      loadArtworkInto(observed.target, entryKey, kind);
+    }
+  },
+  { rootMargin: "200px" },
+);
+//
+// A fetched image is cached in memory for `ARTWORK_CACHE_TTL_MS` (5
+// minutes, matching the TV client's own `ArtworkCache` TTL default) keyed
+// by entry+kind, so re-hovering the same card — or navigating back to a
+// grid you already browsed — doesn't re-read the file over IPC every time.
+// `clearArtworkCache()` is called after anything that can change artwork on
+// disk (a bulk/pinpoint scrape, a manual upload, a scrape revert) so a
+// stale cached image can never outlive the data it was fetched for.
+
+const ARTWORK_CACHE_TTL_MS = 5 * 60 * 1000;
+const artworkCache = new Map(); // `${entryKey}:${kind}` -> { blobUrl, expiresAt }
+
+function clearArtworkCache() {
+  for (const { blobUrl } of artworkCache.values()) URL.revokeObjectURL(blobUrl);
+  artworkCache.clear();
+}
 
 async function loadArtworkInto(imgEl, entryKey, kind) {
+  const cacheKey = `${entryKey}:${kind}`;
+  const cached = artworkCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    imgEl.src = cached.blobUrl;
+    imgEl.classList.remove("art-placeholder");
+    return;
+  }
   try {
     const bytes = await invoke("get_artwork_bytes", { entryKey, kind });
     if (!bytes || !bytes.length) return;
@@ -161,7 +262,10 @@ async function loadArtworkInto(imgEl, entryKey, kind) {
     // blob: URL fed to <img> — every engine this webview runs on (WebKit/
     // Chromium/Gecko) sniffs the real image format for rendering.
     const blob = new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
-    imgEl.src = URL.createObjectURL(blob);
+    if (cached) URL.revokeObjectURL(cached.blobUrl);
+    const blobUrl = URL.createObjectURL(blob);
+    artworkCache.set(cacheKey, { blobUrl, expiresAt: Date.now() + ARTWORK_CACHE_TTL_MS });
+    imgEl.src = blobUrl;
     imgEl.classList.remove("art-placeholder");
   } catch {
     // no artwork of this kind — leave the placeholder in place
@@ -170,11 +274,27 @@ async function loadArtworkInto(imgEl, entryKey, kind) {
 
 function artImg(entryKey, kind, className) {
   const id = `art-${kind}-${entryKey}-${Math.random().toString(36).slice(2)}`;
+  const lazy = className.includes("card-art");
   queueMicrotask(() => {
     const el = document.getElementById(id);
-    if (el) loadArtworkInto(el, entryKey, kind);
+    if (!el) return;
+    if (lazy) {
+      artworkObserver.observe(el);
+    } else {
+      loadArtworkInto(el, entryKey, kind);
+    }
   });
-  return `<img id="${id}" class="${className} art-placeholder" alt="">`;
+  return `<img id="${id}" class="${className} art-placeholder" data-entry-key="${esc(entryKey)}" data-kind="${esc(kind)}" alt="">`;
+}
+
+/** A small heart+count overlay on a browse-grid card's artwork — only for
+ * cards backed by one real entry_key (movies, episodes), since a like is
+ * per-file and a grouped show/artist/album card has no single count to
+ * show. Omitted entirely when nobody's liked it, same as `.badge-count`'s
+ * own d-none-when-zero convention elsewhere in this app. */
+function likeBadge(likeCount) {
+  if (!likeCount) return "";
+  return `<span class="like-badge"><i class="bi bi-heart-fill"></i> ${likeCount}</span>`;
 }
 
 // ---- browse: root (Movies / Music / Shows section pickers) -----------------
@@ -222,15 +342,19 @@ function renderBrowseRoot(body) {
   const movieCards = movies.map(m => `
     <div class="media-card" data-movie="${esc(m.entry_key)}">
       ${artImg(m.entry_key, "poster", "card-art")}
+      ${likeBadge(m.like_count)}
       <div class="card-title" title="${esc(m.scraped_title || m.title)}">${esc(m.scraped_title || m.title)}${m.year ? ` <span class="muted">(${m.year})</span>` : ""}</div>
     </div>`).join("");
 
-  const artistCards = [...tracks.keys()].sort().map(artist => `
+  const artistCards = [...tracks.keys()].sort().map(artist => {
+    const firstTrack = [...tracks.get(artist).values()][0]?.[0];
+    return `
     <div class="media-card" data-artist="${esc(artist)}">
-      <div class="card-art art-placeholder round"></div>
+      ${firstTrack ? artImg(firstTrack.entry_key, "artist", "card-art round") : `<div class="card-art art-placeholder round"></div>`}
       <div class="card-title" title="${esc(artist)}">${esc(artist)}</div>
       <div class="muted" style="font-size:.75rem">${tracks.get(artist).size} album${tracks.get(artist).size === 1 ? "" : "s"}</div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const showCards = [...shows.keys()].sort().map(show => {
     const first = [...shows.get(show).values()][0]?.[0];
@@ -286,8 +410,11 @@ function detailView(entry, backCrumbs) {
         <div>
           <h2 style="margin-top:0; text-transform:none; font-size:1.2rem; color:var(--text)">
             ${esc(entry.scraped_title || entry.title)}${entry.year ? ` <span class="muted">(${entry.year})</span>` : ""}
+            ${entry.rating ? `<span class="tag" style="margin-left:8px; vertical-align:middle">${esc(entry.rating)}</span>` : ""}
+            ${entry.like_count ? `<span class="muted" style="margin-left:8px; font-size:.85rem; vertical-align:middle"><i class="bi bi-heart-fill" style="color:#ff5d7a"></i> ${entry.like_count}</span>` : ""}
           </h2>
-          ${entry.genres.length ? `<p class="muted">${entry.genres.map(esc).join(", ")}</p>` : ""}
+          ${entry.genres.length ? `<div class="category-chips">${entry.genres.map(g => `<button class="category-chip" data-filter-category="${esc(g)}">${esc(g)}</button>`).join("")}</div>` : ""}
+          ${entry.overview ? `<p class="muted" style="margin-top:8px">${esc(entry.overview)}</p>` : ""}
           ${cast.length ? `<h2>Cast</h2><p>${cast.map(c => esc(c.character ? `${c.name} as ${c.character}` : c.name)).join(", ")}</p>` : ""}
           <h2>File</h2>
           <p class="mono muted" style="font-size:.78rem" title="${esc(entry.relative_path)}">
@@ -316,6 +443,8 @@ function wireDetailManage(entry) {
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(entry.entry_key));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(entry.entry_key));
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(entry.entry_key));
+    wireAddCategoryBtn();
+    wireMoveKindFields(entry.entry_key);
   }
 }
 
@@ -326,9 +455,68 @@ function renderMovieDetail(body, entryKey) {
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
   wireDetailManage(entry);
+  body.querySelectorAll("[data-filter-category]").forEach(el => el.addEventListener("click", () => {
+    categoryFilter = el.dataset.filterCategory;
+    browsePath = { kind: "root" };
+    renderMediaTab();
+  }));
 }
 
 // ---- browse: music (artist → album → tracks) -------------------------------
+
+// ---- group-level artwork upload (artist photo, album cover) ---------------
+// Neither an artist nor an album has an `entry_key` of its own — both are
+// groupings computed client-side over the flat entry list (see the file's
+// top comment) — so uploading artwork "for the artist"/"for the album"
+// means applying it to every track entry in that group at once, via
+// `upload_group_artwork` (apps/server/src/gui.rs), the group counterpart of
+// the per-entry `uploadArtwork` below. Uses its own element ids and state
+// (`pickedGroupArtworkPath`, distinct from `pickedArtworkPath`) so this
+// panel and an open per-track manage panel (which also has an upload
+// control) can coexist on the same page — renderAlbum shows both at once.
+
+let pickedGroupArtworkPath = null;
+
+function groupArtworkPanel(label) {
+  return `
+    <div class="row" style="margin:10px 0 4px; align-items:center">
+      <button id="groupArtworkPickBtn" class="secondary"><i class="bi bi-image"></i>Choose image…</button>
+      <button id="groupArtworkUploadBtn"><i class="bi bi-upload"></i>Upload ${label}</button>
+      <span class="muted" id="groupArtworkPickedNote" style="font-size:.8rem">${pickedGroupArtworkPath ? esc(pickedGroupArtworkPath) : "No file chosen."}</span>
+    </div>`;
+}
+
+async function pickGroupArtwork() {
+  try {
+    pickedGroupArtworkPath = await invoke("pick_file_path");
+    document.getElementById("groupArtworkPickedNote").textContent = pickedGroupArtworkPath || "No file chosen.";
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function uploadGroupArtwork(entryKeys, kind) {
+  if (!pickedGroupArtworkPath) {
+    showToast("Choose an image first.", "warning");
+    return;
+  }
+  try {
+    const bytes = await invoke("read_file_bytes", { path: pickedGroupArtworkPath });
+    const extension = (pickedGroupArtworkPath.split(".").pop() || "jpg").toLowerCase();
+    await invoke("upload_group_artwork", { entryKeys, kind, extension, bytes });
+    pickedGroupArtworkPath = null;
+    clearArtworkCache();
+    await refreshLibrary();
+    showToast("Artwork uploaded.", "success");
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function wireGroupArtworkHandlers(entryKeys, kind) {
+  document.getElementById("groupArtworkPickBtn")?.addEventListener("click", pickGroupArtwork);
+  document.getElementById("groupArtworkUploadBtn")?.addEventListener("click", () => uploadGroupArtwork(entryKeys, kind));
+}
 
 function renderArtist(body, artist) {
   const albums = groupTracks(libraryEntries).get(artist);
@@ -340,8 +528,10 @@ function renderArtist(body, artist) {
       <div class="card-title" title="${esc(album)}">${esc(album)}</div>
       <div class="muted" style="font-size:.75rem">${tracks.length} track${tracks.length === 1 ? "" : "s"}</div>
     </div>`).join("");
-  body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
+  const artistEntryKeys = [...albums.values()].flat().map(t => t.entry_key);
+  body.innerHTML = `${breadcrumb(crumbs)}${groupArtworkPanel("artist photo")}<div class="media-grid">${cards}</div>`;
   wireBreadcrumb(body, crumbs);
+  wireGroupArtworkHandlers(artistEntryKeys, "artist");
   body.querySelectorAll("[data-album]").forEach(el => el.addEventListener("click", () => {
     browsePath = { kind: "album", artist, album: el.dataset.album };
     renderBrowse();
@@ -365,9 +555,11 @@ function renderAlbum(body, artist, album) {
     </tr>
     ${openManageKey === t.entry_key ? `<tr><td colspan="4">${manageRow(t)}</td></tr>` : ""}
   `).join("");
-  body.innerHTML = `${breadcrumb(crumbs)}
+  const albumEntryKeys = tracks.map(t => t.entry_key);
+  body.innerHTML = `${breadcrumb(crumbs)}${groupArtworkPanel("album cover")}
     <table><thead><tr><th>#</th><th>Title</th><th>Duration</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   wireBreadcrumb(body, crumbs);
+  wireGroupArtworkHandlers(albumEntryKeys, "cover");
   wireTrackManageHandlers(body);
 }
 
@@ -385,6 +577,8 @@ function wireTrackManageHandlers(container) {
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
+    wireAddCategoryBtn();
+    wireMoveKindFields(openManageKey);
   }
 }
 
@@ -434,6 +628,7 @@ function renderSeason(body, show, season) {
   const cards = episodes.map(ep => `
     <div class="media-card" data-episode="${esc(ep.entry_key)}">
       ${artImg(ep.entry_key, "poster", "card-art")}
+      ${likeBadge(ep.like_count)}
       <div class="card-title" title="${esc(ep.scraped_title || ep.title)}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
     </div>`).join("");
   body.innerHTML = `${breadcrumb(crumbs)}<div class="media-grid">${cards}</div>`;
@@ -458,6 +653,11 @@ function renderEpisodeDetail(body, entryKey) {
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
   wireDetailManage(entry);
+  body.querySelectorAll("[data-filter-category]").forEach(el => el.addEventListener("click", () => {
+    categoryFilter = el.dataset.filterCategory;
+    browsePath = { kind: "root" };
+    renderMediaTab();
+  }));
 }
 
 function renderLibrary() {
@@ -499,21 +699,44 @@ function renderLibrary() {
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
+    wireAddCategoryBtn();
+    wireMoveKindFields(openManageKey);
   }
 }
 
 function manageRow(entry) {
+  // Every category already in use anywhere in the library, plus any this
+  // entry already carries that aren't in that list yet (can happen right
+  // after a fresh scrape adds a brand new genre value, before this panel's
+  // own allCategories cache has been refreshed) — so the picker never
+  // silently hides a category this entry is actually tagged with.
+  const pickerCategories = [...new Set([...allCategories, ...entry.genres])].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   return `
     <div class="inline-edit">
       <h2 style="margin-top:0">Edit metadata</h2>
       <label>Title</label>
       <input id="editTitleInput" value="${esc(entry.scraped_title || entry.title)}">
-      <label>Genres (comma-separated)</label>
-      <input id="editGenresInput" value="${esc(entry.genres.join(", "))}">
+      <label>Description</label>
+      <textarea id="editOverviewInput" rows="4" style="width:100%; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-family:inherit; resize:vertical">${esc(entry.overview || "")}</textarea>
+      ${entry.kind !== "track" ? `
+      <label>Content rating</label>
+      <input id="editRatingInput" placeholder="${entry.kind === "episode" ? "e.g. TV-14" : "e.g. PG-13"}" value="${esc(entry.rating || "")}">
+      ` : ""}
+      <label>Categories</label>
+      <div class="category-picker">
+        ${pickerCategories.length ? pickerCategories.map(c => `
+          <label class="checkbox-label category-picker-item">
+            <input type="checkbox" class="editCategoryCheck" value="${esc(c)}"${entry.genres.includes(c) ? " checked" : ""}>
+            ${esc(c)}
+          </label>`).join("") : `<span class="muted category-picker-empty" style="font-size:.85rem">No categories yet — add one below.</span>`}
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="editNewCategoryInput" placeholder="New category name">
+        <button id="editAddCategoryBtn" class="secondary" type="button"><i class="bi bi-plus-lg"></i>Add</button>
+      </div>
       <div class="row" style="margin-top:10px">
         <button id="editSaveBtn"><i class="bi bi-check-lg"></i>Save metadata</button>
       </div>
-      <p id="editError" class="error"></p>
 
       <h2>Upload artwork</h2>
       <div class="row">
@@ -522,13 +745,12 @@ function manageRow(entry) {
           <option value="poster">Poster</option>
           <option value="backdrop">Backdrop</option>
           <option value="cover">Cover</option>
-          <option value="artist_photo">Artist photo</option>
+          <option value="artist">Artist photo</option>
         </select>
         <button id="pickArtworkBtn" class="secondary"><i class="bi bi-image"></i>Choose image…</button>
         <button id="uploadArtworkBtn"><i class="bi bi-upload"></i>Upload</button>
       </div>
       <p class="muted" id="artworkPickedNote">${pickedArtworkPath ? esc(pickedArtworkPath) : "No file chosen."}</p>
-      <p id="artworkError" class="error"></p>
 
       <h2>Rescrape</h2>
       <label>TMDb URL override (optional — leave blank to search normally)</label>
@@ -539,8 +761,24 @@ function manageRow(entry) {
           ? `<button id="revertScrapeBtn" class="danger"><i class="bi bi-arrow-counterclockwise"></i>Revert to unscraped</button>`
           : ""}
       </div>
-      <p id="rescrapeError" class="error"></p>
-      <p id="revertError" class="error"></p>
+
+      <h2>Asset type</h2>
+      <p class="muted" style="margin-top:-6px">For a file that ended up in the wrong section — most often a music video stored as a movie/show. Moving it here sticks: it's remembered across rescans and "Fix classifications".</p>
+      <select id="moveKindSelect" style="width:100%; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
+        <option value="movie"${entry.kind === "movie" ? " selected" : ""}>Movie</option>
+        <option value="episode"${entry.kind === "episode" ? " selected" : ""}>TV show episode</option>
+        <option value="track"${entry.kind === "track" ? " selected" : ""}>Music track</option>
+      </select>
+      <div id="moveTrackFields" class="row" style="margin-top:8px; display:${entry.kind === "track" ? "flex" : "none"}">
+        <input id="moveArtistInput" placeholder="Artist" value="${entry.kind === "track" ? esc(entry.artist || "") : ""}">
+        <input id="moveAlbumInput" placeholder="Album" value="${entry.kind === "track" ? esc(entry.album || "") : ""}">
+      </div>
+      <div id="moveEpisodeFields" class="row" style="margin-top:8px; display:${entry.kind === "episode" ? "flex" : "none"}">
+        <input id="moveShowInput" placeholder="Show name" value="${entry.kind === "episode" ? esc(entry.show_title || "") : ""}">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="moveKindBtn" class="secondary"><i class="bi bi-arrow-left-right"></i>Move to this type</button>
+      </div>
 
       <h2>File</h2>
       <p class="mono muted" style="font-size:.78rem" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
@@ -548,42 +786,96 @@ function manageRow(entry) {
 }
 
 async function revertScrape(entryKey) {
-  const errorEl = document.getElementById("revertError");
   try {
     await invoke("clear_scraped_metadata", { entryKey });
+    clearArtworkCache();
     await refreshLibrary();
+    showToast("Reverted to unscraped.", "success");
   } catch (err) {
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
   }
 }
 
 async function saveEdit(entryKey) {
-  const errorEl = document.getElementById("editError");
   try {
     const title = document.getElementById("editTitleInput").value.trim();
-    const genres = document.getElementById("editGenresInput").value
-      .split(",").map(g => g.trim()).filter(Boolean);
-    await invoke("set_manual_metadata", { entryKey, title, genres });
+    const overview = document.getElementById("editOverviewInput").value.trim();
+    const rating = document.getElementById("editRatingInput")?.value.trim() ?? null;
+    const genres = [...document.querySelectorAll(".editCategoryCheck:checked")].map(cb => cb.value);
+    await invoke("set_manual_metadata", { entryKey, title, genres, overview, rating });
     await refreshLibrary();
+    showToast("Metadata saved.", "success");
   } catch (err) {
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
   }
 }
 
+function wireMoveKindFields(entryKey) {
+  const select = document.getElementById("moveKindSelect");
+  if (!select) return;
+  const trackFields = document.getElementById("moveTrackFields");
+  const episodeFields = document.getElementById("moveEpisodeFields");
+  const sync = () => {
+    trackFields.style.display = select.value === "track" ? "flex" : "none";
+    episodeFields.style.display = select.value === "episode" ? "flex" : "none";
+  };
+  select.addEventListener("change", sync);
+  document.getElementById("moveKindBtn")?.addEventListener("click", () => moveKind(entryKey));
+}
+
+async function moveKind(entryKey) {
+  try {
+    const kind = document.getElementById("moveKindSelect").value;
+    const artist = document.getElementById("moveArtistInput").value.trim();
+    const album = document.getElementById("moveAlbumInput").value.trim();
+    const showTitle = document.getElementById("moveShowInput").value.trim();
+    await invoke("set_manual_kind", { entryKey, kind, artist: artist || null, album: album || null, showTitle: showTitle || null });
+    await refreshLibrary();
+    showToast(`Moved to ${kind === "track" ? "Music" : kind === "episode" ? "Shows" : "Movies"}.`, "success");
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+// Lets a category be created right from the picker instead of needing a
+// separate "manage categories" flow — typing a brand new name and checking
+// it here is the entire "create a category" action; it only actually starts
+// existing once this entry's edit is saved (see saveEdit), same as every
+// other category, matching the "categories = genres, no separate registry"
+// design (Library::distinct_genres' doc comment).
+function wireAddCategoryBtn() {
+  document.getElementById("editAddCategoryBtn")?.addEventListener("click", () => {
+    const input = document.getElementById("editNewCategoryInput");
+    const name = input.value.trim();
+    if (!name) return;
+    const picker = document.querySelector(".category-picker");
+    const existing = [...picker.querySelectorAll(".editCategoryCheck")].find(cb => cb.value.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      existing.checked = true;
+    } else {
+      picker.querySelector(".category-picker-empty")?.remove();
+      const label = document.createElement("label");
+      label.className = "checkbox-label category-picker-item";
+      label.innerHTML = `<input type="checkbox" class="editCategoryCheck" value="${esc(name)}" checked> ${esc(name)}`;
+      picker.appendChild(label);
+    }
+    input.value = "";
+    input.focus();
+  });
+}
+
 async function pickArtwork() {
-  const errorEl = document.getElementById("artworkError");
   try {
     pickedArtworkPath = await invoke("pick_file_path");
     document.getElementById("artworkPickedNote").textContent = pickedArtworkPath || "No file chosen.";
   } catch (err) {
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
   }
 }
 
 async function uploadArtwork(entryKey) {
-  const errorEl = document.getElementById("artworkError");
   if (!pickedArtworkPath) {
-    errorEl.textContent = "Choose an image first.";
+    showToast("Choose an image first.", "warning");
     return;
   }
   try {
@@ -592,60 +884,98 @@ async function uploadArtwork(entryKey) {
     const kind = document.getElementById("artworkKindSelect").value;
     await invoke("upload_artwork", { entryKey, kind, extension, bytes });
     pickedArtworkPath = null;
+    clearArtworkCache();
     await refreshLibrary();
+    showToast("Artwork uploaded.", "success");
   } catch (err) {
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
   }
 }
 
 async function rescrapeEntry(entryKey) {
-  const errorEl = document.getElementById("rescrapeError");
   const tmdbUrl = document.getElementById("rescrapeUrlInput").value.trim();
-  errorEl.textContent = "Rescraping…";
+  const btn = document.getElementById("rescrapeBtn");
+  if (btn) btn.disabled = true;
   try {
     await invoke("rescrape_entry", { entryKey, tmdbUrl: tmdbUrl || null });
-    errorEl.textContent = "";
+    clearArtworkCache();
     await refreshLibrary();
+    showToast("Rescraped.", "success");
   } catch (err) {
-    errorEl.textContent = String(err);
+    showToast(String(err), "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
+// Real bug this fixes: a rescan over a slow network mount (SMB/NFS) can
+// legitimately take minutes — confirmed live against a real ~3,700-file
+// remote share — and gave no indication anything was happening until it
+// finished. Mirrors the Scrape button's own `scrape-progress` bar exactly
+// (`scan-progress` events from the Rust side, one per discovered file).
 document.getElementById("rescanBtn").addEventListener("click", async () => {
-  const note = document.getElementById("scanNote");
+  const progressBox = document.getElementById("scanProgress");
+  const progressFill = document.getElementById("scanProgressFill");
+  const progressText = document.getElementById("scanProgressText");
+  const rescanBtn = document.getElementById("rescanBtn");
+  progressFill.style.width = "0%";
+  progressText.textContent = "Starting…";
+  progressBox.classList.remove("d-none");
+  rescanBtn.disabled = true;
+
+  const unlisten = await listen("scan-progress", ({ payload }) => {
+    if (payload.phase === "discovering") {
+      progressFill.style.width = "0%";
+      progressText.textContent = `Finding files… ${payload.found} found so far`;
+    } else {
+      progressFill.style.width = `${Math.round((payload.processed / payload.total) * 100)}%`;
+      progressText.textContent = `Scanning ${payload.processed} of ${payload.total} files…`;
+    }
+  });
   try {
     const r = await invoke("rescan");
-    note.textContent = `+${r.added} added, ${r.updated} updated, ${r.removed} removed`;
+    showToast(`+${r.added} added, ${r.updated} updated, ${r.removed} removed`, "success");
     await refreshLibrary();
   } catch (err) {
-    note.textContent = String(err);
+    showToast(String(err), "error");
+  } finally {
+    unlisten();
+    progressBox.classList.add("d-none");
+    rescanBtn.disabled = false;
   }
 });
 
 document.getElementById("reclassifyBtn").addEventListener("click", async () => {
-  const note = document.getElementById("scanNote");
   try {
     const r = await invoke("reclassify_library");
-    note.textContent = `${r.changed} corrected, ${r.unchanged} already correct` +
-      (r.changed ? " — run Scrape metadata again to re-match the corrected entries." : "");
+    showToast(
+      `${r.changed} corrected, ${r.unchanged} already correct` +
+      (r.changed ? " — run Scrape metadata again to re-match the corrected entries." : ""),
+      "success",
+    );
     await refreshLibrary();
   } catch (err) {
-    note.textContent = String(err);
+    showToast(String(err), "error");
   }
 });
 
 function renderScrapeIssues(issues) {
+  const wrap = document.getElementById("scrapeIssuesWrap");
   const list = document.getElementById("scrapeIssues");
   if (!issues || issues.length === 0) {
-    list.classList.add("d-none");
+    wrap.classList.add("d-none");
     list.innerHTML = "";
     return;
   }
-  list.classList.remove("d-none");
+  wrap.classList.remove("d-none");
+  document.getElementById("scrapeIssuesCount").textContent =
+    `${issues.length} issue${issues.length === 1 ? "" : "s"} from the last scrape`;
   list.innerHTML = issues
     .map(i => `<li><span class="issue-title">${esc(i.title)}</span> — <span class="issue-reason">${esc(i.reason)}</span></li>`)
     .join("");
 }
+
+document.getElementById("dismissScrapeIssuesBtn").addEventListener("click", () => renderScrapeIssues(null));
 
 // Applies one `scrape-progress` event immediately, without waiting for the
 // scrape to finish or doing a full `refreshLibrary()` re-fetch — this is
@@ -679,21 +1009,27 @@ function patchEntryLive(p) {
   // currently open (root grid, detail view, album cover, etc.) — re-trigger
   // the load now that the bytes may actually exist on disk.
   if (p.outcome === "matched") {
+    // Fresh bytes just landed on disk — drop any cached copy from before
+    // this match so the reload below can't serve a stale (or empty-
+    // placeholder-miss) cache entry instead of the real artwork.
+    for (const kind of ["poster", "backdrop", "cover"]) {
+      const cached = artworkCache.get(`${p.entry_key}:${kind}`);
+      if (cached) { URL.revokeObjectURL(cached.blobUrl); artworkCache.delete(`${p.entry_key}:${kind}`); }
+    }
     document.querySelectorAll(
       `img[id^="art-poster-${p.entry_key}-"], img[id^="art-backdrop-${p.entry_key}-"], img[id^="art-cover-${p.entry_key}-"]`,
     ).forEach(img => {
       const kind = img.id.startsWith("art-poster-") ? "poster" : img.id.startsWith("art-backdrop-") ? "backdrop" : "cover";
+      artworkObserver.unobserve(img);
       loadArtworkInto(img, p.entry_key, kind);
     });
   }
 }
 
 document.getElementById("scrapeBtn").addEventListener("click", async () => {
-  const note = document.getElementById("scanNote");
   const progressBox = document.getElementById("scrapeProgress");
   const progressFill = document.getElementById("scrapeProgressFill");
   const progressText = document.getElementById("scrapeProgressText");
-  note.textContent = "";
   renderScrapeIssues(null);
   progressFill.style.width = "0%";
   progressText.textContent = "Starting…";
@@ -707,7 +1043,10 @@ document.getElementById("scrapeBtn").addEventListener("click", async () => {
   try {
     const force = document.getElementById("forceScrapeCheck").checked;
     const r = await invoke("run_scrape", { force });
-    note.textContent = `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`;
+    showToast(
+      `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`,
+      r.failed > 0 ? "warning" : "success",
+    );
     renderScrapeIssues(r.issues);
     // A final full refresh as a safety net (picks up anything not visible
     // in the current view during the run) — most of what it would show is
@@ -715,7 +1054,7 @@ document.getElementById("scrapeBtn").addEventListener("click", async () => {
     // reads as content suddenly appearing out of nowhere.
     await refreshLibrary();
   } catch (err) {
-    note.textContent = String(err);
+    showToast(String(err), "error");
   } finally {
     unlisten();
     progressBox.classList.add("d-none");

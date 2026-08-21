@@ -80,6 +80,12 @@ data class CatalogEntry(
     val artworkEtag: String? = null,
     val year: Int? = null,
     val cast: List<CastMember> = emptyList(),
+    /** Synopsis — TMDb's own, or a manual override. Null for tracks and anything not yet scraped. */
+    val overview: String? = null,
+    /** US content rating — TMDb's own, or a manual override. Null for tracks, anything not yet scraped, or without a US certification. */
+    val rating: String? = null,
+    /** Number of distinct devices that currently have this liked — see [LikeToggle]. */
+    val likeCount: Int = 0,
 )
 
 @Serializable
@@ -149,6 +155,34 @@ data class PeerRequest(
     val range: ByteRange? = null,
     val ifNoneMatch: String? = null,
     val playback: PlaybackPreferences? = null,
+    val errorReport: ClientErrorReport? = null,
+    val like: LikeToggle? = null,
+)
+
+/**
+ * Mirrors `swarm_core::peer::LikeToggle` (Rust) — see that type's doc
+ * comment. Sent on `/likes/toggle`; [liked] is the desired end state (not
+ * "flip whatever it currently is"), so a retried request is idempotent.
+ */
+@Serializable
+data class LikeToggle(
+    val deviceId: String,
+    val deviceName: String,
+    val entryKey: String,
+    val liked: Boolean,
+)
+
+/** Mirrors `swarm_core::peer::ClientErrorReport` (Rust) — see that type's doc comment. Sent on `/errors/report`. */
+@Serializable
+data class ClientErrorReport(
+    val deviceId: String,
+    val deviceName: String,
+    val entryKey: String? = null,
+    val assetTitle: String? = null,
+    val kind: String? = null,
+    val message: String,
+    val context: String? = null,
+    val occurredAtMs: Long,
 )
 
 @Serializable

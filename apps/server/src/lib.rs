@@ -17,7 +17,7 @@ use swarm_core::peer::MediaKind;
 use swarm_core::rest::{DeviceRegistration, DeviceType, SwarmDevicesResponse, SwarmSummary};
 use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
-use swarm_media::scan::{scan_roots, ScanReport};
+use swarm_media::scan::{scan_roots, ScanProgressEvent, ScanReport};
 use swarm_media::scrape::{
     run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig, ScrapeOneError,
     ScrapeProgressEvent, TmdbOverride,
@@ -230,7 +230,7 @@ impl ServerCore {
         let scan_core = Arc::clone(&core);
         tokio::spawn(async move {
             let roots = scan_core.media_roots.roots();
-            match scan_core.run_scan(&roots).await {
+            match scan_core.run_scan(&roots, None).await {
                 Ok(report) => tracing::info!(added = report.added, updated = report.updated,
                     removed = report.removed, unchanged = report.unchanged, "initial library scan complete"),
                 Err(err) => tracing::error!(%err, "initial library scan failed"),
@@ -244,10 +244,14 @@ impl ServerCore {
     /// (initial, rescan, or a root change) via `scan_lock` — see the lock's
     /// doc comment on `Self` for why concurrent scans of the same root set
     /// would be unsafe, not just wasteful. Updates `scan_status` throughout.
-    async fn run_scan(&self, roots: &[MediaRoot]) -> Result<ScanReport, ServerError> {
+    async fn run_scan(
+        &self,
+        roots: &[MediaRoot],
+        progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>,
+    ) -> Result<ScanReport, ServerError> {
         let _guard = self.scan_lock.lock().await;
         self.scan_status.send_modify(|s| *s = ScanState::Scanning);
-        match scan_roots(&self.library, roots).await {
+        match scan_roots(&self.library, roots, progress_tx).await {
             Ok(report) => {
                 self.scan_status.send_modify(|s| *s = ScanState::Done(report.clone()));
                 Ok(report)
@@ -281,9 +285,9 @@ impl ServerCore {
         }
     }
 
-    pub async fn rescan(&self) -> Result<ScanReport, ServerError> {
+    pub async fn rescan(&self, progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>) -> Result<ScanReport, ServerError> {
         let roots = self.media_roots.roots();
-        self.run_scan(&roots).await
+        self.run_scan(&roots, progress_tx).await
     }
 
     /// Live-swap the configured media roots and immediately reconcile the
@@ -305,7 +309,7 @@ impl ServerCore {
             return Err(ServerError::NoMediaRoots);
         }
         self.media_roots.replace(roots.clone());
-        self.run_scan(&roots).await
+        self.run_scan(&roots, None).await
     }
 
     pub async fn status(&self) -> Result<ServerStatus, ServerError> {

@@ -71,7 +71,7 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
     )
     .await
     .unwrap();
-    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None, playback: None };
+    let request = PeerRequest { path: "/ping".into(), range: None, if_none_match: None, playback: None, error_report: None };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

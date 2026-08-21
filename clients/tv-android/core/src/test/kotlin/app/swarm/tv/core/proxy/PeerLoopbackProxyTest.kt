@@ -10,7 +10,9 @@
 package app.swarm.tv.core.proxy
 
 import app.swarm.tv.core.peer.ByteRange
+import app.swarm.tv.core.peer.ClientErrorReport
 import app.swarm.tv.core.peer.ContentRange
+import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.PeerResponseHeader
 import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.transport.PeerConnection
@@ -31,7 +33,14 @@ private class FakePeerConnection(
     var lastRange: ByteRange? = null
     var lastIfNoneMatch: String? = null
 
-    override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?): PeerResponse {
+    override fun request(
+        path: String,
+        range: ByteRange?,
+        ifNoneMatch: String?,
+        playback: PlaybackPreferences?,
+        errorReport: ClientErrorReport?,
+        like: LikeToggle?,
+    ): PeerResponse {
         lastPath = path
         lastRange = range
         lastIfNoneMatch = ifNoneMatch

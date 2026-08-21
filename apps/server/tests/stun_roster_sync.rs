@@ -165,7 +165,7 @@ async fn can_use_connection(addr: SocketAddr, dialer: &DeviceIdentity, target_fi
         Ok(connection) => connection,
         Err(_) => return false,
     };
-    let request = PeerRequest { path: "/catalog/thumbprint".into(), range: None, if_none_match: None, playback: None };
+    let request = PeerRequest { path: "/catalog/thumbprint".into(), range: None, if_none_match: None, playback: None, error_report: None, like: None };
     match send_request(&connection, &request).await {
         Ok((header, _)) => header.status == 200,
         Err(_) => false,

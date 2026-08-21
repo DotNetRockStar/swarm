@@ -12,7 +12,7 @@ pub struct MediaRootSetting {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub media_roots: Vec<MediaRootSetting>,
@@ -22,6 +22,30 @@ pub struct Settings {
     #[serde(default)]
     media_root: Option<String>,
     pub tmdb_api_key: Option<String>,
+    /// Whether the read-only MCP server (see `mcp.rs`) starts alongside the
+    /// GUI app's core. Takes effect on next launch/restart — no hot-reload,
+    /// same posture as `media_root`'s pre-multi-root upgrade above having no
+    /// live-apply path either.
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
+}
+
+fn default_mcp_port() -> u16 {
+    7890
+}
+
+// Hand-written rather than `#[derive(Default)]` so a brand-new install (no
+// settings.json at all, going through `Settings::default()` in `load` below)
+// gets the exact same `mcp_port` default as an *existing* settings.json
+// that simply predates this field (going through serde's per-field
+// `#[serde(default = "default_mcp_port")]`) — a derived `Default` would
+// silently disagree (`u16::default()` is `0`, not `default_mcp_port()`).
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { media_roots: Vec::new(), media_root: None, tmdb_api_key: None, mcp_enabled: false, mcp_port: default_mcp_port() }
+    }
 }
 
 fn settings_path(app_data_dir: &Path) -> PathBuf {

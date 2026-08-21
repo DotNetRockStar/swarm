@@ -1,0 +1,275 @@
+//! Read-only MCP (Model Context Protocol) server — lets an AI client
+//! (Claude Desktop, Claude Code, or any other MCP client) query this
+//! server's library, swarm roster, and recent client errors over
+//! Streamable HTTP. See `apps/server/ui`'s "AI" dashboard tab for what MCP
+//! is and how to point a client at it.
+//!
+//! GUI-only (see this crate's `gui` Cargo feature and `AppState::core`,
+//! which starts this alongside `ServerCore` when `Settings::mcp_enabled` is
+//! set) — the headless daemon has no settings.json story to read a toggle
+//! from at all, see `gui.rs::mod settings`'s own doc comment.
+//!
+//! Every tool here is read-only by design (v1 scope, decided explicitly):
+//! an AI client can search/inspect the library and check swarm/error state,
+//! but cannot trigger a rescan/rescrape or change any setting. Mutating
+//! tools are a real, separate trust decision (an AI client acting on your
+//! library, not just reading it) — left for a later version if it turns
+//! out to be wanted.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::model::ServerInfo;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use swarm_core::peer::MediaKind;
+
+use crate::ServerCore;
+
+fn kind_str(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Movie => "movie",
+        MediaKind::Episode => "episode",
+        MediaKind::Track => "track",
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchLibraryParams {
+    /// Free-text search against title, show name, and artist.
+    pub query: Option<String>,
+    /// Restrict to one kind: "movie", "episode", or "track".
+    pub kind: Option<String>,
+    /// Restrict to entries carrying this exact genre/category.
+    pub genre: Option<String>,
+    /// Restrict to entries carrying this exact content rating (e.g. "PG-13", "TV-MA").
+    pub rating: Option<String>,
+    /// Only entries liked by at least one device.
+    pub liked_only: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchResultEntry {
+    /// Pass this to `get_entry_details` for the full record.
+    pub entry_key: String,
+    pub title: String,
+    pub kind: String,
+    pub year: Option<u32>,
+    pub genres: Vec<String>,
+    pub rating: Option<String>,
+    pub like_count: u32,
+}
+
+/// Caps how much of a large library one `search_library` call can return —
+/// this is a browsing/lookup tool for an AI conversation, not a bulk export;
+/// a narrower `query`/`genre`/`kind` is the right way to find more than this
+/// many matches.
+const SEARCH_RESULT_LIMIT: usize = 200;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EntryKeyParams {
+    /// The `entry_key` returned by `search_library`.
+    pub entry_key: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EntryDetails {
+    pub entry_key: String,
+    pub title: String,
+    pub kind: String,
+    pub year: Option<u32>,
+    pub genres: Vec<String>,
+    pub rating: Option<String>,
+    pub like_count: u32,
+    pub overview: Option<String>,
+    /// `"Name as Character"`, or bare `"Name"` when no character is on file.
+    pub cast: Vec<String>,
+    pub show_title: Option<String>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SwarmDeviceInfo {
+    pub name: String,
+    pub device_type: String,
+    pub online: bool,
+    /// RFC 3339, `None` if this device has never been seen online.
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ClientErrorInfo {
+    pub device_name: String,
+    pub asset_title: Option<String>,
+    pub message: String,
+    pub context: Option<String>,
+    /// Unix milliseconds, client-observed wall-clock time.
+    pub occurred_at_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct McpServer {
+    core: Arc<ServerCore>,
+}
+
+// No stored `ToolRouter` field: `#[tool_handler]` below defaults to calling
+// the `Self::tool_router()` associated function this macro generates fresh
+// per dispatch (see its own doc comment on the `router` attribute) — a
+// cached field is only needed when overriding that default via
+// `#[tool_handler(router = self.tool_router)]`, which this doesn't.
+#[tool_router]
+impl McpServer {
+    pub fn new(core: Arc<ServerCore>) -> Self {
+        Self { core }
+    }
+
+    #[tool(description = "Search the media library by title, kind, genre, content rating, and/or liked status. Returns at most 200 matches — narrow the query if you need more precision.")]
+    async fn search_library(&self, Parameters(params): Parameters<SearchLibraryParams>) -> Result<Json<Vec<SearchResultEntry>>, String> {
+        let entries = self.core.library.list().await.map_err(|e| e.to_string())?;
+        let like_counts = self.core.library.like_counts().await.map_err(|e| e.to_string())?;
+        let query = params.query.as_deref().map(str::to_lowercase);
+        let results = entries
+            .into_iter()
+            .filter(|e| params.kind.as_deref().is_none_or(|k| kind_str(e.kind).eq_ignore_ascii_case(k)))
+            .filter(|e| params.genre.as_deref().is_none_or(|g| e.genres.iter().any(|eg| eg.eq_ignore_ascii_case(g))))
+            .filter(|e| params.rating.as_deref().is_none_or(|r| e.rating.as_deref().is_some_and(|er| er.eq_ignore_ascii_case(r))))
+            .filter(|e| !params.liked_only.unwrap_or(false) || like_counts.get(&e.entry_key).copied().unwrap_or(0) > 0)
+            .filter(|e| {
+                query.as_deref().is_none_or(|q| {
+                    let title = e.scraped_title.as_deref().unwrap_or(&e.title).to_lowercase();
+                    title.contains(q)
+                        || e.show_title.as_deref().is_some_and(|s| s.to_lowercase().contains(q))
+                        || e.artist.as_deref().is_some_and(|a| a.to_lowercase().contains(q))
+                })
+            })
+            .take(SEARCH_RESULT_LIMIT)
+            .map(|e| SearchResultEntry {
+                like_count: like_counts.get(&e.entry_key).copied().unwrap_or(0),
+                entry_key: e.entry_key,
+                title: e.scraped_title.unwrap_or(e.title),
+                kind: kind_str(e.kind).to_string(),
+                year: e.year,
+                genres: e.genres,
+                rating: e.rating,
+            })
+            .collect();
+        Ok(Json(results))
+    }
+
+    #[tool(description = "Get full details (synopsis, cast, rating, genres, like count) for one library entry by its entry_key.")]
+    async fn get_entry_details(&self, Parameters(params): Parameters<EntryKeyParams>) -> Result<Json<EntryDetails>, String> {
+        let entry = self
+            .core
+            .library
+            .get(&params.entry_key)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no library entry with entry_key \"{}\"", params.entry_key))?;
+        let like_counts = self.core.library.like_counts().await.map_err(|e| e.to_string())?;
+        Ok(Json(EntryDetails {
+            like_count: like_counts.get(&entry.entry_key).copied().unwrap_or(0),
+            entry_key: entry.entry_key.clone(),
+            title: entry.scraped_title.clone().unwrap_or_else(|| entry.title.clone()),
+            kind: kind_str(entry.kind).to_string(),
+            year: entry.year,
+            genres: entry.genres,
+            rating: entry.rating,
+            overview: entry.overview,
+            cast: entry
+                .cast
+                .into_iter()
+                .map(|c| match c.character {
+                    Some(character) => format!("{} as {character}", c.name),
+                    None => c.name,
+                })
+                .collect(),
+            show_title: entry.show_title,
+            season: entry.season,
+            episode: entry.episode,
+            artist: entry.artist,
+            album: entry.album,
+        }))
+    }
+
+    #[tool(description = "List every device in this server's swarm(s) and whether it's currently online.")]
+    async fn list_swarm_devices(&self) -> Result<Json<Vec<SwarmDeviceInfo>>, String> {
+        let Some(link) = self.core.stun_link().await else {
+            return Ok(Json(Vec::new()));
+        };
+        let mut devices = Vec::new();
+        for swarm in link.swarms {
+            let response = self.core.swarm_devices(&swarm.id).await.map_err(|e| e.to_string())?;
+            devices.extend(response.devices.into_iter().map(|d| SwarmDeviceInfo {
+                name: d.name,
+                device_type: format!("{:?}", d.device_type).to_lowercase(),
+                online: d.online,
+                last_seen_at: d.last_seen_at,
+            }));
+        }
+        Ok(Json(devices))
+    }
+
+    #[tool(description = "List recent client-reported errors (playback failures, unreachable servers, user-reported asset problems) for triage — newest first.")]
+    async fn list_client_errors(&self) -> Result<Json<Vec<ClientErrorInfo>>, String> {
+        let errors = self.core.library.list_client_errors().await.map_err(|e| e.to_string())?;
+        Ok(Json(
+            errors
+                .into_iter()
+                .map(|e| ClientErrorInfo {
+                    device_name: e.device_name,
+                    asset_title: e.asset_title,
+                    message: e.message,
+                    context: e.context,
+                    occurred_at_ms: e.occurred_at_ms,
+                })
+                .collect(),
+        ))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerInfo {
+        // Field-assignment, not a `ServerInfo { .., ..Default::default() }`
+        // literal: `ServerInfo` (= `InitializeResult`) is `#[non_exhaustive]`
+        // upstream, which blocks struct-literal construction entirely from
+        // outside its own crate, even with a `..` base.
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Query this SWARM media server: search the library (search_library), \
+             inspect one entry in full (get_entry_details), check which swarm \
+             devices are online (list_swarm_devices), and review recent \
+             client-reported errors (list_client_errors). All tools are read-only."
+                .into(),
+        );
+        info
+    }
+}
+
+/// Binds `0.0.0.0:{port}` and serves the MCP endpoint at `/mcp` until the
+/// process exits — spawned as a background task, never awaited by its
+/// caller (see `AppState::core`). `disable_allowed_hosts` because this
+/// server is meant to be reachable from other devices on the LAN (an AI
+/// client rarely runs on the same machine as a headless media server); the
+/// SDK's default DNS-rebinding protection only allows loopback hosts, which
+/// would silently reject every real LAN request. This is the same trust
+/// model the rest of this app already uses on a home LAN (`/errors/report`
+/// and `/likes/toggle` also trust the caller without further
+/// authentication) — not a new weakening.
+pub async fn serve(core: Arc<ServerCore>, port: u16) -> std::io::Result<()> {
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
+    let service = StreamableHttpService::new(move || Ok(McpServer::new(Arc::clone(&core))), session_manager, config);
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(port, "MCP server listening");
+    axum::serve(listener, router).await
+}

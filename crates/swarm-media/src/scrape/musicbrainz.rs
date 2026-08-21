@@ -82,6 +82,9 @@ impl MusicBrainzClient {
         }
         let body: ReleaseSearchResponse =
             response.json().await.map_err(|e| MbError::Unavailable(e.to_string()))?;
+        if let Some(error) = body.error {
+            return Err(MbError::Unavailable(error));
+        }
         body.releases.into_iter().next().map(|r| r.id).ok_or(MbError::NotFound)
     }
 
@@ -176,10 +179,25 @@ fn urlencoding_decode(input: &str) -> String {
     out
 }
 
+/// MusicBrainz's search endpoint (unlike its plain `/release/{mbid}` lookup)
+/// signals its own throttle/overload condition as a `{"error": "..."}` body
+/// at HTTP 200, not a non-2xx status — confirmed live against the real API
+/// (`musicbrainz.org/ws/2/release/?query=...`), which returned exactly
+/// `{"error": "The MusicBrainz web server is currently busy. Please try
+/// again later."}` at 200 OK on one real request during this investigation.
+/// Before `error` was captured here, that shape silently deserialized into
+/// an empty `releases: []` (the field's `#[serde(default)]`) and was
+/// treated as a genuine "no match" — permanently marking the entry
+/// processed and never retried, rather than the transient, retry-worthy
+/// failure it actually is. Real-world impact: a large bulk scrape run
+/// (many hundreds of album-group requests at MusicBrainz's mandated ~1
+/// req/s) is exactly the shape of traffic likely to hit this, and every hit
+/// silently masqueraded as "not found" instead of "try again."
 #[derive(serde::Deserialize)]
 struct ReleaseSearchResponse {
     #[serde(default)]
     releases: Vec<ReleaseSearchHit>,
+    error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -271,6 +289,22 @@ mod tests {
         let base = spawn_mock(router).await;
         let client = MusicBrainzClient::with_base_url(&base);
         assert!(matches!(client.search_release("Nobody", "Nothing").await, Err(MbError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn busy_error_body_at_200_is_unavailable_not_not_found() {
+        // Real MusicBrainz behavior, confirmed live: the search endpoint's
+        // throttle/overload message comes back as `{"error": "..."}\` at
+        // HTTP 200, not a non-2xx status. Before this was handled, it
+        // deserialized as an empty result set and was wrongly treated as a
+        // permanent "no match" (see the struct doc comment).
+        let router = axum::Router::new().route(
+            "/release/",
+            get(|| async { Json(json!({"error": "The MusicBrainz web server is currently busy. Please try again later."})) }),
+        );
+        let base = spawn_mock(router).await;
+        let client = MusicBrainzClient::with_base_url(&base);
+        assert!(matches!(client.search_release("Pink Floyd", "The Wall").await, Err(MbError::Unavailable(_))));
     }
 
     #[tokio::test]

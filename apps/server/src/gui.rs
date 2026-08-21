@@ -11,11 +11,13 @@
 //! torn down, only the shared `SharedRootResolver` both the core and its
 //! `MediaService` hold is swapped and a scan run against the new set.
 
+mod mcp;
 mod settings;
 
 use settings::{MediaRootSetting, Settings};
 use std::path::PathBuf;
 use std::sync::Arc;
+use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
 use swarm_server::{ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
@@ -40,12 +42,12 @@ impl AppState {
         self.core
             .get_or_try_init(|| async {
                 let dir = app_data_dir(app)?;
-                let media_roots = settings::load(&dir).media_roots;
-                if media_roots.is_empty() {
+                let settings = settings::load(&dir);
+                if settings.media_roots.is_empty() {
                     return Err("not_configured".to_string());
                 }
                 let config = ServerConfig {
-                    media_roots: to_media_roots(&media_roots),
+                    media_roots: to_media_roots(&settings.media_roots),
                     data_dir: dir,
                     // Same SWARM_PEER_BIND convention as the headless binary
                     // (see config_from_env) — lets the GUI run on a different
@@ -56,9 +58,33 @@ impl AppState {
                         .parse()
                         .expect("SWARM_PEER_BIND must be host:port"),
                     allowed_fingerprints: vec![],
-                    token_store_mode: TokenStoreMode::PreferKeyring,
+                    // Real bug, found live: with PreferKeyring, a token saved
+                    // successfully via the OS keychain has no file backup —
+                    // `TokenStore::save` only falls back to the file when the
+                    // keyring *write* itself fails. macOS Keychain access is
+                    // tied to the app binary's code signature, so an
+                    // unsigned/ad-hoc-resigned build (this app's normal dev
+                    // state) can lose access to its own previously-saved
+                    // entry after a rebuild; `restore_stun_link` then finds
+                    // no token and discards the whole STUN link — even though
+                    // base_url/device_id/swarms all survived fine in
+                    // server-state.sqlite — forcing full STUN URL + join code
+                    // re-entry. FileOnly's plain 0600 file isn't tied to code
+                    // signing, so it survives every rebuild/restart; the
+                    // token itself is already revocable-not-precious (the
+                    // STUN server's own row is the real revocation
+                    // authority), so this is the right trade-off here.
+                    token_store_mode: TokenStoreMode::FileOnly,
                 };
                 let core = ServerCore::start(config).await.map_err(|e| e.to_string())?;
+                if settings.mcp_enabled {
+                    let mcp_core = Arc::clone(&core);
+                    tokio::spawn(async move {
+                        if let Err(err) = mcp::serve(mcp_core, settings.mcp_port).await {
+                            tracing::error!(%err, "MCP server stopped");
+                        }
+                    });
+                }
                 Ok(core)
             })
             .await
@@ -91,12 +117,19 @@ fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
 struct SettingsView {
     media_roots: Vec<MediaRootSetting>,
     has_tmdb_key: bool,
+    mcp_enabled: bool,
+    mcp_port: u16,
 }
 
 #[tauri::command]
 async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
     let settings = settings::load(&app_data_dir(&app)?);
-    Ok(SettingsView { media_roots: settings.media_roots, has_tmdb_key: settings.tmdb_api_key.is_some() })
+    Ok(SettingsView {
+        media_roots: settings.media_roots,
+        has_tmdb_key: settings.tmdb_api_key.is_some(),
+        mcp_enabled: settings.mcp_enabled,
+        mcp_port: settings.mcp_port,
+    })
 }
 
 async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<String>, String> {
@@ -218,6 +251,25 @@ async fn set_tmdb_api_key(app: tauri::AppHandle, key: String) -> Result<(), Stri
     settings::save(&dir, &settings).map_err(|e| e.to_string())
 }
 
+/// Both take effect on next launch/restart, not live — see `mcp.rs`'s doc
+/// comment and `AppState::core`, which only ever starts the MCP listener
+/// once, the same time it starts `ServerCore` itself.
+#[tauri::command]
+async fn set_mcp_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings: Settings = settings::load(&dir);
+    settings.mcp_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_mcp_port(app: tauri::AppHandle, port: u16) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings: Settings = settings::load(&dir);
+    settings.mcp_port = port;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_status(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<ServerStatus, String> {
     state.core(&app).await?.status().await.map_err(|e| e.to_string())
@@ -231,9 +283,27 @@ struct RescanResult {
     unchanged: u64,
 }
 
+/// `scan-progress` event name emitted to the webview during [`rescan`] — one
+/// per discovered file, payload shape is `swarm_media::scan::ScanProgressEvent`.
+/// Same forwarding-task pattern as [`run_scrape`]'s `scrape-progress` — real
+/// bug this fixes: a rescan over a slow network mount gave no indication
+/// anything was happening until it finished, confirmed live against a real
+/// ~3,700-file remote share.
+const SCAN_PROGRESS_EVENT: &str = "scan-progress";
+
 #[tauri::command]
 async fn rescan(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<RescanResult, String> {
-    let report = state.core(&app).await?.rescan().await.map_err(|e| e.to_string())?;
+    let core = state.core(&app).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let forward = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = emitter.emit(SCAN_PROGRESS_EVENT, event);
+        }
+    });
+    let result = core.rescan(Some(tx)).await.map_err(|e| e.to_string());
+    let _ = forward.await;
+    let report = result?;
     Ok(RescanResult {
         added: report.added,
         updated: report.updated,
@@ -254,7 +324,8 @@ async fn reclassify_library(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<swarm_media::store::ReclassifyReport, String> {
-    state.core(&app).await?.library.reclassify_all().await.map_err(|e| e.to_string())
+    let core = state.core(&app).await?;
+    core.library.reclassify_all(&core.media_roots).await.map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -281,15 +352,20 @@ struct EntrySummary {
     year: Option<u32>,
     duration_secs: Option<f64>,
     cast: Vec<swarm_media::store::CastMember>,
+    overview: Option<String>,
+    rating: Option<String>,
+    like_count: u32,
 }
 
 #[tauri::command]
 async fn list_entries(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<EntrySummary>, String> {
     let core = state.core(&app).await?;
     let entries = core.library.list().await.map_err(|e| e.to_string())?;
+    let like_counts = core.library.like_counts().await.map_err(|e| e.to_string())?;
     Ok(entries
         .into_iter()
         .map(|entry| EntrySummary {
+            like_count: like_counts.get(&entry.entry_key).copied().unwrap_or(0),
             entry_key: entry.entry_key,
             kind: format!("{:?}", entry.kind).to_lowercase(),
             title: entry.title,
@@ -307,8 +383,20 @@ async fn list_entries(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
             year: entry.year,
             duration_secs: entry.duration_secs,
             cast: entry.cast,
+            overview: entry.overview,
+            rating: entry.rating,
         })
         .collect())
+}
+
+/// Every distinct genre/category value currently in use anywhere in the
+/// library — backs the Media tab's category picker, see
+/// `Library::distinct_genres`'s doc comment for why genres double as
+/// categories rather than this being a separate concept.
+#[tauri::command]
+async fn list_categories(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let core = state.core(&app).await?;
+    core.library.distinct_genres().await.map_err(|e| e.to_string())
 }
 
 /// Raw bytes for one entry's artwork slot, for the Media tab's browse view to
@@ -385,10 +473,11 @@ async fn rescrape_entry(
     core.rescrape_entry(&entry_key, config, tmdb_override).await.map_err(|e| e.to_string())
 }
 
-/// Manually override an entry's display title and/or genre list. `None`
-/// (omitted from the JS call) leaves that field untouched — see
-/// `Library::set_manual_metadata`. Never affects grouping (artist/album/
-/// show/season/episode), which stays path-derived.
+/// Manually override an entry's display title, genre/category list,
+/// synopsis, and/or content rating. `None` (omitted from the JS call) leaves
+/// that field untouched — see `Library::set_manual_metadata`/
+/// `Library::set_overview`/`Library::set_rating`. Never affects grouping
+/// (artist/album/show/season/episode), which stays path-derived.
 #[tauri::command]
 async fn set_manual_metadata(
     app: tauri::AppHandle,
@@ -396,10 +485,48 @@ async fn set_manual_metadata(
     entry_key: String,
     title: Option<String>,
     genres: Option<Vec<String>>,
+    overview: Option<String>,
+    rating: Option<String>,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
     core.library
         .set_manual_metadata(&entry_key, title.as_deref(), genres.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(overview) = overview {
+        core.library.set_overview(&entry_key, &overview).await.map_err(|e| e.to_string())?;
+    }
+    if let Some(rating) = rating {
+        core.library.set_rating(&entry_key, &rating).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Manually move an entry to a different asset type ("movie"/"episode"/
+/// "track") — see `Library::set_manual_kind`'s doc comment for why this
+/// exists (a music video sitting under `movies/` or `shows/` as an .mkv,
+/// indistinguishable from a real movie/episode by path or extension alone).
+/// `artist`/`album` matter only when `kind` is "track"; `show_title` only
+/// when it's "episode" — both ignored otherwise.
+#[tauri::command]
+async fn set_manual_kind(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+    kind: String,
+    artist: Option<String>,
+    album: Option<String>,
+    show_title: Option<String>,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    let kind = match kind.as_str() {
+        "movie" => MediaKind::Movie,
+        "episode" => MediaKind::Episode,
+        "track" => MediaKind::Track,
+        other => return Err(format!("unknown asset kind \"{other}\"")),
+    };
+    core.library
+        .set_manual_kind(&entry_key, kind, artist.as_deref(), album.as_deref(), show_title.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -432,6 +559,52 @@ async fn upload_artwork(
         .await
         .map_err(|e| e.to_string())?;
     core.library.set_artwork(&entry_key, artwork_kind, &relative).await.map_err(|e| e.to_string())
+}
+
+/// Manually uploaded artwork shared across a whole client-side-computed
+/// group — an artist (every track by that artist, across every album) or an
+/// album (every track in it) — rather than one entry, since neither has an
+/// `entry_key` of its own (the Netflix-style hierarchy is grouped entirely
+/// client-side over the flat entry list; see the plan's "hierarchy is
+/// grouped client-side" decision). The frontend already knows exactly which
+/// entries belong to the group (it just built the grouping to render the
+/// page), so it passes their keys directly rather than this command
+/// re-deriving artist/album matches itself. Same on-disk convention as
+/// [upload_artwork] and the scraper's own [`crate`]-external
+/// `scrape_one_album_group` (`swarm_media::scrape::runner`): the file is
+/// saved once, beside the *first* entry, and every entry in the group
+/// stores that same shared `relative_path` — safe regardless of whether the
+/// group's tracks span multiple folders, since artwork is always resolved
+/// root-relative (`get_artwork_bytes` above), never relative to the
+/// referencing entry's own folder.
+#[tauri::command]
+async fn upload_group_artwork(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_keys: Vec<String>,
+    kind: String,
+    extension: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    let artwork_kind =
+        swarm_media::store::ArtworkKind::parse(&kind).ok_or_else(|| format!("unknown artwork kind \"{kind}\""))?;
+    let extension = extension.trim().trim_start_matches('.').to_lowercase();
+    if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+        return Err(format!("unsupported image extension \"{extension}\""));
+    }
+    let Some(first_key) = entry_keys.first() else {
+        return Err("no entries to attach artwork to".to_string());
+    };
+    let first = core.library.get(first_key).await.map_err(|e| e.to_string())?.ok_or("no such entry")?;
+    let filename = format!("manual-{}.{extension}", artwork_kind.route_segment());
+    let relative = swarm_media::scrape::artwork::save_artwork(&core.media_roots, &first.relative_path, &filename, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    for entry_key in &entry_keys {
+        core.library.set_artwork(entry_key, artwork_kind, &relative).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Reverts a bad scrape (wrong TMDb/MusicBrainz match, bad manual edit) —
@@ -534,6 +707,72 @@ async fn get_swarm_devices(
     core.swarm_devices(&swarm_id).await.map_err(|e| e.to_string())
 }
 
+/// Wire shape for the swarm page's Errors panel — a plain struct rather than
+/// reusing `swarm_media::store::ClientErrorRecord` directly so the frontend
+/// gets stable camelCase field names independent of the Rust struct's own
+/// naming, same pattern as `EntrySummary` above.
+#[derive(serde::Serialize)]
+struct ClientErrorView {
+    id: i64,
+    device_id: String,
+    device_name: String,
+    entry_key: Option<String>,
+    asset_title: Option<String>,
+    kind: Option<String>,
+    message: String,
+    context: Option<String>,
+    occurred_at_ms: i64,
+    received_at_ms: i64,
+}
+
+impl From<swarm_media::store::ClientErrorRecord> for ClientErrorView {
+    fn from(r: swarm_media::store::ClientErrorRecord) -> Self {
+        Self {
+            id: r.id,
+            device_id: r.device_id,
+            device_name: r.device_name,
+            entry_key: r.entry_key,
+            asset_title: r.asset_title,
+            kind: r.kind,
+            message: r.message,
+            context: r.context,
+            occurred_at_ms: r.occurred_at_ms,
+            received_at_ms: r.received_at_ms,
+        }
+    }
+}
+
+/// Client-reported errors (playback failures, etc. — see
+/// `swarm_core::peer::ClientErrorReport`), newest first, for the swarm
+/// page's Errors panel.
+#[tauri::command]
+async fn list_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<ClientErrorView>, String> {
+    let core = state.core(&app).await?;
+    let errors = core.library.list_client_errors().await.map_err(|e| e.to_string())?;
+    Ok(errors.into_iter().map(ClientErrorView::from).collect())
+}
+
+/// Backs the swarm page's notification bubble — polled separately from
+/// [`list_client_errors`] so the badge can refresh cheaply without pulling
+/// every error's full body down each time.
+#[tauri::command]
+async fn client_error_count(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<u64, String> {
+    let core = state.core(&app).await?;
+    core.library.client_error_count().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_client_error(app: tauri::AppHandle, state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.library.delete_client_error(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.library.clear_client_errors().await.map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -548,15 +787,20 @@ fn main() {
             add_media_root,
             remove_media_root,
             set_tmdb_api_key,
+            set_mcp_enabled,
+            set_mcp_port,
             get_status,
             rescan,
             reclassify_library,
             list_entries,
+            list_categories,
             get_artwork_bytes,
             run_scrape,
             rescrape_entry,
             set_manual_metadata,
+            set_manual_kind,
             upload_artwork,
+            upload_group_artwork,
             clear_scraped_metadata,
             get_swarm_link,
             join_swarm,
@@ -564,6 +808,10 @@ fn main() {
             resync_swarm,
             leave_swarm,
             get_swarm_devices,
+            list_client_errors,
+            client_error_count,
+            delete_client_error,
+            clear_client_errors,
         ])
         .run(tauri::generate_context!())
         .expect("failed to launch SWARM Server");

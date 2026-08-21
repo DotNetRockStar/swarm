@@ -152,17 +152,26 @@ class PeerLoopbackProxy private constructor(
             connection.request(peerPath, range, ifNoneMatch)
         } catch (e: PeerQuicError) {
             e.printStackTrace()
-            connections.remove(serverId)
             writeStatusOnly(output, 500, "Internal Server Error")
             return
         } catch (e: IOException) {
-            // A cached connection can die after this proxy last used it (peer
-            // restarted, or the QUIC connection idled out) — confirmed live via
-            // kwik's own "not connected" on createStream. Evicting it here means
-            // the next play attempt at least gets a clean 404 (prompting a
-            // re-browse) instead of the same connection silently 500ing forever.
+            // Real bug, found live: this used to remove `serverId` from
+            // `connections` right here on any single failed request. Fine
+            // for one deliberate action (the caller notices a play/browse
+            // attempt failed and retries), but silently fatal for artwork —
+            // a burst of concurrent card-image fetches sharing one
+            // connection (a normal grid scroll) meant one transient hiccup
+            // on any single request deregistered the connection for the
+            // *whole server*, and every image fetch after that point 404'd
+            // instantly with no attempt to reconnect, until whatever next
+            // triggered a full catalog refresh. This proxy has no business
+            // making that call anyway — see the class doc comment
+            // ("this proxy just needs to know how to route to whichever one
+            // was chosen" / "the caller owns its lifecycle"). Connection
+            // health and reconnection are entirely
+            // [app.swarm.tv.core.catalog.CatalogSession]'s job now, via the
+            // self-healing [PeerConnection] it registers.
             e.printStackTrace()
-            connections.remove(serverId)
             writeStatusOnly(output, 500, "Internal Server Error")
             return
         }

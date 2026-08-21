@@ -201,7 +201,7 @@ async fn registering_with_stun_leaves_the_server_ready_to_accept_a_punched_conne
     .await
     .unwrap();
 
-    let request = PeerRequest { path: "/catalog/thumbprint".into(), range: None, if_none_match: None, playback: None };
+    let request = PeerRequest { path: "/catalog/thumbprint".into(), range: None, if_none_match: None, playback: None, error_report: None, like: None };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 200);
     let body = read_body(&header, &mut recv).await.unwrap();

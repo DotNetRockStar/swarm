@@ -102,6 +102,10 @@ dependencies {
     // 2.x needs neither and needs no separate network-engine artifact
     // either (bundles OkHttp fetching by default).
     implementation(libs.coil.compose)
+    // Coil's GIF frame decoder — the base coil-compose artifact only handles
+    // static formats, so an animated GIF (the player's loading indicator)
+    // would otherwise render as its first frame and never animate.
+    implementation(libs.coil.gif)
 
     // Relational on-device store for what the app remembers between
     // launches — the saved STUN connection (server URL, device name,

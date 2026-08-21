@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -85,12 +86,17 @@ private fun AlbumGrid(artist: ArtistGroup, onOpenAlbum: (AlbumGroup) -> Unit, on
             Button(onClick = onBack, colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText)) { Text("Back") }
         }
         Spacer(Modifier.height(24.dp))
-        LazyVerticalGrid(columns = GridCells.Fixed(4), verticalArrangement = Arrangement.spacedBy(20.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(4),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            contentPadding = PaddingValues(12.dp),
+        ) {
             itemsIndexed(artist.albums) { index, album ->
                 val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                 Card(onClick = { onOpenAlbum(album) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp)) {
-                        Text(album.album, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                        Text(album.album, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                         Spacer(Modifier.height(6.dp))
                         Text("${album.tracks.size} track" + if (album.tracks.size == 1) "" else "s", color = SwarmMuted, fontSize = 11.sp)
                     }
