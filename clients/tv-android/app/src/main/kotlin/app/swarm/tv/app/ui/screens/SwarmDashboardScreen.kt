@@ -6,8 +6,11 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import android.app.Activity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,12 +24,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +47,7 @@ import app.swarm.tv.core.rest.DeviceType
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.rest.SwarmSummary
 import app.swarm.tv.app.ui.theme.SwarmAccent
+import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmGreen
 import app.swarm.tv.app.ui.theme.SwarmMuted
@@ -65,54 +75,124 @@ fun SwarmDashboardScreen(
     val browseLibraryFocusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { browseLibraryFocusRequester.requestFocus() }
 
-    Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+    // This is the app's true home screen — every other screen's Back chain
+    // (Settings, Catalog, detail screens, ...) ultimately lands here, so
+    // this is the one place a physical Back press would otherwise fall
+    // through to Android's default behavior and silently kill the Activity.
+    // That's the accidental-exit bug real use surfaced: Back one time too
+    // many while browsing quits the whole app with no warning. Trapping it
+    // here with a confirm step (rather than on every individual screen)
+    // keeps the fix in one place matching where the real risk actually is.
+    var showExitConfirm by remember { mutableStateOf(false) }
+    val activity = LocalContext.current as? Activity
+
+    BackHandler(enabled = !showExitConfirm) { showExitConfirm = true }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(40.dp)
+                // Same reasoning as CatalogScreen's FilterOverlay: without this,
+                // D-pad focus can still travel into this content from behind the
+                // (visually on-top) exit-confirm overlay.
+                .focusProperties { canFocus = !showExitConfirm },
         ) {
-            Column {
-                Text("SWARM", color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
-                Text(swarm.name, color = SwarmText, fontSize = 16.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("SWARM", color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
+                    Text(swarm.name, color = SwarmText, fontSize = 16.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        onClick = onBrowseCatalog,
+                        modifier = Modifier.focusRequester(browseLibraryFocusRequester),
+                        colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = SwarmBackground),
+                    ) {
+                        Text("Browse library")
+                    }
+                    Button(
+                        onClick = onResync,
+                        enabled = !resyncing,
+                        colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+                    ) {
+                        Text(if (resyncing) "Resyncing…" else "Resync")
+                    }
+                    Button(
+                        onClick = onOpenSettings,
+                        colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
+                    ) {
+                        Text("Settings")
+                    }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    onClick = onBrowseCatalog,
-                    modifier = Modifier.focusRequester(browseLibraryFocusRequester),
-                    colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = SwarmBackground),
-                ) {
-                    Text("Browse library")
-                }
-                Button(
-                    onClick = onResync,
-                    enabled = !resyncing,
-                    colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                ) {
-                    Text(if (resyncing) "Resyncing…" else "Resync")
-                }
-                Button(
-                    onClick = onOpenSettings,
-                    colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                ) {
-                    Text("Settings")
+            Spacer(Modifier.height(24.dp))
+
+            val servers = devices.filter { it.deviceType == DeviceType.SERVER || it.deviceType == DeviceType.BOTH }
+            Text("Servers in this swarm (${servers.size})", color = SwarmMuted, fontSize = 14.sp)
+            Spacer(Modifier.height(12.dp))
+
+            if (servers.isEmpty()) {
+                Text(
+                    "No servers here yet — join code a SWARM server app onto this swarm to start streaming.",
+                    color = SwarmMuted,
+                    fontSize = 14.sp,
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(servers) { device -> ServerRow(device) }
                 }
             }
         }
-        Spacer(Modifier.height(24.dp))
 
-        val servers = devices.filter { it.deviceType == DeviceType.SERVER || it.deviceType == DeviceType.BOTH }
-        Text("Servers in this swarm (${servers.size})", color = SwarmMuted, fontSize = 14.sp)
-        Spacer(Modifier.height(12.dp))
-
-        if (servers.isEmpty()) {
-            Text(
-                "No servers here yet — join code a SWARM server app onto this swarm to start streaming.",
-                color = SwarmMuted,
-                fontSize = 14.sp,
+        if (showExitConfirm) {
+            ExitConfirmOverlay(
+                onConfirmExit = { activity?.finish() },
+                onDismiss = { showExitConfirm = false },
             )
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(servers) { device -> ServerRow(device) }
+        }
+    }
+}
+
+/**
+ * A single confirm action, no on-screen Cancel — same reasoning every other
+ * overlay in this app drops one: the physical Back button already dismisses
+ * this (wired below via [BackHandler]), and it's the more natural gesture
+ * anyway since Back is exactly what the user just pressed to get here.
+ */
+@Composable
+private fun ExitConfirmOverlay(onConfirmExit: () -> Unit, onDismiss: () -> Unit) {
+    BackHandler(onBack = onDismiss)
+    val exitFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { exitFocusRequester.requestFocus() }
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(SwarmSurface).padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Exit SWARM?", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.height(8.dp))
+            Text("Press Back again to stay.", color = SwarmMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = onConfirmExit,
+                modifier = Modifier.focusRequester(exitFocusRequester),
+                colors = ButtonDefaults.colors(
+                    containerColor = SwarmAccentHot,
+                    contentColor = SwarmText,
+                    focusedContainerColor = SwarmAccentHot,
+                    focusedContentColor = SwarmText,
+                    pressedContainerColor = SwarmAccentHot,
+                    pressedContentColor = SwarmText,
+                ),
+            ) {
+                Text("Exit app", fontWeight = FontWeight.Bold)
             }
         }
     }

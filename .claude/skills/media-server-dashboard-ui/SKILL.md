@@ -1,6 +1,6 @@
 ---
 name: media-server-dashboard-ui
-description: Use when building or changing anything in the Tauri media server's web dashboard (apps/server/ui — index.html, app.js, details.js, swarm.js, media.js, style.css). Covers the no-framework vanilla-JS conventions (invoke(), esc(), showToast()), the shared SwarmBackground/SwarmAccent-style CSS palette, the tab system, script-load-order pitfalls, and the pattern for adding a new panel like "Client errors." For the Fire TV client's UI conventions (a separate, Kotlin/Compose surface sharing the same palette), see tv-client-ui-conventions.
+description: Use when building or changing anything in the Tauri media server's web dashboard (apps/server/ui — index.html, app.js, details.js, swarm.js, notifications.js, media.js, ai.js, style.css). Covers the no-framework vanilla-JS conventions (invoke(), esc(), showToast()), the shared SwarmBackground/SwarmAccent-style CSS palette, the tab system, script-load-order pitfalls, and the pattern for adding a new panel like "Client errors." For the Fire TV client's UI conventions (a separate, Kotlin/Compose surface sharing the same palette), see tv-client-ui-conventions.
 ---
 
 # Media server dashboard UI conventions
@@ -21,12 +21,13 @@ onto the elements that string just created. Follow this same shape for
 new panels rather than introducing a different pattern (a template
 engine, a framework) for one feature.
 
-Four script files load in a fixed order (`index.html`'s bottom):
-`app.js` → `details.js` → `swarm.js` → `media.js`. `app.js` owns
-boot/tabs/toast/shared helpers; the other three each own one tab's
-content and are expected to define whatever function `app.js`'s
-`showTab()` dispatches to for that tab (`refreshDetails`,
-`refreshSwarm`, `refreshMedia`).
+Six script files load in a fixed order (`index.html`'s bottom):
+`app.js` → `details.js` → `swarm.js` → `notifications.js` → `media.js`
+→ `ai.js`. `app.js` owns boot/tabs/toast/shared helpers; the other five
+each own one tab's content and are expected to define whatever function
+`app.js`'s `showTab()` dispatches to for that tab (`refreshDetails`,
+`refreshSwarm`, `refreshNotifications`, `refreshMedia`, `refreshAi`).
+The `about` tab is the one exception — see "Tabs" below.
 
 **Real bug, found live, twice**: calling any of those tab-refresh
 functions (or anything else defined in a later-loading file) from code
@@ -34,7 +35,7 @@ that runs unconditionally at a file's own top level is a genuine race,
 not a one-off — each classic `<script>` gets a microtask checkpoint
 after it runs, and if an `invoke()` round trip resolves fast enough,
 the continuation can call a function that hasn't been defined yet
-(surfaces as e.g. `refreshErrorBadge is not defined`, easy to
+(surfaces as e.g. `refreshNotificationBadge is not defined`, easy to
 misdiagnose as a settings/persistence bug since it's caught by the same
 top-level `try/catch` that also handles "onboarding not finished").
 Fix: gate any such call behind `document.addEventListener("DOMContentLoaded", ...)`,
@@ -84,9 +85,10 @@ text. Every `try { await invoke(...) } catch (err) { ... }` in this
 codebase routes `err` to `showToast(String(err), "error")` in the catch
 block; a new call site that swallows an error without a toast is a
 regression, not a simplification. The one deliberate exception is a
-best-effort background poll (`refreshErrorBadge`'s `catch {}`) where a
-transient failure every 30s isn't worth a toast — comment why if you
-add another one of these, don't let a silent catch look accidental.
+best-effort background poll (`refreshNotificationBadge`'s `catch {}`)
+where a transient failure every 30s isn't worth a toast — comment why
+if you add another one of these, don't let a silent catch look
+accidental.
 
 ## Shared palette: keep in sync with the Fire TV client
 
@@ -114,21 +116,27 @@ Kotlin side too rather than letting one app silently drift off-palette.
 - Icons are Bootstrap Icons (`<i class="bi bi-icon-name">`), always
   paired with the button/label text, never icon-only for a primary
   action.
-- Tabs: `TABS` array in `app.js`, `tabPanel-<name>` / `tabBtn-<name>`
-  id convention, `showTab(name)` toggles `.d-none`/`.tab-active` and
-  dispatches to that tab's `refresh*()`. Adding a tab means adding to
-  `TABS`, adding the matching `tabPanel-`/`tabBtn-` markup, and adding
-  the `if (name === "...") refresh...()` dispatch line.
+- Tabs: `TABS` array in `app.js` (currently `about`, `details`, `swarm`,
+  `notifications`, `media`, `ai`, in on-screen left-to-right order —
+  `about` is deliberately leftmost and is also the tab `enterDashboard()`
+  opens on at boot, since it's the first thing every user should see),
+  `tabPanel-<name>` / `tabBtn-<name>` id convention, `showTab(name)`
+  toggles `.d-none`/`.tab-active` and dispatches to that tab's
+  `refresh*()`. Adding a tab means adding to `TABS`, adding the matching
+  `tabPanel-`/`tabBtn-` markup, and adding the
+  `if (name === "...") refresh...()` dispatch line. `about` is the one
+  tab with no dispatch line — its content is static, nothing to refresh.
 - A small red count bubble on a tab button (`.badge-count`, see
-  `#errorBadge` on the Swarm tab) is this app's pattern for "there's
-  something here you haven't looked at yet" — paired with a
+  `#notificationBadge` on the Notifications tab) is this app's pattern
+  for "there's something here you haven't looked at yet" — paired with a
   `setInterval`-polled `refresh*Badge()` function (30s interval is the
   existing standard) rather than a push mechanism, since there's no
   websocket/event channel wired up for this yet.
 
 ## Adding a new report/feed-style panel: follow the "Client errors" shape
 
-The Swarm tab's "Client errors" panel (`swarm.js`'s `loadClientErrors`,
+The Notifications tab's "Client errors" panel (`notifications.js`'s
+`loadClientErrors`,
 `style.css`'s `.client-error-row`/`.client-error-meta`/`.client-error-context`)
 is the reference shape for "a list of server-recorded events a human
 should triage and dismiss": a header with a live count and a
@@ -141,4 +149,21 @@ and a per-row delete button (`data-delete-*` attribute + a single
 `innerHTML` render, the standard way this codebase wires up
 dynamically-created rows). Copy this shape for any new "list of things
 from the backend that accumulate and get dismissed" panel rather than
-designing a new list layout from scratch.
+designing a new list layout from scratch. This panel moved here from the
+Swarm tab once its badge grew into its own "things to look at" surface
+distinct from swarm membership/roster management — a similar future
+panel might belong on this tab too rather than wherever its data
+technically originates.
+
+## Adding a "row of things" list: give each row a real delineated card
+
+`.media-root-row` (Details tab, `details.js`'s `refreshMediaRoots`) is
+the reference shape for a *simpler* list than "Client errors" above —
+no per-row expand state, no meta-tag line, just "one thing plus a
+delete/remove action" — but still needs its own bordered/backgrounded
+row (padding, `border-radius`, `margin-bottom`) rather than bare
+adjacent `.row` divs with nothing marking where one entry ends and the
+next begins. Real feedback this fixed: a plain stack of `.row` divs (no
+border, no background, no margin) read as "too close together, no
+delineation" once there was more than one entry — the fix is the same
+"give it a card" shape `.client-error-row` already uses, scaled down.

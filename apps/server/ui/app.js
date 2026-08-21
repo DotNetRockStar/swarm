@@ -51,9 +51,9 @@ function show(id) {
   document.body.style.visibility = "visible";
 }
 
-// "security" has no refresh*() dispatch below — its tab content is static
+// "about" has no refresh*() dispatch below — its tab content is static
 // (no invoke() calls, nothing that goes stale), unlike every other tab here.
-const TABS = ["details", "swarm", "media", "ai", "security"];
+const TABS = ["about", "details", "swarm", "notifications", "media", "ai"];
 
 function showTab(name) {
   for (const tab of TABS) {
@@ -62,6 +62,7 @@ function showTab(name) {
   }
   if (name === "details") refreshDetails();
   if (name === "swarm") refreshSwarm();
+  if (name === "notifications") refreshNotifications();
   if (name === "media") refreshMedia();
   if (name === "ai") refreshAi();
 }
@@ -102,12 +103,12 @@ document.getElementById("onboardSkipBtn").addEventListener("click", enterDashboa
 
 // ---- boot -------------------------------------------------------------------
 
-// Notification bubble on the Swarm tab (client-reported error count) — kept
-// here rather than in swarm.js despite belonging conceptually to that tab's
-// feature, purely so it sits next to enterDashboard() below, the other
-// thing that touches it at boot.
-async function refreshErrorBadge() {
-  const badge = document.getElementById("errorBadge");
+// Notification bubble on the Notifications tab (client-reported error
+// count) — kept here rather than in notifications.js despite belonging
+// conceptually to that tab's feature, purely so it sits next to
+// enterDashboard() below, the other thing that touches it at boot.
+async function refreshNotificationBadge() {
+  const badge = document.getElementById("notificationBadge");
   if (!badge) return;
   try {
     const count = Number(await invoke("client_error_count")) || 0;
@@ -120,9 +121,9 @@ async function refreshErrorBadge() {
 
 async function enterDashboard() {
   show("dashView");
-  showTab("details");
-  refreshErrorBadge();
-  setInterval(refreshErrorBadge, 30000);
+  showTab("about");
+  refreshNotificationBadge();
+  setInterval(refreshNotificationBadge, 30000);
 }
 
 async function boot() {

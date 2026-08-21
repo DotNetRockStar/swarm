@@ -24,8 +24,13 @@ p { line-height: 1.5; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .stat { background: var(--surface-muted); border-radius: 10px; padding: 12px 14px; }
 .stat .label { font-size: .72rem; color: var(--muted); }
-.stat .value { font-size: 1.05rem; font-weight: 700; word-break: break-all; }
-.stat .value.mono { font-family: ui-monospace, monospace; font-size: .8rem; }
+/* overflow-wrap (not word-break: break-all) for ordinary values — it only
+   breaks where the browser actually needs to, at a word boundary when one
+   exists, instead of chopping through the middle of every word regardless.
+   break-all stays scoped to .mono below, where hex hashes have no natural
+   word boundaries at all and need it to avoid overflowing the tile. */
+.stat .value { font-size: 1.05rem; font-weight: 700; overflow-wrap: break-word; }
+.stat .value.mono { font-family: ui-monospace, monospace; font-size: .8rem; word-break: break-all; }
 button {
   background: var(--accent); color: #04263a; border: 0; border-radius: 8px;
   padding: 8px 16px; font-weight: 700; font-family: inherit; cursor: pointer; white-space: nowrap;
@@ -34,10 +39,10 @@ button:hover { filter: brightness(1.15); }
 button.secondary { background: var(--surface-muted); color: var(--text); border: 1px solid var(--border); }
 button.danger { background: var(--surface-muted); color: #ff8db4; border: 1px solid #6b3348; }
 button i.bi, .tabnav button i.bi, .checkbox-label i.bi { margin-right: 6px; }
-label { display: block; font-size: .75rem; color: var(--muted); margin: 10px 0 4px; }
+label { display: block; font-size: .75rem; color: var(--muted); margin: 14px 0 6px; }
 input {
   width: 100%; background: var(--surface-muted); border: 1px solid var(--border); color: var(--text);
-  border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: .9rem;
+  border-radius: 8px; padding: 10px 12px; font-family: inherit; font-size: .9rem;
 }
 input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .table-scroll { overflow-x: auto; }
@@ -62,6 +67,23 @@ td.mono {
 .card-head-actions { display: flex; gap: 8px; align-items: center; }
 .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); white-space: nowrap; }
 .checkbox-label input { width: auto; }
+
+/* Media roots list (Details tab) — each root its own bordered row, same
+   shape as .client-error-row below, so a list of two or more roots reads as
+   distinct delineated entries instead of bare text lines stacked directly
+   against each other with nothing marking where one ends and the next
+   starts. Label/path stack vertically (rather than sitting side by side in
+   one line) so a long path wraps on its own line without colliding with —
+   or squeezing — the label or the Remove button. */
+.media-root-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-muted); margin-bottom: 8px;
+}
+.media-root-row:last-child { margin-bottom: 0; }
+.media-root-info { flex: 1; min-width: 0; }
+.media-root-label { font-size: .85rem; font-weight: 700; }
+.media-root-path { font-size: .78rem; margin-top: 2px; overflow-wrap: break-word; }
 
 /* Toast notifications: every success/warning/error message in the app
    surfaces here instead of scattered inline text, color-coded so status is
@@ -141,7 +163,7 @@ td.mono {
 .tabnav button:hover { filter: none; color: var(--text); }
 .tabnav button.tab-active { color: var(--accent); background: var(--surface); }
 
-/* Notification bubble — client-reported error count on the Swarm tab. */
+/* Notification bubble — client-reported error count on the Notifications tab. */
 .badge-count {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; margin-left: 6px; padding: 0 5px;
@@ -149,7 +171,7 @@ td.mono {
   font-size: .7rem; font-weight: 800; letter-spacing: 0; vertical-align: 2px;
 }
 
-/* Client errors list (Swarm tab) */
+/* Client errors list (Notifications tab) */
 .client-error-row {
   display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;
   padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
@@ -229,3 +251,49 @@ td.mono {
 .detail-body { display: flex; gap: 18px; margin-top: -40px; padding: 0 4px; position: relative; }
 .detail-body:has(.art-placeholder.detail-backdrop) { margin-top: 0; }
 .detail-poster { width: 130px; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; border: 3px solid var(--surface); background: var(--surface-muted); flex: 0 0 auto; }
+
+/* AI tab: example-prompt "console" — a mock terminal/chat transcript, not a
+   real input (there's nothing to submit to from this webview), just a
+   markdown-code-fence-style dark block that shows literal example questions
+   a user can copy the *idea* of into their own Claude/Codex session. */
+.ai-console {
+  background: var(--surface-muted); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin-top: 10px; font-family: ui-monospace, monospace; font-size: .82rem;
+}
+.ai-console-head {
+  color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+  margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+.ai-console-head i { margin-right: 6px; }
+.ai-console-line { color: var(--text); line-height: 1.7; }
+.ai-console-prompt { color: var(--accent); font-weight: 700; margin-right: 6px; }
+
+/* About tab: the leftmost/default tab now that it's an explainer, not just
+   a security page — gets a bit of "wizbang" (a hero card with a Server ->
+   STUN -> Client flow diagram and feature badges) since it's the first
+   thing every user sees, unlike the plain stacked-card treatment the rest
+   of the app uses for reference material nobody browses cold. */
+.about-hero { background: linear-gradient(160deg, var(--surface), var(--surface-muted)); }
+.about-hero-head { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.about-hero-badge { width: 56px; height: 56px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 0 8px rgba(0,194,255,.5)); }
+.about-flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+.about-flow-step {
+  flex: 1; min-width: 150px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px; text-align: center;
+}
+.about-flow-icon { font-size: 1.4rem; color: var(--accent); margin-bottom: 8px; }
+.about-flow-label { font-weight: 700; font-size: .85rem; margin-bottom: 4px; }
+.about-flow-desc { color: var(--muted); font-size: .75rem; line-height: 1.4; }
+.about-flow-arrow { display: flex; align-items: center; justify-content: center; color: var(--border); font-size: 1.2rem; flex: 0 0 auto; }
+.about-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.about-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 14px; font-size: .78rem; font-weight: 700; color: var(--text);
+}
+.about-badge i { color: var(--accent); }
+.about-section-label {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
+  font-weight: 800; margin: 22px 0 10px;
+}
+.about-section-label:first-of-type { margin-top: 6px; }

@@ -29,13 +29,18 @@ async function refreshStatus() {
     const status = await invoke("get_status");
     const totalGb = (await invoke("list_entries").catch(() => []))
       .reduce((sum, e) => sum + e.size, 0) / 1073741824;
+    // "Media roots" used to be a stat tile here too, joining every root
+    // path into one comma-separated string — the exact "word wrapped
+    // panel" complaint real use surfaced, since a tile sized for a short
+    // label/value pair isn't a reasonable place for one or more full
+    // filesystem paths. It's dropped: the "Media roots" card right below
+    // this one already lists every root in full, with room to breathe.
     grid.innerHTML =
       stat("Entries", status.entry_count) +
       stat("Library size", totalGb.toFixed(2) + " GB") +
       stat("Listening (QUIC)", status.listen_addr) +
       stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps") +
       stat("Active playback sessions", status.active_playback_sessions) +
-      stat("Media roots", status.media_roots.join(", ")) +
       stat("Device fingerprint", status.fingerprint, true) +
       stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);
   } catch (err) {
@@ -49,8 +54,11 @@ async function refreshMediaRoots() {
   try {
     const roots = await invoke("list_media_roots");
     list.innerHTML = roots.map(r => `
-      <div class="row" style="align-items:center">
-        <div class="mono muted" style="flex:2">${esc(r.label)}: ${esc(r.path)}</div>
+      <div class="media-root-row">
+        <div class="media-root-info">
+          <div class="media-root-label">${esc(r.label)}</div>
+          <div class="mono muted media-root-path">${esc(r.path)}</div>
+        </div>
         <button class="danger" data-remove-root="${esc(r.label)}" ${roots.length <= 1 ? "disabled" : ""}><i class="bi bi-trash"></i>Remove</button>
       </div>`).join("");
     list.querySelectorAll("[data-remove-root]").forEach(btn => {

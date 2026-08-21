@@ -10,6 +10,7 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -94,22 +95,17 @@ fun SwarmSettingsScreen(
     val firstSectionFocusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { firstSectionFocusRequester.requestFocus() }
 
-    Column(modifier = Modifier.fillMaxSize().padding(32.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Swarm settings", color = SwarmAccent, fontSize = 22.sp, fontWeight = FontWeight.Black)
-            Button(
-                onClick = onBack,
-                colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-            ) {
-                Text("Back")
-            }
-        }
-        Spacer(Modifier.height(18.dp))
+    // Physical Back used to be a no-op here (no BackHandler was ever wired
+    // up), so it fell through to Android's default behavior and killed the
+    // whole Activity instead of returning to the dashboard — confirmed as
+    // the exact bug the on-screen "Back" button below was silently
+    // papering over for remote users. Wiring the real Back button to the
+    // same `onBack` the button called is what actually fixes it; the
+    // on-screen button/title row is dropped entirely below, both because
+    // it's now redundant and to win back the vertical space it took.
+    BackHandler(onBack = onBack)
 
+    Column(modifier = Modifier.fillMaxSize().padding(32.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SettingsTab(
                 label = "General",
@@ -122,122 +118,129 @@ fun SwarmSettingsScreen(
         }
         Spacer(Modifier.height(16.dp))
 
-        Column(
-            modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            errorMessage?.let {
-                Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+        // SettingsPanel below gets weight(1f), not just fillMaxWidth, so its
+        // own card background/border fill the rest of the screen below the
+        // tab row instead of shrink-wrapping to whatever the shortest tab's
+        // content needs and leaving bare background underneath — that dead
+        // gap below a small floating card was the real complaint, not
+        // spacing inside any one tab. Scrolling moves to SettingsPanel's own
+        // inner content Column instead of wrapping this whole Column, since
+        // this Column can only give a weighted child a *bounded* height (what
+        // weight(1f) needs) by not itself being wrapped in verticalScroll,
+        // which unbounds it.
+        errorMessage?.let {
+            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+            Spacer(Modifier.height(10.dp))
+        }
+        when (section) {
+            SettingsSection.GENERAL -> SettingsPanel(
+                title = "General",
+                subtitle = "Connection identity and artwork behavior for this TV.",
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                Text("Connection", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
-            }
-            when (section) {
-                SettingsSection.GENERAL -> SettingsPanel(
-                    title = "General",
-                    subtitle = "Connection identity and artwork behavior for this TV.",
-                ) {
-                    Text("Connection", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(12.dp))
-                    SettingFieldRow(
-                        value = baseUrlField,
-                        onValueChange = { baseUrlField = it },
-                        label = "STUN server URL",
-                        saveEnabled = !busy && baseUrlField.isNotBlank() && baseUrlField != baseUrl,
-                        onSave = { onUpdateBaseUrl(baseUrlField) },
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    SettingFieldRow(
-                        value = deviceNameField,
-                        onValueChange = { deviceNameField = it },
-                        label = "Device name",
-                        saveEnabled = !busy && deviceNameField.isNotBlank() && deviceNameField != deviceName,
-                        onSave = { onUpdateDeviceName(deviceNameField) },
-                    )
+                SettingFieldRow(
+                    value = baseUrlField,
+                    onValueChange = { baseUrlField = it },
+                    label = "STUN server URL",
+                    saveEnabled = !busy && baseUrlField.isNotBlank() && baseUrlField != baseUrl,
+                    onSave = { onUpdateBaseUrl(baseUrlField) },
+                )
+                Spacer(Modifier.height(10.dp))
+                SettingFieldRow(
+                    value = deviceNameField,
+                    onValueChange = { deviceNameField = it },
+                    label = "Device name",
+                    saveEnabled = !busy && deviceNameField.isNotBlank() && deviceNameField != deviceName,
+                    onSave = { onUpdateDeviceName(deviceNameField) },
+                )
+                Text(
+                    "The device name is stored on this TV; it does not rename an existing STUN roster entry.",
+                    color = SwarmMuted,
+                    fontSize = 11.sp,
+                )
+
+                Spacer(Modifier.height(24.dp))
+                Text("Artwork cache", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Button(
+                        onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
+                        enabled = !busy && artworkCacheMinutes > 0,
+                        colors = secondaryButtonColors(),
+                    ) { Text("−") }
                     Text(
-                        "The device name is stored on this TV; it does not rename an existing STUN roster entry.",
-                        color = SwarmMuted,
-                        fontSize = 11.sp,
+                        if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
+                        color = SwarmText,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.width(120.dp),
                     )
-
-                    Spacer(Modifier.height(24.dp))
-                    Text("Artwork cache", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(10.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Button(
-                            onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
-                            enabled = !busy && artworkCacheMinutes > 0,
-                            colors = secondaryButtonColors(),
-                        ) { Text("−") }
-                        Text(
-                            if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
-                            color = SwarmText,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.width(120.dp),
-                        )
-                        Button(
-                            onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
-                            enabled = !busy && artworkCacheMinutes < 1440,
-                            colors = secondaryButtonColors(),
-                        ) { Text("+") }
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text("0 always re-fetches; up to 1,440 minutes keeps browsing fast on slower networks.", color = SwarmMuted, fontSize = 11.sp)
+                    Button(
+                        onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
+                        enabled = !busy && artworkCacheMinutes < 1440,
+                        colors = secondaryButtonColors(),
+                    ) { Text("+") }
                 }
+                Spacer(Modifier.height(6.dp))
+                Text("0 always re-fetches; up to 1,440 minutes keeps browsing fast on slower networks.", color = SwarmMuted, fontSize = 11.sp)
+            }
 
-                SettingsSection.SWARMS -> SettingsPanel(
-                    title = "Swarms",
-                    subtitle = "Choose the active swarm, leave one, or join another.",
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.Top) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Joined (${allSwarms.size})", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(12.dp))
-                            if (allSwarms.isEmpty()) {
-                                Text("This device has not joined a swarm yet.", color = SwarmMuted, fontSize = 14.sp)
-                            } else {
-                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    for (swarm in allSwarms) {
-                                        SwarmRow(
-                                            swarm = swarm,
-                                            isActive = swarm.id == activeSwarmId,
-                                            busy = busy,
-                                            onSelect = { onSwitchActive(swarm.id) },
-                                            onLeave = { onLeave(swarm.id) },
-                                        )
-                                    }
+            SettingsSection.SWARMS -> SettingsPanel(
+                title = "Swarms",
+                subtitle = "Choose the active swarm, leave one, or join another.",
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.Top) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Joined (${allSwarms.size})", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(12.dp))
+                        if (allSwarms.isEmpty()) {
+                            Text("This device has not joined a swarm yet.", color = SwarmMuted, fontSize = 14.sp)
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                for (swarm in allSwarms) {
+                                    SwarmRow(
+                                        swarm = swarm,
+                                        isActive = swarm.id == activeSwarmId,
+                                        busy = busy,
+                                        onSelect = { onSwitchActive(swarm.id) },
+                                        onLeave = { onLeave(swarm.id) },
+                                    )
                                 }
                             }
                         }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Join another", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(12.dp))
-                            NumberPadEntry(value = code, maxLength = 8, onValueChange = { code = it }, enabled = !busy)
-                            Spacer(Modifier.height(14.dp))
-                            Button(
-                                onClick = { onJoin(code); code = "" },
-                                enabled = !busy && code.length == 8,
-                                colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
-                            ) {
-                                Text(if (busy) "Working…" else "Join swarm", fontWeight = FontWeight.Bold)
-                            }
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Join another", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(12.dp))
+                        NumberPadEntry(value = code, maxLength = 8, onValueChange = { code = it }, enabled = !busy)
+                        Spacer(Modifier.height(14.dp))
+                        Button(
+                            onClick = { onJoin(code); code = "" },
+                            enabled = !busy && code.length == 8,
+                            colors = ButtonDefaults.colors(containerColor = SwarmAccent, contentColor = Color(0xFF04263A)),
+                        ) {
+                            Text(if (busy) "Working…" else "Join swarm", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
-
-                SettingsSection.FAMILY -> SettingsPanel(
-                    title = "Family controls",
-                    subtitle = "Limit the library shown on this TV with a PIN.",
-                ) {
-                    KidModeCard(
-                        kidModeSettings = kidModeSettings,
-                        availableGenres = availableGenres,
-                        onEnable = onEnableKidMode,
-                        onUpdateRules = onUpdateKidModeRules,
-                        onDisable = onDisableKidMode,
-                    )
-                }
             }
-            Spacer(Modifier.height(24.dp))
+
+            SettingsSection.FAMILY -> SettingsPanel(
+                title = "Family controls",
+                subtitle = "Limit the library shown on this TV with a PIN.",
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                KidModeCard(
+                    kidModeSettings = kidModeSettings,
+                    availableGenres = availableGenres,
+                    onEnable = onEnableKidMode,
+                    onUpdateRules = onUpdateKidModeRules,
+                    onDisable = onDisableKidMode,
+                )
+            }
         }
     }
 }
@@ -259,14 +262,22 @@ private fun SettingsTab(label: String, selected: Boolean, onClick: () -> Unit, m
 }
 
 @Composable
-private fun SettingsPanel(title: String, subtitle: String, content: @Composable () -> Unit) {
+private fun SettingsPanel(title: String, subtitle: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    // The card frame itself takes the caller's full fillMaxWidth().weight(1f)
+    // sizing so its background/border reach the bottom of the available pane
+    // regardless of how tall any one tab's content is — content then scrolls
+    // inside that fixed-height frame (only kicks in if it's ever taller than
+    // the pane) rather than the frame shrink-wrapping to content height and
+    // leaving bare, un-carded background below it.
     Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(SwarmSurface).padding(24.dp),
+        modifier = modifier.clip(RoundedCornerShape(16.dp)).background(SwarmSurface).padding(24.dp),
     ) {
         Text(title, color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text(subtitle, color = SwarmMuted, fontSize = 13.sp)
         Spacer(Modifier.height(20.dp))
-        content()
+        Column(modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
+            content()
+        }
     }
 }
 
