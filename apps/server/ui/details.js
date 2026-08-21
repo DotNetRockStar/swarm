@@ -36,13 +36,13 @@ async function refreshStatus() {
     // filesystem paths. It's dropped: the "Media roots" card right below
     // this one already lists every root in full, with room to breathe.
     grid.innerHTML =
-      stat("Entries", status.entry_count) +
-      stat("Library size", totalGb.toFixed(2) + " GB") +
-      stat("Listening (QUIC)", status.listen_addr) +
-      stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps") +
-      stat("Active playback sessions", status.active_playback_sessions) +
-      stat("Device fingerprint", status.fingerprint, true) +
-      stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true);
+      stat("Entries", status.entry_count, false, "entries") +
+      stat("Library size", totalGb.toFixed(2) + " GB", false, "library-size") +
+      stat("Listening (QUIC)", status.listen_addr, false, "listening-quic") +
+      stat("Streaming upload budget", (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps", false, "upload-budget") +
+      stat("Active playback sessions", status.active_playback_sessions, false, "active-sessions") +
+      stat("Device fingerprint", status.fingerprint, true, "device-fingerprint") +
+      stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true, "library-thumbprint");
   } catch (err) {
     grid.innerHTML = `<p class="muted">Unable to load status.</p>`;
     showToast(String(err), "error");

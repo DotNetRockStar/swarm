@@ -10,6 +10,33 @@ webview — no React/Vue/build step. Read this before adding or changing
 anything here; several of these are silent failure modes that only show
 up under real timing, not in a quick look at the code.
 
+## `.d-none` vs. a class with its own `display:` — a specificity tie goes to source order, not to the classes actually present
+
+Real bug, found live building the info modal (`.modal-backdrop`) and
+independently confirmed already broken on `.badge-count` (the
+Notifications tab badge): `.d-none { display: none; }` and a component
+class that sets its own `display` (e.g. `display: flex`) are equal
+specificity — `(0,1,0)` each, one class selector apiece. When two rules
+tie on specificity, CSS resolves the conflict by **source order in the
+stylesheet**, completely independent of which classes are actually on
+the element or which was added last via `classList`. Any component class
+declared *after* `.d-none` in `style.css` (line 59) silently wins its
+own `display` even while `d-none` is present on the element — the
+"hidden" state never actually renders as hidden, even though
+`classList.contains("d-none")` correctly returns `true` and the JS logic
+is otherwise completely correct. This is invisible from reading the JS
+(state toggling looks right) and easy to misdiagnose as a JS bug when
+"the modal won't close" — it's pure CSS cascade order.
+
+Fix: for any class that both sets its own `display` *and* gets toggled
+with `.d-none`, add an explicit `.that-class.d-none { display: none; }`
+override — two class selectors beats one regardless of source order, so
+it wins unconditionally. See `.modal-backdrop.d-none`, `.modal-link.d-none`,
+and `.badge-count.d-none` in `style.css` for the pattern. When adding a
+*new* class that sets `display` and will ever be paired with `.d-none`,
+add this override at the same time — don't rely on declaring it before
+`.d-none` in the file, since that's fragile to any later reordering.
+
 ## No framework: `invoke()`, real DOM, real `<script>` tags
 
 Every backend call goes through `window.__TAURI__.core.invoke("cmd", {...})`
@@ -107,8 +134,23 @@ Kotlin side too rather than letting one app silently drift off-palette.
 - `.card` / `.card-head` (+ `.card-head-actions`) — the standard
   bordered content block with a title-row-plus-actions header. Almost
   every panel is one or more of these.
-- `.grid` + `stat(label, value, mono)` (`app.js` helper) — the
-  auto-fitting label/value tile grid used for status summaries.
+- `.grid` + `stat(label, value, mono, infoId)` (`app.js` helper) — the
+  auto-fitting label/value tile grid used for status summaries. Pass
+  `infoId` to make a tile open the info modal (below) — omit it (as
+  `swarm.js`'s own `stat()` calls do) for a plain, non-interactive tile.
+- The info modal (`app.js`'s `INFO_TOPICS`/`openInfoModal`, `#infoModalBackdrop`
+  in `index.html`, `.modal-*` in `style.css`) — one shared "what am I
+  looking at" popup (icon, title, one-paragraph explanation, optional
+  external link) triggered by any element anywhere carrying
+  `data-info="<topicId>"` matching a key in `INFO_TOPICS`, via a single
+  delegated `document` click/keydown listener rather than a listener per
+  element. Reach for this before building a bespoke tooltip/popover for a
+  new "explain this concept" need — add a topic to `INFO_TOPICS` and a
+  `data-info` attribute, don't invent a second popup mechanism. Keep
+  `body` to one or two sentences (this exists specifically so the default
+  view can stay concise); only set `link`/`linkLabel` when there's a real
+  external resource worth reading further (a protocol, a standard, a
+  third-party service) — most topics don't need one.
 - `.row` — a flex row of inputs/buttons for an inline form (used for
   "add a root", "join a swarm", etc.).
 - `.muted`, `.mono`, `.d-none`, `button.secondary`, `button.danger` —

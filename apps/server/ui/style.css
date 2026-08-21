@@ -170,6 +170,14 @@ td.mono {
   border-radius: 999px; background: #ff4d6d; color: #fff;
   font-size: .7rem; font-weight: 800; letter-spacing: 0; vertical-align: 2px;
 }
+/* Real bug, found live while testing the info modal below (same class of
+   issue): .badge-count's own display: inline-flex and .d-none's
+   display: none are equal specificity (0,1,0) — whichever is declared
+   later in the file wins outright, regardless of which classes are
+   actually on the element. .badge-count comes after .d-none, so the
+   badge never actually hid at a zero count; this override forces the
+   hidden state to win regardless of source order. */
+.badge-count.d-none { display: none; }
 
 /* Client errors list (Notifications tab) */
 .client-error-row {
@@ -283,7 +291,7 @@ td.mono {
 .about-flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
 .about-flow-step {
   flex: 1; min-width: 150px; background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; padding: 14px; text-align: center;
+  border-radius: 10px; padding: 14px; text-align: center; cursor: pointer;
   transition: transform .15s ease, border-color .15s ease;
 }
 .about-flow-step:hover { transform: translateY(-2px); border-color: var(--accent); }
@@ -293,7 +301,7 @@ td.mono {
 .about-flow-arrow { display: flex; align-items: center; justify-content: center; color: var(--border); font-size: 1.2rem; flex: 0 0 auto; }
 .about-badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
 .about-badge {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
   padding: 6px 14px; font-size: .78rem; font-weight: 700; color: var(--text);
   transition: border-color .15s ease, background .15s ease;
@@ -309,7 +317,7 @@ td.mono {
    than another full-width bordered box. */
 .about-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
 .about-feature {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; cursor: pointer;
   transition: transform .15s ease, border-color .15s ease, background .15s ease;
 }
 .about-feature:hover { transform: translateY(-3px); border-color: var(--accent); background: var(--surface-muted); }
@@ -336,3 +344,59 @@ td.mono {
 .about-more-body { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .about-more-body p { color: var(--muted); font-size: .85rem; line-height: 1.5; margin-bottom: 10px; }
 .about-more-body p:last-child { margin-bottom: 0; }
+
+/* Info modal — one shared "what am I looking at" popup, opened by any
+   element carrying data-info (see INFO_TOPICS/openInfoModal in app.js).
+   Used across the About, Details, and AI tabs so every stat, badge, tile,
+   and card header is a real answer away instead of a wall of prose. */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 2000; padding: 20px;
+  background: rgba(6, 10, 20, .72);
+  display: flex; align-items: center; justify-content: center;
+  animation: modal-fade-in .12s ease-out;
+}
+/* .d-none (display: none) and this rule's own display: flex are equal
+   specificity (0,1,0) each — without this override, whichever is declared
+   later in the file wins regardless of which classes are actually on the
+   element, which silently defeated the d-none toggle entirely (the modal
+   never actually hid). A same-specificity tie needs a more specific
+   selector to guarantee the win, not just "whichever we declare last." */
+.modal-backdrop.d-none { display: none; }
+.modal-box {
+  position: relative; width: 100%; max-width: 440px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 28px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  animation: modal-pop-in .15s ease-out;
+}
+.modal-close {
+  position: absolute; top: 14px; right: 14px;
+  background: transparent; color: var(--muted); border: 0; padding: 4px; font-size: .95rem;
+}
+.modal-close:hover { filter: none; color: var(--text); }
+.modal-icon {
+  width: 48px; height: 48px; border-radius: 12px; margin-bottom: 14px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 194, 255, .12); color: var(--accent); font-size: 1.4rem;
+}
+.modal-box h2 { margin-bottom: 10px; text-transform: none; letter-spacing: 0; font-size: 1.05rem; color: var(--text); }
+.modal-box p { color: var(--muted); font-size: .88rem; line-height: 1.55; }
+.modal-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 16px; color: var(--accent); font-size: .82rem; font-weight: 700; }
+.modal-link:hover { text-decoration: underline; }
+.modal-link.d-none { display: none; }
+@keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-pop-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+/* Any element that opens the info modal via data-info gets a pointer
+   cursor and, where it's plain text rather than an already-iconed tile
+   (card `<h2>`s, AI's tool list rows), a small trailing/leading info cue
+   so it doesn't just look like a static heading. */
+.info-trigger { cursor: pointer; }
+h2.info-trigger:hover { color: var(--accent); }
+.info-affordance { font-size: .75rem; color: var(--muted); margin-left: 6px; transition: color .15s ease; }
+.info-trigger:hover .info-affordance { color: var(--accent); }
+li.info-trigger { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; transition: background .15s ease; }
+li.info-trigger:hover { background: var(--surface-muted); }
+.tool-icon { color: var(--accent); font-size: .85rem; flex: 0 0 auto; }
+
+.stat-clickable { cursor: pointer; transition: background .15s ease, transform .15s ease; }
+.stat-clickable:hover { background: var(--border); transform: translateY(-2px); }
