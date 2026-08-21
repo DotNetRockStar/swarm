@@ -23,6 +23,7 @@ use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
 use swarm_server::{ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::OnceCell;
 
 struct AppState {
@@ -803,12 +804,30 @@ async fn clear_client_errors(app: tauri::AppHandle, state: tauri::State<'_, AppS
     core.library.clear_client_errors().await.map_err(|e| e.to_string())
 }
 
+// The dashboard's info modal (apps/server/ui/app.js's INFO_TOPICS) links out to
+// external resources (protocol/standard explainers) for the curious — a plain
+// `<a target="_blank">` doesn't open the OS's default browser from inside a
+// Tauri webview the way it would in a real browser tab; it's either silently
+// swallowed or, at best, opens a second app window pointed at an external
+// site, neither of which is what "learn more" should do. The opener plugin's
+// `open_url` is the actual supported way to hand a URL to the OS. Called from
+// a plain app command (not invoked as `plugin:opener|open_url` directly from
+// JS) so no extra capability/permission entry is needed — same reasoning
+// `choose_media_folder` below wraps the dialog plugin instead of exposing it
+// to JS directly.
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState { core: OnceCell::new() })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            open_external_url,
             choose_media_folder,
             pick_folder_path,
             pick_file_path,

@@ -24,7 +24,7 @@ default = []
 # story at all (env-var configured, see config_from_env), so there's nothing
 # for it to read to decide whether to start one — not worth carrying the
 # dependency weight there for a feature it could never turn on.
-gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:rmcp", "dep:axum", "dep:schemars"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:rmcp", "dep:axum", "dep:schemars"]
 
 [dependencies]
 swarm-core = { workspace = true }
@@ -45,6 +45,7 @@ reqwest = { workspace = true }
 mdns-sd = "0.21"
 tauri = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
 rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }
 axum = { version = "0.8", optional = true }
 schemars = { version = "1", optional = true }

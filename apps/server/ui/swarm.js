@@ -22,7 +22,7 @@ async function loadLocalPeers() {
   try {
     const peers = await invoke("list_local_peers");
     list.innerHTML = peers.length ? `<table>
-      <thead><tr><th>Name</th><th>Paired</th><th>Certificate</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Paired</th><th class="info-trigger" data-info="device-fingerprint" tabindex="0" role="button">Certificate <i class="bi bi-info-circle info-affordance"></i></th><th></th></tr></thead>
       <tbody>${peers.map(peer => `<tr>
         <td>${esc(peer.name)}</td>
         <td>${esc(new Date(peer.paired_at * 1000).toLocaleString())}</td>
@@ -75,7 +75,7 @@ async function refreshSwarm() {
 
   if (!link) {
     content.innerHTML = `
-      <p class="muted">Not linked to a STUN server yet.</p>
+      <p class="muted"><i class="bi bi-link-45deg"></i> Not linked to a STUN server yet.</p>
       <div class="row">
         <input id="joinBaseUrl" placeholder="https://swarm.example.com">
         <input id="joinCode" placeholder="12345678" maxlength="8">
@@ -99,8 +99,8 @@ async function refreshSwarm() {
 
   content.innerHTML = `
     <div class="grid">
-      ${stat("STUN server", link.base_url)}
-      ${stat("Trusted peers", link.allowed_peer_count)}
+      ${stat("STUN server", link.base_url, false, "stun-server-address")}
+      ${stat("Trusted peers", link.allowed_peer_count, false, "trusted-peers")}
     </div>
     <p class="muted" style="margin-top:10px">
       Join codes are generated from the STUN server's own admin page:
@@ -117,7 +117,7 @@ async function refreshSwarm() {
   swarmList.innerHTML = link.swarms.map(s => `
     <div class="card" style="background:var(--surface-muted); margin-bottom:10px">
       <div class="card-head">
-        <strong>${esc(s.name)}</strong>
+        <strong><i class="bi bi-diagram-3" style="color:var(--accent); margin-right:6px"></i>${esc(s.name)}</strong>
         <button class="danger" data-leave-swarm="${esc(s.id)}"><i class="bi bi-box-arrow-right"></i>Leave</button>
       </div>
       <div id="roster-${esc(s.id)}" class="muted">Loading roster…</div>
@@ -170,7 +170,8 @@ async function loadRoster(swarmId) {
     const metaKeys = [...new Set(roster.devices.flatMap(d => Object.keys(d.metadata || {})))];
     el.innerHTML = `<table>
       <thead><tr>
-        <th>Name</th><th>Type</th><th>Online</th><th>Last seen</th><th>Fingerprint</th>
+        <th>Name</th><th>Type</th><th>Online</th><th>Last seen</th>
+        <th class="info-trigger" data-info="device-fingerprint" tabindex="0" role="button">Fingerprint <i class="bi bi-info-circle info-affordance"></i></th>
         ${metaKeys.map(k => `<th>${esc(k)}</th>`).join("")}
       </tr></thead>
       <tbody>` + roster.devices.map(d => `<tr>

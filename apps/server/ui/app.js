@@ -76,7 +76,7 @@ const INFO_TOPICS = {
   },
   "device-fingerprint": {
     icon: "bi-fingerprint", title: "Device fingerprint",
-    body: "A unique hash of this server's security certificate, used so connecting devices can verify they're really talking to your server and not an impostor.",
+    body: "A unique hash of a device's security certificate, used so two devices can verify they're really talking to each other and not an impostor.",
     link: "https://en.wikipedia.org/wiki/Public_key_fingerprint", linkLabel: "Learn about certificate fingerprints",
   },
   "library-thumbprint": {
@@ -143,6 +143,24 @@ const INFO_TOPICS = {
     icon: "bi-bell-fill", title: "list_client_errors",
     body: "Returns recent client-reported problems, like failed playback or an unreachable server — the same list shown on the Notifications tab.",
   },
+  "lan-network": {
+    icon: "bi-broadcast-pin", title: "Local network",
+    body: "On the same Wi-Fi/LAN, this server advertises itself automatically via mDNS — no internet or STUN server involved. A short-lived pairing code is only needed the first time a new device trusts it; later connections reuse that trust and go straight over QUIC.",
+    link: "https://en.wikipedia.org/wiki/Multicast_DNS", linkLabel: "Learn about mDNS",
+  },
+  "swarm-concept": {
+    icon: "bi-diagram-3-fill", title: "Swarm",
+    body: "A swarm is a private group of your own devices — servers and clients — that can find and stream from each other. A device joins one with a short one-time code, and can belong to more than one swarm at a time.",
+  },
+  "stun-server-address": {
+    icon: "bi-hdd-network-fill", title: "STUN server",
+    body: "The coordination server this device is linked to. STUN only handles introductions — telling two devices how to reach each other — so join codes come from its admin page, but your media never actually passes through it.",
+    link: "https://en.wikipedia.org/wiki/STUN", linkLabel: "Learn about STUN",
+  },
+  "trusted-peers": {
+    icon: "bi-people-fill", title: "Trusted peers",
+    body: "How many devices, across every swarm this server has joined, are currently allowed to connect to it.",
+  },
 };
 
 function openInfoModal(topicId) {
@@ -172,6 +190,23 @@ document.getElementById("infoModalBackdrop").addEventListener("click", (e) => {
   if (e.target.id === "infoModalBackdrop") closeInfoModal();
 });
 document.getElementById("infoModalClose").addEventListener("click", closeInfoModal);
+
+// A plain `<a target="_blank">` doesn't open the OS's default browser from
+// inside this app's Tauri webview the way it would in a real browser tab —
+// href/target/rel stay on the element for semantics (hover preview, right-
+// click "copy link", screen readers) but the actual navigation is handed off
+// to open_external_url (apps/server/src/gui.rs), a thin wrapper around the
+// Tauri opener plugin, which is the one thing that actually knows how to ask
+// the OS to open a URL in the user's real browser.
+document.getElementById("infoModalLink").addEventListener("click", async (e) => {
+  e.preventDefault();
+  const url = e.currentTarget.href;
+  try {
+    await invoke("open_external_url", { url });
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+});
 
 document.addEventListener("click", (e) => {
   const trigger = e.target.closest("[data-info]");

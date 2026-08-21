@@ -150,7 +150,27 @@ Kotlin side too rather than letting one app silently drift off-palette.
   `body` to one or two sentences (this exists specifically so the default
   view can stay concise); only set `link`/`linkLabel` when there's a real
   external resource worth reading further (a protocol, a standard, a
-  third-party service) — most topics don't need one.
+  third-party service) — most topics don't need one. Its `link` opens via
+  `open_external_url` (below), not a bare `<a target="_blank">` — see
+  that entry before wiring up any other external link in this UI.
+- **External links must go through `open_external_url`, never a bare
+  `<a target="_blank">`.** Real bug, found live: inside this app's Tauri
+  webview (unlike a real browser tab), `target="_blank"` doesn't open the
+  OS's default browser — it's silently swallowed, with no error and
+  nothing in the console, so it's easy to ship and not notice until a
+  real user clicks it. `app.js` keeps `href`/`target`/`rel` on the
+  `<a>` for semantics (hover preview, right-click "copy link", screen
+  readers) but intercepts the click, calls `preventDefault()`, and
+  invokes `open_external_url` (`gui.rs`) instead — a plain app command
+  wrapping `tauri-plugin-opener`'s `OpenerExt::open_url`, the officially
+  supported way to hand a URL to the OS. It's a plain command (not
+  invoked as `plugin:opener|open_url` straight from JS) specifically so
+  no `capabilities/default.json` permission entry is needed — same
+  reasoning `choose_media_folder` wraps the dialog plugin instead of
+  exposing it to JS directly (see that file's own description). The info
+  modal's `#infoModalLink` already does this; reuse it (or the same
+  `open_external_url` invoke) for any new outbound link rather than a
+  raw anchor tag.
 - `.row` — a flex row of inputs/buttons for an inline form (used for
   "add a root", "join a swarm", etc.).
 - `.muted`, `.mono`, `.d-none`, `button.secondary`, `button.danger` —

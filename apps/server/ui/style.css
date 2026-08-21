@@ -391,7 +391,7 @@ td.mono {
    (card `<h2>`s, AI's tool list rows), a small trailing/leading info cue
    so it doesn't just look like a static heading. */
 .info-trigger { cursor: pointer; }
-h2.info-trigger:hover { color: var(--accent); }
+h2.info-trigger:hover, th.info-trigger:hover { color: var(--accent); }
 .info-affordance { font-size: .75rem; color: var(--muted); margin-left: 6px; transition: color .15s ease; }
 .info-trigger:hover .info-affordance { color: var(--accent); }
 li.info-trigger { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; transition: background .15s ease; }

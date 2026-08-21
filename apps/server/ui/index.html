@@ -101,7 +101,7 @@
   <div id="tabPanel-swarm" class="d-none">
     <div class="card">
       <div class="card-head">
-        <h2>Local network</h2>
+        <h2 class="info-trigger" data-info="lan-network" tabindex="0" role="button">Local network <i class="bi bi-info-circle info-affordance"></i></h2>
         <button id="openLanPairingBtn"><i class="bi bi-broadcast-pin"></i>Pair a LAN client</button>
       </div>
       <p class="muted">This server advertises itself to clients on the same LAN automatically. A pairing code is required only the first time a client is trusted; direct connections do not use the STUN server.</p>
@@ -109,7 +109,7 @@
       <div id="localPeersList" style="margin-top:12px">Loading…</div>
     </div>
     <div class="card">
-      <h2>Swarm</h2>
+      <h2 class="info-trigger" data-info="swarm-concept" tabindex="0" role="button">Swarm <i class="bi bi-info-circle info-affordance"></i></h2>
       <div id="swarmContent">Loading…</div>
     </div>
   </div>
