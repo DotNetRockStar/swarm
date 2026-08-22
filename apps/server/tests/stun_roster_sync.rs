@@ -456,6 +456,45 @@ async fn configured_managed_swarm_migrates_an_existing_manual_link_before_tv_app
     assert_eq!(approved.swarm.unwrap().id, managed_link.swarms[0].id);
 }
 
+/// A managed service can keep the same database/ownership while its public
+/// hostname or LAN address changes. The owner claim must be accepted at the
+/// newly configured endpoint before either persisted base URL is migrated.
+#[tokio::test]
+async fn managed_swarm_adopts_a_new_endpoint_after_owner_claim_validation() {
+    let _test_guard = INTEGRATION_TEST_LOCK.lock().await;
+    let stun_base = spawn_stun_server().await;
+    let alternate_base = stun_base.replacen("127.0.0.1", "localhost", 1);
+    assert_ne!(stun_base, alternate_base);
+
+    let base = std::env::temp_dir().join(format!(
+        "swarm-managed-endpoint-migration-{}",
+        stun_server::security::new_id()
+    ));
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+    let mut config = ServerConfig {
+        media_roots: vec![MediaRoot {
+            label: "local".to_string(),
+            path: media_root,
+        }],
+        data_dir: base.join("data"),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        allowed_fingerprints: vec![],
+        token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: Some(stun_base.clone()),
+    };
+
+    let first = ServerCore::start(config.clone()).await.unwrap();
+    let original = first.stun_link().await.unwrap();
+    assert_eq!(original.base_url, stun_base);
+
+    config.managed_rendezvous_url = Some(alternate_base.clone());
+    let migrated = ServerCore::start(config).await.unwrap();
+    let migrated_link = migrated.stun_link().await.unwrap();
+    assert_eq!(migrated_link.base_url, alternate_base);
+    assert_eq!(migrated_link.swarms, original.swarms);
+}
+
 /// A server that belongs to two swarms leaves one and keeps the other:
 /// `allowed` shrinks to drop only the peer reachable solely through the
 /// left swarm, and the persisted link's `swarms` list shrinks to match.

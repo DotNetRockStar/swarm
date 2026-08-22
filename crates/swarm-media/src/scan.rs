@@ -52,7 +52,11 @@ struct ScanProgress {
 
 impl ScanProgress {
     fn new(sender: UnboundedSender<ScanProgressEvent>) -> Self {
-        Self { sender, found: AtomicU64::new(0), processed: AtomicU64::new(0) }
+        Self {
+            sender,
+            found: AtomicU64::new(0),
+            processed: AtomicU64::new(0),
+        }
     }
 
     /// Called once per file as the directory walk discovers it, before the
@@ -66,7 +70,9 @@ impl ScanProgress {
     /// visits it, now that `total` (the walk's final file count) is fixed.
     fn tick_processing(&self, total: u64) {
         let processed = self.processed.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = self.sender.send(ScanProgressEvent::Processing { processed, total });
+        let _ = self
+            .sender
+            .send(ScanProgressEvent::Processing { processed, total });
     }
 }
 
@@ -89,7 +95,15 @@ pub enum ScanError {
 /// single-root case — see that function and `crate::roots` for why a
 /// single root never gets a `{label}/` prefix on `relative_path`.
 pub async fn scan_root(library: &Library, root: &Path) -> Result<ScanReport, ScanError> {
-    scan_roots(library, &[MediaRoot { label: "local".to_string(), path: root.to_path_buf() }], None).await
+    scan_roots(
+        library,
+        &[MediaRoot {
+            label: "local".to_string(),
+            path: root.to_path_buf(),
+        }],
+        None,
+    )
+    .await
 }
 
 /// Walk every configured root and reconcile the library with what is on
@@ -136,7 +150,11 @@ pub async fn scan_roots(
     }
 
     for (root, absolute, relative_under_root) in all_files {
-        let relative = if multi { format!("{}/{relative_under_root}", root.label) } else { relative_under_root.clone() };
+        let relative = if multi {
+            format!("{}/{relative_under_root}", root.label)
+        } else {
+            relative_under_root.clone()
+        };
         if let Some(p) = &progress {
             p.tick_processing(total);
         }
@@ -162,7 +180,14 @@ pub async fn scan_roots(
                     // fingerprint/probe pass on a file that hasn't changed.
                     if let Some(classified) = classify::classify(&relative_under_root) {
                         let entry_key = entry_key::entry_key(&relative);
-                        recover_existing_artwork(library, &absolute, &entry_key, &relative, classified.kind).await?;
+                        recover_existing_artwork(
+                            library,
+                            &absolute,
+                            &entry_key,
+                            &relative,
+                            classified.kind,
+                        )
+                        .await?;
                     }
                 }
                 continue;
@@ -175,8 +200,12 @@ pub async fn scan_roots(
         // multi-root case that top folder would otherwise be this
         // root's own arbitrary label (e.g. "nas-music"), not a real
         // artist name.
-        let Some(classified) = classify::classify(&relative_under_root) else { continue };
-        let Ok(fp) = fingerprint::fingerprint_file(&absolute) else { continue };
+        let Some(classified) = classify::classify(&relative_under_root) else {
+            continue;
+        };
+        let Ok(fp) = fingerprint::fingerprint_file(&absolute) else {
+            continue;
+        };
         // Embedded tags override the path-derived *display* fields when
         // present; grouping keys stay path-derived upstream of this.
         let tag = tags::read_tags(&absolute);
@@ -186,13 +215,25 @@ pub async fn scan_roots(
             entry_key: entry_key.clone(),
             relative_path: relative,
             kind: classified.kind,
-            title: tag.as_ref().and_then(|t| t.title.clone()).unwrap_or(classified.title),
+            title: tag
+                .as_ref()
+                .and_then(|t| t.title.clone())
+                .unwrap_or(classified.title),
             size,
             modified_time: mtime,
             fingerprint: fp,
-            artist: tag.as_ref().and_then(|t| t.artist.clone()).or(classified.artist),
-            album: tag.as_ref().and_then(|t| t.album.clone()).or(classified.album),
-            track_number: tag.as_ref().and_then(|t| t.track_number).or(classified.track_number),
+            artist: tag
+                .as_ref()
+                .and_then(|t| t.artist.clone())
+                .or(classified.artist),
+            album: tag
+                .as_ref()
+                .and_then(|t| t.album.clone())
+                .or(classified.album),
+            track_number: tag
+                .as_ref()
+                .and_then(|t| t.track_number)
+                .or(classified.track_number),
             show_title: classified.show_title,
             season: classified.season,
             episode: classified.episode,
@@ -209,6 +250,8 @@ pub async fn scan_roots(
             cast: Vec::new(),
             overview: None,
             rating: None,
+            community_rating: None,
+            community_rating_votes: None,
         };
         // A manually reclassified file (see `Library::set_manual_kind`) that
         // changed on disk (re-encoded, replaced) would otherwise have its
@@ -217,7 +260,10 @@ pub async fn scan_roots(
         // still needs a fresh fingerprint/probe pass, but the human's
         // classification of *what it is* takes precedence over the path
         // heuristic that got it wrong in the first place.
-        if known.get(&record.relative_path).is_some_and(|k| k.kind_overridden) {
+        if known
+            .get(&record.relative_path)
+            .is_some_and(|k| k.kind_overridden)
+        {
             if let Ok(Some(existing)) = library.get(&entry_key).await {
                 record.kind = existing.kind;
                 record.title = existing.title;
@@ -230,7 +276,9 @@ pub async fn scan_roots(
             }
         }
         library.upsert(&record).await?;
-        let already_had_artwork = known.get(&record.relative_path).is_some_and(|k| k.has_artwork);
+        let already_had_artwork = known
+            .get(&record.relative_path)
+            .is_some_and(|k| k.has_artwork);
         if known.contains_key(&record.relative_path) {
             report.updated += 1;
         } else {
@@ -244,7 +292,14 @@ pub async fn scan_roots(
         // touched. See the recovery function's own doc comment for why
         // either case (added or updated-but-still-unscraped) is worth it.
         if !already_had_artwork {
-            recover_existing_artwork(library, &absolute, &record.entry_key, &record.relative_path, record.kind).await?;
+            recover_existing_artwork(
+                library,
+                &absolute,
+                &record.entry_key,
+                &record.relative_path,
+                record.kind,
+            )
+            .await?;
         }
     }
 
@@ -259,7 +314,7 @@ pub async fn scan_roots(
 
 /// Classifies an `images/` sibling file by the exact, small set of
 /// filenames every artwork-writing path in this codebase actually produces
-/// — `save_video_artwork`'s `{stem}-tmdb-{poster,backdrop}.jpg`
+/// — `save_video_artwork`'s `{stem}-tmdb-{poster,season-poster,backdrop}.jpg`
 /// (`scrape/runner.rs`), `scrape_one_album_group`'s fixed `album-cover.jpg`/
 /// `artist-photo.jpg`, and the GUI's manual-upload `manual-{poster,backdrop,
 /// cover,artist}.<ext>` (`apps/server/src/gui.rs`, `ArtworkKind::
@@ -267,9 +322,14 @@ pub async fn scan_roots(
 /// `.jpg`) — matches on the filename stem only.
 fn recovered_artwork_kind(filename: &str) -> Option<ArtworkKind> {
     let lower = filename.to_lowercase();
-    let stem = lower.rsplit_once('.').map(|(s, _)| s).unwrap_or(lower.as_str());
+    let stem = lower
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(lower.as_str());
     if stem.ends_with("-tmdb-poster") || stem == "manual-poster" {
         Some(ArtworkKind::Poster)
+    } else if stem.ends_with("-tmdb-season-poster") || stem == "manual-season" {
+        Some(ArtworkKind::SeasonPoster)
     } else if stem.ends_with("-tmdb-backdrop") || stem == "manual-backdrop" {
         Some(ArtworkKind::Backdrop)
     } else if stem == "album-cover" || stem == "manual-cover" {
@@ -305,11 +365,20 @@ async fn recover_existing_artwork(
     relative_path: &str,
     kind: MediaKind,
 ) -> sqlx::Result<()> {
-    let Some(parent) = absolute.parent() else { return Ok(()) };
-    let Ok(entries) = std::fs::read_dir(parent.join("images")) else { return Ok(()) };
+    let Some(parent) = absolute.parent() else {
+        return Ok(());
+    };
+    let Ok(entries) = std::fs::read_dir(parent.join("images")) else {
+        return Ok(());
+    };
 
     let relevant = |k: ArtworkKind| match kind {
-        MediaKind::Movie | MediaKind::Episode => matches!(k, ArtworkKind::Poster | ArtworkKind::Backdrop),
+        MediaKind::Movie | MediaKind::Episode => {
+            matches!(
+                k,
+                ArtworkKind::Poster | ArtworkKind::SeasonPoster | ArtworkKind::Backdrop
+            )
+        }
         MediaKind::Track => matches!(k, ArtworkKind::Cover | ArtworkKind::ArtistPhoto),
     };
     let relative_images_dir = match relative_path.rsplit_once('/') {
@@ -333,21 +402,34 @@ async fn recover_existing_artwork(
     // against at all, so they're deliberately excluded from automatic
     // recovery here — a real, separate gap for a manually-uploaded movie
     // poster in a shared folder, not one this fix can safely close too.
-    let own_stem_prefix = format!("{}-tmdb-", artwork::sanitize_stem(artwork::file_stem(relative_path)).to_lowercase());
+    let own_stem_prefix = format!(
+        "{}-tmdb-",
+        artwork::sanitize_stem(artwork::file_stem(relative_path)).to_lowercase()
+    );
 
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Some(found_kind) = recovered_artwork_kind(&name) else { continue };
+        let Some(found_kind) = recovered_artwork_kind(&name) else {
+            continue;
+        };
         if !relevant(found_kind) {
             continue;
         }
-        if matches!(found_kind, ArtworkKind::Poster | ArtworkKind::Backdrop)
-            && !name.to_lowercase().starts_with(&own_stem_prefix)
+        if matches!(
+            found_kind,
+            ArtworkKind::Poster | ArtworkKind::SeasonPoster | ArtworkKind::Backdrop
+        ) && !name.to_lowercase().starts_with(&own_stem_prefix)
         {
             continue;
         }
-        library.set_artwork(entry_key, found_kind, &format!("{relative_images_dir}/{name}")).await?;
+        library
+            .set_artwork(
+                entry_key,
+                found_kind,
+                &format!("{relative_images_dir}/{name}"),
+            )
+            .await?;
     }
     Ok(())
 }
@@ -355,7 +437,10 @@ async fn recover_existing_artwork(
 /// Recursive allowlist walk. Skips symlinks, hidden entries, and anything
 /// without a known media extension. Paths come back as (absolute,
 /// forward-slash relative).
-fn collect_media_files(root: &Path, progress: Option<&ScanProgress>) -> std::io::Result<Vec<(PathBuf, String)>> {
+fn collect_media_files(
+    root: &Path,
+    progress: Option<&ScanProgress>,
+) -> std::io::Result<Vec<(PathBuf, String)>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut first = true;
@@ -382,7 +467,9 @@ fn collect_media_files(root: &Path, progress: Option<&ScanProgress>) -> std::io:
             if name.starts_with('.') {
                 continue;
             }
-            let Ok(file_type) = entry.file_type() else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             if file_type.is_symlink() {
                 continue;
             }
@@ -390,7 +477,9 @@ fn collect_media_files(root: &Path, progress: Option<&ScanProgress>) -> std::io:
                 stack.push(path);
                 continue;
             }
-            let Ok(relative) = path.strip_prefix(root) else { continue };
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
             let relative = relative
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())

@@ -98,8 +98,17 @@ class ContractsTest {
         )
         val encoded = SwarmJson.encodeToString(request)
         assertEquals(
-            """{"path":"/play/030fe19c72f2665e6efd018a","playback":{"capabilities":{"containers":["mp4","hls"],"video_codecs":["h264:high@4.2"],"audio_codecs":["aac","ac3","mp3"],"max_width":1920,"max_height":1080,"max_bitrate":12000000,"hdr":false},"start_position_secs":42,"prefer_direct":true}}""",
+            """{"path":"/play/030fe19c72f2665e6efd018a","playback":{"capabilities":{"containers":["mp4","hls"],"video_codecs":["h264:high@4.2"],"audio_codecs":["aac","ac3","mp3"],"max_width":1920,"max_height":1080,"max_bitrate":12000000,"hdr":false},"start_position_secs":42,"prefer_direct":true,"preview":false}}""",
             encoded,
+        )
+        val previewEncoded = SwarmJson.encodeToString(
+            request.copy(
+                playback = request.playback?.copy(preferDirect = false, preview = true),
+            ),
+        )
+        assertEquals(
+            """{"path":"/play/030fe19c72f2665e6efd018a","playback":{"capabilities":{"containers":["mp4","hls"],"video_codecs":["h264:high@4.2"],"audio_codecs":["aac","ac3","mp3"],"max_width":1920,"max_height":1080,"max_bitrate":12000000,"hdr":false},"start_position_secs":42,"prefer_direct":false,"preview":true}}""",
+            previewEncoded,
         )
         val plan = SwarmJson.decodeFromString<PlaybackPlan>(
             """{"mode":"hls","path":"/hls/session/master.m3u8","max_bitrate":4160000,"session_id":"session","lyrics":{"provider":"lrclib","provider_id":17,"language":"en","plain_lyrics":"First line","synced_lyrics":"[00:01.00]First line","instrumental":false},"subtitles":[{"id":"whisper-en","language":"en","label":"English — AI generated","source":"whisper","path":"/subtitles/030fe19c72f2665e6efd018a/whisper-en.vtt"}]}""",

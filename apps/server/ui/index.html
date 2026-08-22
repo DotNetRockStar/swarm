@@ -71,6 +71,15 @@
     <button id="hideToTrayBtn" class="tray-hide-button" title="Hide this window; the media server will keep running"><i class="bi bi-dash-square"></i>Hide</button>
   </div>
 
+  <div id="mediaRootWarning" class="media-root-warning d-none" role="alert" aria-live="assertive">
+    <i class="bi bi-hdd-network-fill media-root-warning-icon"></i>
+    <div class="media-root-warning-copy">
+      <strong>Media storage is unavailable</strong>
+      <div id="mediaRootWarningText"></div>
+    </div>
+    <button id="mediaRootWarningDetailsBtn" class="secondary"><i class="bi bi-folder2-open"></i>View media roots</button>
+  </div>
+
   <div id="tabPanel-details" class="d-none">
     <div class="card">
       <h2>Status</h2>
@@ -85,6 +94,8 @@
         <label class="checkbox-label transcription-toggle"><input type="checkbox" id="localTranscriptionEnabledCheck"> <i class="bi bi-cpu"></i>Generate with Whisper</label>
       </div>
       <p id="localTranscriptionSettingStatus" class="muted compact-help">Loading subtitle settings…</p>
+      <label class="checkbox-label transcription-toggle"><input type="checkbox" id="transcriptionPauseWhileStreamingCheck"> <i class="bi bi-pause-circle"></i>Pause subtitle generation while clients are streaming</label>
+      <p class="muted compact-help">Recommended for smooth playback. Turn this off only if the server has enough CPU for streaming and Whisper at the same time.</p>
     </div>
 
     <div class="card">

@@ -19,6 +19,7 @@ import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.capability.CapabilityProfile
 import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.CatalogManifest
+import app.swarm.tv.core.peer.CatalogThumbprint
 import app.swarm.tv.core.peer.ClientErrorReport
 import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.PlaybackMode
@@ -38,9 +39,15 @@ import java.net.InetSocketAddress
 import java.io.IOException
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.decodeFromStream
 
 /**
  * What [CatalogSession] needs to attempt a hole-punched connection when a
@@ -83,7 +90,7 @@ enum class ConnectionRoute { DIRECT, PUNCH }
  * practice.
  */
 private class RouteMemory {
-    private val lastSuccessful = mutableMapOf<String, ConnectionRoute>()
+    private val lastSuccessful = ConcurrentHashMap<String, ConnectionRoute>()
     fun record(deviceId: String, route: ConnectionRoute) {
         lastSuccessful[deviceId] = route
     }
@@ -93,11 +100,19 @@ private class RouteMemory {
     }
 }
 
-class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
-    private val connections = mutableMapOf<String, PeerQuicClient>()
+class CatalogSession(
+    private val proxy: PeerLoopbackProxy,
+    private val catalogCache: CatalogCache? = null,
+) : AutoCloseable {
+    private val connections = ConcurrentHashMap<String, PeerQuicClient>()
+    /** Prevent an artwork burst and a simultaneous catalog refresh from
+     * opening several replacement QUIC connections to the same server. */
+    private val connectionLocks = ConcurrentHashMap<String, Mutex>()
+    /** Decoded once per process; persistent storage supplies the cold-start copy. */
+    private val manifests = ConcurrentHashMap<String, CatalogManifest>()
     private val routeMemory = RouteMemory()
     /** Which devices already have a [ReconnectingConnection] registered with [proxy] — see [connectionFor]'s doc comment on why that registration must happen at most once per device, never repeated on a reconnect. */
-    private val proxyRegisteredDevices = mutableSetOf<String>()
+    private val proxyRegisteredDevices = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Set once a signaling session is available (typically right after
@@ -106,7 +121,15 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
      */
     var punchFallback: PunchFallback? = null
 
-    data class Result(val entries: List<MergedEntry>, val unreachable: List<SwarmDevice>)
+    /** One server whose catalog could not be loaded, with the transport or
+     * decode failure retained for automatic reporting back to that server. */
+    data class CatalogFailure(val device: SwarmDevice, val detail: String)
+
+    data class Result(
+        val entries: List<MergedEntry>,
+        val unreachable: List<SwarmDevice>,
+        val failures: List<CatalogFailure> = emptyList(),
+    )
     data class PlaybackSelection(
         val url: String,
         val mode: PlaybackMode,
@@ -115,6 +138,31 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         val lyrics: app.swarm.tv.core.peer.TrackLyrics? = null,
         val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
     )
+
+    /**
+     * Returns the last successfully downloaded catalogs without touching the
+     * network. The app uses this before [refresh] so Browse can paint useful
+     * content immediately while a fingerprint check happens in the
+     * background.
+     */
+    suspend fun cachedEntries(
+        devices: List<SwarmDevice>,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
+    ): List<MergedEntry> {
+        val byServer = mutableMapOf<String, CatalogManifest>()
+        for (device in devices.filter { it.deviceType != DeviceType.CLIENT }) {
+            cachedManifest(device.deviceId)?.let {
+                byServer[device.deviceId] = it
+                // Register a lazy, reconnecting proxy route before cached
+                // cards are painted. Artwork can then initiate the server
+                // connection itself instead of racing refresh and receiving
+                // an immediate 404 from an unregistered proxy route.
+                ensureProxyRegistration(device, clientCertificate, clientKey)
+            }
+        }
+        return CatalogMerger.merge(byServer)
+    }
 
     /** The URL to hand a media player for `peerPath` on `serverId` — only live once that server appeared connected in a [refresh]. */
     fun urlFor(serverId: String, peerPath: String): String = proxy.urlFor(serverId, peerPath)
@@ -128,6 +176,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     /** Close this TV's connection to one server without changing any other device's swarm membership. */
     fun disconnect(deviceId: String) {
         connections.remove(deviceId)?.let { runCatching { it.close() } }
+        connectionLocks.remove(deviceId)
         routeMemory.forget(deviceId)
         if (proxyRegisteredDevices.remove(deviceId)) proxy.unregister(deviceId)
     }
@@ -146,11 +195,13 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         clientCertificate: X509Certificate,
         clientKey: PrivateKey,
         capabilities: CapabilityProfile = CapabilityProfile.fireTvBaseline(),
+        preview: Boolean = false,
     ): PlaybackSelection {
         val preferences = PlaybackPreferences(
             capabilities = capabilities,
             startPositionSecs = startPositionSecs,
-            preferDirect = true,
+            preferDirect = !preview,
+            preview = preview,
         )
         var connection = connectionFor(device, clientCertificate, clientKey)
             ?: throw IOException("server is no longer connected")
@@ -163,7 +214,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             // same self-heal refresh()/fetchManifest already does for browse.
             // Only the raw connection is evicted here, never the proxy
             // registration itself — see ReconnectingConnection's doc comment.
-            connections.remove(device.deviceId)
+            evictConnection(device.deviceId, connection)
             connection = connectionFor(device, clientCertificate, clientKey)
                 ?: throw IOException("server is no longer connected")
             connection.request(path = "/play/$entryKey", playback = preferences)
@@ -207,8 +258,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         // between, leaving the cached QUIC connection stale. Cleanup matters
         // most precisely then, so reconnect and retry once instead of silently
         // leaving the old transcode reservation until its idle timeout.
-        connections.remove(device.deviceId)
-        runCatching { connection.close() }
+        evictConnection(device.deviceId, connection)
         connection = connectionFor(device, clientCertificate, clientKey) ?: return
         stop(connection)
     }
@@ -221,11 +271,25 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
      * [stopPlayback]: a device too unreachable to accept an error report is
      * itself unremarkable (it's very possibly *why* the original error
      * happened), and this must never itself become a second point of
-     * failure in an error-handling path.
+     * failure in an error-handling path. Returns whether the server accepted
+     * the report so the app can retain a failed delivery and retry after the
+     * next successful catalog connection.
      */
-    suspend fun reportError(device: SwarmDevice, report: ClientErrorReport, clientCertificate: X509Certificate, clientKey: PrivateKey) {
-        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
-        runCatching { connection.request(path = "/errors/report", errorReport = report) }
+    suspend fun reportError(device: SwarmDevice, report: ClientErrorReport, clientCertificate: X509Certificate, clientKey: PrivateKey): Boolean {
+        var connection = connectionFor(device, clientCertificate, clientKey) ?: return false
+        repeat(2) { attempt ->
+            val accepted = runCatching {
+                val response = connection.request(path = "/errors/report", errorReport = report)
+                response.body.readBytes()
+                response.header.status == 204
+            }.getOrDefault(false)
+            if (accepted) return true
+            evictConnection(device.deviceId, connection)
+            if (attempt == 0) {
+                connection = connectionFor(device, clientCertificate, clientKey) ?: return false
+            }
+        }
+        return false
     }
 
     /**
@@ -246,10 +310,14 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
     suspend fun refresh(devices: List<SwarmDevice>, clientCertificate: X509Certificate, clientKey: PrivateKey): Result {
         val manifestsByServer = mutableMapOf<String, CatalogManifest>()
         val unreachable = mutableListOf<SwarmDevice>()
+        val failures = mutableListOf<CatalogFailure>()
 
         for (device in devices.filter { it.deviceType != DeviceType.CLIENT }) {
+            val cached = cachedManifest(device.deviceId)
             var connection = connectionFor(device, clientCertificate, clientKey)
-            var manifest = connection?.let { fetchManifest(device.deviceId, it) }
+            var fetch = connection?.let { fetchCurrentManifest(device.deviceId, it, cached) }
+            var manifest = fetch?.getOrNull()
+            var failure = fetch?.exceptionOrNull()
             if (manifest == null && connection != null) {
                 // fetchManifest already evicted the dead connection it was just
                 // handed (peer restarted, or — confirmed live — a QUIC connection
@@ -257,12 +325,26 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
                 // fresh one in the same refresh, instead of leaving the device
                 // "unreachable" until a second, separate Browse Library press.
                 connection = connectionFor(device, clientCertificate, clientKey)
-                manifest = connection?.let { fetchManifest(device.deviceId, it) }
+                fetch = connection?.let { fetchCurrentManifest(device.deviceId, it, cached) }
+                manifest = fetch?.getOrNull()
+                failure = fetch?.exceptionOrNull() ?: failure
             }
-            if (manifest == null) unreachable += device else manifestsByServer[device.deviceId] = manifest
+            if (manifest == null) {
+                unreachable += device
+                val detail = failure?.let { "${it.javaClass.simpleName}: ${it.message ?: "no detail"}" }
+                    ?: "Could not establish a catalog connection."
+                failures += CatalogFailure(device, detail)
+                // A temporary network failure must not erase a library that
+                // this TV has already browsed successfully. Keep the server
+                // visibly marked unreachable while its stale catalog remains
+                // usable for browsing; playback will reconnect independently.
+                if (cached != null) manifestsByServer[device.deviceId] = cached
+            } else {
+                manifestsByServer[device.deviceId] = manifest
+            }
         }
 
-        return Result(CatalogMerger.merge(manifestsByServer), unreachable)
+        return Result(CatalogMerger.merge(manifestsByServer), unreachable, failures)
     }
 
     /** Lightweight authenticated reachability check used by the dashboard's Resync action. */
@@ -275,8 +357,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
                 response.header.status == 200
             }.getOrDefault(false)
             if (reachable) return true
-            connections.remove(device.deviceId)
-            runCatching { connection.close() }
+            evictConnection(device.deviceId, connection)
         }
         return false
     }
@@ -294,7 +375,12 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
      * same self-healing without each of *those* call sites needing to know
      * anything about reconnection.
      */
-    private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
+    private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? =
+        connectionLocks.computeIfAbsent(device.deviceId) { Mutex() }.withLock {
+            connectionForLocked(device, clientCertificate, clientKey)
+        }
+
+    private suspend fun connectionForLocked(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
         connections[device.deviceId]?.let { return it }
 
         // Failures here fail open (device just ends up in Result.unreachable)
@@ -339,10 +425,18 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         // wrapper on top of the still-live first one; the wrapper always
         // looks up the *current* raw connection dynamically at request
         // time, so it never goes stale on its own.
+        ensureProxyRegistration(device, clientCertificate, clientKey)
+        return connection
+    }
+
+    private fun ensureProxyRegistration(
+        device: SwarmDevice,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
+    ) {
         if (proxyRegisteredDevices.add(device.deviceId)) {
             proxy.register(device.deviceId, ReconnectingConnection(device, clientCertificate, clientKey))
         }
-        return connection
     }
 
     /**
@@ -367,28 +461,84 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
             return try {
                 current.request(path, range, ifNoneMatch, playback, errorReport, like)
             } catch (e: IOException) {
-                connections.remove(device.deviceId)
+                evictConnection(device.deviceId, current)
                 val fresh = runBlocking { connectionFor(device, clientCertificate, clientKey) } ?: throw e
                 fresh.request(path, range, ifNoneMatch, playback, errorReport, like)
             }
         }
     }
 
-    private fun fetchManifest(serverId: String, connection: PeerQuicClient): CatalogManifest? {
-        val manifest = runCatching {
-            val response = connection.request("/catalog/manifest")
-            SwarmJson.decodeFromString<CatalogManifest>(response.body.readBytes().decodeToString())
-        }.onFailure { it.printStackTrace() }.getOrNull()
-        if (manifest == null) {
+    private suspend fun cachedManifest(serverId: String): CatalogManifest? {
+        manifests[serverId]?.let { return it }
+        return runCatching { catalogCache?.load(serverId) }
+            .onFailure { it.printStackTrace() }
+            .getOrNull()
+            ?.also { manifests[serverId] = it }
+    }
+
+    /**
+     * Checks the tiny version response before requesting the large manifest.
+     * An unchanged server therefore transfers only a few bytes on every
+     * visit, while a changed/first-seen server still gets a fresh full copy.
+     */
+    private suspend fun fetchCurrentManifest(
+        serverId: String,
+        connection: PeerQuicClient,
+        cached: CatalogManifest?,
+    ): kotlin.Result<CatalogManifest> {
+        val result = runCatching {
+            val thumbprintResponse = connection.request("/catalog/thumbprint")
+            if (thumbprintResponse.header.status != 200) {
+                thumbprintResponse.body.close()
+                throw IOException("catalog thumbprint returned ${thumbprintResponse.header.status}")
+            }
+            val remote = decodeBody<CatalogThumbprint>(thumbprintResponse)
+            if (cached != null && remote.thumbprint == cached.thumbprint && remote.entryCount == cached.entries.size.toLong()) {
+                return@runCatching cached
+            }
+
+            var response = connection.request("/catalog/manifest.gz")
+            var compressed = response.header.status == 200
+            if (response.header.status == 404) {
+                // Compatibility with media servers from before compressed
+                // manifests were introduced.
+                response.body.close()
+                response = connection.request("/catalog/manifest")
+                compressed = false
+            }
+            if (response.header.status != 200) {
+                response.body.close()
+                throw IOException("catalog manifest returned ${response.header.status}")
+            }
+            decodeBody<CatalogManifest>(response, compressed).also { manifest ->
+                manifests[serverId] = manifest
+                runCatching { catalogCache?.store(serverId, manifest) }.onFailure { it.printStackTrace() }
+            }
+        }.onFailure { it.printStackTrace() }
+        if (result.isFailure) {
             // Stale connection (peer restarted, network dropped) — drop the
             // raw connection so the next refresh (or a ReconnectingConnection
             // handling an artwork fetch in the meantime) reconnects. The
             // proxy registration itself stays — see ReconnectingConnection's
             // doc comment.
-            connections.remove(serverId)
-            runCatching { connection.close() }
+            evictConnection(serverId, connection)
         }
-        return manifest
+        return result
+    }
+
+    /** Evict only the connection that actually failed. Another worker may
+     * already have installed a healthy replacement for this server. */
+    private fun evictConnection(serverId: String, failed: PeerQuicClient) {
+        connections.remove(serverId, failed)
+        runCatching { failed.close() }
+    }
+
+    /** Decode directly from the bounded QUIC stream, avoiding byte[] and
+     * String copies of a multi-megabyte catalog on memory-constrained TVs. */
+    @OptIn(ExperimentalSerializationApi::class)
+    private inline fun <reified T> decodeBody(response: PeerResponse, gzip: Boolean = false): T {
+        val input = if (gzip) GZIPInputStream(response.body.buffered()) else response.body.buffered()
+        return input.use { SwarmJson.decodeFromStream<T>(it) }
     }
 
     override fun close() {
@@ -400,5 +550,7 @@ class CatalogSession(private val proxy: PeerLoopbackProxy) : AutoCloseable {
         proxyRegisteredDevices.clear()
         connections.values.forEach { runCatching { it.close() } }
         connections.clear()
+        connectionLocks.clear()
+        manifests.clear()
     }
 }

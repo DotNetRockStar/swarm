@@ -63,6 +63,9 @@ pub struct SearchResultEntry {
     pub year: Option<u32>,
     pub genres: Vec<String>,
     pub rating: Option<String>,
+    /// Provider community score normalized to 0–10.
+    pub community_rating: Option<f64>,
+    pub community_rating_votes: Option<u64>,
     pub like_count: u32,
 }
 
@@ -86,6 +89,9 @@ pub struct EntryDetails {
     pub year: Option<u32>,
     pub genres: Vec<String>,
     pub rating: Option<String>,
+    /// Provider community score normalized to 0–10.
+    pub community_rating: Option<f64>,
+    pub community_rating_votes: Option<u64>,
     pub like_count: u32,
     pub overview: Option<String>,
     /// `"Name as Character"`, or bare `"Name"` when no character is on file.
@@ -197,6 +203,8 @@ impl McpServer {
                 year: e.year,
                 genres: e.genres,
                 rating: e.rating,
+                community_rating: e.community_rating,
+                community_rating_votes: e.community_rating_votes,
             })
             .collect();
         Ok(Json(results))
@@ -233,6 +241,8 @@ impl McpServer {
             year: entry.year,
             genres: entry.genres,
             rating: entry.rating,
+            community_rating: entry.community_rating,
+            community_rating_votes: entry.community_rating_votes,
             overview: entry.overview,
             cast: entry
                 .cast

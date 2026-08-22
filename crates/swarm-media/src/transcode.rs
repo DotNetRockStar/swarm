@@ -15,7 +15,9 @@ use swarm_core::peer::{MediaKind, PlaybackMode, PlaybackPlan, PlaybackPreference
 use tokio::process::{Child, Command};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const AUDIO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+const PREVIEW_DURATION_SECS: u64 = 32;
 
 #[derive(Debug, Clone)]
 pub struct TranscodeConfig {
@@ -133,6 +135,67 @@ const LADDER: [Rendition; 4] = [
         audio_bps: 96_000,
     },
 ];
+
+/// Browse cards are only 347x195 dp. A single inexpensive rendition gets a
+/// useful first frame to the TV faster than starting the full adaptive ladder,
+/// while retaining enough detail for the enlarged card on a 4K display.
+const PREVIEW_LADDER: [Rendition; 3] = [
+    Rendition {
+        name: "preview-540p",
+        width: 960,
+        height: 540,
+        average_video_bps: 1_000_000,
+        peak_video_bps: 1_400_000,
+        audio_bps: 96_000,
+    },
+    Rendition {
+        name: "preview-480p",
+        width: 854,
+        height: 480,
+        average_video_bps: 850_000,
+        peak_video_bps: 1_200_000,
+        audio_bps: 96_000,
+    },
+    Rendition {
+        name: "preview-360p",
+        width: 640,
+        height: 360,
+        average_video_bps: 600_000,
+        peak_video_bps: 900_000,
+        audio_bps: 96_000,
+    },
+];
+
+fn video_variants(
+    source_height: u32,
+    preferences: &PlaybackPreferences,
+    client_limit: u64,
+) -> Vec<Rendition> {
+    let eligible = |rendition: &&Rendition| {
+        rendition.width <= preferences.capabilities.max_width
+            && rendition.height <= preferences.capabilities.max_height
+            // The lowest HLS rung is a 640x360 *bounding box*. A source can
+            // legitimately be shorter than 360 while still being wider than
+            // 640 (real example: The Aviator AVI is 688x288); FFmpeg's
+            // force_original_aspect_ratio=decrease scales that file down to
+            // fit without enlarging/distorting it. Rejecting solely because
+            // 288 < 360 left no rendition and surfaced a false bandwidth 429.
+            && rendition.height <= source_height.max(360)
+            && rendition.peak_total() <= client_limit
+    };
+    if preferences.preview {
+        // Encoding multiple ABR rungs costs more CPU and delays the first
+        // segment. One appropriately-sized preview stream is intentional.
+        PREVIEW_LADDER
+            .iter()
+            .filter(eligible)
+            .copied()
+            .take(1)
+            .collect()
+    } else {
+        LADDER.iter().filter(eligible).copied().collect()
+    }
+}
 
 #[derive(Debug)]
 enum SessionKind {
@@ -365,7 +428,7 @@ impl TranscodeManager {
         };
         let client_limit = preferences.capabilities.max_bitrate.min(available);
 
-        if preferences.prefer_direct {
+        if preferences.prefer_direct && !preferences.preview {
             if let Some(source_peak) = direct_peak_bps(entry) {
                 if source_peak <= client_limit && direct_compatible(entry, preferences) {
                     let id = self.reserve(
@@ -416,6 +479,7 @@ impl TranscodeManager {
                         enforce_budget,
                         budget_exempt: is_lan,
                     },
+                    preferences.preview,
                 )
                 .await;
         }
@@ -425,16 +489,7 @@ impl TranscodeManager {
             .as_ref()
             .map(|video| video.height)
             .unwrap_or(preferences.capabilities.max_height);
-        let variants: Vec<Rendition> = LADDER
-            .iter()
-            .copied()
-            .filter(|rendition| {
-                rendition.width <= preferences.capabilities.max_width
-                    && rendition.height <= preferences.capabilities.max_height
-                    && rendition.height <= source_height
-                    && rendition.peak_total() <= client_limit
-            })
-            .collect();
+        let variants = video_variants(source_height, preferences, client_limit);
         if variants.is_empty() {
             return Err(TranscodeError::Bandwidth);
         }
@@ -452,6 +507,7 @@ impl TranscodeManager {
                 enforce_budget,
                 budget_exempt: is_lan,
             },
+            preferences.preview,
         )
         .await
     }
@@ -568,6 +624,7 @@ impl TranscodeManager {
         start_position_secs: u64,
         variants: &[Rendition],
         reservation: HlsReservation,
+        preview: bool,
     ) -> Result<PlaybackPlan, TranscodeError> {
         let HlsReservation {
             reserved_bps,
@@ -633,6 +690,7 @@ impl TranscodeManager {
                 variants,
                 reserved_bps,
                 &directory,
+                preview,
             )
             .await;
         let child = match result {
@@ -668,6 +726,7 @@ impl TranscodeManager {
         variants: &[Rendition],
         reserved_bps: u64,
         directory: &Path,
+        preview: bool,
     ) -> Result<Child, TranscodeError> {
         let log_path = directory.join("ffmpeg.log");
         let log = std::fs::File::create(&log_path).map_err(TranscodeError::Workspace)?;
@@ -682,8 +741,32 @@ impl TranscodeManager {
             command.arg("-ss").arg(start_position_secs.to_string());
         }
         command.arg("-i").arg(media_path);
+        if preview {
+            // The client displays 30 seconds. Stop the encoder shortly after
+            // that window instead of racing through the remainder of a movie.
+            command.arg("-t").arg(PREVIEW_DURATION_SECS.to_string());
+        }
 
         let has_audio = entry.audio.is_some();
+        // Audio language is routing metadata, not part of the codec summary
+        // retained at scan time. Resolve it when an HLS session is created so
+        // both normal transcodes and previews map English when the container
+        // advertises one. A failed/missing ffprobe safely retains the historic
+        // first-audio-track behavior. Bound this metadata read tightly because
+        // a slow network share must not hold a hover preview in negotiation.
+        let audio_map = if has_audio && entry.kind != MediaKind::Track {
+            tokio::time::timeout(
+                AUDIO_PROBE_TIMEOUT,
+                crate::probe::preferred_audio_stream_index(&self.config.ffmpeg_path, media_path),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|index| format!("0:{index}"))
+            .unwrap_or_else(|| "0:a:0".to_string())
+        } else {
+            "0:a:0".to_string()
+        };
         let output_pattern = directory.join("v%v/index.m3u8");
         let segment_pattern = directory.join("v%v/segment_%06d.m4s");
 
@@ -691,7 +774,7 @@ impl TranscodeManager {
             command
                 .arg("-vn")
                 .arg("-map")
-                .arg("0:a:0")
+                .arg(&audio_map)
                 .arg("-c:a:0")
                 .arg("aac")
                 .arg("-b:a:0")
@@ -716,19 +799,23 @@ impl TranscodeManager {
             for (index, rendition) in variants.iter().enumerate() {
                 command.arg("-map").arg(format!("[v{index}]"));
                 if has_audio {
-                    command.arg("-map").arg("0:a:0");
+                    command.arg("-map").arg(&audio_map);
                 }
                 command
                     .arg(format!("-c:v:{index}"))
                     .arg("libx264")
                     .arg(format!("-preset:v:{index}"))
-                    .arg("veryfast")
+                    .arg(if preview { "ultrafast" } else { "veryfast" })
                     .arg(format!("-profile:v:{index}"))
                     .arg("high")
                     .arg(format!("-level:v:{index}"))
                     .arg("4.1")
                     .arg(format!("-pix_fmt:v:{index}"))
-                    .arg("yuv420p")
+                    .arg("yuv420p");
+                if preview {
+                    command.arg(format!("-tune:v:{index}")).arg("zerolatency");
+                }
+                command
                     .arg(format!("-b:v:{index}"))
                     .arg(rendition.average_video_bps.to_string())
                     .arg(format!("-maxrate:v:{index}"))
@@ -738,7 +825,11 @@ impl TranscodeManager {
                     .arg(format!("-sc_threshold:v:{index}"))
                     .arg("0")
                     .arg(format!("-force_key_frames:v:{index}"))
-                    .arg("expr:gte(t,n_forced*2)");
+                    .arg(if preview {
+                        "expr:gte(t,n_forced*1)"
+                    } else {
+                        "expr:gte(t,n_forced*2)"
+                    });
                 if has_audio {
                     command
                         .arg(format!("-c:a:{index}"))
@@ -774,7 +865,11 @@ impl TranscodeManager {
             .arg("-f")
             .arg("hls")
             .arg("-hls_time")
-            .arg(self.config.segment_duration_secs.max(2).to_string())
+            .arg(if preview {
+                "1".to_string()
+            } else {
+                self.config.segment_duration_secs.max(2).to_string()
+            })
             .arg("-hls_list_size")
             .arg("0")
             .arg("-hls_playlist_type")
@@ -1046,6 +1141,8 @@ mod tests {
             cast: vec![],
             overview: None,
             rating: None,
+            community_rating: None,
+            community_rating_votes: None,
         }
     }
 
@@ -1054,6 +1151,7 @@ mod tests {
             capabilities: CapabilityProfile::fire_tv_baseline(),
             start_position_secs: 0,
             prefer_direct: true,
+            preview: false,
         }
     }
 
@@ -1135,6 +1233,34 @@ mod tests {
 
         let incompatible = entry();
         assert!(!direct_compatible(&incompatible, &preferences()));
+    }
+
+    #[test]
+    fn preview_uses_one_lightweight_rendition() {
+        let mut prefs = preferences();
+        prefs.preview = true;
+        prefs.prefer_direct = false;
+
+        let variants = video_variants(1080, &prefs, u64::MAX);
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].name, "preview-540p");
+        assert_eq!(variants[0].height, 540);
+        assert_eq!(variants[0].peak_total(), 1_496_000);
+
+        prefs.capabilities.max_height = 480;
+        let variants = video_variants(1080, &prefs, u64::MAX);
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].name, "preview-480p");
+    }
+
+    #[test]
+    fn low_height_widescreen_video_still_gets_the_lowest_hls_rendition() {
+        let prefs = preferences();
+
+        let variants = video_variants(288, &prefs, u64::MAX);
+
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].name, "360p");
     }
 
     #[test]
@@ -1284,6 +1410,22 @@ mod tests {
         assert!(master.contains("index.m3u8"));
         assert_eq!(master.matches("#EXT-X-STREAM-INF").count(), 3);
         manager.finish_use(session);
+
+        manager.release(session);
+        prefs.preview = true;
+        let preview_plan = manager
+            .plan(&source_entry, &source, &prefs, false)
+            .await
+            .unwrap();
+        assert_eq!(preview_plan.mode, PlaybackMode::Hls);
+        assert_eq!(preview_plan.max_bitrate, 1_496_000);
+        let preview_relative = preview_plan.path.splitn(4, '/').nth(3).unwrap();
+        let preview_session = preview_plan.path.split('/').nth(2).unwrap();
+        let preview_file = manager.open_hls(preview_session, preview_relative).unwrap();
+        let preview_master = std::fs::read_to_string(preview_file.path).unwrap();
+        assert!(preview_master.contains("preview-540p/index.m3u8"));
+        assert_eq!(preview_master.matches("#EXT-X-STREAM-INF").count(), 1);
+        manager.finish_use(preview_session);
         drop(manager);
         let _ = std::fs::remove_dir_all(&root);
     }

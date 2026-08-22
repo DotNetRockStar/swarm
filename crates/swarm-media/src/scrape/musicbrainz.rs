@@ -25,6 +25,10 @@ pub struct ReleaseDetails {
     pub genres: Vec<String>,
     pub artist_mbid: Option<String>,
     pub artist_name: Option<String>,
+    /// MusicBrainz release-group community rating normalized from its
+    /// native 0–5 scale to the server-wide 0–10 scale.
+    pub community_rating: Option<f64>,
+    pub community_rating_votes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -50,7 +54,10 @@ impl MusicBrainzClient {
 
     pub fn with_base_url(base: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::builder().user_agent(USER_AGENT).build().unwrap_or_default(),
+            http: reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .build()
+                .unwrap_or_default(),
             base: base.into(),
             last_request: Arc::new(Mutex::new(None)),
         }
@@ -69,7 +76,11 @@ impl MusicBrainzClient {
 
     pub async fn search_release(&self, artist: &str, album: &str) -> Result<String, MbError> {
         self.throttle().await;
-        let query = format!("artist:\"{}\" AND release:\"{}\"", escape_lucene(artist), escape_lucene(album));
+        let query = format!(
+            "artist:\"{}\" AND release:\"{}\"",
+            escape_lucene(artist),
+            escape_lucene(album)
+        );
         let response = self
             .http
             .get(format!("{}/release/", self.base))
@@ -78,14 +89,23 @@ impl MusicBrainzClient {
             .await
             .map_err(|e| MbError::Unavailable(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(MbError::Unavailable(format!("search returned {}", response.status())));
+            return Err(MbError::Unavailable(format!(
+                "search returned {}",
+                response.status()
+            )));
         }
-        let body: ReleaseSearchResponse =
-            response.json().await.map_err(|e| MbError::Unavailable(e.to_string()))?;
+        let body: ReleaseSearchResponse = response
+            .json()
+            .await
+            .map_err(|e| MbError::Unavailable(e.to_string()))?;
         if let Some(error) = body.error {
             return Err(MbError::Unavailable(error));
         }
-        body.releases.into_iter().next().map(|r| r.id).ok_or(MbError::NotFound)
+        body.releases
+            .into_iter()
+            .next()
+            .map(|r| r.id)
+            .ok_or(MbError::NotFound)
     }
 
     pub async fn release_lookup(&self, release_mbid: &str) -> Result<ReleaseDetails, MbError> {
@@ -93,7 +113,13 @@ impl MusicBrainzClient {
         let response = self
             .http
             .get(format!("{}/release/{release_mbid}", self.base))
-            .query(&[("inc", "artist-credits+genres"), ("fmt", "json")])
+            // Releases themselves do not support ratings. Include the
+            // parent release group and its aggregate rating in this same
+            // lookup so rating support adds no extra rate-limited request.
+            .query(&[
+                ("inc", "artist-credits+genres+release-groups+ratings"),
+                ("fmt", "json"),
+            ])
             .send()
             .await
             .map_err(|e| MbError::Unavailable(e.to_string()))?;
@@ -101,15 +127,28 @@ impl MusicBrainzClient {
             return Err(MbError::NotFound);
         }
         if !response.status().is_success() {
-            return Err(MbError::Unavailable(format!("lookup returned {}", response.status())));
+            return Err(MbError::Unavailable(format!(
+                "lookup returned {}",
+                response.status()
+            )));
         }
-        let body: ReleaseLookupResponse =
-            response.json().await.map_err(|e| MbError::Unavailable(e.to_string()))?;
+        let body: ReleaseLookupResponse = response
+            .json()
+            .await
+            .map_err(|e| MbError::Unavailable(e.to_string()))?;
         let first_credit = body.artist_credit.into_iter().next();
+        let group_rating = body.release_group.and_then(|group| group.rating);
+        let votes = group_rating.as_ref().map_or(0, |rating| rating.votes_count);
         Ok(ReleaseDetails {
             genres: body.genres.into_iter().map(|g| g.name).collect(),
             artist_mbid: first_credit.as_ref().map(|c| c.artist.id.clone()),
             artist_name: first_credit.map(|c| c.artist.name),
+            community_rating: (votes > 0)
+                .then(|| group_rating.as_ref().and_then(|rating| rating.value))
+                .flatten()
+                .map(|rating| rating * 2.0)
+                .filter(|rating| rating.is_finite() && (0.0..=10.0).contains(rating)),
+            community_rating_votes: (votes > 0).then_some(votes),
         })
     }
 
@@ -126,14 +165,21 @@ impl MusicBrainzClient {
             return Err(MbError::NotFound);
         }
         if !response.status().is_success() {
-            return Err(MbError::Unavailable(format!("artist lookup returned {}", response.status())));
+            return Err(MbError::Unavailable(format!(
+                "artist lookup returned {}",
+                response.status()
+            )));
         }
-        let body: ArtistLookupResponse =
-            response.json().await.map_err(|e| MbError::Unavailable(e.to_string()))?;
+        let body: ArtistLookupResponse = response
+            .json()
+            .await
+            .map_err(|e| MbError::Unavailable(e.to_string()))?;
         let commons_file = body
             .relations
             .into_iter()
-            .find(|rel| rel.rel_type == "image" && rel.url.resource.contains("commons.wikimedia.org"))
+            .find(|rel| {
+                rel.rel_type == "image" && rel.url.resource.contains("commons.wikimedia.org")
+            })
             .and_then(|rel| commons_title_from_url(&rel.url.resource));
         Ok(ArtistDetails { commons_file })
     }
@@ -211,6 +257,20 @@ struct ReleaseLookupResponse {
     genres: Vec<MbGenre>,
     #[serde(default, rename = "artist-credit")]
     artist_credit: Vec<ArtistCredit>,
+    #[serde(default, rename = "release-group")]
+    release_group: Option<ReleaseGroup>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReleaseGroup {
+    rating: Option<MbRating>,
+}
+
+#[derive(serde::Deserialize)]
+struct MbRating {
+    value: Option<f64>,
+    #[serde(default, rename = "votes-count")]
+    votes_count: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -264,31 +324,44 @@ mod tests {
     #[tokio::test]
     async fn search_then_lookup() {
         let router = axum::Router::new()
-            .route("/release/", get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }))
+            .route(
+                "/release/",
+                get(|| async { Json(json!({"releases": [{"id": "rel-1"}]})) }),
+            )
             .route(
                 "/release/rel-1",
                 get(|| async {
                     Json(json!({
                         "genres": [{"name": "Rock"}],
-                        "artist-credit": [{"artist": {"id": "art-1", "name": "Pink Floyd"}}]
+                        "artist-credit": [{"artist": {"id": "art-1", "name": "Pink Floyd"}}],
+                        "release-group": {"rating": {"value": 4.25, "votes-count": 120}}
                     }))
                 }),
             );
         let base = spawn_mock(router).await;
         let client = MusicBrainzClient::with_base_url(&base);
-        let mbid = client.search_release("Pink Floyd", "The Wall").await.unwrap();
+        let mbid = client
+            .search_release("Pink Floyd", "The Wall")
+            .await
+            .unwrap();
         assert_eq!(mbid, "rel-1");
         let details = client.release_lookup(&mbid).await.unwrap();
         assert_eq!(details.genres, vec!["Rock"]);
         assert_eq!(details.artist_mbid.as_deref(), Some("art-1"));
+        assert_eq!(details.community_rating, Some(8.5));
+        assert_eq!(details.community_rating_votes, Some(120));
     }
 
     #[tokio::test]
     async fn no_releases_is_not_found() {
-        let router = axum::Router::new().route("/release/", get(|| async { Json(json!({"releases": []})) }));
+        let router =
+            axum::Router::new().route("/release/", get(|| async { Json(json!({"releases": []})) }));
         let base = spawn_mock(router).await;
         let client = MusicBrainzClient::with_base_url(&base);
-        assert!(matches!(client.search_release("Nobody", "Nothing").await, Err(MbError::NotFound)));
+        assert!(matches!(
+            client.search_release("Nobody", "Nothing").await,
+            Err(MbError::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -304,7 +377,10 @@ mod tests {
         );
         let base = spawn_mock(router).await;
         let client = MusicBrainzClient::with_base_url(&base);
-        assert!(matches!(client.search_release("Pink Floyd", "The Wall").await, Err(MbError::Unavailable(_))));
+        assert!(matches!(
+            client.search_release("Pink Floyd", "The Wall").await,
+            Err(MbError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]
@@ -321,7 +397,10 @@ mod tests {
         let base = spawn_mock(router).await;
         let client = MusicBrainzClient::with_base_url(&base);
         let details = client.artist_lookup("art-1").await.unwrap();
-        assert_eq!(details.commons_file.as_deref(), Some("File:Pink Floyd 1973.jpg"));
+        assert_eq!(
+            details.commons_file.as_deref(),
+            Some("File:Pink Floyd 1973.jpg")
+        );
     }
 
     #[test]

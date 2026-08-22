@@ -344,6 +344,14 @@ function likeBadge(likeCount) {
   return `<span class="like-badge"><i class="bi bi-heart-fill"></i> ${likeCount}</span>`;
 }
 
+function communityRating(entry) {
+  if (entry.community_rating == null) return "—";
+  const votes = entry.community_rating_votes
+    ? `${entry.community_rating_votes.toLocaleString()} provider votes`
+    : "Provider community rating";
+  return `<span title="${esc(votes)}"><i class="bi bi-star-fill"></i> ${Number(entry.community_rating).toFixed(1)}/10</span>`;
+}
+
 // ---- browse: root (Movies / Music / Shows section pickers) -----------------
 
 function renderBrowse() {
@@ -458,6 +466,7 @@ function detailView(entry, backCrumbs) {
           <h2 style="margin-top:0; text-transform:none; font-size:1.2rem; color:var(--text)">
             ${esc(entry.scraped_title || entry.title)}${entry.year ? ` <span class="muted">(${entry.year})</span>` : ""}
             ${entry.rating ? `<span class="tag" style="margin-left:8px; vertical-align:middle">${esc(entry.rating)}</span>` : ""}
+            ${entry.community_rating != null ? `<span class="tag" style="margin-left:8px; vertical-align:middle">${communityRating(entry)}</span>` : ""}
             ${entry.like_count ? `<span class="muted" style="margin-left:8px; font-size:.85rem; vertical-align:middle"><i class="bi bi-heart-fill" style="color:#ff5d7a"></i> ${entry.like_count}</span>` : ""}
           </h2>
           ${entry.genres.length ? `<div class="category-chips">${entry.genres.map(g => `<button class="category-chip" data-filter-category="${esc(g)}">${esc(g)}</button>`).join("")}</div>` : ""}
@@ -598,13 +607,14 @@ function renderAlbum(body, artist, album) {
       <td class="mono">${t.track_number ?? "—"}</td>
       <td>${esc(t.scraped_title || t.title)}</td>
       <td>${t.duration_secs ? formatDuration(t.duration_secs) : "—"}</td>
+      <td>${communityRating(t)}</td>
       <td><button class="secondary" data-manage="${esc(t.entry_key)}">${openManageKey === t.entry_key ? '<i class="bi bi-x-lg"></i>Close' : '<i class="bi bi-sliders"></i>Manage'}</button></td>
     </tr>
-    ${openManageKey === t.entry_key ? `<tr><td colspan="4">${manageRow(t)}</td></tr>` : ""}
+    ${openManageKey === t.entry_key ? `<tr><td colspan="5">${manageRow(t)}</td></tr>` : ""}
   `).join("");
   const albumEntryKeys = tracks.map(t => t.entry_key);
   body.innerHTML = `${breadcrumb(crumbs)}${groupArtworkPanel("album cover")}
-    <table><thead><tr><th>#</th><th>Title</th><th>Duration</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table><thead><tr><th>#</th><th>Title</th><th>Duration</th><th>Rating</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   wireBreadcrumb(body, crumbs);
   wireGroupArtworkHandlers(albumEntryKeys, "cover");
   wireTrackManageHandlers(body);
@@ -692,7 +702,7 @@ function renderShow(body, show) {
   const crumbs = [{ label: "Media", onClick: () => browsePath = { kind: "root" } }, { label: show }];
   const cards = [...seasons.entries()].sort(([a], [b]) => a - b).map(([season, episodes]) => `
     <div class="media-card" data-season="${season}">
-      ${artImg(episodes[0].entry_key, "poster", "card-art")}
+      ${artImg(episodes[0].entry_key, "season", "card-art")}
       <div class="card-title">${seasonLabel(season)}</div>
       <div class="muted" style="font-size:.75rem">${episodes.length} episode${episodes.length === 1 ? "" : "s"}</div>
     </div>`).join("");
@@ -723,7 +733,7 @@ function renderSeason(body, show, season) {
   ];
   const cards = episodes.map(ep => `
     <div class="media-card" data-episode="${esc(ep.entry_key)}">
-      ${artImg(ep.entry_key, "poster", "card-art")}
+      ${artImg(ep.entry_key, "backdrop", "card-art")}
       ${likeBadge(ep.like_count)}
       <div class="card-title" title="${esc(ep.scraped_title || ep.title)}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
     </div>`).join("");
@@ -847,6 +857,7 @@ function manageRow(entry) {
         <label style="flex:0 0 100%">Kind</label>
         <select id="artworkKindSelect" style="flex:1; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
           <option value="poster">Poster</option>
+          <option value="season">Season poster</option>
           <option value="backdrop">Backdrop</option>
           <option value="cover">Cover</option>
           <option value="artist">Artist photo</option>
@@ -1116,14 +1127,14 @@ function patchEntryLive(p) {
     // Fresh bytes just landed on disk — drop any cached copy from before
     // this match so the reload below can't serve a stale (or empty-
     // placeholder-miss) cache entry instead of the real artwork.
-    for (const kind of ["poster", "backdrop", "cover"]) {
+    for (const kind of ["poster", "season", "backdrop", "cover"]) {
       const cached = artworkCache.get(`${p.entry_key}:${kind}`);
       if (cached) { URL.revokeObjectURL(cached.blobUrl); artworkCache.delete(`${p.entry_key}:${kind}`); }
     }
     document.querySelectorAll(
-      `img[id^="art-poster-${p.entry_key}-"], img[id^="art-backdrop-${p.entry_key}-"], img[id^="art-cover-${p.entry_key}-"]`,
+      `img[id^="art-poster-${p.entry_key}-"], img[id^="art-season-${p.entry_key}-"], img[id^="art-backdrop-${p.entry_key}-"], img[id^="art-cover-${p.entry_key}-"]`,
     ).forEach(img => {
-      const kind = img.id.startsWith("art-poster-") ? "poster" : img.id.startsWith("art-backdrop-") ? "backdrop" : "cover";
+      const kind = img.id.startsWith("art-poster-") ? "poster" : img.id.startsWith("art-season-") ? "season" : img.id.startsWith("art-backdrop-") ? "backdrop" : "cover";
       artworkObserver.unobserve(img);
       loadArtworkInto(img, p.entry_key, kind);
     });

@@ -33,7 +33,9 @@ const PROBE_TARGET: &str = "8.8.8.8:80";
 const TUNNEL_PREFIXES: &[&str] = &["utun", "tun", "tap", "ppp", "wg"];
 
 fn is_tunnel_interface(name: &str) -> bool {
-    TUNNEL_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    TUNNEL_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 fn probe_via_routing_table() -> Option<IpAddr> {
@@ -113,7 +115,10 @@ mod tests {
             .into_iter()
             .flatten()
             .any(|iface| iface.ip() == reported && is_tunnel_interface(&iface.name));
-        assert!(!on_a_tunnel, "detect_local_ipv4() reported {reported}, which belongs to a tunnel interface");
+        assert!(
+            !on_a_tunnel,
+            "detect_local_ipv4() reported {reported}, which belongs to a tunnel interface"
+        );
     }
 
     #[test]

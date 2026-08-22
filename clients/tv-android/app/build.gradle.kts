@@ -135,4 +135,8 @@ dependencies {
     // SwarmJson value — :core's own dependency on this is `implementation`,
     // not exposed transitively, so :app needs it too.
     implementation(libs.kotlinx.serialization.json)
+
+    testImplementation(libs.junit.jupiter)
 }
+
+tasks.withType<Test>().configureEach { useJUnitPlatform() }

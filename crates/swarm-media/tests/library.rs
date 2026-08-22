@@ -22,7 +22,11 @@ async fn fixture(tag: &str) -> Fixture {
     std::fs::create_dir_all(&root).unwrap();
     let db_path = base.join("library.sqlite");
     let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
-    Fixture { root, library, _db_path: db_path }
+    Fixture {
+        root,
+        library,
+        _db_path: db_path,
+    }
 }
 
 fn write(root: &Path, relative: &str, content: &[u8]) {
@@ -62,19 +66,49 @@ async fn transcription_queue_resumes_segments_and_cascades_with_media() {
         cast: Vec::new(),
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     fx.library.upsert(&entry).await.unwrap();
-    assert_eq!(fx.library.enqueue_missing_transcriptions("small.en", "en", 600).await.unwrap(), 1);
-    let first = fx.library.claim_next_transcription().await.unwrap().unwrap();
+    assert_eq!(
+        fx.library
+            .enqueue_missing_transcriptions("small.en", "en", 600)
+            .await
+            .unwrap(),
+        1
+    );
+    let first = fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((first.total_segments, first.completed_segments), (3, 0));
-    fx.library.store_transcription_segment(&entry.entry_key, 0, "[]").await.unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 0, "[]")
+        .await
+        .unwrap();
 
     // Simulate a real process exit after one durable segment was committed.
-    fx.library.recover_interrupted_transcriptions().await.unwrap();
-    let resumed = fx.library.claim_next_transcription().await.unwrap().unwrap();
+    fx.library
+        .recover_interrupted_transcriptions()
+        .await
+        .unwrap();
+    let resumed = fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(resumed.completed_segments, 1);
-    fx.library.store_transcription_segment(&entry.entry_key, 1, "[]").await.unwrap();
-    fx.library.store_transcription_segment(&entry.entry_key, 2, "[]").await.unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 1, "[]")
+        .await
+        .unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 2, "[]")
+        .await
+        .unwrap();
     fx.library
         .complete_transcription(&SubtitleRecord {
             id: "whisper-en".into(),
@@ -89,11 +123,33 @@ async fn transcription_queue_resumes_segments_and_cascades_with_media() {
         .await
         .unwrap();
     let status = fx.library.transcription_queue_status().await.unwrap();
-    assert_eq!((status.completed, status.completed_segments, status.total_segments), (1, 3, 3));
+    assert_eq!(
+        (
+            status.completed,
+            status.completed_segments,
+            status.total_segments
+        ),
+        (1, 3, 3)
+    );
 
-    fx.library.remove_by_path(&entry.relative_path).await.unwrap();
-    assert!(fx.library.subtitle_tracks(&entry.entry_key).await.unwrap().is_empty());
-    assert_eq!(fx.library.transcription_queue_status().await.unwrap().total_segments, 0);
+    fx.library
+        .remove_by_path(&entry.relative_path)
+        .await
+        .unwrap();
+    assert!(fx
+        .library
+        .subtitle_tracks(&entry.entry_key)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fx.library
+            .transcription_queue_status()
+            .await
+            .unwrap()
+            .total_segments,
+        0
+    );
 }
 
 #[tokio::test]
@@ -101,8 +157,16 @@ async fn scan_add_modify_rename_delete() {
     let fx = fixture("delta").await;
 
     // --- initial add ---
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
-    write(&fx.root, "music/Artist/Album/01 - Song.flac", b"fake flac bytes");
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
+    write(
+        &fx.root,
+        "music/Artist/Album/01 - Song.flac",
+        b"fake flac bytes",
+    );
     write(&fx.root, "movies/Heat (1995)/poster.jpg", b"not media"); // must be ignored
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 2);
@@ -135,7 +199,11 @@ async fn scan_add_modify_rename_delete() {
     assert_eq!(fx.library.thumbprint().await.unwrap(), thumbprint_v1);
 
     // --- modify (size change forces re-fingerprint) ---
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![2u8; 8192]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![2u8; 8192],
+    );
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.updated, 1);
     let updated = fx.library.get(&movie.entry_key).await.unwrap().unwrap();
@@ -159,13 +227,20 @@ async fn scan_add_modify_rename_delete() {
     assert!(fx.library.get(&movie.entry_key).await.unwrap().is_none());
     let entries = fx.library.list().await.unwrap();
     let renamed = entries.iter().find(|e| e.kind == MediaKind::Movie).unwrap();
-    assert_eq!(renamed.relative_path, "movies/Heat (1995)/Heat.Remastered.mkv");
+    assert_eq!(
+        renamed.relative_path,
+        "movies/Heat (1995)/Heat.Remastered.mkv"
+    );
     // Same bytes, new path: content identity survives the rename.
     assert_eq!(renamed.fingerprint, updated.fingerprint);
     let changes = fx.library.pending_changes().await.unwrap();
     assert_eq!(changes.len(), 2);
-    assert!(changes.iter().any(|c| c.operation == "delete" && c.entry_key == movie.entry_key));
-    assert!(changes.iter().any(|c| c.operation == "upsert" && c.entry_key == renamed.entry_key));
+    assert!(changes
+        .iter()
+        .any(|c| c.operation == "delete" && c.entry_key == movie.entry_key));
+    assert!(changes
+        .iter()
+        .any(|c| c.operation == "upsert" && c.entry_key == renamed.entry_key));
     fx.library.clear_pending_changes().await.unwrap();
 
     // --- delete ---
@@ -191,7 +266,11 @@ async fn scan_add_modify_rename_delete() {
 #[tokio::test]
 async fn rescan_of_a_root_that_stops_existing_refuses_to_wipe_the_known_library() {
     let fx = fixture("root-disappears").await;
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 1);
     assert_eq!(fx.library.list().await.unwrap().len(), 1);
@@ -202,14 +281,25 @@ async fn rescan_of_a_root_that_stops_existing_refuses_to_wipe_the_known_library(
     std::fs::remove_dir_all(&fx.root).unwrap();
 
     let result = scan_root(&fx.library, &fx.root).await;
-    assert!(result.is_err(), "a root that vanished entirely must be a hard error, not an empty scan");
-    assert_eq!(fx.library.list().await.unwrap().len(), 1, "the known library must survive an unreachable root untouched");
+    assert!(
+        result.is_err(),
+        "a root that vanished entirely must be a hard error, not an empty scan"
+    );
+    assert_eq!(
+        fx.library.list().await.unwrap().len(),
+        1,
+        "the known library must survive an unreachable root untouched"
+    );
 }
 
 #[tokio::test]
 async fn rescan_that_finds_zero_files_anywhere_refuses_to_wipe_a_nonempty_known_library() {
     let fx = fixture("suspicious-empty").await;
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 1);
 
@@ -219,8 +309,15 @@ async fn rescan_that_finds_zero_files_anywhere_refuses_to_wipe_a_nonempty_known_
     std::fs::remove_file(fx.root.join("movies/Heat (1995)/Heat.1995.mkv")).unwrap();
 
     let result = scan_root(&fx.library, &fx.root).await;
-    assert!(result.is_err(), "finding 0 files against a nonempty known library must refuse, not wipe everything");
-    assert_eq!(fx.library.list().await.unwrap().len(), 1, "the known library must survive untouched");
+    assert!(
+        result.is_err(),
+        "finding 0 files against a nonempty known library must refuse, not wipe everything"
+    );
+    assert_eq!(
+        fx.library.list().await.unwrap().len(),
+        1,
+        "the known library must survive untouched"
+    );
 }
 
 #[tokio::test]
@@ -243,7 +340,11 @@ async fn rescan_relinks_artwork_files_still_on_disk_after_the_catalog_row_is_gon
     // whatever's already sitting in `images/` rather than leaving artwork
     // unset until a full re-scrape.
     let fx = fixture("artwork-recovery").await;
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 1);
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
@@ -256,21 +357,48 @@ async fn rescan_relinks_artwork_files_still_on_disk_after_the_catalog_row_is_gon
     let poster_path = images_dir.join("Heat_1995-tmdb-poster.jpg");
     std::fs::write(&poster_path, b"fake poster bytes").unwrap();
     fx.library
-        .set_artwork(&entry.entry_key, ArtworkKind::Poster, "movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg")
+        .set_artwork(
+            &entry.entry_key,
+            ArtworkKind::Poster,
+            "movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg",
+        )
         .await
         .unwrap();
-    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_some());
+    assert!(fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap()
+        .is_some());
 
     // Simulate the catalog row being lost (a wipe) without touching the
     // real file on disk — same entry_key will be produced by the rescan
     // below, since it's purely path-derived.
-    fx.library.remove_by_path(&entry.relative_path).await.unwrap();
-    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+    fx.library
+        .remove_by_path(&entry.relative_path)
+        .await
+        .unwrap();
+    assert!(fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap()
+        .is_none());
 
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
-    assert_eq!(report.added, 1, "the row is gone, so this is a fresh add again, not an update");
-    let recovered = fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap();
-    assert_eq!(recovered.map(|(path, _)| path), Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string()));
+    assert_eq!(
+        report.added, 1,
+        "the row is gone, so this is a fresh add again, not an update"
+    );
+    let recovered = fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered.map(|(path, _)| path),
+        Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string())
+    );
 }
 
 #[tokio::test]
@@ -281,7 +409,11 @@ async fn rescan_relinks_artwork_for_an_already_known_unchanged_entry_too() {
     // the artwork check, so they'd otherwise never recover their real,
     // still-on-disk artwork short of a full library wipe.
     let fx = fixture("artwork-recovery-unchanged").await;
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 1);
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
@@ -290,15 +422,31 @@ async fn rescan_relinks_artwork_for_an_already_known_unchanged_entry_too() {
     // otherwise simulate) but nothing ever links it in the DB.
     let images_dir = fx.root.join("movies/Heat (1995)/images");
     std::fs::create_dir_all(&images_dir).unwrap();
-    std::fs::write(images_dir.join("Heat_1995-tmdb-poster.jpg"), b"fake poster bytes").unwrap();
-    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+    std::fs::write(
+        images_dir.join("Heat_1995-tmdb-poster.jpg"),
+        b"fake poster bytes",
+    )
+    .unwrap();
+    assert!(fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap()
+        .is_none());
 
     // Same file, unchanged — a normal rescan must still pick up the
     // artwork sitting right next to it.
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.unchanged, 1);
-    let recovered = fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap();
-    assert_eq!(recovered.map(|(path, _)| path), Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string()));
+    let recovered = fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered.map(|(path, _)| path),
+        Some("movies/Heat (1995)/images/Heat_1995-tmdb-poster.jpg".to_string())
+    );
 }
 
 #[tokio::test]
@@ -321,8 +469,16 @@ async fn artwork_recovery_never_cross_links_a_sibling_movies_poster() {
     // `sanitize_stem`'s real output exactly (parens preserved).
     let images_dir = fx.root.join("images");
     std::fs::create_dir_all(&images_dir).unwrap();
-    std::fs::write(images_dir.join("10 Cloverfield Lane (2016)-tmdb-poster.jpg"), b"cloverfield poster").unwrap();
-    std::fs::write(images_dir.join("Jaws 2 (1978)-tmdb-poster.jpg"), b"jaws poster").unwrap();
+    std::fs::write(
+        images_dir.join("10 Cloverfield Lane (2016)-tmdb-poster.jpg"),
+        b"cloverfield poster",
+    )
+    .unwrap();
+    std::fs::write(
+        images_dir.join("Jaws 2 (1978)-tmdb-poster.jpg"),
+        b"jaws poster",
+    )
+    .unwrap();
 
     // Force both entries through the recovery path (as if the catalog had
     // just been rebuilt) by clearing their DB rows and rescanning — the
@@ -334,14 +490,38 @@ async fn artwork_recovery_never_cross_links_a_sibling_movies_poster() {
     let report = scan_root(&fx.library, &fx.root).await.unwrap();
     assert_eq!(report.added, 2);
 
-    let jaws = fx.library.list().await.unwrap().into_iter().find(|e| e.relative_path.starts_with("Jaws")).unwrap();
-    let cloverfield =
-        fx.library.list().await.unwrap().into_iter().find(|e| e.relative_path.starts_with("10 Cloverfield")).unwrap();
+    let jaws = fx
+        .library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.relative_path.starts_with("Jaws"))
+        .unwrap();
+    let cloverfield = fx
+        .library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.relative_path.starts_with("10 Cloverfield"))
+        .unwrap();
 
-    let jaws_poster = fx.library.artwork(&jaws.entry_key, ArtworkKind::Poster).await.unwrap();
-    let cloverfield_poster = fx.library.artwork(&cloverfield.entry_key, ArtworkKind::Poster).await.unwrap();
+    let jaws_poster = fx
+        .library
+        .artwork(&jaws.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap();
+    let cloverfield_poster = fx
+        .library
+        .artwork(&cloverfield.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap();
 
-    assert_eq!(jaws_poster.map(|(p, _)| p), Some("images/Jaws 2 (1978)-tmdb-poster.jpg".to_string()));
+    assert_eq!(
+        jaws_poster.map(|(p, _)| p),
+        Some("images/Jaws 2 (1978)-tmdb-poster.jpg".to_string())
+    );
     assert_eq!(
         cloverfield_poster.map(|(p, _)| p),
         Some("images/10 Cloverfield Lane (2016)-tmdb-poster.jpg".to_string())
@@ -355,12 +535,19 @@ async fn single_root_scan_roots_matches_scan_root_byte_for_byte() {
     // it's a thin wrapper over scan_roots with one implicit "local" root
     // that scan_roots never prefixes when there's only one root configured.
     let fx = fixture("single-root-parity").await;
-    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
+    write(
+        &fx.root,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
     scan_root(&fx.library, &fx.root).await.unwrap();
     let entries = fx.library.list().await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].relative_path, "movies/Heat (1995)/Heat.1995.mkv");
-    assert_eq!(entries[0].entry_key, entry_key("movies/Heat (1995)/Heat.1995.mkv"));
+    assert_eq!(
+        entries[0].entry_key,
+        entry_key("movies/Heat (1995)/Heat.1995.mkv")
+    );
 }
 
 #[tokio::test]
@@ -371,15 +558,31 @@ async fn two_roots_with_the_same_relative_path_get_distinct_entry_keys() {
     let root_b = base.join("root-b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let library = Library::open(base.join("library.sqlite").to_str().unwrap()).await.unwrap();
+    let library = Library::open(base.join("library.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
 
     // Same sub-path under both roots — must not collide.
-    write(&root_a, "movies/Heat (1995)/Heat.1995.mkv", &vec![1u8; 4096]);
-    write(&root_b, "movies/Heat (1995)/Heat.1995.mkv", &vec![2u8; 4096]);
+    write(
+        &root_a,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![1u8; 4096],
+    );
+    write(
+        &root_b,
+        "movies/Heat (1995)/Heat.1995.mkv",
+        &vec![2u8; 4096],
+    );
 
     let roots = [
-        MediaRoot { label: "local".to_string(), path: root_a.clone() },
-        MediaRoot { label: "nas".to_string(), path: root_b.clone() },
+        MediaRoot {
+            label: "local".to_string(),
+            path: root_a.clone(),
+        },
+        MediaRoot {
+            label: "nas".to_string(),
+            path: root_b.clone(),
+        },
     ];
     let report = scan_roots(&library, &roots, None).await.unwrap();
     assert_eq!(report.added, 2);
@@ -396,7 +599,11 @@ async fn two_roots_with_the_same_relative_path_get_distinct_entry_keys() {
 #[tokio::test]
 async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_untouched() {
     let fx = fixture("manual-metadata").await;
-    write(&fx.root, "music/Artist/Album/01 - Song.flac", b"fake flac bytes");
+    write(
+        &fx.root,
+        "music/Artist/Album/01 - Song.flac",
+        b"fake flac bytes",
+    );
     scan_root(&fx.library, &fx.root).await.unwrap();
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
     assert_eq!(entry.artist.as_deref(), Some("Artist"));
@@ -404,7 +611,10 @@ async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_un
 
     // Only title provided — genres must stay untouched (None means "leave
     // unchanged", not "clear").
-    fx.library.set_manual_metadata(&entry.entry_key, Some("Manual Title"), None).await.unwrap();
+    fx.library
+        .set_manual_metadata(&entry.entry_key, Some("Manual Title"), None)
+        .await
+        .unwrap();
     let after_title = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(after_title.scraped_title.as_deref(), Some("Manual Title"));
     assert!(after_title.genres.is_empty());
@@ -418,7 +628,11 @@ async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_un
 
     // Now set genres too, and clear the title explicitly via Some("").
     fx.library
-        .set_manual_metadata(&entry.entry_key, Some(""), Some(&["Electronic".to_string()]))
+        .set_manual_metadata(
+            &entry.entry_key,
+            Some(""),
+            Some(&["Electronic".to_string()]),
+        )
         .await
         .unwrap();
     let after_genres = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
@@ -437,21 +651,48 @@ async fn clear_scrape_result_reverts_to_unscraped_and_leaves_grouping_fields_unt
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
 
     fx.library
-        .set_scrape_result(&entry.entry_key, Some("Heat"), &["Crime".to_string()], &[])
+        .set_scrape_result(
+            &entry.entry_key,
+            Some("Heat"),
+            &["Crime".to_string()],
+            &[],
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    fx.library.set_artwork(&entry.entry_key, ArtworkKind::Poster, "movies/Heat (1995)/images/poster.jpg").await.unwrap();
+    fx.library
+        .set_artwork(
+            &entry.entry_key,
+            ArtworkKind::Poster,
+            "movies/Heat (1995)/images/poster.jpg",
+        )
+        .await
+        .unwrap();
     let scraped = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(scraped.scraped_title.as_deref(), Some("Heat"));
     assert!(fx.library.missing_scrape().await.unwrap().is_empty());
 
-    let cleared_paths = fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
-    assert_eq!(cleared_paths, vec!["movies/Heat (1995)/images/poster.jpg".to_string()]);
+    let cleared_paths = fx
+        .library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        cleared_paths,
+        vec!["movies/Heat (1995)/images/poster.jpg".to_string()]
+    );
 
     let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(reverted.scraped_title, None);
     assert!(reverted.genres.is_empty());
-    assert!(fx.library.artwork(&entry.entry_key, ArtworkKind::Poster).await.unwrap().is_none());
+    assert!(fx
+        .library
+        .artwork(&entry.entry_key, ArtworkKind::Poster)
+        .await
+        .unwrap()
+        .is_none());
     // Path-derived fields are never touched by a scrape (or its reversal).
     assert_eq!(reverted.relative_path, scraped.relative_path);
     // Reverting must put it back into the bulk-scraper's "needs work" set.
@@ -481,21 +722,49 @@ async fn track_lyrics_are_relational_cached_and_cleared_with_scrape_data() {
         synced_lyrics: Some("[00:01.00]First line\n[00:03.50]Second line".into()),
         instrumental: false,
     };
-    fx.library.set_track_lyrics(&entry.entry_key, &lyrics).await.unwrap();
-    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), Some(lyrics.clone()));
+    fx.library
+        .set_track_lyrics(&entry.entry_key, &lyrics)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.library.track_lyrics(&entry.entry_key).await.unwrap(),
+        Some(lyrics.clone())
+    );
     assert!(fx.library.missing_track_lyrics().await.unwrap().is_empty());
 
-    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
-    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None);
+    fx.library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.library.track_lyrics(&entry.entry_key).await.unwrap(),
+        None
+    );
     assert_eq!(fx.library.missing_track_lyrics().await.unwrap().len(), 1);
 
-    fx.library.mark_track_lyrics_not_found(&entry.entry_key).await.unwrap();
-    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None);
-    assert!(fx.library.missing_track_lyrics().await.unwrap().is_empty(), "a fresh 404 must not be retried every run");
+    fx.library
+        .mark_track_lyrics_not_found(&entry.entry_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.library.track_lyrics(&entry.entry_key).await.unwrap(),
+        None
+    );
+    assert!(
+        fx.library.missing_track_lyrics().await.unwrap().is_empty(),
+        "a fresh 404 must not be retried every run"
+    );
 
-    fx.library.set_track_lyrics(&entry.entry_key, &lyrics).await.unwrap();
+    fx.library
+        .set_track_lyrics(&entry.entry_key, &lyrics)
+        .await
+        .unwrap();
     fx.library.remove_by_path(relative_path).await.unwrap();
-    assert_eq!(fx.library.track_lyrics(&entry.entry_key).await.unwrap(), None, "foreign-key cascade must remove orphaned lyrics");
+    assert_eq!(
+        fx.library.track_lyrics(&entry.entry_key).await.unwrap(),
+        None,
+        "foreign-key cascade must remove orphaned lyrics"
+    );
 }
 
 #[tokio::test]
@@ -506,11 +775,20 @@ async fn set_overview_round_trips_and_clear_scrape_result_wipes_it() {
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
     assert_eq!(entry.overview, None);
 
-    fx.library.set_overview(&entry.entry_key, "A group of professional bank robbers...").await.unwrap();
+    fx.library
+        .set_overview(&entry.entry_key, "A group of professional bank robbers...")
+        .await
+        .unwrap();
     let with_overview = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
-    assert_eq!(with_overview.overview.as_deref(), Some("A group of professional bank robbers..."));
+    assert_eq!(
+        with_overview.overview.as_deref(),
+        Some("A group of professional bank robbers...")
+    );
 
-    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    fx.library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
     let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(reverted.overview, None);
 }
@@ -528,9 +806,49 @@ async fn set_rating_round_trips_and_clear_scrape_result_wipes_it() {
     assert_eq!(with_rating.rating.as_deref(), Some("R"));
     assert_eq!(with_rating.to_catalog_entry().rating.as_deref(), Some("R"));
 
-    fx.library.clear_scrape_result(&entry.entry_key).await.unwrap();
+    fx.library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
     let reverted = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(reverted.rating, None);
+}
+
+#[tokio::test]
+async fn scraped_content_and_community_ratings_round_trip_to_catalog() {
+    let fx = fixture("scraped-community-rating").await;
+    write(&fx.root, "movies/Heat (1995)/Heat.1995.mkv", &[1u8; 10]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+
+    fx.library
+        .set_scrape_result(
+            &entry.entry_key,
+            Some("Heat"),
+            &["Crime".into()],
+            &[],
+            Some("R"),
+            Some(8.3),
+            Some(7_251),
+        )
+        .await
+        .unwrap();
+
+    let stored = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(stored.rating.as_deref(), Some("R"));
+    assert_eq!(stored.community_rating, Some(8.3));
+    assert_eq!(stored.community_rating_votes, Some(7_251));
+    let catalog = stored.to_catalog_entry();
+    assert_eq!(catalog.community_rating, Some(8.3));
+    assert_eq!(catalog.community_rating_votes, Some(7_251));
+
+    fx.library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
+    let cleared = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
+    assert_eq!(cleared.community_rating, None);
+    assert_eq!(cleared.community_rating_votes, None);
 }
 
 #[tokio::test]
@@ -543,7 +861,10 @@ async fn distinct_genres_unions_across_entries_and_sorts_case_insensitively() {
     let entries = fx.library.list().await.unwrap();
 
     // No genres assigned to any entry yet.
-    assert_eq!(fx.library.distinct_genres().await.unwrap(), Vec::<String>::new());
+    assert_eq!(
+        fx.library.distinct_genres().await.unwrap(),
+        Vec::<String>::new()
+    );
 
     for entry in &entries {
         let genres: &[String] = if entry.title.starts_with("Heat") {
@@ -553,13 +874,23 @@ async fn distinct_genres_unions_across_entries_and_sorts_case_insensitively() {
         } else {
             &[] // Amelie contributes nothing
         };
-        fx.library.set_manual_metadata(&entry.entry_key, None, Some(genres)).await.unwrap();
+        fx.library
+            .set_manual_metadata(&entry.entry_key, None, Some(genres))
+            .await
+            .unwrap();
     }
 
     // Exact-string dedup ("action" from both entries collapses to one), sorted
     // case-insensitively (lowercase "action" sorts with the Cs/Ss on its letter,
     // not after every uppercase-initial entry the way a plain byte sort would).
-    assert_eq!(fx.library.distinct_genres().await.unwrap(), vec!["action".to_string(), "Crime".to_string(), "Sci-Fi".to_string()]);
+    assert_eq!(
+        fx.library.distinct_genres().await.unwrap(),
+        vec![
+            "action".to_string(),
+            "Crime".to_string(),
+            "Sci-Fi".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -572,7 +903,16 @@ async fn set_manual_kind_moves_a_movie_to_a_track_and_clears_movie_only_fields()
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
     assert_eq!(entry.kind, MediaKind::Movie);
 
-    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+    fx.library
+        .set_manual_kind(
+            &entry.entry_key,
+            MediaKind::Track,
+            Some("The Artist"),
+            Some("The Album"),
+            None,
+        )
+        .await
+        .unwrap();
     let moved = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(moved.kind, MediaKind::Track);
     assert_eq!(moved.artist.as_deref(), Some("The Artist"));
@@ -580,7 +920,16 @@ async fn set_manual_kind_moves_a_movie_to_a_track_and_clears_movie_only_fields()
     assert_eq!(moved.show_title, None);
 
     // Moving it again, to Episode, must clear the artist/album a Track move just set.
-    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Episode, None, None, Some("Some Show")).await.unwrap();
+    fx.library
+        .set_manual_kind(
+            &entry.entry_key,
+            MediaKind::Episode,
+            None,
+            None,
+            Some("Some Show"),
+        )
+        .await
+        .unwrap();
     let moved_again = fx.library.get(&entry.entry_key).await.unwrap().unwrap();
     assert_eq!(moved_again.kind, MediaKind::Episode);
     assert_eq!(moved_again.show_title.as_deref(), Some("Some Show"));
@@ -594,7 +943,16 @@ async fn set_manual_kind_survives_fix_classifications() {
     write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 10]);
     scan_root(&fx.library, &fx.root).await.unwrap();
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
-    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+    fx.library
+        .set_manual_kind(
+            &entry.entry_key,
+            MediaKind::Track,
+            Some("The Artist"),
+            Some("The Album"),
+            None,
+        )
+        .await
+        .unwrap();
 
     let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
     let report = fx.library.reclassify_all(&roots).await.unwrap();
@@ -612,12 +970,24 @@ async fn set_manual_kind_survives_a_rescan_after_the_file_changes_on_disk() {
     write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 10]);
     scan_root(&fx.library, &fx.root).await.unwrap();
     let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
-    fx.library.set_manual_kind(&entry.entry_key, MediaKind::Track, Some("The Artist"), Some("The Album"), None).await.unwrap();
+    fx.library
+        .set_manual_kind(
+            &entry.entry_key,
+            MediaKind::Track,
+            Some("The Artist"),
+            Some("The Album"),
+            None,
+        )
+        .await
+        .unwrap();
 
     // Change the file's content (different size, so scan_roots takes the
     // "changed" path, not the "unchanged, skip entirely" fast path).
     write(&fx.root, "movies/Some Music Video.mkv", &[1u8; 999]);
-    let roots = vec![MediaRoot { label: "local".into(), path: fx.root.clone() }];
+    let roots = vec![MediaRoot {
+        label: "local".into(),
+        path: fx.root.clone(),
+    }];
     let report = scan_roots(&fx.library, &roots, None).await.unwrap();
     assert_eq!(report.updated, 1);
 
@@ -641,7 +1011,49 @@ async fn thumbprint_is_order_independent_and_content_sensitive() {
     write(&fx_b.root, "movies/A.mkv", b"aaaa");
     scan_root(&fx_a.library, &fx_a.root).await.unwrap();
     scan_root(&fx_b.library, &fx_b.root).await.unwrap();
-    assert_eq!(fx_a.library.thumbprint().await.unwrap(), fx_b.library.thumbprint().await.unwrap());
+    assert_eq!(
+        fx_a.library.thumbprint().await.unwrap(),
+        fx_b.library.thumbprint().await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn thumbprint_changes_with_client_visible_catalog_metadata() {
+    use swarm_media::store::ArtworkKind;
+
+    let fx = fixture("tp-metadata").await;
+    write(&fx.root, "movies/A.mkv", b"aaaa");
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().remove(0);
+    let initial = fx.library.thumbprint().await.unwrap();
+
+    fx.library
+        .set_scrape_result(
+            &entry.entry_key,
+            Some("Scraped A"),
+            &["Drama".into()],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let scraped = fx.library.thumbprint().await.unwrap();
+    assert_ne!(scraped, initial);
+
+    fx.library
+        .set_artwork(&entry.entry_key, ArtworkKind::Poster, "movies/A-poster.jpg")
+        .await
+        .unwrap();
+    let artwork = fx.library.thumbprint().await.unwrap();
+    assert_ne!(artwork, scraped);
+
+    fx.library
+        .set_like(&entry.entry_key, "tv-1", "Living Room", true)
+        .await
+        .unwrap();
+    assert_ne!(fx.library.thumbprint().await.unwrap(), artwork);
 }
 
 #[tokio::test]
@@ -657,7 +1069,8 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
 
     let fx = fixture("reclassify").await;
 
-    let wrong_relative = "Shows/Dexter/Dexter (2006) S03/Featurettes/Interviews/Michael C. Hall.mkv";
+    let wrong_relative =
+        "Shows/Dexter/Dexter (2006) S03/Featurettes/Interviews/Michael C. Hall.mkv";
     let wrong_entry = EntryRecord {
         entry_key: entry_key(wrong_relative),
         relative_path: wrong_relative.to_string(),
@@ -682,14 +1095,31 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     fx.library.upsert(&wrong_entry).await.unwrap();
     // upsert() deliberately never writes scrape/artwork columns (a rescan
     // must never clobber existing scrape results) — set the "already
     // (wrongly) scraped" state the way a real scrape actually would.
-    fx.library.set_scrape_result(&wrong_entry.entry_key, Some("The Interview"), &["Comedy".to_string()], &[]).await.unwrap();
     fx.library
-        .set_artwork(&wrong_entry.entry_key, ArtworkKind::Poster, "Shows/Dexter/Dexter (2006) S03/images/wrong-poster.jpg")
+        .set_scrape_result(
+            &wrong_entry.entry_key,
+            Some("The Interview"),
+            &["Comedy".to_string()],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    fx.library
+        .set_artwork(
+            &wrong_entry.entry_key,
+            ArtworkKind::Poster,
+            "Shows/Dexter/Dexter (2006) S03/images/wrong-poster.jpg",
+        )
         .await
         .unwrap();
 
@@ -721,29 +1151,63 @@ async fn reclassify_all_repairs_stale_bonus_content_and_leaves_correct_entries_u
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     fx.library.upsert(&correct_entry).await.unwrap();
-    fx.library.set_scrape_result(&correct_entry.entry_key, Some("Dexter"), &["Drama".to_string()], &[]).await.unwrap();
+    fx.library
+        .set_scrape_result(
+            &correct_entry.entry_key,
+            Some("Dexter"),
+            &["Drama".to_string()],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
     let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
     let report = fx.library.reclassify_all(&roots).await.unwrap();
     assert_eq!(report.changed, 1);
     assert_eq!(report.unchanged, 1);
 
-    let fixed = fx.library.get(&wrong_entry.entry_key).await.unwrap().unwrap();
+    let fixed = fx
+        .library
+        .get(&wrong_entry.entry_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fixed.kind, MediaKind::Episode);
     assert_eq!(fixed.show_title.as_deref(), Some("Dexter"));
     assert_eq!(fixed.season, Some(0));
     assert_eq!(fixed.episode, None);
-    assert_eq!(fixed.scraped_title, None, "stale wrong scrape data must be cleared, not just relabeled");
+    assert_eq!(
+        fixed.scraped_title, None,
+        "stale wrong scrape data must be cleared, not just relabeled"
+    );
     assert!(fixed.genres.is_empty());
     assert!(
-        fx.library.artwork(&fixed.entry_key, ArtworkKind::Poster).await.unwrap().is_none(),
+        fx.library
+            .artwork(&fixed.entry_key, ArtworkKind::Poster)
+            .await
+            .unwrap()
+            .is_none(),
         "the wrong movie's artwork must be cleared too"
     );
 
-    let untouched = fx.library.get(&correct_entry.entry_key).await.unwrap().unwrap();
-    assert_eq!(untouched.scraped_title.as_deref(), Some("Dexter"), "already-correct entries must be left completely untouched");
+    let untouched = fx
+        .library
+        .get(&correct_entry.entry_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched.scraped_title.as_deref(),
+        Some("Dexter"),
+        "already-correct entries must be left completely untouched"
+    );
     assert_eq!(untouched.genres, vec!["Drama".to_string()]);
 }
 
@@ -791,17 +1255,38 @@ async fn reclassify_all_repairs_a_track_whose_only_wrong_fields_are_artist_and_a
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     fx.library.upsert(&wrong_entry).await.unwrap();
-    fx.library.set_scrape_result(&wrong_entry.entry_key, Some("29 - Unknown"), &[], &[]).await.unwrap();
+    fx.library
+        .set_scrape_result(
+            &wrong_entry.entry_key,
+            Some("29 - Unknown"),
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
     let roots = SharedRootResolver::new(RootResolver::single(fx.root.clone()));
     let report = fx.library.reclassify_all(&roots).await.unwrap();
     assert_eq!(report.changed, 1);
     assert_eq!(report.unchanged, 0);
 
-    let fixed = fx.library.get(&wrong_entry.entry_key).await.unwrap().unwrap();
+    let fixed = fx
+        .library
+        .get(&wrong_entry.entry_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fixed.artist.as_deref(), Some("Gabriel & Dresden"));
     assert_eq!(fixed.album.as_deref(), Some("Organized Natures"));
-    assert_eq!(fixed.scraped_title, None, "stale wrong scrape data must be cleared, not just relabeled");
+    assert_eq!(
+        fixed.scraped_title, None,
+        "stale wrong scrape data must be cleared, not just relabeled"
+    );
 }

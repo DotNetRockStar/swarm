@@ -39,6 +39,8 @@ fn entry(entry_key: &str) -> EntryRecord {
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     }
 }
 

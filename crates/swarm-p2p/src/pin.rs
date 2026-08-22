@@ -74,7 +74,10 @@ pub struct PinnedServerVerifier {
 
 impl PinnedServerVerifier {
     pub fn new(expected_fingerprint: &str) -> Arc<Self> {
-        Arc::new(Self { expected_fingerprint: expected_fingerprint.to_lowercase(), provider: provider() })
+        Arc::new(Self {
+            expected_fingerprint: expected_fingerprint.to_lowercase(),
+            provider: provider(),
+        })
     }
 }
 
@@ -90,7 +93,9 @@ impl ServerCertVerifier for PinnedServerVerifier {
         if fingerprint_der(end_entity) == self.expected_fingerprint {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(TlsError::General("server certificate does not match pinned fingerprint".into()))
+            Err(TlsError::General(
+                "server certificate does not match pinned fingerprint".into(),
+            ))
         }
     }
 
@@ -100,7 +105,12 @@ impl ServerCertVerifier for PinnedServerVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -109,11 +119,18 @@ impl ServerCertVerifier for PinnedServerVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -127,13 +144,18 @@ pub struct RosterClientVerifier {
 
 impl std::fmt::Debug for AllowedPeers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AllowedPeers").field("count", &self.inner.read().unwrap().len()).finish()
+        f.debug_struct("AllowedPeers")
+            .field("count", &self.inner.read().unwrap().len())
+            .finish()
     }
 }
 
 impl RosterClientVerifier {
     pub fn new(allowed: AllowedPeers) -> Arc<Self> {
-        Arc::new(Self { allowed, provider: provider() })
+        Arc::new(Self {
+            allowed,
+            provider: provider(),
+        })
     }
 }
 
@@ -159,7 +181,9 @@ impl ClientCertVerifier for RosterClientVerifier {
         if self.allowed.contains(&fingerprint_der(end_entity)) {
             Ok(ClientCertVerified::assertion())
         } else {
-            Err(TlsError::General("client certificate is not in the allowed peer set".into()))
+            Err(TlsError::General(
+                "client certificate is not in the allowed peer set".into(),
+            ))
         }
     }
 
@@ -169,7 +193,12 @@ impl ClientCertVerifier for RosterClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -178,10 +207,17 @@ impl ClientCertVerifier for RosterClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

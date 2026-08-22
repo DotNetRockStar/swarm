@@ -35,12 +35,20 @@ impl RootResolver {
     /// # Panics
     /// If `roots` is empty — at least one root is always required.
     pub fn new(roots: Vec<MediaRoot>) -> Self {
-        assert!(!roots.is_empty(), "RootResolver requires at least one media root");
+        assert!(
+            !roots.is_empty(),
+            "RootResolver requires at least one media root"
+        );
         Self { roots }
     }
 
     pub fn single(path: PathBuf) -> Self {
-        Self { roots: vec![MediaRoot { label: "local".to_string(), path }] }
+        Self {
+            roots: vec![MediaRoot {
+                label: "local".to_string(),
+                path,
+            }],
+        }
     }
 
     pub fn roots(&self) -> &[MediaRoot] {
@@ -71,7 +79,11 @@ impl RootResolver {
                 }
             }
         }
-        let root = self.roots.first().map(|r| r.path.clone()).unwrap_or_default();
+        let root = self
+            .roots
+            .first()
+            .map(|r| r.path.clone())
+            .unwrap_or_default();
         (root, relative_path.to_string())
     }
 
@@ -86,7 +98,10 @@ impl RootResolver {
                 }
             }
         }
-        self.roots.first().map(|r| r.label.clone()).unwrap_or_default()
+        self.roots
+            .first()
+            .map(|r| r.label.clone())
+            .unwrap_or_default()
     }
 
     /// Build a stored `relative_path` from a root's label and a path under
@@ -113,7 +128,9 @@ pub struct SharedRootResolver {
 
 impl SharedRootResolver {
     pub fn new(resolver: RootResolver) -> Self {
-        Self { inner: Arc::new(RwLock::new(resolver)) }
+        Self {
+            inner: Arc::new(RwLock::new(resolver)),
+        }
     }
 
     /// Atomically swap in a fresh set of roots. Every clone of this handle
@@ -165,7 +182,10 @@ pub fn parse_roots_env(value: &str) -> Vec<MediaRoot> {
             if label.is_empty() || path.is_empty() {
                 return None;
             }
-            Some(MediaRoot { label: label.to_string(), path: PathBuf::from(path) })
+            Some(MediaRoot {
+                label: label.to_string(),
+                path: PathBuf::from(path),
+            })
         })
         .collect()
 }
@@ -176,15 +196,24 @@ mod tests {
 
     fn two_roots() -> RootResolver {
         RootResolver::new(vec![
-            MediaRoot { label: "local".into(), path: PathBuf::from("/media") },
-            MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") },
+            MediaRoot {
+                label: "local".into(),
+                path: PathBuf::from("/media"),
+            },
+            MediaRoot {
+                label: "nas".into(),
+                path: PathBuf::from("/Volumes/nas"),
+            },
         ])
     }
 
     #[test]
     fn single_root_applies_no_prefix() {
         let r = RootResolver::single(PathBuf::from("/media"));
-        assert_eq!(r.resolve("movies/Foo.mkv"), PathBuf::from("/media/movies/Foo.mkv"));
+        assert_eq!(
+            r.resolve("movies/Foo.mkv"),
+            PathBuf::from("/media/movies/Foo.mkv")
+        );
         assert_eq!(r.compose("local", "movies/Foo.mkv"), "movies/Foo.mkv");
         assert_eq!(r.label_for("movies/Foo.mkv"), "local");
     }
@@ -192,8 +221,14 @@ mod tests {
     #[test]
     fn multi_root_resolves_by_label_prefix() {
         let r = two_roots();
-        assert_eq!(r.resolve("nas/movies/Foo.mkv"), PathBuf::from("/Volumes/nas/movies/Foo.mkv"));
-        assert_eq!(r.resolve("local/movies/Foo.mkv"), PathBuf::from("/media/movies/Foo.mkv"));
+        assert_eq!(
+            r.resolve("nas/movies/Foo.mkv"),
+            PathBuf::from("/Volumes/nas/movies/Foo.mkv")
+        );
+        assert_eq!(
+            r.resolve("local/movies/Foo.mkv"),
+            PathBuf::from("/media/movies/Foo.mkv")
+        );
         assert_eq!(r.label_for("nas/movies/Foo.mkv"), "nas");
     }
 
@@ -213,8 +248,14 @@ mod tests {
         assert_eq!(
             roots,
             vec![
-                MediaRoot { label: "local".into(), path: PathBuf::from("/media") },
-                MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") },
+                MediaRoot {
+                    label: "local".into(),
+                    path: PathBuf::from("/media")
+                },
+                MediaRoot {
+                    label: "nas".into(),
+                    path: PathBuf::from("/Volumes/nas")
+                },
             ]
         );
     }
@@ -223,22 +264,46 @@ mod tests {
     fn parse_roots_env_skips_malformed_entries() {
         assert_eq!(parse_roots_env(""), vec![]);
         assert_eq!(parse_roots_env("no-equals-sign"), vec![]);
-        assert_eq!(parse_roots_env("=novalue,label=,ok=/path"), vec![MediaRoot { label: "ok".into(), path: PathBuf::from("/path") }]);
+        assert_eq!(
+            parse_roots_env("=novalue,label=,ok=/path"),
+            vec![MediaRoot {
+                label: "ok".into(),
+                path: PathBuf::from("/path")
+            }]
+        );
     }
 
     #[test]
     fn shared_resolver_replace_is_visible_on_every_clone() {
         let shared = SharedRootResolver::new(RootResolver::single(PathBuf::from("/old")));
         let other_handle = shared.clone();
-        assert_eq!(shared.resolve("movies/Foo.mkv"), PathBuf::from("/old/movies/Foo.mkv"));
+        assert_eq!(
+            shared.resolve("movies/Foo.mkv"),
+            PathBuf::from("/old/movies/Foo.mkv")
+        );
 
-        shared.replace(vec![MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") }]);
+        shared.replace(vec![MediaRoot {
+            label: "nas".into(),
+            path: PathBuf::from("/Volumes/nas"),
+        }]);
 
         // Both handles observe the swap — this is the whole point of the
         // shared Arc<RwLock<..>>: ServerCore and MediaService must never see
         // different root sets after a live update.
-        assert_eq!(shared.resolve("movies/Foo.mkv"), PathBuf::from("/Volumes/nas/movies/Foo.mkv"));
-        assert_eq!(other_handle.resolve("movies/Foo.mkv"), PathBuf::from("/Volumes/nas/movies/Foo.mkv"));
-        assert_eq!(shared.roots(), vec![MediaRoot { label: "nas".into(), path: PathBuf::from("/Volumes/nas") }]);
+        assert_eq!(
+            shared.resolve("movies/Foo.mkv"),
+            PathBuf::from("/Volumes/nas/movies/Foo.mkv")
+        );
+        assert_eq!(
+            other_handle.resolve("movies/Foo.mkv"),
+            PathBuf::from("/Volumes/nas/movies/Foo.mkv")
+        );
+        assert_eq!(
+            shared.roots(),
+            vec![MediaRoot {
+                label: "nas".into(),
+                path: PathBuf::from("/Volumes/nas")
+            }]
+        );
     }
 }

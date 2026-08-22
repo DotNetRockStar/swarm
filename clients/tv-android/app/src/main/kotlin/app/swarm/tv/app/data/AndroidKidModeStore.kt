@@ -46,19 +46,17 @@ object RatingScale {
     val TV_ORDER = listOf("TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA")
 
     /**
-     * A `null` [rating] (unscraped, or TMDb has no US certification on
-     * file) always passes — failing closed on missing metadata would hide
-     * arbitrary, unrelated content unpredictably rather than actually
-     * protecting anything. A `null` [max] means no restriction is
-     * configured. A [rating] or [max] this app doesn't recognize (not in
-     * [order] — a foreign or unusual certification) also passes rather
-     * than silently disappearing.
+     * A `null` [max] means no restriction is configured. Once a parent sets
+     * a maximum, missing or unfamiliar ratings must fail closed: showing an
+     * unrated R movie under a PG-13 limit is a much worse surprise than
+     * temporarily hiding a title until metadata scraping identifies it.
      */
     fun isAllowed(rating: String?, max: String?, order: List<String>): Boolean {
-        if (max == null || rating == null) return true
+        if (max == null) return true
+        if (rating == null) return false
         val ratingIndex = order.indexOf(rating)
         val maxIndex = order.indexOf(max)
-        if (ratingIndex == -1 || maxIndex == -1) return true
+        if (ratingIndex == -1 || maxIndex == -1) return false
         return ratingIndex <= maxIndex
     }
 }

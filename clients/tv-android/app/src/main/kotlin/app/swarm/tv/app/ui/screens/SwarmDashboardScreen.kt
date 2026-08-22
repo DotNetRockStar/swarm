@@ -48,6 +48,7 @@ import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.app.ui.theme.SwarmError
 import app.swarm.tv.app.ui.theme.SwarmGreen
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -68,10 +69,8 @@ fun SwarmDashboardScreen(
     lanPairingBusy: Boolean,
     lanError: String?,
     deviceName: String,
-    resyncing: Boolean,
     joiningServer: Boolean,
     joinServerError: String?,
-    onResync: () -> Unit,
     onBrowseCatalog: () -> Unit,
     onOpenSettings: () -> Unit,
     onAddServer: () -> Unit,
@@ -153,12 +152,6 @@ fun SwarmDashboardScreen(
                         colors = swarmActionButtonColors(),
                     ) { Text("Browse library") }
                     Button(
-                        onClick = onResync,
-                        enabled = !resyncing,
-                        modifier = downToFirstServer,
-                        colors = swarmActionButtonColors(),
-                    ) { Text(if (resyncing) "Resyncing…" else "Resync") }
-                    Button(
                         onClick = onOpenSettings,
                         modifier = downToFirstServer,
                         colors = swarmActionButtonColors(),
@@ -200,7 +193,7 @@ fun SwarmDashboardScreen(
                     Text("Servers on LAN (${lanServers.size})", color = SwarmMuted, fontSize = 14.sp)
                 }
                 if (lanError != null && selectedLanServer == null) {
-                    item { Text(lanError, color = SwarmAccentHot, fontSize = 12.sp) }
+                    item { Text(lanError, color = SwarmError, fontSize = 12.sp) }
                 }
                 if (lanServers.isEmpty()) {
                     item {
@@ -493,7 +486,7 @@ private fun LanPairingOverlay(
         )
         if (error != null) {
             Spacer(Modifier.height(10.dp))
-            Text(error, color = SwarmAccentHot, fontSize = 12.sp)
+            Text(error, color = SwarmError, fontSize = 12.sp)
         }
         Spacer(Modifier.height(14.dp))
         Button(

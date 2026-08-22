@@ -53,7 +53,8 @@ Routes:
 |---|---|---|
 | `/catalog/thumbprint` | `CatalogThumbprint` | whole-library version token |
 | `/catalog/manifest[?since=<tp>]` | `CatalogManifest` | full or delta listing |
-| `/art/{entry_key}/{poster\|backdrop\|cover\|artist}` | image bytes | etag/`if_none_match` honored |
+| `/catalog/manifest.gz` | gzip-compressed `CatalogManifest` | bandwidth-efficient full listing for memory-constrained clients |
+| `/art/{entry_key}/{poster\|season\|backdrop\|cover\|artist}` | image bytes | etag/`if_none_match` honored |
 | `/play/{entry_key}` | `PlaybackPlan` | request carries `PlaybackPreferences`; reserves upload and chooses direct/HLS |
 | `/stream/{session_id}/media` | file bytes | budgeted direct play; Range → 206 + `content_range` |
 | `/media/{entry_key}` | file bytes | legacy/unnegotiated direct play; globally upload-paced |

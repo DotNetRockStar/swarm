@@ -20,6 +20,7 @@
 #   SWARM_STUN_PORT      STUN server HTTP port (default 8080)
 #   SWARM_GUI_PEER_PORT  GUI media server's peer QUIC port (default 8544)
 #   SWARM_RUN_DIR        where local SWARM server state lives (default .run)
+#   SWARM_LAN_IP         explicit advertised LAN IPv4 (normally auto-detected)
 #   RUST_LOG             default "info"
 
 set -euo pipefail
@@ -69,7 +70,18 @@ finally:
     s.close()
 " 2>/dev/null || echo "127.0.0.1"
 }
-LAN_IP="$(detect_lan_ip)"
+# One detected/overridden address is the source of truth for every public
+# endpoint this development stack advertises. The listeners intentionally
+# stay on 0.0.0.0 below so localhost and LAN clients both work; 0.0.0.0 is a
+# bind address, never an address handed to a client.
+LAN_IP="${SWARM_LAN_IP:-$(detect_lan_ip)}"
+case "$LAN_IP" in
+    ""|127.*)
+        echo "Could not determine a LAN IPv4 address. Connect this machine to the LAN or set SWARM_LAN_IP explicitly." >&2
+        exit 1
+        ;;
+esac
+SWARM_URL="http://$LAN_IP:$STUN_PORT"
 
 pids=()
 # Kills whatever's actually listening on $1 (tcp) — belt-and-suspenders
@@ -144,7 +156,7 @@ echo "==> Starting SWARM rendezvous service on 0.0.0.0:$STUN_PORT ..."
 # non-API path, including "/", 404s) with only a log warning to show for it.
 SWARM_DATABASE_PATH="$RUN_DIR/stun-data/swarm.sqlite" \
 SWARM_HTTP_BIND="0.0.0.0:$STUN_PORT" \
-SWARM_PUBLIC_URL="http://$LAN_IP:$STUN_PORT" \
+SWARM_PUBLIC_URL="$SWARM_URL" \
 SWARM_STATIC_DIR="apps/stun-server/static" \
     cargo run -q --bin swarm-stun-server &
 pids+=($!)
@@ -159,7 +171,7 @@ done
 
 echo "==> Opening the media server GUI (peer QUIC on 0.0.0.0:$GUI_PEER_PORT) ..."
 SWARM_PEER_BIND="0.0.0.0:$GUI_PEER_PORT" \
-SWARM_RENDEZVOUS_URL="http://$LAN_IP:$STUN_PORT" \
+SWARM_RENDEZVOUS_URL="$SWARM_URL" \
     cargo run -q -p swarm-server &
 pids+=($!)
 
@@ -168,7 +180,7 @@ cat <<EOF
 --------------------------------------------------------------------
 SWARM is running, reachable from this machine and from your LAN:
   local  http://127.0.0.1:$STUN_PORT   (browser on this machine, Swagger at /api/docs)
-  LAN    http://$LAN_IP:$STUN_PORT   <- use this one in the Fire TV client / other devices
+  LAN    $SWARM_URL   <- use this one in the Fire TV client / other devices
 
   GUI media server: a separate window should now be open, peer QUIC on
                     port $GUI_PEER_PORT — pick its media folder there

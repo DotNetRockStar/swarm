@@ -24,7 +24,10 @@ impl WikimediaClient {
     }
 
     pub fn with_base_url(base: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), base: base.into() }
+        Self {
+            http: reqwest::Client::new(),
+            base: base.into(),
+        }
     }
 
     /// `file_title` like `File:Some Artist 2019.jpg`.
@@ -43,10 +46,15 @@ impl WikimediaClient {
             .await
             .map_err(|e| WikimediaError::Unavailable(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(WikimediaError::Unavailable(format!("query returned {}", response.status())));
+            return Err(WikimediaError::Unavailable(format!(
+                "query returned {}",
+                response.status()
+            )));
         }
-        let body: QueryResponse =
-            response.json().await.map_err(|e| WikimediaError::Unavailable(e.to_string()))?;
+        let body: QueryResponse = response
+            .json()
+            .await
+            .map_err(|e| WikimediaError::Unavailable(e.to_string()))?;
         body.query
             .pages
             .into_values()
@@ -55,11 +63,23 @@ impl WikimediaClient {
     }
 
     pub async fn download(&self, url: &str) -> Result<Vec<u8>, WikimediaError> {
-        let response = self.http.get(url).send().await.map_err(|e| WikimediaError::Unavailable(e.to_string()))?;
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| WikimediaError::Unavailable(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(WikimediaError::Unavailable(format!("download returned {}", response.status())));
+            return Err(WikimediaError::Unavailable(format!(
+                "download returned {}",
+                response.status()
+            )));
         }
-        response.bytes().await.map(|b| b.to_vec()).map_err(|e| WikimediaError::Unavailable(e.to_string()))
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| WikimediaError::Unavailable(e.to_string()))
     }
 }
 
@@ -116,16 +136,27 @@ mod tests {
         );
         let base = spawn_mock(router).await;
         let client = WikimediaClient::with_base_url(&base);
-        let url = client.resolve_file_url("File:Pink Floyd 1973.jpg").await.unwrap();
-        assert_eq!(url, "https://upload.wikimedia.org/commons/a/ab/Pink_Floyd_1973.jpg");
+        let url = client
+            .resolve_file_url("File:Pink Floyd 1973.jpg")
+            .await
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://upload.wikimedia.org/commons/a/ab/Pink_Floyd_1973.jpg"
+        );
     }
 
     #[tokio::test]
     async fn missing_page_is_not_found() {
-        let router = Router::new()
-            .route("/", get(|| async { Json(json!({"query": {"pages": {"-1": {}}}})) }));
+        let router = Router::new().route(
+            "/",
+            get(|| async { Json(json!({"query": {"pages": {"-1": {}}}})) }),
+        );
         let base = spawn_mock(router).await;
         let client = WikimediaClient::with_base_url(&base);
-        assert!(matches!(client.resolve_file_url("File:Nope.jpg").await, Err(WikimediaError::NotFound)));
+        assert!(matches!(
+            client.resolve_file_url("File:Nope.jpg").await,
+            Err(WikimediaError::NotFound)
+        ));
     }
 }

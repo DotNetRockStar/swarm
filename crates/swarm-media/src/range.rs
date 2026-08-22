@@ -38,14 +38,24 @@ pub fn resolve(range: Option<ByteRange>, total: u64) -> ResolvedRange {
                 return ResolvedRange::Unsatisfiable;
             }
             let start = total.saturating_sub(last);
-            ResolvedRange::Partial(ContentRange { start, end: total - 1, total })
+            ResolvedRange::Partial(ContentRange {
+                start,
+                end: total - 1,
+                total,
+            })
         }
     }
 }
 
 /// MIME type from the file extension, for player container sniffing.
 pub fn content_type(relative_path: &str) -> &'static str {
-    match relative_path.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+    match relative_path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "mp4" | "m4v" => "video/mp4",
         "mkv" => "video/x-matroska",
         "webm" => "video/webm",
@@ -81,36 +91,76 @@ mod tests {
     #[test]
     fn open_ended_range() {
         assert_eq!(
-            resolve(Some(ByteRange::FromTo { start: 10, end: None }), 100),
-            ResolvedRange::Partial(ContentRange { start: 10, end: 99, total: 100 })
+            resolve(
+                Some(ByteRange::FromTo {
+                    start: 10,
+                    end: None
+                }),
+                100
+            ),
+            ResolvedRange::Partial(ContentRange {
+                start: 10,
+                end: 99,
+                total: 100
+            })
         );
     }
 
     #[test]
     fn end_is_clamped() {
         assert_eq!(
-            resolve(Some(ByteRange::FromTo { start: 0, end: Some(1_000_000) }), 100),
-            ResolvedRange::Partial(ContentRange { start: 0, end: 99, total: 100 })
+            resolve(
+                Some(ByteRange::FromTo {
+                    start: 0,
+                    end: Some(1_000_000)
+                }),
+                100
+            ),
+            ResolvedRange::Partial(ContentRange {
+                start: 0,
+                end: 99,
+                total: 100
+            })
         );
     }
 
     #[test]
     fn start_past_eof_is_unsatisfiable() {
-        assert_eq!(resolve(Some(ByteRange::FromTo { start: 100, end: None }), 100), ResolvedRange::Unsatisfiable);
+        assert_eq!(
+            resolve(
+                Some(ByteRange::FromTo {
+                    start: 100,
+                    end: None
+                }),
+                100
+            ),
+            ResolvedRange::Unsatisfiable
+        );
     }
 
     #[test]
     fn suffix_range() {
         assert_eq!(
             resolve(Some(ByteRange::Suffix { last: 10 }), 100),
-            ResolvedRange::Partial(ContentRange { start: 90, end: 99, total: 100 })
+            ResolvedRange::Partial(ContentRange {
+                start: 90,
+                end: 99,
+                total: 100
+            })
         );
         // Suffix longer than the file means the whole file.
         assert_eq!(
             resolve(Some(ByteRange::Suffix { last: 500 }), 100),
-            ResolvedRange::Partial(ContentRange { start: 0, end: 99, total: 100 })
+            ResolvedRange::Partial(ContentRange {
+                start: 0,
+                end: 99,
+                total: 100
+            })
         );
-        assert_eq!(resolve(Some(ByteRange::Suffix { last: 0 }), 100), ResolvedRange::Unsatisfiable);
+        assert_eq!(
+            resolve(Some(ByteRange::Suffix { last: 0 }), 100),
+            ResolvedRange::Unsatisfiable
+        );
     }
 
     #[test]

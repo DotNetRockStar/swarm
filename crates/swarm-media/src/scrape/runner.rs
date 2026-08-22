@@ -17,7 +17,7 @@ use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
 use crate::scrape::lrclib::{LrclibClient, LrclibError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
-use crate::scrape::tmdb::{ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
+use crate::scrape::tmdb::{ScrapedSeason, ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
 use crate::scrape::wikimedia::WikimediaClient;
 use crate::store::{ArtworkKind, CastMember, EntryRecord, Library};
 use std::collections::HashMap;
@@ -405,6 +405,9 @@ async fn scrape_videos(
     // One TMDb TV lookup per show, shared across every episode entry —
     // avoids N calls for an N-episode season.
     let mut tv_cache: HashMap<String, Result<ScrapedVideo, TmdbError>> = HashMap::new();
+    // Season details contain both the season poster and every episode still,
+    // so one request per (show, season) is sufficient even for a full season.
+    let mut tv_season_cache: HashMap<(u64, u32), Result<ScrapedSeason, TmdbError>> = HashMap::new();
 
     for entry in entries {
         if cancel.load(Ordering::Relaxed) {
@@ -426,7 +429,43 @@ async fn scrape_videos(
                     let result = tmdb.search_and_fetch_tv(&query).await;
                     tv_cache.insert(key.clone(), result);
                 }
-                tv_cache.get(&key).expect("just inserted").clone()
+                match tv_cache.get(&key).expect("just inserted").clone() {
+                    Ok(mut scraped) => {
+                        if let Some(season_number) = entry.season {
+                            let season_key = (scraped.tmdb_id, season_number);
+                            let season_result =
+                                if let Some(cached) = tv_season_cache.get(&season_key) {
+                                    cached.clone()
+                                } else {
+                                    let result =
+                                        tmdb.season_details(scraped.tmdb_id, season_number).await;
+                                    tv_season_cache.insert(season_key, result.clone());
+                                    result
+                                };
+                            match season_result {
+                                Ok(season) => {
+                                    scraped.season_poster_url = season.poster_url;
+                                    if let Some(still) = entry
+                                        .episode
+                                        .and_then(|number| season.episode_still_urls.get(&number))
+                                    {
+                                        scraped.backdrop_url = Some(still.clone());
+                                    }
+                                    Ok(scraped)
+                                }
+                                // Some libraries contain specials or custom
+                                // season numbering that TMDB does not. Keep
+                                // the valid show-level match/artwork instead
+                                // of turning that entry into a false no-match.
+                                Err(TmdbError::NotFound) => Ok(scraped),
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            Ok(scraped)
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
             }
             MediaKind::Track => unreachable!("videos partition excludes tracks"),
         };
@@ -438,17 +477,28 @@ async fn scrape_videos(
                         Some(&scraped.title),
                         &scraped.genres,
                         &scraped.cast,
+                        scraped.certification.as_deref(),
+                        scraped.community_rating,
+                        scraped.community_rating_votes,
                     )
                     .await?;
                 if let Some(overview) = &scraped.overview {
                     library.set_overview(&entry.entry_key, overview).await?;
                 }
-                if let Some(certification) = &scraped.certification {
-                    library.set_rating(&entry.entry_key, certification).await?;
-                }
                 if let Some(url) = &scraped.poster_url {
                     save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url)
                         .await;
+                }
+                if let Some(url) = &scraped.season_poster_url {
+                    save_video_artwork(
+                        library,
+                        roots,
+                        entry,
+                        ArtworkKind::SeasonPoster,
+                        "season-poster",
+                        url,
+                    )
+                    .await;
                 }
                 if let Some(url) = &scraped.backdrop_url {
                     save_video_artwork(
@@ -474,7 +524,7 @@ async fn scrape_videos(
             }
             Err(TmdbError::NotFound) => {
                 library
-                    .set_scrape_result(&entry.entry_key, None, &[], &[])
+                    .set_scrape_result(&entry.entry_key, None, &[], &[], None, None, None)
                     .await?;
                 report.not_found += 1;
                 let reason = "no match found on TMDb".to_string();
@@ -755,7 +805,7 @@ async fn scrape_one_album_group(
         Err(MbError::NotFound) => {
             for track in group {
                 library
-                    .set_scrape_result(&track.entry_key, None, &[], &[])
+                    .set_scrape_result(&track.entry_key, None, &[], &[], None, None, None)
                     .await?;
                 let reason =
                     format!("no match found on MusicBrainz for \"{artist} \u{2013} {album}\"");
@@ -802,7 +852,19 @@ async fn scrape_one_album_group(
                 .unwrap_or_default();
             for track in group {
                 library
-                    .set_scrape_result(&track.entry_key, None, &genres, &[])
+                    .set_scrape_result(
+                        &track.entry_key,
+                        None,
+                        &genres,
+                        &[],
+                        None,
+                        details
+                            .as_ref()
+                            .and_then(|details| details.community_rating),
+                        details
+                            .as_ref()
+                            .and_then(|details| details.community_rating_votes),
+                    )
                     .await?;
             }
             report.matched += group.len() as u64;
@@ -888,7 +950,7 @@ pub async fn scrape_one_video(
         MediaKind::Episode => "tv",
         MediaKind::Track => return Err(ScrapeOneError::WrongKind),
     };
-    let scraped = match tmdb_override {
+    let mut scraped = match tmdb_override {
         Some(over) => {
             let id = over.resolve_id()?;
             tmdb.details_by_id(id, media_type).await?
@@ -909,22 +971,52 @@ pub async fn scrape_one_video(
             MediaKind::Track => unreachable!("checked above"),
         },
     };
+    if entry.kind == MediaKind::Episode {
+        if let Some(season_number) = entry.season {
+            match tmdb.season_details(scraped.tmdb_id, season_number).await {
+                Ok(season) => {
+                    scraped.season_poster_url = season.poster_url;
+                    if let Some(still) = entry
+                        .episode
+                        .and_then(|number| season.episode_still_urls.get(&number))
+                    {
+                        scraped.backdrop_url = Some(still.clone());
+                    }
+                }
+                // Preserve the successfully matched show for custom season
+                // numbering that does not exist on TMDB.
+                Err(TmdbError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     library
         .set_scrape_result(
             &entry.entry_key,
             Some(&scraped.title),
             &scraped.genres,
             &scraped.cast,
+            scraped.certification.as_deref(),
+            scraped.community_rating,
+            scraped.community_rating_votes,
         )
         .await?;
     if let Some(overview) = &scraped.overview {
         library.set_overview(&entry.entry_key, overview).await?;
     }
-    if let Some(certification) = &scraped.certification {
-        library.set_rating(&entry.entry_key, certification).await?;
-    }
     if let Some(url) = &scraped.poster_url {
         save_video_artwork(library, roots, entry, ArtworkKind::Poster, "poster", url).await;
+    }
+    if let Some(url) = &scraped.season_poster_url {
+        save_video_artwork(
+            library,
+            roots,
+            entry,
+            ArtworkKind::SeasonPoster,
+            "season-poster",
+            url,
+        )
+        .await;
     }
     if let Some(url) = &scraped.backdrop_url {
         save_video_artwork(
@@ -1257,6 +1349,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn end_to_end_episode_scrape_writes_show_season_and_episode_artwork() {
+        let (root, db_path) = fixture_dirs("episode-artwork-e2e");
+        std::fs::create_dir_all(root.join("Shows/American Dad!/Season 2")).unwrap();
+        std::fs::write(
+            root.join("Shows/American Dad!/Season 2/American.Dad.S02E01.mkv"),
+            vec![0u8; 10],
+        )
+        .unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route(
+                "/search/tv",
+                get(|| async { Json(json!({"results": [{"id": 1433, "name": "American Dad!"}]})) }),
+            )
+            .route(
+                "/tv/1433",
+                get(|| async {
+                    Json(json!({
+                        "name": "American Dad!",
+                        "genres": [{"name": "Animation"}],
+                        "poster_path": "/show.jpg",
+                        "backdrop_path": "/show-backdrop.jpg"
+                    }))
+                }),
+            )
+            .route(
+                "/tv/1433/season/2",
+                get(|| async {
+                    Json(json!({
+                        "poster_path": "/season-2.jpg",
+                        "episodes": [{"episode_number": 1, "still_path": "/s02e01.jpg"}]
+                    }))
+                }),
+            )
+            .route("/img/w342/show.jpg", get(|| async { [1u8, 1, 1] }))
+            .route(
+                "/img/w1280/show-backdrop.jpg",
+                get(|| async { [2u8, 2, 2] }),
+            )
+            .route("/img/w342/season-2.jpg", get(|| async { [3u8, 3, 3] }))
+            .route("/img/w780/s02e01.jpg", get(|| async { [4u8, 4, 4] }));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let config = ScrapeConfig {
+            tmdb_api_key: Some("key".into()),
+            tmdb_api_base: Some(format!("http://{addr}")),
+            tmdb_image_base: Some(format!("http://{addr}/img")),
+            ..Default::default()
+        };
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.matched, 1);
+
+        let entry = &library.list().await.unwrap()[0];
+        assert_eq!(entry.scraped_title.as_deref(), Some("American Dad!"));
+        assert_eq!(entry.artwork_version, 3);
+        let (poster, _) = library
+            .artwork(&entry.entry_key, ArtworkKind::Poster)
+            .await
+            .unwrap()
+            .unwrap();
+        let (season, _) = library
+            .artwork(&entry.entry_key, ArtworkKind::SeasonPoster)
+            .await
+            .unwrap()
+            .unwrap();
+        let (still, _) = library
+            .artwork(&entry.entry_key, ArtworkKind::Backdrop)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(root.join(poster)).unwrap(), vec![1, 1, 1]);
+        assert_eq!(std::fs::read(root.join(season)).unwrap(), vec![3, 3, 3]);
+        assert_eq!(std::fs::read(root.join(still)).unwrap(), vec![4, 4, 4]);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
     async fn pinpoint_scrape_overwrites_an_already_matched_entry() {
         let (root, db_path) = fixture_dirs("pinpoint-overwrite");
         std::fs::create_dir_all(root.join("movies/Heat (1995)")).unwrap();
@@ -1451,6 +1633,9 @@ mod tests {
                 Some("Existing Title"),
                 &[],
                 &[],
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();

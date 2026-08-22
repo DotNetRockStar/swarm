@@ -12,6 +12,8 @@ use crate::store::{ArtworkKind, Library};
 use crate::transcode::{
     hls_content_type, SessionRateLimiter, TranscodeConfig, TranscodeError, TranscodeManager,
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -77,6 +79,24 @@ fn json_response(status: u16, value: &impl serde::Serialize) -> Resolved {
     }
 }
 
+fn gzip_json_response(status: u16, value: &impl serde::Serialize) -> Resolved {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    let bytes = serde_json::to_writer(&mut encoder, value)
+        .and_then(|_| encoder.finish().map_err(serde_json::Error::io))
+        .unwrap_or_default();
+    Resolved {
+        header: PeerResponseHeader {
+            status,
+            len: bytes.len() as u64,
+            content_type: Some("application/gzip".into()),
+            content_range: None,
+            etag: None,
+        },
+        body: Body::Bytes(bytes),
+        session_id: None,
+    }
+}
+
 impl MediaService {
     pub fn new(library: Arc<Library>, media_root: PathBuf) -> Self {
         let config = TranscodeConfig::disabled(std::env::temp_dir().join("swarm-hls-disabled"));
@@ -133,7 +153,8 @@ impl MediaService {
             .unwrap_or(request.path.as_str());
         match request_path {
             "/catalog/thumbprint" => self.thumbprint().await,
-            "/catalog/manifest" => self.manifest().await,
+            "/catalog/manifest" => self.manifest(false).await,
+            "/catalog/manifest.gz" => self.manifest(true).await,
             "/errors/report" => self.report_error(request).await,
             "/likes/toggle" => self.set_like(request).await,
             path => {
@@ -162,42 +183,32 @@ impl MediaService {
     }
 
     async fn thumbprint(&self) -> Resolved {
-        match (
-            self.library.thumbprint().await,
-            self.library.entry_count().await,
-        ) {
-            (Ok(thumbprint), Ok(entry_count)) => json_response(
+        match self.library.catalog_snapshot().await {
+            Ok((thumbprint, entries)) => json_response(
                 200,
                 &CatalogThumbprint {
                     thumbprint,
-                    entry_count,
+                    entry_count: entries.len() as u64,
                 },
             ),
             _ => status(500),
         }
     }
 
-    async fn manifest(&self) -> Resolved {
-        let (Ok(thumbprint), Ok(entries), Ok(like_counts)) = (
-            self.library.thumbprint().await,
-            self.library.list().await,
-            self.library.like_counts().await,
-        ) else {
+    async fn manifest(&self, compressed: bool) -> Resolved {
+        let Ok((thumbprint, entries)) = self.library.catalog_snapshot().await else {
             return status(500);
         };
         let manifest = CatalogManifest {
             thumbprint,
-            entries: entries
-                .iter()
-                .map(|e| {
-                    let mut catalog_entry = e.to_catalog_entry();
-                    catalog_entry.like_count = like_counts.get(&e.entry_key).copied().unwrap_or(0);
-                    catalog_entry
-                })
-                .collect(),
+            entries,
             removed: Vec::new(),
         };
-        json_response(200, &manifest)
+        if compressed {
+            gzip_json_response(200, &manifest)
+        } else {
+            json_response(200, &manifest)
+        }
     }
 
     /// `/errors/report` — a client persists a [`swarm_core::peer::ClientErrorReport`]
@@ -330,7 +341,7 @@ impl MediaService {
                             tracing::warn!(entry_key, %error, "could not load cached lyrics for playback");
                         }
                     }
-                } else {
+                } else if !preferences.preview {
                     match self.library.subtitle_tracks(entry_key).await {
                         Ok(tracks) => {
                             plan.subtitles = tracks
@@ -503,7 +514,7 @@ impl MediaService {
         limiters
     }
 
-    /// `GET /art/{entry_key}/{poster|backdrop|cover|artist}` — the artwork a
+    /// `GET /art/{entry_key}/{poster|season|backdrop|cover|artist}` — the artwork a
     /// scrape wrote, served the same way as media bytes (Range + etag), with
     /// `if_none_match` short-circuiting to 304 when the client already has
     /// the current version.

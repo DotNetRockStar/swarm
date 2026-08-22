@@ -127,6 +127,13 @@ fun PlayerScreen(
             .setInitialBitrateEstimate(initialBitrate)
             .build()
         ExoPlayer.Builder(context).setBandwidthMeter(bandwidthMeter).build().apply {
+            // Direct-play containers may expose several embedded audio tracks.
+            // Prefer English when it is tagged, while Media3 naturally falls
+            // back to the container default when no English track exists.
+            trackSelectionParameters = trackSelectionParameters
+                .buildUpon()
+                .setPreferredAudioLanguages("en", "eng")
+                .build()
             val subtitleConfigurations = subtitles.map { track ->
                 MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
                     .setMimeType(MimeTypes.TEXT_VTT)

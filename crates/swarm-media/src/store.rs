@@ -51,7 +51,19 @@ pub struct EntryRecord {
     /// rating concept) and for anything not yet scraped or without a US
     /// certification on file.
     pub rating: Option<String>,
+    /// Provider community score normalized to a common 0–10 scale: TMDb's
+    /// native score for movies/TV and twice MusicBrainz's 0–5 release-group
+    /// score for music. Kept separate from `rating`, which is a parental
+    /// content certification used by Kid Mode.
+    pub community_rating: Option<f64>,
+    /// Number of provider votes behind `community_rating`, when supplied.
+    pub community_rating_votes: Option<u64>,
 }
+
+/// Bump whenever a successful online scrape begins populating new durable
+/// metadata. Rows written by an older scraper version become eligible for a
+/// one-time backfill even though their title/artwork scrape already finished.
+const CURRENT_SCRAPE_VERSION: i64 = 1;
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
 /// order) at scrape time. Same status as `scraped_title`/`genres` — display
@@ -67,6 +79,7 @@ pub struct CastMember {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtworkKind {
     Poster,
+    SeasonPoster,
     Backdrop,
     Cover,
     ArtistPhoto,
@@ -76,6 +89,7 @@ impl ArtworkKind {
     pub fn route_segment(self) -> &'static str {
         match self {
             ArtworkKind::Poster => "poster",
+            ArtworkKind::SeasonPoster => "season",
             ArtworkKind::Backdrop => "backdrop",
             ArtworkKind::Cover => "cover",
             ArtworkKind::ArtistPhoto => "artist",
@@ -85,6 +99,7 @@ impl ArtworkKind {
     pub fn parse(segment: &str) -> Option<Self> {
         match segment {
             "poster" => Some(ArtworkKind::Poster),
+            "season" => Some(ArtworkKind::SeasonPoster),
             "backdrop" => Some(ArtworkKind::Backdrop),
             "cover" => Some(ArtworkKind::Cover),
             "artist" => Some(ArtworkKind::ArtistPhoto),
@@ -95,6 +110,7 @@ impl ArtworkKind {
     fn column(self) -> &'static str {
         match self {
             ArtworkKind::Poster => "poster_relative_path",
+            ArtworkKind::SeasonPoster => "season_poster_relative_path",
             ArtworkKind::Backdrop => "backdrop_relative_path",
             ArtworkKind::Cover => "cover_relative_path",
             ArtworkKind::ArtistPhoto => "artist_art_relative_path",
@@ -212,7 +228,10 @@ impl Library {
             .foreign_keys(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new().max_connections(4).connect_with(options).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await?;
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS library_entries (
@@ -319,6 +338,7 @@ impl Library {
             ("cast_json", "TEXT"),
             ("year", "INTEGER"),
             ("poster_relative_path", "TEXT"),
+            ("season_poster_relative_path", "TEXT"),
             ("backdrop_relative_path", "TEXT"),
             ("cover_relative_path", "TEXT"),
             ("artist_art_relative_path", "TEXT"),
@@ -326,6 +346,9 @@ impl Library {
             ("overview", "TEXT"),
             ("kind_overridden", "INTEGER NOT NULL DEFAULT 0"),
             ("rating", "TEXT"),
+            ("community_rating", "REAL"),
+            ("community_rating_votes", "INTEGER"),
+            ("scrape_version", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(&pool, "library_entries", column, ddl_type).await?;
         }
@@ -335,11 +358,22 @@ impl Library {
     /// [`KnownEntry`] per relative path — the scanner's change-detection
     /// snapshot.
     pub async fn snapshot(&self) -> sqlx::Result<HashMap<String, KnownEntry>> {
-        type Row = (String, i64, i64, String, Option<String>, Option<String>, Option<String>, Option<String>, i64);
+        type Row = (
+            String,
+            i64,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        );
         let rows: Vec<Row> =
             sqlx::query_as(
                 "SELECT relative_path, size, modified_time, fingerprint, \
-                 poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path, \
+                 poster_relative_path, season_poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path, \
                  kind_overridden \
                  FROM library_entries",
             )
@@ -347,10 +381,36 @@ impl Library {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(path, size, mtime, fingerprint, poster, backdrop, cover, artist, kind_overridden)| {
-                let has_artwork = poster.is_some() || backdrop.is_some() || cover.is_some() || artist.is_some();
-                (path, KnownEntry { size: size as u64, modified_time: mtime, fingerprint, has_artwork, kind_overridden: kind_overridden != 0 })
-            })
+            .map(
+                |(
+                    path,
+                    size,
+                    mtime,
+                    fingerprint,
+                    poster,
+                    season_poster,
+                    backdrop,
+                    cover,
+                    artist,
+                    kind_overridden,
+                )| {
+                    let has_artwork = poster.is_some()
+                        || season_poster.is_some()
+                        || backdrop.is_some()
+                        || cover.is_some()
+                        || artist.is_some();
+                    (
+                        path,
+                        KnownEntry {
+                            size: size as u64,
+                            modified_time: mtime,
+                            fingerprint,
+                            has_artwork,
+                            kind_overridden: kind_overridden != 0,
+                        },
+                    )
+                },
+            )
             .collect())
     }
 
@@ -406,11 +466,12 @@ impl Library {
     }
 
     pub async fn remove_by_path(&self, relative_path: &str) -> sqlx::Result<()> {
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT entry_key, fingerprint FROM library_entries WHERE relative_path = ?")
-                .bind(relative_path)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT entry_key, fingerprint FROM library_entries WHERE relative_path = ?",
+        )
+        .bind(relative_path)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some((entry_key, fingerprint)) = row else {
             return Ok(());
         };
@@ -480,10 +541,17 @@ impl Library {
                 && entry.audio.is_some()
                 && entry.duration_secs.is_some_and(|duration| duration > 0.0)
         }) {
-            let total_segments = ((entry.duration_secs.unwrap_or(1.0) / segment_duration_secs.max(1) as f64).ceil() as i64).max(1);
-            if existing.get(&entry.entry_key).is_some_and(|(fingerprint, old_model, old_language)| {
-                fingerprint == &entry.fingerprint && old_model == model && old_language == language
-            }) {
+            let total_segments = ((entry.duration_secs.unwrap_or(1.0)
+                / segment_duration_secs.max(1) as f64)
+                .ceil() as i64)
+                .max(1);
+            if existing.get(&entry.entry_key).is_some_and(
+                |(fingerprint, old_model, old_language)| {
+                    fingerprint == &entry.fingerprint
+                        && old_model == model
+                        && old_language == language
+                },
+            ) {
                 continue;
             }
             let mut transaction = self.pool.begin().await?;
@@ -538,7 +606,9 @@ impl Library {
         )
         .fetch_optional(&mut *transaction)
         .await?;
-        let Some((entry_key, fingerprint, model, language, total_segments, completed_segments)) = row else {
+        let Some((entry_key, fingerprint, model, language, total_segments, completed_segments)) =
+            row
+        else {
             transaction.commit().await?;
             return Ok(None);
         };
@@ -594,10 +664,11 @@ impl Library {
         .bind(unix_time_ms())
         .execute(&mut *transaction)
         .await?;
-        let (completed,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transcription_segments WHERE entry_key = ?")
-            .bind(entry_key)
-            .fetch_one(&mut *transaction)
-            .await?;
+        let (completed,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM transcription_segments WHERE entry_key = ?")
+                .bind(entry_key)
+                .fetch_one(&mut *transaction)
+                .await?;
         sqlx::query("UPDATE transcription_jobs SET completed_segments = ?, updated_at_ms = ? WHERE entry_key = ?")
             .bind(completed)
             .bind(unix_time_ms())
@@ -608,14 +679,20 @@ impl Library {
         Ok(())
     }
 
-    pub async fn transcription_segments(&self, entry_key: &str) -> sqlx::Result<Vec<(u32, String)>> {
+    pub async fn transcription_segments(
+        &self,
+        entry_key: &str,
+    ) -> sqlx::Result<Vec<(u32, String)>> {
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT segment_index, cues_json FROM transcription_segments WHERE entry_key = ? ORDER BY segment_index",
         )
         .bind(entry_key)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(index, json)| (index as u32, json)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(index, json)| (index as u32, json))
+            .collect())
     }
 
     pub async fn complete_transcription(&self, subtitle: &SubtitleRecord) -> sqlx::Result<()> {
@@ -649,7 +726,16 @@ impl Library {
     }
 
     pub async fn subtitle_tracks(&self, entry_key: &str) -> sqlx::Result<Vec<SubtitleRecord>> {
-        type Row = (String, String, String, String, String, String, String, String);
+        type Row = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT id, entry_key, language, label, source, format, file_path, fingerprint \
              FROM subtitle_tracks WHERE entry_key = ? ORDER BY language, label",
@@ -657,13 +743,35 @@ impl Library {
         .bind(entry_key)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(id, entry_key, language, label, source, format, file_path, fingerprint)| SubtitleRecord {
-            id, entry_key, language, label, source, format, file_path, fingerprint,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, entry_key, language, label, source, format, file_path, fingerprint)| {
+                    SubtitleRecord {
+                        id,
+                        entry_key,
+                        language,
+                        label,
+                        source,
+                        format,
+                        file_path,
+                        fingerprint,
+                    }
+                },
+            )
+            .collect())
     }
 
-    pub async fn subtitle_track(&self, entry_key: &str, id: &str) -> sqlx::Result<Option<SubtitleRecord>> {
-        Ok(self.subtitle_tracks(entry_key).await?.into_iter().find(|track| track.id == id))
+    pub async fn subtitle_track(
+        &self,
+        entry_key: &str,
+        id: &str,
+    ) -> sqlx::Result<Option<SubtitleRecord>> {
+        Ok(self
+            .subtitle_tracks(entry_key)
+            .await?
+            .into_iter()
+            .find(|track| track.id == id))
     }
 
     pub async fn transcription_queue_status(&self) -> sqlx::Result<TranscriptionQueueStatus> {
@@ -690,7 +798,11 @@ impl Library {
     /// Every track sharing exactly this (artist, album) pair — the sibling
     /// set a pinpoint music rescrape re-syncs together, matching bulk
     /// scrape's per-album (not per-track) grouping.
-    pub async fn entries_by_artist_album(&self, artist: &str, album: &str) -> sqlx::Result<Vec<EntryRecord>> {
+    pub async fn entries_by_artist_album(
+        &self,
+        artist: &str,
+        album: &str,
+    ) -> sqlx::Result<Vec<EntryRecord>> {
         let rows = sqlx::query_as::<_, EntryRow>(&format!(
             "{ENTRY_SELECT} WHERE artist = ? AND album = ? ORDER BY relative_path"
         ))
@@ -706,44 +818,72 @@ impl Library {
             sqlx::query_as("SELECT entry_key, operation FROM library_changes ORDER BY entry_key")
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.into_iter().map(|(entry_key, operation)| PendingChange { entry_key, operation }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(entry_key, operation)| PendingChange {
+                entry_key,
+                operation,
+            })
+            .collect())
     }
 
     pub async fn clear_pending_changes(&self) -> sqlx::Result<()> {
-        sqlx::query("DELETE FROM library_changes").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM library_changes")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    /// Whole-library version token: SHA-256 over the sorted
-    /// `(lowercased path, fingerprint, size)` triples.
-    pub async fn thumbprint(&self) -> sqlx::Result<String> {
-        let mut rows: Vec<(String, String, i64)> =
-            sqlx::query_as("SELECT relative_path, fingerprint, size FROM library_entries")
-                .fetch_all(&self.pool)
-                .await?;
-        rows.sort_by_key(|a| a.0.to_lowercase());
+    /// The exact catalog payload plus its stable SHA-256 version token.
+    ///
+    /// This intentionally hashes every client-visible field, including
+    /// scraped metadata, artwork versions, and aggregate like counts. The
+    /// old `(path, fingerprint, size)`-only token stayed unchanged while a
+    /// scraper populated artwork/titles, which made a fingerprint-aware TV
+    /// cache retain stale presentation data indefinitely.
+    pub async fn catalog_snapshot(&self) -> sqlx::Result<(String, Vec<CatalogEntry>)> {
+        let entries = self.list().await?;
+        let like_counts = self.like_counts().await?;
+        let catalog_entries: Vec<CatalogEntry> = entries
+            .iter()
+            .map(|entry| {
+                let mut catalog_entry = entry.to_catalog_entry();
+                catalog_entry.like_count = like_counts.get(&entry.entry_key).copied().unwrap_or(0);
+                catalog_entry
+            })
+            .collect();
         let mut digest = Sha256::new();
-        for (path, fingerprint, size) in rows {
-            digest.update(path.to_lowercase().as_bytes());
-            digest.update(b"|");
-            digest.update(fingerprint.as_bytes());
-            digest.update(b"|");
-            digest.update(size.to_le_bytes());
+        for entry in &catalog_entries {
+            // CatalogEntry contains no fallible/custom serializer. Hashing
+            // each entry independently avoids allocating one second copy of
+            // the entire multi-megabyte manifest merely to version it.
+            digest.update(serde_json::to_vec(entry).unwrap_or_default());
             digest.update(b"\n");
         }
-        Ok(hex::encode(digest.finalize()))
+        Ok((hex::encode(digest.finalize()), catalog_entries))
+    }
+
+    pub async fn thumbprint(&self) -> sqlx::Result<String> {
+        self.catalog_snapshot()
+            .await
+            .map(|(thumbprint, _)| thumbprint)
     }
 
     pub async fn entry_count(&self) -> sqlx::Result<u64> {
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM library_entries").fetch_one(&self.pool).await?;
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM library_entries")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(count as u64)
     }
 
-    /// Entries a scraper has not yet resolved (`scraped_title IS NULL`),
-    /// oldest-added first isn't tracked — path order is deterministic enough
-    /// for a bulk job's iteration.
+    /// Entries a scraper has not yet resolved, plus entries last processed by
+    /// an older metadata schema. The version clause is what backfills fields
+    /// added after an existing library was already scraped.
     pub async fn missing_scrape(&self) -> sqlx::Result<Vec<EntryRecord>> {
-        let rows = sqlx::query_as::<_, EntryRow>(&format!("{ENTRY_SELECT} WHERE scraped_title IS NULL ORDER BY relative_path"))
+        let rows = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE scraped_title IS NULL OR scrape_version < ? ORDER BY relative_path"
+        ))
+            .bind(CURRENT_SCRAPE_VERSION)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.into_iter().map(EntryRecord::from).collect())
@@ -775,7 +915,11 @@ impl Library {
 
     /// Cache an LRCLIB match. The entry foreign key makes stale lyrics leave
     /// automatically when a media file is removed from the library.
-    pub async fn set_track_lyrics(&self, entry_key: &str, lyrics: &TrackLyrics) -> sqlx::Result<()> {
+    pub async fn set_track_lyrics(
+        &self,
+        entry_key: &str,
+        lyrics: &TrackLyrics,
+    ) -> sqlx::Result<()> {
         let fetched_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
@@ -821,7 +965,14 @@ impl Library {
 
     /// Cached lyrics for playback. A no-match marker returns `None`.
     pub async fn track_lyrics(&self, entry_key: &str) -> sqlx::Result<Option<TrackLyrics>> {
-        type Row = (String, Option<i64>, Option<String>, Option<String>, Option<String>, i64);
+        type Row = (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        );
         let row: Option<Row> = sqlx::query_as(
             "SELECT provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental \
              FROM track_lyrics WHERE entry_key = ?",
@@ -829,20 +980,22 @@ impl Library {
         .bind(entry_key)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.and_then(|(provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental)| {
-            if plain_lyrics.is_none() && synced_lyrics.is_none() && instrumental == 0 {
-                None
-            } else {
-                Some(TrackLyrics {
-                    provider,
-                    provider_id,
-                    language,
-                    plain_lyrics,
-                    synced_lyrics,
-                    instrumental: instrumental != 0,
-                })
-            }
-        }))
+        Ok(row.and_then(
+            |(provider, provider_id, language, plain_lyrics, synced_lyrics, instrumental)| {
+                if plain_lyrics.is_none() && synced_lyrics.is_none() && instrumental == 0 {
+                    None
+                } else {
+                    Some(TrackLyrics {
+                        provider,
+                        provider_id,
+                        language,
+                        plain_lyrics,
+                        synced_lyrics,
+                        instrumental: instrumental != 0,
+                    })
+                }
+            },
+        ))
     }
 
     /// Record that a scrape attempt completed for this entry — whether or not
@@ -859,16 +1012,27 @@ impl Library {
         scraped_title: Option<&str>,
         genres: &[String],
         cast: &[CastMember],
+        rating: Option<&str>,
+        community_rating: Option<f64>,
+        community_rating_votes: Option<u64>,
     ) -> sqlx::Result<()> {
         let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
         let cast_json = serde_json::to_string(cast).unwrap_or_else(|_| "[]".into());
-        sqlx::query("UPDATE library_entries SET scraped_title = ?, genres_json = ?, cast_json = ? WHERE entry_key = ?")
-            .bind(scraped_title.unwrap_or(""))
-            .bind(genres_json)
-            .bind(cast_json)
-            .bind(entry_key)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE library_entries SET scraped_title = ?, genres_json = ?, cast_json = ?, \
+             rating = ?, community_rating = ?, community_rating_votes = ?, scrape_version = ? \
+             WHERE entry_key = ?",
+        )
+        .bind(scraped_title.unwrap_or(""))
+        .bind(genres_json)
+        .bind(cast_json)
+        .bind(rating)
+        .bind(community_rating)
+        .bind(community_rating_votes.map(|votes| votes as i64))
+        .bind(CURRENT_SCRAPE_VERSION)
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -888,16 +1052,22 @@ impl Library {
         genres: Option<&[String]>,
     ) -> sqlx::Result<()> {
         if let Some(title) = title {
-            sqlx::query("UPDATE library_entries SET scraped_title = ? WHERE entry_key = ?")
+            sqlx::query(
+                "UPDATE library_entries SET scraped_title = ?, scrape_version = ? WHERE entry_key = ?",
+            )
                 .bind(title)
+                .bind(CURRENT_SCRAPE_VERSION)
                 .bind(entry_key)
                 .execute(&self.pool)
                 .await?;
         }
         if let Some(genres) = genres {
             let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
-            sqlx::query("UPDATE library_entries SET genres_json = ? WHERE entry_key = ?")
+            sqlx::query(
+                "UPDATE library_entries SET genres_json = ?, scrape_version = ? WHERE entry_key = ?",
+            )
                 .bind(genres_json)
+                .bind(CURRENT_SCRAPE_VERSION)
                 .bind(entry_key)
                 .execute(&self.pool)
                 .await?;
@@ -983,12 +1153,16 @@ impl Library {
     /// library scale (a few thousand rows), called only when the GUI opens
     /// the picker, not on any hot path.
     pub async fn distinct_genres(&self) -> sqlx::Result<Vec<String>> {
-        let rows: Vec<(Option<String>,)> = sqlx::query_as("SELECT DISTINCT genres_json FROM library_entries WHERE genres_json IS NOT NULL")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT DISTINCT genres_json FROM library_entries WHERE genres_json IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (genres_json,) in rows {
-            let Some(genres_json) = genres_json else { continue };
+            let Some(genres_json) = genres_json else {
+                continue;
+            };
             let genres: Vec<String> = serde_json::from_str(&genres_json).unwrap_or_default();
             for g in genres {
                 if !g.is_empty() {
@@ -1003,20 +1177,39 @@ impl Library {
 
     /// Store a downloaded artwork image's path (relative to the media root,
     /// alongside the source file) and bump the version that backs its etag.
-    pub async fn set_artwork(&self, entry_key: &str, kind: ArtworkKind, relative_path: &str) -> sqlx::Result<()> {
+    pub async fn set_artwork(
+        &self,
+        entry_key: &str,
+        kind: ArtworkKind,
+        relative_path: &str,
+    ) -> sqlx::Result<()> {
         let sql = format!(
             "UPDATE library_entries SET {} = ?, artwork_version = artwork_version + 1 WHERE entry_key = ?",
             kind.column()
         );
-        sqlx::query(&sql).bind(relative_path).bind(entry_key).execute(&self.pool).await?;
+        sqlx::query(&sql)
+            .bind(relative_path)
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// The stored path and version (etag material) for one artwork slot, if
     /// downloaded. One query, since `serve.rs` needs both together.
-    pub async fn artwork(&self, entry_key: &str, kind: ArtworkKind) -> sqlx::Result<Option<(String, u32)>> {
-        let sql = format!("SELECT {}, artwork_version FROM library_entries WHERE entry_key = ?", kind.column());
-        let row: Option<(Option<String>, i64)> = sqlx::query_as(&sql).bind(entry_key).fetch_optional(&self.pool).await?;
+    pub async fn artwork(
+        &self,
+        entry_key: &str,
+        kind: ArtworkKind,
+    ) -> sqlx::Result<Option<(String, u32)>> {
+        let sql = format!(
+            "SELECT {}, artwork_version FROM library_entries WHERE entry_key = ?",
+            kind.column()
+        );
+        let row: Option<(Option<String>, i64)> = sqlx::query_as(&sql)
+            .bind(entry_key)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.and_then(|(path, version)| path.map(|p| (p, version as u32))))
     }
 
@@ -1030,18 +1223,29 @@ impl Library {
     /// caller can best-effort delete the now-orphaned files on disk.
     pub async fn clear_scrape_result(&self, entry_key: &str) -> sqlx::Result<Vec<String>> {
         let mut transaction = self.pool.begin().await?;
-        let row: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path \
+        type ArtworkPathRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: ArtworkPathRow = sqlx::query_as(
+            "SELECT poster_relative_path, season_poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path \
              FROM library_entries WHERE entry_key = ?",
         )
         .bind(entry_key)
         .fetch_one(&mut *transaction)
         .await?;
-        let cleared_paths: Vec<String> = [row.0, row.1, row.2, row.3].into_iter().flatten().collect();
+        let cleared_paths: Vec<String> = [row.0, row.1, row.2, row.3, row.4]
+            .into_iter()
+            .flatten()
+            .collect();
 
         sqlx::query(
             "UPDATE library_entries SET scraped_title = NULL, genres_json = NULL, cast_json = NULL, overview = NULL, \
-             rating = NULL, poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
+             rating = NULL, community_rating = NULL, community_rating_votes = NULL, scrape_version = 0, \
+             poster_relative_path = NULL, season_poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
              artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
         )
         .bind(entry_key)
@@ -1077,9 +1281,22 @@ impl Library {
     /// folder-derived artist/album) — this reuses
     /// [`Self::clear_scrape_result`] for exactly those entries, so they come
     /// out the other side freshly eligible for a correct re-scrape.
-    pub async fn reclassify_all(&self, roots: &crate::roots::SharedRootResolver) -> sqlx::Result<ReclassifyReport> {
-        type ReclassifyRow =
-            (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, i64);
+    pub async fn reclassify_all(
+        &self,
+        roots: &crate::roots::SharedRootResolver,
+    ) -> sqlx::Result<ReclassifyReport> {
+        type ReclassifyRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            i64,
+        );
         let mut report = ReclassifyReport::default();
         let rows: Vec<ReclassifyRow> = sqlx::query_as(
             "SELECT entry_key, relative_path, kind, show_title, season, episode, artist, album, track_number, kind_overridden \
@@ -1114,7 +1331,9 @@ impl Library {
             // grouping must never see a root's label as though it were a
             // real folder.
             let (_, path_under_root) = roots.split(&relative_path);
-            let Some(classified) = crate::classify::classify(&path_under_root) else { continue };
+            let Some(classified) = crate::classify::classify(&path_under_root) else {
+                continue;
+            };
             let new_kind = kind_str(classified.kind);
             let new_season = classified.season.map(i64::from);
             let new_episode = classified.episode.map(i64::from);
@@ -1156,7 +1375,10 @@ impl Library {
     /// Persists a client-reported error (`/errors/report`) for later triage
     /// from the swarm page. `received_at_ms` is stamped here, from this
     /// machine's own clock — see [`ClientErrorRecord`]'s doc comment.
-    pub async fn record_client_error(&self, report: &swarm_core::peer::ClientErrorReport) -> sqlx::Result<()> {
+    pub async fn record_client_error(
+        &self,
+        report: &swarm_core::peer::ClientErrorReport,
+    ) -> sqlx::Result<()> {
         let received_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -1183,7 +1405,18 @@ impl Library {
     /// Newest first — matches how the swarm page's Errors panel wants to
     /// present them (most recent triage-worthy thing first).
     pub async fn list_client_errors(&self) -> sqlx::Result<Vec<ClientErrorRecord>> {
-        type Row = (i64, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, i64, i64);
+        type Row = (
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            i64,
+            i64,
+        );
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms \
              FROM client_errors ORDER BY received_at_ms DESC",
@@ -1192,8 +1425,8 @@ impl Library {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms)| {
-                ClientErrorRecord {
+            .map(
+                |(
                     id,
                     device_id,
                     device_name,
@@ -1204,23 +1437,43 @@ impl Library {
                     context,
                     occurred_at_ms,
                     received_at_ms,
-                }
-            })
+                )| {
+                    ClientErrorRecord {
+                        id,
+                        device_id,
+                        device_name,
+                        entry_key,
+                        asset_title,
+                        kind,
+                        message,
+                        context,
+                        occurred_at_ms,
+                        received_at_ms,
+                    }
+                },
+            )
             .collect())
     }
 
     pub async fn client_error_count(&self) -> sqlx::Result<u64> {
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM client_errors").fetch_one(&self.pool).await?;
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM client_errors")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(count as u64)
     }
 
     pub async fn delete_client_error(&self, id: i64) -> sqlx::Result<()> {
-        sqlx::query("DELETE FROM client_errors WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM client_errors WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn clear_client_errors(&self) -> sqlx::Result<()> {
-        sqlx::query("DELETE FROM client_errors").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM client_errors")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1231,7 +1484,13 @@ impl Library {
     /// identity is self-reported the same way `record_client_error`'s is —
     /// see that method's doc comment; this route has the identical trust
     /// model.
-    pub async fn set_like(&self, entry_key: &str, device_id: &str, device_name: &str, liked: bool) -> sqlx::Result<()> {
+    pub async fn set_like(
+        &self,
+        entry_key: &str,
+        device_id: &str,
+        device_name: &str,
+        liked: bool,
+    ) -> sqlx::Result<()> {
         if liked {
             let liked_at_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1263,8 +1522,13 @@ impl Library {
     /// pass instead of N queries.
     pub async fn like_counts(&self) -> sqlx::Result<HashMap<String, u32>> {
         let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT entry_key, COUNT(*) FROM entry_likes GROUP BY entry_key").fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(|(entry_key, count)| (entry_key, count as u32)).collect())
+            sqlx::query_as("SELECT entry_key, COUNT(*) FROM entry_likes GROUP BY entry_key")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(entry_key, count)| (entry_key, count as u32))
+            .collect())
     }
 }
 
@@ -1277,14 +1541,23 @@ pub struct ReclassifyReport {
 /// `ALTER TABLE ADD COLUMN IF NOT EXISTS` doesn't exist in SQLite; check
 /// `pragma_table_info` first so re-adding a column already present is a
 /// silent no-op instead of an error.
-async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl_type: &str) -> sqlx::Result<()> {
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    ddl_type: &str,
+) -> sqlx::Result<()> {
     let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
         .bind(table)
         .bind(column)
         .fetch_one(pool)
         .await?;
     if exists.0 == 0 {
-        sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")).execute(pool).await?;
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"
+        ))
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -1292,7 +1565,8 @@ async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl_type: &
 const ENTRY_SELECT: &str =
     "SELECT entry_key, relative_path, kind, title, size, modified_time, fingerprint, artist, album, \
      track_number, show_title, season, episode, duration_secs, video_json, audio_json, \
-     scraped_title, genres_json, artwork_version, year, cast_json, overview, rating FROM library_entries";
+     scraped_title, genres_json, artwork_version, year, cast_json, overview, rating, \
+     community_rating, community_rating_votes FROM library_entries";
 
 #[derive(sqlx::FromRow)]
 struct EntryRow {
@@ -1319,6 +1593,8 @@ struct EntryRow {
     cast_json: Option<String>,
     overview: Option<String>,
     rating: Option<String>,
+    community_rating: Option<f64>,
+    community_rating_votes: Option<i64>,
 }
 
 impl From<EntryRow> for EntryRecord {
@@ -1338,17 +1614,33 @@ impl From<EntryRow> for EntryRecord {
             season: row.season.map(|n| n as u32),
             episode: row.episode.map(|n| n as u32),
             duration_secs: row.duration_secs,
-            video: row.video_json.as_deref().and_then(|j| serde_json::from_str(j).ok()),
-            audio: row.audio_json.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+            video: row
+                .video_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok()),
+            audio: row
+                .audio_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok()),
             // Empty string is the "scraped, no match found" marker (see
             // set_scrape_not_found) — surface it as no display overlay.
             scraped_title: row.scraped_title.filter(|t| !t.is_empty()),
-            genres: row.genres_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
+            genres: row
+                .genres_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default(),
             artwork_version: row.artwork_version as u32,
             year: row.year.map(|n| n as u32),
-            cast: row.cast_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
+            cast: row
+                .cast_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default(),
             overview: row.overview,
             rating: row.rating,
+            community_rating: row.community_rating,
+            community_rating_votes: row.community_rating_votes.map(|votes| votes as u64),
         }
     }
 }
@@ -1374,9 +1666,18 @@ impl EntryRecord {
             audio: self.audio.clone(),
             artwork_etag: (self.artwork_version > 0).then(|| format!("v{}", self.artwork_version)),
             year: self.year,
-            cast: self.cast.iter().map(|c| swarm_core::peer::CastMember { name: c.name.clone(), character: c.character.clone() }).collect(),
+            cast: self
+                .cast
+                .iter()
+                .map(|c| swarm_core::peer::CastMember {
+                    name: c.name.clone(),
+                    character: c.character.clone(),
+                })
+                .collect(),
             overview: self.overview.clone(),
             rating: self.rating.clone(),
+            community_rating: self.community_rating,
+            community_rating_votes: self.community_rating_votes,
             // Not derivable from a single row — `serve.rs`'s `manifest()`
             // overwrites this with a real count from `Library::like_counts`
             // after mapping every entry, the same reason `artwork_etag`

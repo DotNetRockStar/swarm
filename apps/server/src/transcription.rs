@@ -3,6 +3,7 @@
 //! process restart resumes at the first unfinished ten-minute segment.
 
 use futures_util::StreamExt;
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -21,6 +22,7 @@ const MODEL_URL: &str =
 // to a .part file and accepted only after that published digest matches.
 const MODEL_SHA1: &str = "db8a495a91d927739e50b3fc1cc4c6b8f6c2d022";
 const SEGMENT_DURATION_SECS: u64 = 600;
+const MEDIA_ROOT_UNAVAILABLE_PREFIX: &str = "media root unavailable:";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TranscriptionStatus {
@@ -79,6 +81,7 @@ pub struct TranscriptionManager {
     roots: SharedRootResolver,
     transcodes: Arc<TranscodeManager>,
     enabled: Arc<AtomicBool>,
+    pause_while_streaming: Arc<AtomicBool>,
     segment_progress: Arc<AtomicU32>,
     notify: Notify,
     runtime: RwLock<RuntimeStatus>,
@@ -101,6 +104,7 @@ impl TranscriptionManager {
             roots,
             transcodes,
             enabled: Arc::new(AtomicBool::new(false)),
+            pause_while_streaming: Arc::new(AtomicBool::new(true)),
             segment_progress: Arc::new(AtomicU32::new(0)),
             notify: Notify::new(),
             runtime: RwLock::new(RuntimeStatus::default()),
@@ -116,6 +120,15 @@ impl TranscriptionManager {
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    pub fn set_pause_while_streaming(&self, enabled: bool) {
+        self.pause_while_streaming.store(enabled, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn should_pause_for_streaming(&self) -> bool {
+        self.pause_while_streaming.load(Ordering::Acquire) && self.transcodes.active_sessions() > 0
     }
 
     pub async fn status(&self) -> Result<TranscriptionStatus, sqlx::Error> {
@@ -191,7 +204,7 @@ impl TranscriptionManager {
                 continue;
             }
 
-            if self.transcodes.active_sessions() > 0 {
+            if self.should_pause_for_streaming() {
                 self.update_runtime(|status| {
                     status.phase = "waiting_for_streams".into();
                     status.message = "Paused while clients are streaming.".into();
@@ -228,6 +241,19 @@ impl TranscriptionManager {
             if let Err(error) = self.process_job(&job).await {
                 if error == "interrupted" {
                     let _ = self.library.requeue_transcription(&job.entry_key).await;
+                } else if error.starts_with(MEDIA_ROOT_UNAVAILABLE_PREFIX) {
+                    // A disconnected drive/share is temporary infrastructure
+                    // state, not a bad media file. Preserve durable progress
+                    // and retry instead of burning through the queue as
+                    // permanently failed while the mount is absent.
+                    let _ = self.library.requeue_transcription(&job.entry_key).await;
+                    self.update_runtime(|status| {
+                        status.phase = "waiting_for_media".into();
+                        status.message = error.clone();
+                        status.current_title = None;
+                    })
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 } else {
                     tracing::warn!(entry_key = %job.entry_key, %error, "local subtitle generation failed");
                     let _ = self
@@ -340,11 +366,13 @@ impl TranscriptionManager {
             return Err("media changed while it was queued".into());
         }
         let title = entry.scraped_title.clone().unwrap_or(entry.title.clone());
+        let (root_path, _) = self.roots.split(&entry.relative_path);
         let media_path = self.roots.resolve(&entry.relative_path);
         for segment_index in job.completed_segments..job.total_segments {
-            if !self.enabled.load(Ordering::Acquire) || self.transcodes.active_sessions() > 0 {
+            if !self.enabled.load(Ordering::Acquire) || self.should_pause_for_streaming() {
                 return Err("interrupted".into());
             }
+            ensure_media_root_available(&root_path)?;
             self.update_runtime(|status| {
                 status.phase = "transcribing".into();
                 status.message = format!("Generating subtitles for {title}");
@@ -355,31 +383,59 @@ impl TranscriptionManager {
             .await;
             self.segment_progress.store(0, Ordering::Release);
             let start_secs = u64::from(segment_index) * SEGMENT_DURATION_SECS;
-            let audio = extract_audio(
+            let audio = match extract_audio(
                 &self.ffmpeg_path,
                 &media_path,
                 start_secs,
                 SEGMENT_DURATION_SECS,
             )
-            .await?;
+            .await
+            {
+                Ok(audio) => audio,
+                Err(error) => {
+                    // The share can disappear between the preflight check
+                    // and ffmpeg opening the file. Re-check the owning root
+                    // so an outage is retried, while a genuinely bad or
+                    // deleted individual file still fails normally.
+                    ensure_media_root_available(&root_path)?;
+                    return Err(error);
+                }
+            };
             let model_path = self.model_path();
-            let enabled = Arc::clone(&self.enabled);
-            let transcodes = Arc::clone(&self.transcodes);
+            let abort_requested = Arc::new(AtomicBool::new(false));
+            let monitor_abort = Arc::clone(&abort_requested);
+            let monitor_enabled = Arc::clone(&self.enabled);
+            let monitor_pause_while_streaming = Arc::clone(&self.pause_while_streaming);
+            let monitor_transcodes = Arc::clone(&self.transcodes);
+            let abort_monitor = tokio::spawn(async move {
+                loop {
+                    if !monitor_enabled.load(Ordering::Acquire)
+                        || (monitor_pause_while_streaming.load(Ordering::Acquire)
+                            && monitor_transcodes.active_sessions() > 0)
+                    {
+                        monitor_abort.store(true, Ordering::Release);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            });
             let progress = Arc::clone(&self.segment_progress);
             let language = job.language.clone();
-            let cues = tokio::task::spawn_blocking(move || {
+            let transcription_result = tokio::task::spawn_blocking(move || {
                 transcribe_segment(
                     &model_path,
                     audio,
                     start_secs * 1_000,
                     &language,
-                    enabled,
-                    transcodes,
+                    abort_requested,
                     progress,
                 )
             })
             .await
-            .map_err(|error| error.to_string())??;
+            .map_err(|error| error.to_string());
+            abort_monitor.abort();
+            let _ = abort_monitor.await;
+            let cues = transcription_result??;
             let json = serde_json::to_string(&cues).map_err(|error| error.to_string())?;
             self.library
                 .store_transcription_segment(&job.entry_key, segment_index, &json)
@@ -432,6 +488,15 @@ impl TranscriptionManager {
     }
 }
 
+fn ensure_media_root_available(root: &Path) -> Result<(), String> {
+    std::fs::read_dir(root).map(|_| ()).map_err(|error| {
+        format!(
+            "{MEDIA_ROOT_UNAVAILABLE_PREFIX} {}. Reconnect the drive or network share ({error})",
+            root.display()
+        )
+    })
+}
+
 async fn extract_audio(
     ffmpeg: &Path,
     media: &Path,
@@ -465,8 +530,7 @@ fn transcribe_segment(
     audio_i16: Vec<i16>,
     offset_ms: u64,
     language: &str,
-    enabled: Arc<AtomicBool>,
-    transcodes: Arc<TranscodeManager>,
+    abort_requested: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
 ) -> Result<Vec<Cue>, String> {
     let context = WhisperContext::new_with_params(
@@ -492,13 +556,18 @@ fn transcribe_segment(
     params.set_progress_callback_safe(move |percent: i32| {
         callback_progress.store(percent.clamp(0, 100) as u32, Ordering::Release);
     });
-    let abort_enabled = Arc::clone(&enabled);
-    let abort_transcodes = Arc::clone(&transcodes);
-    params.set_abort_callback_safe(move || {
-        !abort_enabled.load(Ordering::Acquire) || abort_transcodes.active_sessions() > 0
-    });
+    // whisper-rs 0.16's safe helper stores a boxed trait-object pointer but
+    // installs a trampoline for the closure's concrete type. That mismatch is
+    // undefined behavior and caused a reproducible SIGBUS on macOS. Keep the
+    // native callback limited to one stable atomic pointer instead.
+    unsafe {
+        params.set_abort_callback(Some(transcription_abort_callback));
+        params.set_abort_callback_user_data(
+            Arc::as_ptr(&abort_requested).cast_mut().cast::<c_void>(),
+        );
+    }
     if let Err(error) = state.full(params, &audio) {
-        if !enabled.load(Ordering::Acquire) || transcodes.active_sessions() > 0 {
+        if abort_requested.load(Ordering::Acquire) {
             return Err("interrupted".into());
         }
         return Err(error.to_string());
@@ -521,6 +590,19 @@ fn transcribe_segment(
         });
     }
     Ok(cues)
+}
+
+/// # Safety
+///
+/// `user_data` must point to an `AtomicBool` that stays alive throughout the
+/// synchronous `WhisperState::full` call. `transcribe_segment` retains the
+/// owning `Arc` until that call returns.
+unsafe extern "C" fn transcription_abort_callback(user_data: *mut c_void) -> bool {
+    if user_data.is_null() {
+        return false;
+    }
+    // SAFETY: upheld by the synchronous call and retained Arc above.
+    unsafe { &*user_data.cast::<AtomicBool>() }.load(Ordering::Acquire)
 }
 
 fn render_webvtt(cues: &[Cue]) -> String {
@@ -598,5 +680,29 @@ mod tests {
         }]);
         assert!(text.contains("01:02:03.004 --> 01:02:05.006"));
         assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn native_abort_callback_reads_a_stable_atomic_flag() {
+        let abort = Arc::new(AtomicBool::new(false));
+        let user_data = Arc::as_ptr(&abort).cast_mut().cast::<c_void>();
+        // SAFETY: `abort` owns this pointer for both synchronous calls.
+        assert!(!unsafe { transcription_abort_callback(user_data) });
+        abort.store(true, Ordering::Release);
+        // SAFETY: same retained Arc and pointer as above.
+        assert!(unsafe { transcription_abort_callback(user_data) });
+        // SAFETY: null is explicitly handled as "continue".
+        assert!(!unsafe { transcription_abort_callback(std::ptr::null_mut()) });
+    }
+
+    #[test]
+    fn inaccessible_media_root_is_reported_as_retryable_storage_state() {
+        let missing = std::env::temp_dir().join(format!(
+            "swarm-missing-transcription-root-{}",
+            rand::random::<u64>()
+        ));
+        let error = ensure_media_root_available(&missing).unwrap_err();
+        assert!(error.starts_with(MEDIA_ROOT_UNAVAILABLE_PREFIX));
+        assert!(error.contains("Reconnect the drive or network share"));
     }
 }

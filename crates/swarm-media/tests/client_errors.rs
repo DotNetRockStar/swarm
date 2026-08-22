@@ -32,10 +32,18 @@ fn sample_report() -> ClientErrorReport {
 }
 
 async fn service_with_fresh_library() -> (MediaService, Arc<Library>) {
-    let root = std::env::temp_dir().join(format!("swarm-client-errors-{}-{}", std::process::id(), rand_suffix()));
+    let root = std::env::temp_dir().join(format!(
+        "swarm-client-errors-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let library = Arc::new(Library::open(root.join("library.sqlite").to_str().unwrap()).await.unwrap());
+    let library = Arc::new(
+        Library::open(root.join("library.sqlite").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
     let service = MediaService::new(library.clone(), root.join("media"));
     (service, library)
 }
@@ -48,7 +56,10 @@ async fn service_with_fresh_library() -> (MediaService, Arc<Library>) {
 // guarantees uniqueness within this process regardless of clock resolution.
 fn rand_suffix() -> u128 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     now + n as u128
 }
@@ -57,7 +68,9 @@ fn rand_suffix() -> u128 {
 async fn reported_error_is_persisted_and_listed_newest_first() {
     let (service, library) = service_with_fresh_library().await;
 
-    let first = service.resolve(&report_request(Some(sample_report()))).await;
+    let first = service
+        .resolve(&report_request(Some(sample_report())))
+        .await;
     assert_eq!(first.header.status, 204);
 
     let mut second_report = sample_report();
@@ -93,11 +106,25 @@ async fn request_with_an_empty_device_id_or_message_is_rejected() {
 
     let mut missing_device = sample_report();
     missing_device.device_id = String::new();
-    assert_eq!(service.resolve(&report_request(Some(missing_device))).await.header.status, 400);
+    assert_eq!(
+        service
+            .resolve(&report_request(Some(missing_device)))
+            .await
+            .header
+            .status,
+        400
+    );
 
     let mut missing_message = sample_report();
     missing_message.message = String::new();
-    assert_eq!(service.resolve(&report_request(Some(missing_message))).await.header.status, 400);
+    assert_eq!(
+        service
+            .resolve(&report_request(Some(missing_message)))
+            .await
+            .header
+            .status,
+        400
+    );
 
     assert_eq!(library.client_error_count().await.unwrap(), 0);
 }
@@ -105,7 +132,9 @@ async fn request_with_an_empty_device_id_or_message_is_rejected() {
 #[tokio::test]
 async fn delete_and_clear_remove_from_the_store() {
     let (service, library) = service_with_fresh_library().await;
-    service.resolve(&report_request(Some(sample_report()))).await;
+    service
+        .resolve(&report_request(Some(sample_report())))
+        .await;
     let mut other = sample_report();
     other.message = "a second error".into();
     service.resolve(&report_request(Some(other))).await;
@@ -118,4 +147,3 @@ async fn delete_and_clear_remove_from_the_store() {
     library.clear_client_errors().await.unwrap();
     assert_eq!(library.client_error_count().await.unwrap(), 0);
 }
-

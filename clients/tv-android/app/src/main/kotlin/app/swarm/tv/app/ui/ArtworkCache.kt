@@ -1,6 +1,5 @@
 /**
- * Enforces a configurable max-age on Coil's artwork cache — item 3 of the
- * client-updates request: cache behavior remains configurable in the app.
+ * Enforces a one-day max-age on Coil's artwork cache.
  * Coil's own [coil.disk.DiskCache]/[coil.memory.MemoryCache]
  * are pure LRU (size-bounded, not time-bounded), and the loopback proxy
  * artwork actually loads through ([app.swarm.tv.core.proxy.PeerLoopbackProxy])
@@ -29,16 +28,13 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 class ArtworkCache(context: Context) : Interceptor {
-    /** Live-updated by [app.swarm.tv.app.SwarmApplication] as the config-page setting changes — no app restart needed for a new value to take effect. */
-    @Volatile var ttlMinutes: Int = DEFAULT_ARTWORK_CACHE_MINUTES
-
     private val lastFetchedAt = ConcurrentHashMap<String, Long>()
     private val persistedFetchTimes = context.applicationContext.getSharedPreferences("swarm_artwork_fetch_times", Context.MODE_PRIVATE)
 
     override suspend fun intercept(chain: Interceptor.Chain): ImageResult {
         val key = chain.request.data.toString()
         val now = System.currentTimeMillis()
-        val ttlMillis = ttlMinutes.coerceAtLeast(0) * 60_000L
+        val ttlMillis = DEFAULT_ARTWORK_CACHE_MINUTES * 60_000L
         val timestampKey = key.sha256()
         val lastFetch = lastFetchedAt[key] ?: persistedFetchTimes.getLong(timestampKey, 0L).also {
             if (it > 0L) lastFetchedAt[key] = it

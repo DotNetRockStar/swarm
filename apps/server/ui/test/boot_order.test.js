@@ -33,6 +33,7 @@ const path = require("path");
 const UI_DIR = path.join(__dirname, "..");
 const invokeCalls = [];
 let testLibraryEntries = [];
+let testRootHealth = [{ label: "test", path: "/tmp/swarm-boot-order-test", available: true, error: null }];
 
 function invokeStub(command, args) {
   invokeCalls.push({ command, args });
@@ -46,6 +47,7 @@ function invokeStub(command, args) {
         has_tmdb_key: false,
         streaming_upload_budget_enabled: true,
         local_transcription_enabled: false,
+        transcription_pause_while_streaming: true,
         mcp_enabled: false,
         mcp_port: 7890,
         mcp_access_token: null,
@@ -62,6 +64,8 @@ function invokeStub(command, args) {
         active_playback_sessions: 0,
         scanning: false,
       };
+    case "get_media_root_health":
+      return testRootHealth;
     case "get_transcription_status":
       return {
         enabled: false,
@@ -192,6 +196,22 @@ async function main() {
   }
   if (document.getElementById("statusGrid").textContent.includes("Listening (QUIC)")) {
     failures.push("Expected the Listening (QUIC) status panel to be removed.");
+  }
+  if (!document.getElementById("mediaRootWarning").classList.contains("d-none")) {
+    failures.push("Expected the media-root warning to stay hidden while every root is readable.");
+  }
+  testRootHealth = [{ label: "nas", path: "/Volumes/missing-share/movies", available: false, error: "not found" }];
+  await dom.window.refreshMediaRootHealth();
+  if (document.getElementById("mediaRootWarning").classList.contains("d-none")) {
+    failures.push("Expected an unavailable media root to show the persistent storage warning.");
+  }
+  if (!document.getElementById("mediaRootWarningText").textContent.includes("/Volumes/missing-share/movies")) {
+    failures.push("Expected the storage warning to identify the unavailable media-root path.");
+  }
+  testRootHealth = [{ label: "nas", path: "/Volumes/missing-share/movies", available: true, error: null }];
+  await dom.window.refreshMediaRootHealth();
+  if (!document.getElementById("mediaRootWarning").classList.contains("d-none")) {
+    failures.push("Expected the storage warning to clear automatically after the root recovers.");
   }
   document.querySelector('[data-info="try-asking"]').click();
   if (document.getElementById("infoModalBackdrop").classList.contains("d-none")) {

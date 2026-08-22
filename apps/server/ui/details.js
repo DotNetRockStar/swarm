@@ -15,6 +15,7 @@ async function refreshTmdbKeyField() {
 async function refreshTranscriptionSetting() {
   const settings = await invoke("get_settings");
   document.getElementById("localTranscriptionEnabledCheck").checked = settings.local_transcription_enabled;
+  document.getElementById("transcriptionPauseWhileStreamingCheck").checked = settings.transcription_pause_while_streaming;
   const statusEl = document.getElementById("localTranscriptionSettingStatus");
   try {
     const status = await invoke("get_transcription_status");
@@ -41,6 +42,23 @@ document.getElementById("localTranscriptionEnabledCheck").addEventListener("chan
       showToast("Local subtitle generation paused. Progress has been saved.", "success");
     }
     await Promise.all([refreshTranscriptionSetting(), refreshTranscriptionProgress()]);
+  } catch (err) {
+    event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("transcriptionPauseWhileStreamingCheck").addEventListener("change", async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    await invoke("set_transcription_pause_while_streaming", { enabled });
+    showToast(
+      enabled
+        ? "Subtitle generation will pause while clients are streaming."
+        : "Subtitle generation may now use CPU while clients are streaming.",
+      "success",
+    );
+    await refreshTranscriptionSetting();
   } catch (err) {
     event.currentTarget.checked = !enabled;
     showToast(String(err), "error");

@@ -204,12 +204,22 @@ private class PunchedSocketFactory(private val port: Int) : DatagramSocketFactor
 }
 
 /** Reads at most `limit` bytes from `delegate`, then always reports EOF. */
-private class BoundedInputStream(private val delegate: InputStream, private val limit: Long) : InputStream() {
+internal class BoundedInputStream(private val delegate: InputStream, private val limit: Long) : InputStream() {
     private var remaining = limit
+
+    private fun interrupted(error: IOException): IOException = IOException(
+        "response body interrupted at ${limit - remaining}/$limit bytes: ${error.message ?: error.javaClass.simpleName}",
+        error,
+    )
 
     override fun read(): Int {
         if (remaining <= 0) return -1
-        val b = delegate.read()
+        val b = try {
+            delegate.read()
+        } catch (error: IOException) {
+            throw interrupted(error)
+        }
+        if (b < 0) throw PeerQuicError.TruncatedBody(limit - remaining, limit)
         if (b >= 0) remaining--
         return b
     }
@@ -217,7 +227,12 @@ private class BoundedInputStream(private val delegate: InputStream, private val 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
         if (remaining <= 0) return -1
         val toRead = minOf(len.toLong(), remaining).toInt()
-        val got = delegate.read(b, off, toRead)
+        val got = try {
+            delegate.read(b, off, toRead)
+        } catch (error: IOException) {
+            throw interrupted(error)
+        }
+        if (got < 0) throw PeerQuicError.TruncatedBody(limit - remaining, limit)
         if (got > 0) remaining -= got
         return got
     }

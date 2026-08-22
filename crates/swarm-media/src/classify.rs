@@ -10,9 +10,12 @@
 
 use swarm_core::peer::MediaKind;
 
-pub const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "opus", "m4a", "wav", "wma", "aac", "aiff", "ape"];
-pub const VIDEO_EXTS: &[&str] =
-    &["mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv", "mpg", "mpeg", "m2ts", "ts", "3gp"];
+pub const AUDIO_EXTS: &[&str] = &[
+    "mp3", "flac", "ogg", "opus", "m4a", "wav", "wma", "aac", "aiff", "ape",
+];
+pub const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv", "mpg", "mpeg", "m2ts", "ts", "3gp",
+];
 
 /// Disc-subfolder names absorbed into the parent album (e.g. `CD1`, `Disc 2`).
 fn is_disc_folder(name: &str) -> bool {
@@ -37,11 +40,44 @@ fn is_disc_folder(name: &str) -> bool {
 /// fake bucket (e.g. every ATB album under one "ATB / Album" group) — same
 /// vocabulary, since it mirrors MusicBrainz's own release-group type list.
 const CATEGORY_FOLDER_NAMES: &[&str] = &[
-    "album", "albums", "single", "singles", "ep", "eps", "broadcast", "broadcasts", "other", "others",
-    "compilation", "compilations", "soundtrack", "soundtracks", "spokenword", "interview", "interviews",
-    "audiobook", "audiobooks", "audio drama", "live", "live album", "live albums", "remix", "remixes",
-    "dj-mix", "dj mix", "mixtape", "mixtapes", "street", "demo", "demos", "field recording",
-    "field recordings", "bootleg", "bootlegs", "bonus", "bonuses",
+    "album",
+    "albums",
+    "single",
+    "singles",
+    "ep",
+    "eps",
+    "broadcast",
+    "broadcasts",
+    "other",
+    "others",
+    "compilation",
+    "compilations",
+    "soundtrack",
+    "soundtracks",
+    "spokenword",
+    "interview",
+    "interviews",
+    "audiobook",
+    "audiobooks",
+    "audio drama",
+    "live",
+    "live album",
+    "live albums",
+    "remix",
+    "remixes",
+    "dj-mix",
+    "dj mix",
+    "mixtape",
+    "mixtapes",
+    "street",
+    "demo",
+    "demos",
+    "field recording",
+    "field recordings",
+    "bootleg",
+    "bootlegs",
+    "bonus",
+    "bonuses",
 ];
 
 /// Real libraries often number these wrapper folders (`"3. Remixes"`,
@@ -51,7 +87,9 @@ const CATEGORY_FOLDER_NAMES: &[&str] = &[
 /// category-name check so those still match.
 fn strip_leading_ordinal(name: &str) -> &str {
     let trimmed = name.trim_start();
-    let digits_end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(trimmed.len());
+    let digits_end = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(trimmed.len());
     if digits_end == 0 {
         return name;
     }
@@ -79,7 +117,9 @@ fn is_category_folder(name: &str) -> bool {
 /// (~12% of the library).
 fn strip_discography_suffix(name: &str) -> &str {
     for suffix in [" - discography", " discography"] {
-        if name.len() > suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix) {
+        if name.len() > suffix.len()
+            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        {
             let stripped = name[..name.len() - suffix.len()].trim_end();
             if !stripped.is_empty() {
                 return stripped;
@@ -111,7 +151,15 @@ fn is_media_type_wrapper(name: &str) -> bool {
 /// content) fell all the way through to the movie fallback below and was
 /// searched against the wrong TMDb database entirely. Only meaningful as
 /// the very first path segment, same reasoning as the music wrapper.
-const VIDEO_TYPE_WRAPPER_NAMES: &[&str] = &["shows", "show", "tv", "tv shows", "tv series", "series", "television"];
+const VIDEO_TYPE_WRAPPER_NAMES: &[&str] = &[
+    "shows",
+    "show",
+    "tv",
+    "tv shows",
+    "tv series",
+    "series",
+    "television",
+];
 
 fn is_video_type_wrapper(name: &str) -> bool {
     VIDEO_TYPE_WRAPPER_NAMES.contains(&name.to_lowercase().as_str())
@@ -154,7 +202,9 @@ fn parse_ep_marker(stem: &str) -> Option<u32> {
         let wlen = word.len();
         let mut start = 0;
         while start + wlen <= bytes.len() {
-            if is_boundary_before(start) && bytes[start..start + wlen].eq_ignore_ascii_case(word.as_bytes()) {
+            if is_boundary_before(start)
+                && bytes[start..start + wlen].eq_ignore_ascii_case(word.as_bytes())
+            {
                 let mut i = start + wlen;
                 if i < bytes.len() && bytes[i] == b'.' {
                     i += 1;
@@ -198,7 +248,10 @@ pub fn media_extension(relative_path: &str) -> Option<(&'static str, bool)> {
     if let Some(known) = AUDIO_EXTS.iter().find(|e| **e == ext) {
         return Some((known, true));
     }
-    VIDEO_EXTS.iter().find(|e| **e == ext).map(|known| (*known, false))
+    VIDEO_EXTS
+        .iter()
+        .find(|e| **e == ext)
+        .map(|known| (*known, false))
 }
 
 /// Classify a library-relative path (forward slashes) into a catalog entry.
@@ -207,7 +260,10 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     let (_, is_audio) = media_extension(relative_path)?;
     let segments: Vec<&str> = relative_path.split('/').filter(|s| !s.is_empty()).collect();
     let file_name = segments.last()?;
-    let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(file_name);
     // Directory chain above the file, with disc folders absorbed.
     let mut dirs: Vec<&str> = segments[..segments.len() - 1].to_vec();
     if dirs.last().is_some_and(|d| is_disc_folder(d)) {
@@ -237,14 +293,20 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         // dedicated per-type root or label) is skipped the same way a
         // multi-root label prefix already is upstream (see scan_roots/
         // reclassify_all) — otherwise it would be misread as the artist.
-        let dirs: &[&str] = if dirs.first().is_some_and(|d| is_media_type_wrapper(d)) { &dirs[1..] } else { &dirs };
+        let dirs: &[&str] = if dirs.first().is_some_and(|d| is_media_type_wrapper(d)) {
+            &dirs[1..]
+        } else {
+            &dirs
+        };
 
         // A category/release-type wrapper folder some libraries insert
         // right after Artist (`Artist/Album/<Real Album Name>/track.mp3`,
         // `Artist/Compilation/<Real Release>/track.mp3`) is skipped so the
         // real album name underneath it is used instead of the category
         // label — see CATEGORY_FOLDER_NAMES.
-        let artist = dirs.first().map(|s| clean_title(strip_discography_suffix(s)));
+        let artist = dirs
+            .first()
+            .map(|s| clean_title(strip_discography_suffix(s)));
         let album = match dirs.get(1) {
             Some(second) if is_category_folder(second) && dirs.len() >= 3 => {
                 Some(clean_title(dirs[2]))
@@ -302,7 +364,9 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         // filename — release-group filename wording varies far more than
         // folder structure does in practice.
         let from_stem = clean_title(title_prefix);
-        let folder_derived = find_ancestor_season(&dirs).map(|(name, _, _)| name).filter(|name| !name.is_empty());
+        let folder_derived = find_ancestor_season(&dirs)
+            .map(|(name, _, _)| name)
+            .filter(|name| !name.is_empty());
         let show_title = folder_derived
             .or_else(|| (!from_stem.is_empty()).then_some(from_stem))
             .or_else(|| wrapper_derived_show_name(&dirs))
@@ -331,7 +395,9 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // reliable, path-derived signal (see the module doc comment's grouping
     // rule).
     if let Some(episode) = parse_ep_marker(&stem_clean) {
-        let (season, folder_year) = find_ancestor_season(&dirs).map(|(_, s, y)| (s, y)).unwrap_or((1, None));
+        let (season, folder_year) = find_ancestor_season(&dirs)
+            .map(|(_, s, y)| (s, y))
+            .unwrap_or((1, None));
         let show_title = find_ancestor_season(&dirs)
             .map(|(name, _, _)| name)
             .or_else(|| wrapper_derived_show_name(&dirs))
@@ -420,7 +486,11 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
 /// now used from two places): nearest-to-furthest, the first ancestor
 /// directory that isn't itself a season folder.
 fn show_title_from_ancestors(dirs: &[&str]) -> String {
-    dirs.iter().rev().map(|d| clean_title(d)).find(|name| !name.is_empty() && !is_season_folder(name)).unwrap_or_default()
+    dirs.iter()
+        .rev()
+        .map(|d| clean_title(d))
+        .find(|name| !name.is_empty() && !is_season_folder(name))
+        .unwrap_or_default()
 }
 
 /// A season-indicating folder, any of three shapes: a literal `"Season N"`,
@@ -430,8 +500,13 @@ fn show_title_from_ancestors(dirs: &[&str]) -> String {
 /// ancestor".
 fn is_season_folder(name: &str) -> bool {
     let lower = name.to_lowercase();
-    let literal = lower.strip_prefix("season").map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit())).unwrap_or(false);
-    literal || parse_season_suffix_folder(name).is_some() || parse_bare_season_folder(name).is_some()
+    let literal = lower
+        .strip_prefix("season")
+        .map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or(false);
+    literal
+        || parse_season_suffix_folder(name).is_some()
+        || parse_bare_season_folder(name).is_some()
 }
 
 /// A folder name ending in `" SNN"` (a space, a case-insensitive `S`, then
@@ -515,11 +590,14 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
             continue;
         }
         let lower = dir.to_lowercase();
-        let literal_season = lower.strip_prefix("season").and_then(|rest| rest.trim().parse().ok());
+        let literal_season = lower
+            .strip_prefix("season")
+            .and_then(|rest| rest.trim().parse().ok());
         let Some(season) = literal_season.or_else(|| parse_bare_season_folder(dir)) else {
             continue;
         };
-        let show_title = wrapper_derived_show_name(&dirs[..idx]).unwrap_or_else(|| show_title_from_ancestors(&dirs[..idx]));
+        let show_title = wrapper_derived_show_name(&dirs[..idx])
+            .unwrap_or_else(|| show_title_from_ancestors(&dirs[..idx]));
         if !show_title.is_empty() {
             return Some((show_title, season, None));
         }
@@ -548,7 +626,11 @@ fn parse_sxxeyy_marker(stem: &str) -> Option<(u32, u32, &str)> {
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
-        if i == season_start || i - season_start > 3 || i >= bytes.len() || !bytes[i].eq_ignore_ascii_case(&b'e') {
+        if i == season_start
+            || i - season_start > 3
+            || i >= bytes.len()
+            || !bytes[i].eq_ignore_ascii_case(&b'e')
+        {
             continue;
         }
         let episode_start = i + 1;
@@ -901,8 +983,16 @@ mod tests {
         let entry = classify("movies/Interstellar (2014) [1080p].mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.year, Some(2014));
-        assert!(!entry.title.contains('('), "brackets must not survive into the title: {}", entry.title);
-        assert!(!entry.title.contains('['), "brackets must not survive into the title: {}", entry.title);
+        assert!(
+            !entry.title.contains('('),
+            "brackets must not survive into the title: {}",
+            entry.title
+        );
+        assert!(
+            !entry.title.contains('['),
+            "brackets must not survive into the title: {}",
+            entry.title
+        );
     }
 
     #[test]
@@ -912,7 +1002,10 @@ mod tests {
         // real-world layout.
         let entry = classify("movies/Inception (2010)/Inception.1080p.mkv").unwrap();
         assert_eq!(entry.year, Some(2010));
-        assert_eq!(entry.title, "Inception 1080p", "folder-derived year must not change the filename-derived title");
+        assert_eq!(
+            entry.title, "Inception 1080p",
+            "folder-derived year must not change the filename-derived title"
+        );
     }
 
     #[test]
@@ -920,9 +1013,13 @@ mod tests {
         // The dominant real-world scene-release convention has no brackets
         // at all — found live on real hardware: year stayed NULL for
         // exactly this pattern before this fix.
-        let cloverfield = classify("movies/10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv").unwrap();
+        let cloverfield =
+            classify("movies/10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(cloverfield.year, Some(2016));
-        assert_eq!(cloverfield.title, "10 Cloverfield Lane 1080p BluRay x264-GROUP");
+        assert_eq!(
+            cloverfield.title,
+            "10 Cloverfield Lane 1080p BluRay x264-GROUP"
+        );
 
         let days_later = classify("movies/28.Days.Later.2002.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(days_later.year, Some(2002));
@@ -941,7 +1038,11 @@ mod tests {
     #[test]
     fn bracket_year_takes_precedence_over_a_bare_token_year() {
         let entry = classify("movies/Movie.2016.[2010].mkv").unwrap();
-        assert_eq!(entry.year, Some(2010), "a deliberately bracketed year is the more deliberate signal");
+        assert_eq!(
+            entry.year,
+            Some(2010),
+            "a deliberately bracketed year is the more deliberate signal"
+        );
     }
 
     #[test]
@@ -953,7 +1054,8 @@ mod tests {
 
     #[test]
     fn bracket_content_without_a_year_is_still_stripped() {
-        let entry = classify("tv/Severance/Season 1/Severance.S01E01 [Good News About Hell].mkv").unwrap();
+        let entry =
+            classify("tv/Severance/Season 1/Severance.S01E01 [Good News About Hell].mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Episode);
         assert_eq!(entry.year, None);
         assert!(!entry.title.contains('['));
@@ -981,9 +1083,17 @@ mod tests {
         .unwrap();
         assert_eq!(entry.kind, MediaKind::Episode);
         assert_eq!(entry.show_title.as_deref(), Some("Lost"));
-        assert_eq!(entry.season, Some(0), "bonus content is a single show-level bucket, not per-season");
+        assert_eq!(
+            entry.season,
+            Some(0),
+            "bonus content is a single show-level bucket, not per-season"
+        );
         assert_eq!(entry.episode, None);
-        assert_eq!(entry.year, Some(2004), "year falls back to the season folder's own (year)");
+        assert_eq!(
+            entry.year,
+            Some(2004),
+            "year falls back to the season folder's own (year)"
+        );
         assert_eq!(entry.title, "11 hostiles-others");
     }
 
@@ -1008,7 +1118,8 @@ mod tests {
         // The new folder shape must not steal season/episode numbers away
         // from a real SxxEyy filename marker — that's still the primary,
         // authoritative signal when present.
-        let entry = classify("Shows/Dexter/Dexter (2006) S03/Dexter.S03E01.Our Father.mkv").unwrap();
+        let entry =
+            classify("Shows/Dexter/Dexter (2006) S03/Dexter.S03E01.Our Father.mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Episode);
         assert_eq!(entry.show_title.as_deref(), Some("Dexter"));
         assert_eq!(entry.season, Some(3));
@@ -1048,8 +1159,10 @@ mod tests {
     fn ep_marker_without_a_trailing_dot_is_also_recognized() {
         // Real example reported live: "CENTURIONS - Ep 20 - Terror on Ice"
         // — no "." after "Ep", unlike the earlier "Ep. 57" example.
-        let entry =
-            classify("Batocera-movies-shows/Shows/The CENTURIONS/CENTURIONS - Ep 20 - Terror on Ice.mp4").unwrap();
+        let entry = classify(
+            "Batocera-movies-shows/Shows/The CENTURIONS/CENTURIONS - Ep 20 - Terror on Ice.mp4",
+        )
+        .unwrap();
         assert_eq!(entry.kind, MediaKind::Episode);
         assert_eq!(entry.show_title.as_deref(), Some("The CENTURIONS"));
         assert_eq!(entry.season, Some(1));
@@ -1075,7 +1188,8 @@ mod tests {
 
     #[test]
     fn ep_marker_uses_an_ancestor_season_folder_when_one_exists() {
-        let entry = classify("Shows/Dexter/Dexter (2006) S03/Dexter - Ep. 5 - Our Father.mkv").unwrap();
+        let entry =
+            classify("Shows/Dexter/Dexter (2006) S03/Dexter - Ep. 5 - Our Father.mkv").unwrap();
         assert_eq!(entry.show_title.as_deref(), Some("Dexter"));
         assert_eq!(entry.season, Some(3));
         assert_eq!(entry.episode, Some(5));
@@ -1103,7 +1217,9 @@ mod tests {
         // Real bug: this exact filename searched TMDb for the literal title
         // "Shaun of the Dead 2004" (year left unset) instead of title
         // "Shaun of the Dead" + year 2004, and came back unmatched.
-        let entry = classify("Batocera-movies-shows/Shaun of the Dead 2004 (1080p x265 q22 FS78 Joy).mkv").unwrap();
+        let entry =
+            classify("Batocera-movies-shows/Shaun of the Dead 2004 (1080p x265 q22 FS78 Joy).mkv")
+                .unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.title, "Shaun of the Dead");
         assert_eq!(entry.year, Some(2004));
@@ -1148,7 +1264,8 @@ mod tests {
     }
 
     #[test]
-    fn bonus_content_with_its_own_season_zero_marker_uses_the_wrapper_show_not_the_containing_folder() {
+    fn bonus_content_with_its_own_season_zero_marker_uses_the_wrapper_show_not_the_containing_folder(
+    ) {
         // Real bug, found live: a file with its own `S00E02`-style marker
         // sitting directly inside a generic bonus-content folder
         // ("Featurettes") — no season-shaped ancestor, no text before the
@@ -1179,7 +1296,10 @@ mod tests {
         // Regression guard: the new ancestor walk must never fire for a
         // plain movie just because it happens to be nested a few folders
         // deep with no season-folder signal anywhere in its ancestry.
-        let entry = classify("movies/Action/Best Of/Really Good Movie (2020)/Really Good Movie.2020.1080p.mkv").unwrap();
+        let entry = classify(
+            "movies/Action/Best Of/Really Good Movie (2020)/Really Good Movie.2020.1080p.mkv",
+        )
+        .unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.show_title, None);
     }
@@ -1244,7 +1364,8 @@ mod tests {
     }
 
     #[test]
-    fn nxnn_marker_show_title_falls_back_to_the_bare_season_folders_parent_when_stem_has_no_prefix() {
+    fn nxnn_marker_show_title_falls_back_to_the_bare_season_folders_parent_when_stem_has_no_prefix()
+    {
         // No text at all before the "6x09" marker — show_title must fall
         // back through find_ancestor_season, which for a bare "S06" folder
         // (no show name of its own) takes the name from the *parent* folder
@@ -1296,7 +1417,10 @@ mod tests {
         // alphanumeric run, not a real marker — must not misfire.
         assert_eq!(parse_nxnn_marker("Item23x09"), None);
         // A real, valid match with mixed case "X".
-        assert_eq!(parse_nxnn_marker("Show - 6X09 - Title"), Some((6, 9, "Show - ")));
+        assert_eq!(
+            parse_nxnn_marker("Show - 6X09 - Title"),
+            Some((6, 9, "Show - "))
+        );
     }
 
     #[test]

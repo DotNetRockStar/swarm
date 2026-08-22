@@ -42,7 +42,7 @@ import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
-import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.app.ui.theme.SwarmError
 import app.swarm.tv.app.ui.theme.SwarmBorder
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
@@ -53,12 +53,10 @@ import app.swarm.tv.core.peer.MediaKind
 fun SwarmSettingsScreen(
     baseUrl: String,
     deviceName: String,
-    artworkCacheMinutes: Int,
     busy: Boolean,
     errorMessage: String?,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
-    onUpdateArtworkCacheMinutes: (minutes: Int) -> Unit,
     onBack: () -> Unit,
     kidModeSettings: KidModeSettings?,
     availableGenres: List<String>,
@@ -108,7 +106,7 @@ fun SwarmSettingsScreen(
         // weight(1f) needs) by not itself being wrapped in verticalScroll,
         // which unbounds it.
         errorMessage?.let {
-            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+            Text(it, color = SwarmError, fontSize = 14.sp)
             Spacer(Modifier.height(10.dp))
         }
         when (section) {
@@ -138,30 +136,6 @@ fun SwarmSettingsScreen(
                     fontSize = 11.sp,
                 )
 
-                Spacer(Modifier.height(24.dp))
-                Text("Artwork cache", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Button(
-                        onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes - 1) },
-                        enabled = !busy && artworkCacheMinutes > 0,
-                        colors = swarmActionButtonColors(),
-                    ) { Text("−") }
-                    Text(
-                        if (artworkCacheMinutes == 1) "1 minute" else "$artworkCacheMinutes minutes",
-                        color = SwarmText,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.width(120.dp),
-                    )
-                    Button(
-                        onClick = { onUpdateArtworkCacheMinutes(artworkCacheMinutes + 1) },
-                        enabled = !busy && artworkCacheMinutes < 1440,
-                        colors = swarmActionButtonColors(),
-                    ) { Text("+") }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text("0 always re-fetches; up to 1,440 minutes keeps browsing fast on slower networks.", color = SwarmMuted, fontSize = 11.sp)
             }
 
             SettingsSection.FAMILY -> SettingsPanel(
@@ -330,7 +304,7 @@ private fun KidModeCard(
             )
             if (pinError) {
                 Spacer(Modifier.height(10.dp))
-                Text("Wrong PIN.", color = SwarmAccentHot, fontSize = 13.sp)
+                Text("Wrong PIN.", color = SwarmError, fontSize = 13.sp)
             }
         }
         KidModeStep.SET_PIN -> {
@@ -371,7 +345,7 @@ private fun KidModeCard(
             )
             if (pinError) {
                 Spacer(Modifier.height(10.dp))
-                Text("Didn't match — start over.", color = SwarmAccentHot, fontSize = 13.sp)
+                Text("Didn't match — start over.", color = SwarmError, fontSize = 13.sp)
             }
         }
         KidModeStep.EDIT_RULES -> {
@@ -446,7 +420,7 @@ private fun KidModeRulesEditor(
     }
     if (allowedKinds.isEmpty()) {
         Spacer(Modifier.height(6.dp))
-        Text("At least one type must stay allowed.", color = SwarmAccentHot, fontSize = 12.sp)
+        Text("At least one type must stay allowed.", color = SwarmError, fontSize = 12.sp)
     }
 
     if (availableGenres.isNotEmpty()) {
@@ -469,6 +443,10 @@ private fun KidModeRulesEditor(
             for (rating in RatingScale.MOVIE_ORDER) {
                 SelectableChip(rating, isSelected = rating == maxMovieRating, onClick = { onSelectMaxMovieRating(rating) })
             }
+        }
+        if (maxMovieRating != null) {
+            Spacer(Modifier.height(6.dp))
+            Text("Movies without a known US rating are hidden while a limit is active.", color = SwarmMuted, fontSize = 11.sp)
         }
     }
 

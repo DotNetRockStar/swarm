@@ -33,7 +33,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import app.swarm.tv.app.data.AndroidAppSettingsStore
+import app.swarm.tv.app.data.AndroidCatalogCache
 import app.swarm.tv.app.data.AndroidConnectionStore
 import app.swarm.tv.app.data.AndroidDeviceIdentity
 import app.swarm.tv.app.data.AndroidDisconnectedServerStore
@@ -45,6 +45,7 @@ import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.LanDiscoveryManager
 import app.swarm.tv.app.data.LanServer
 import app.swarm.tv.app.data.AndroidWatchStateStore
+import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
 import app.swarm.tv.app.data.androidMachineId
@@ -107,12 +108,12 @@ class MainActivity : ComponentActivity() {
         val tokenStore = AndroidTokenStore(applicationContext)
         val watchStateStore = AndroidWatchStateStore(applicationContext)
         val connectionStore = AndroidConnectionStore(applicationContext)
-        val settingsStore = AndroidAppSettingsStore(applicationContext)
         val likedEntriesStore = AndroidLikedEntriesStore(applicationContext)
         val kidModeStore = AndroidKidModeStore(applicationContext)
         val lanDiscovery = LanDiscoveryManager(applicationContext)
         val lanConnectionStore = AndroidLanConnectionStore(applicationContext)
         val disconnectedServerStore = AndroidDisconnectedServerStore(applicationContext)
+        val catalogCache = AndroidCatalogCache(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val defaultDeviceName = resolveDeviceName(applicationContext)
         val certFingerprint = AndroidDeviceIdentity.ensureFingerprint()
@@ -121,7 +122,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, connectionStore, settingsStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore, disconnectedServerStore, BuildConfig.SWARM_RENDEZVOUS_URL) as T
+                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, connectionStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore, disconnectedServerStore, catalogCache, BuildConfig.SWARM_RENDEZVOUS_URL) as T
         }
 
         setContent {
@@ -137,6 +138,7 @@ class MainActivity : ComponentActivity() {
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
                     val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
+                    val browsePreview by viewModel.browsePreview.collectAsState()
                     val lanServers by viewModel.lanServers.collectAsState()
                     val lanPairingBusy by viewModel.lanPairingBusy.collectAsState()
                     val lanError by viewModel.lanError.collectAsState()
@@ -166,6 +168,10 @@ class MainActivity : ComponentActivity() {
                         shuffleEnabled = shuffleEnabled,
                         onToggleShuffle = viewModel::toggleShuffle,
                         minimizedPlayer = minimizedPlayer,
+                        browsePreview = browsePreview,
+                        onStartBrowsePreview = viewModel::startBrowsePreview,
+                        onStopBrowsePreview = viewModel::stopBrowsePreview,
+                        onFinishBrowsePreview = viewModel::finishBrowsePreview,
                         onMinimizePlayback = viewModel::minimizePlayback,
                         onRestoreMinimizedPlayback = viewModel::restoreMinimizedPlayback,
                         onStopMinimizedPlayback = viewModel::stopMinimizedPlayback,
@@ -176,13 +182,14 @@ class MainActivity : ComponentActivity() {
                         onSubmit = viewModel::submitPasscode,
                         onStartActivation = viewModel::startActivation,
                         onCancelActivation = viewModel::cancelActivation,
-                        onResync = viewModel::resync,
                         onBrowseCatalog = viewModel::browseCatalog,
                         onPlay = viewModel::play,
                         onPlayNext = viewModel::playNext,
                         onStopPlayback = viewModel::stopPlayback,
                         onBackToDashboard = viewModel::backToDashboard,
                         artworkUrl = viewModel::artworkUrl,
+                        seasonArtworkUrl = viewModel::seasonArtworkUrl,
+                        episodeArtworkUrl = viewModel::episodeArtworkUrl,
                         backdropUrl = viewModel::backdropUrl,
                         onReportProblem = viewModel::reportAssetProblem,
                         onSavePlaybackPosition = viewModel::savePlaybackPosition,
@@ -191,7 +198,6 @@ class MainActivity : ComponentActivity() {
                         onJoinAdditionalSwarm = viewModel::joinAdditionalSwarm,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
                         onUpdateDeviceName = viewModel::updateDeviceName,
-                        onUpdateArtworkCacheMinutes = viewModel::updateArtworkCacheMinutes,
                         onBackFromSettings = viewModel::backFromSettings,
                         onOpenMovie = viewModel::openMovieDetail,
                         onBackFromMovie = viewModel::backFromMovieDetail,
@@ -241,6 +247,10 @@ private fun SwarmApp(
     shuffleEnabled: Boolean,
     onToggleShuffle: () -> Unit,
     minimizedPlayer: UiState.Player?,
+    browsePreview: BrowsePreview?,
+    onStartBrowsePreview: (MergedEntry) -> Unit,
+    onStopBrowsePreview: () -> Unit,
+    onFinishBrowsePreview: (String) -> Unit,
     onMinimizePlayback: () -> Unit,
     onRestoreMinimizedPlayback: () -> Unit,
     onStopMinimizedPlayback: () -> Unit,
@@ -251,13 +261,14 @@ private fun SwarmApp(
     onSubmit: (baseUrl: String, code: String, deviceName: String) -> Unit,
     onStartActivation: (deviceName: String) -> Unit,
     onCancelActivation: () -> Unit,
-    onResync: () -> Unit,
     onBrowseCatalog: () -> Unit,
     onPlay: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
     onStopPlayback: () -> Unit,
     onBackToDashboard: () -> Unit,
     artworkUrl: (MergedEntry) -> String?,
+    seasonArtworkUrl: (MergedEntry) -> String?,
+    episodeArtworkUrl: (MergedEntry) -> String?,
     backdropUrl: (MergedEntry) -> String?,
     onReportProblem: (MergedEntry) -> Unit,
     onSavePlaybackPosition: (fingerprint: String, positionSecs: Double, durationSecs: Double) -> Unit,
@@ -266,7 +277,6 @@ private fun SwarmApp(
     onJoinAdditionalSwarm: (code: String) -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
-    onUpdateArtworkCacheMinutes: (minutes: Int) -> Unit,
     onBackFromSettings: () -> Unit,
     onOpenMovie: (MergedEntry) -> Unit,
     onBackFromMovie: () -> Unit,
@@ -334,6 +344,21 @@ private fun SwarmApp(
     var musicIsPlaying by remember(musicPlayer) { mutableStateOf(true) }
     var musicIsLoading by remember(musicPlayer) { mutableStateOf(true) }
     var musicPositionMs by remember(musicPlayer) { mutableLongStateOf(0L) }
+    var musicPausedForPreview by remember(musicPlayer) { mutableStateOf(false) }
+
+    // Inline previews intentionally include audio. If music was already
+    // playing in the minimized bar, pause it for the preview and restore it
+    // afterward; never mix two unrelated soundtracks together.
+    LaunchedEffect(musicPlayer, browsePreview?.sessionId, browsePreview?.released) {
+        val previewPlaying = browsePreview != null && !browsePreview.released
+        if (previewPlaying && musicPlayer?.isPlaying == true) {
+            musicPausedForPreview = true
+            musicPlayer.pause()
+        } else if (!previewPlaying && musicPausedForPreview) {
+            musicPausedForPreview = false
+            musicPlayer?.play()
+        }
+    }
 
     // Lyrics need a lightweight playhead clock, but only while the full
     // music screen is visible. The minimized player does not trigger a
@@ -387,7 +412,11 @@ private fun SwarmApp(
     val videoPlaybackActive = (state as? UiState.Player)
         ?.entry?.entry?.kind
         ?.let { it != MediaKind.TRACK } == true
-    KeepScreenAwakeWhile(videoPlaybackActive || (activeMusicSession != null && musicIsPlaying))
+    KeepScreenAwakeWhile(
+        videoPlaybackActive ||
+            (activeMusicSession != null && musicIsPlaying) ||
+            (browsePreview != null && !browsePreview.released),
+    )
 
     val config = LocalConfiguration.current
     val contentModifier = if (state is UiState.Player) {
@@ -457,10 +486,8 @@ private fun SwarmApp(
                     lanPairingBusy = lanPairingBusy,
                     lanError = lanError,
                     deviceName = defaultDeviceName,
-                    resyncing = state.resyncing,
                     joiningServer = state.joiningServer,
                     joinServerError = state.joinServerError,
-                    onResync = onResync,
                     onBrowseCatalog = onBrowseCatalog,
                     onOpenSettings = onOpenSettings,
                     onAddServer = { onStartActivation(defaultDeviceName) },
@@ -473,12 +500,10 @@ private fun SwarmApp(
                 SwarmSettingsScreen(
                     baseUrl = state.baseUrl,
                     deviceName = state.deviceName,
-                    artworkCacheMinutes = state.artworkCacheMinutes,
                     busy = state.busy,
                     errorMessage = state.error,
                     onUpdateBaseUrl = onUpdateBaseUrl,
                     onUpdateDeviceName = onUpdateDeviceName,
-                    onUpdateArtworkCacheMinutes = onUpdateArtworkCacheMinutes,
                     onBack = onBackFromSettings,
                     kidModeSettings = kidModeSettings,
                     availableGenres = state.availableGenres,
@@ -505,6 +530,10 @@ private fun SwarmApp(
                     initialFocusShowKey = lastFocusedShowKey,
                     initialFocusArtistKey = lastFocusedArtistKey,
                     isLiked = isLiked,
+                    preview = browsePreview,
+                    onStartPreview = onStartBrowsePreview,
+                    onStopPreview = onStopBrowsePreview,
+                    onPreviewFinished = onFinishBrowsePreview,
                 )
             is UiState.ArtistShelf ->
                 ArtistShelfScreen(
@@ -532,7 +561,13 @@ private fun SwarmApp(
             is UiState.ShowShelf ->
                 ShowShelfScreen(state.shows, artworkUrl, onOpenShow = onOpenShow, onBack = onBackFromShowShelf)
             is UiState.ShowSeasons ->
-                SeasonScreen(state.show, artworkUrl, onPlayEpisode = onPlay, onBack = onBackFromShowSeasons)
+                SeasonScreen(
+                    state.show,
+                    seasonArtworkUrl = seasonArtworkUrl,
+                    episodeArtworkUrl = episodeArtworkUrl,
+                    onPlayEpisode = onPlay,
+                    onBack = onBackFromShowSeasons,
+                )
             is UiState.Player ->
                 if (state.entry.entry.kind == MediaKind.TRACK) {
                     MusicPlayerScreen(

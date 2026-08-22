@@ -65,7 +65,6 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import app.swarm.tv.R
 import app.swarm.tv.app.ui.theme.SwarmAccent
-import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.app.ui.components.swarmActionButtonColors

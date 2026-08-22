@@ -10,7 +10,7 @@ use crate::capability::CapabilityProfile;
 use serde::{Deserialize, Serialize};
 
 /// Request header line. `path` uses the fixed peer route vocabulary:
-/// `/catalog/thumbprint`, `/catalog/manifest`, `/art/{entry_key}/{kind}`,
+/// `/catalog/thumbprint`, `/catalog/manifest[.gz]`, `/art/{entry_key}/{kind}`,
 /// `/play/{entry_key}` (playback negotiation), `/stream/{session}/media`
 /// (budgeted direct play), `/hls/{session}/...` (transcode),
 /// `/errors/report` (client-observed error triage — see
@@ -93,6 +93,10 @@ pub struct PlaybackPreferences {
     pub start_position_secs: u64,
     #[serde(default = "default_true")]
     pub prefer_direct: bool,
+    /// Hover/browse previews always use the server's lightweight, short-lived
+    /// HLS profile instead of reserving or exposing the full source stream.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 fn default_true() -> bool {
@@ -273,6 +277,13 @@ pub struct CatalogEntry {
     /// tracks, anything not yet scraped, or without a US certification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<String>,
+    /// Provider community score normalized to 0–10. This is deliberately
+    /// separate from the parental `rating` certification above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_rating: Option<f64>,
+    /// Provider vote count behind `community_rating`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_rating_votes: Option<u64>,
     /// Number of distinct devices that currently have this liked
     /// (`entry_likes`, one row per device — see `Library::like_counts`).
     #[serde(default)]
@@ -368,6 +379,7 @@ mod tests {
                 capabilities: crate::capability::CapabilityProfile::fire_tv_baseline(),
                 start_position_secs: 42,
                 prefer_direct: true,
+                preview: false,
             }),
             error_report: None,
             like: None,
@@ -434,11 +446,21 @@ mod tests {
                 artwork_etag: Some("v1".into()),
                 year: Some(2010),
                 cast: vec![
-                    CastMember { name: "Leonardo DiCaprio".into(), character: Some("Cobb".into()) },
-                    CastMember { name: "Ellen Page".into(), character: None },
+                    CastMember {
+                        name: "Leonardo DiCaprio".into(),
+                        character: Some("Cobb".into()),
+                    },
+                    CastMember {
+                        name: "Ellen Page".into(),
+                        character: None,
+                    },
                 ],
-                overview: Some("A thief who steals corporate secrets through dream-sharing technology.".into()),
+                overview: Some(
+                    "A thief who steals corporate secrets through dream-sharing technology.".into(),
+                ),
                 rating: Some("PG-13".into()),
+                community_rating: Some(8.4),
+                community_rating_votes: Some(36_000),
                 like_count: 3,
             }],
             removed: vec![],

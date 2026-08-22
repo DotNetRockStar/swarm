@@ -30,8 +30,12 @@ pub enum SignalMessage {
         /// UDP ports the reflector is currently listening on (e.g. [443, 3478]).
         reflector_ports: Vec<u16>,
     },
-    Ping { seq: u64 },
-    Pong { seq: u64 },
+    Ping {
+        seq: u64,
+    },
+    Pong {
+        seq: u64,
+    },
     /// Pushed by the server to all online devices sharing a swarm whenever a
     /// peer's state changes.
     Presence {
@@ -54,7 +58,10 @@ pub enum SignalMessage {
     },
     /// Graceful shutdown notice from either side.
     Bye {},
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 /// Server-app load advertisement, folded into presence so clients can score
@@ -160,14 +167,25 @@ mod tests {
             payload: SignalPayload::Offer {
                 punch_id: "p1".into(),
                 candidates: vec![
-                    Candidate { kind: CandidateKind::Lan, ip: "192.168.1.10".into(), port: 40000 },
-                    Candidate { kind: CandidateKind::Reflexive, ip: "203.0.113.9".into(), port: 61234 },
+                    Candidate {
+                        kind: CandidateKind::Lan,
+                        ip: "192.168.1.10".into(),
+                        port: 40000,
+                    },
+                    Candidate {
+                        kind: CandidateKind::Reflexive,
+                        ip: "203.0.113.9".into(),
+                        port: 61234,
+                    },
                 ],
                 cert_fingerprint: "ab".repeat(32),
             },
         });
         roundtrip(&SignalMessage::Bye {});
-        roundtrip(&SignalMessage::Error { code: "unauthorized".into(), message: "bad token".into() });
+        roundtrip(&SignalMessage::Error {
+            code: "unauthorized".into(),
+            message: "bad token".into(),
+        });
     }
 
     #[test]
@@ -178,7 +196,8 @@ mod tests {
 
     #[test]
     fn reflector_response_parses() {
-        let resp: ReflectorResponse = serde_json::from_str(r#"{"ip":"203.0.113.9","port":61234}"#).unwrap();
+        let resp: ReflectorResponse =
+            serde_json::from_str(r#"{"ip":"203.0.113.9","port":61234}"#).unwrap();
         assert_eq!(resp.port, 61234);
     }
 }

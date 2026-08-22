@@ -18,9 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
-import app.swarm.tv.app.ui.theme.SwarmAccent
-import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
-import app.swarm.tv.app.ui.theme.SwarmText
+import app.swarm.tv.app.ui.theme.SwarmAccentHot
 
 @Composable
 fun SelectableChip(label: String, isSelected: Boolean, onClick: () -> Unit, focusRequester: FocusRequester? = null) {
@@ -40,11 +38,11 @@ fun SelectableChip(label: String, isSelected: Boolean, onClick: () -> Unit, focu
         // pressed, same gap) colors close it for good rather than relying
         // on the library default matching this app's dark theme by luck.
         colors = ButtonDefaults.colors(
-            containerColor = if (isSelected) SwarmAccent else SwarmSurfaceMuted,
-            contentColor = if (isSelected) Color(0xFF04263A) else SwarmText,
-            focusedContainerColor = SwarmAccent,
+            containerColor = if (isSelected) SwarmAccentHot else Color.White,
+            contentColor = Color(0xFF04263A),
+            focusedContainerColor = SwarmAccentHot,
             focusedContentColor = Color(0xFF04263A),
-            pressedContainerColor = SwarmAccent,
+            pressedContainerColor = SwarmAccentHot,
             pressedContentColor = Color(0xFF04263A),
         ),
     ) {

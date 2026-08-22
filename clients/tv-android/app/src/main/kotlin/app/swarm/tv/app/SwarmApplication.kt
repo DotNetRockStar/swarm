@@ -1,7 +1,7 @@
 /**
  * Registers a Coil [ImageLoader] with [ArtworkCache] wired in so the whole
  * app's artwork requests (every screen already just calls `AsyncImage`
- * against Coil's default singleton loader) get the configurable cache TTL
+ * against Coil's default singleton loader) get the fixed one-day cache TTL
  * without touching each call site — [ImageLoaderFactory] is Coil's
  * supported hook for replacing that singleton, resolved once at process
  * start from the `Application` class named in AndroidManifest.xml.
@@ -9,7 +9,6 @@
 package app.swarm.tv.app
 
 import android.app.Application
-import app.swarm.tv.app.data.AndroidAppSettingsStore
 import app.swarm.tv.app.ui.ArtworkCache
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -18,24 +17,12 @@ import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.size.Precision
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 
 class SwarmApplication : Application(), ImageLoaderFactory {
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val artworkCache by lazy { ArtworkCache(this) }
-
-    override fun onCreate() {
-        super.onCreate()
-        val settingsStore = AndroidAppSettingsStore(this)
-        appScope.launch {
-            settingsStore.observeArtworkCacheMinutes().collect { minutes -> artworkCache.ttlMinutes = minutes }
-        }
-    }
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)

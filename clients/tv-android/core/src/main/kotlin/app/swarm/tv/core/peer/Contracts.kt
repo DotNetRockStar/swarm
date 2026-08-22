@@ -84,6 +84,10 @@ data class CatalogEntry(
     val overview: String? = null,
     /** US content rating — TMDb's own, or a manual override. Null for tracks, anything not yet scraped, or without a US certification. */
     val rating: String? = null,
+    /** Provider community score normalized to 0–10; separate from the parental content rating. */
+    val communityRating: Double? = null,
+    /** Provider vote count behind [communityRating]. */
+    val communityRatingVotes: Long? = null,
     /** Number of distinct devices that currently have this liked — see [LikeToggle]. */
     val likeCount: Int = 0,
 )
@@ -190,6 +194,7 @@ data class PlaybackPreferences(
     val capabilities: CapabilityProfile,
     val startPositionSecs: Long = 0,
     val preferDirect: Boolean = true,
+    val preview: Boolean = false,
 )
 
 @Serializable

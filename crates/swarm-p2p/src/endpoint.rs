@@ -37,13 +37,18 @@ pub enum P2pError {
     Protocol(String),
 }
 
-fn identity_material(identity: &DeviceIdentity) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+fn identity_material(
+    identity: &DeviceIdentity,
+) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
     let chain = vec![CertificateDer::from(identity.cert_der.clone())];
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
     (chain, key)
 }
 
-fn server_config(identity: &DeviceIdentity, allowed: AllowedPeers) -> Result<quinn::ServerConfig, P2pError> {
+fn server_config(
+    identity: &DeviceIdentity,
+    allowed: AllowedPeers,
+) -> Result<quinn::ServerConfig, P2pError> {
     let (chain, key) = identity_material(identity);
     let mut tls = rustls::ServerConfig::builder()
         .with_client_cert_verifier(RosterClientVerifier::new(allowed))
@@ -53,7 +58,10 @@ fn server_config(identity: &DeviceIdentity, allowed: AllowedPeers) -> Result<qui
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
 }
 
-fn client_config(identity: &DeviceIdentity, expected_fingerprint: &str) -> Result<quinn::ClientConfig, P2pError> {
+fn client_config(
+    identity: &DeviceIdentity,
+    expected_fingerprint: &str,
+) -> Result<quinn::ClientConfig, P2pError> {
     let (chain, key) = identity_material(identity);
     let mut tls = rustls::ClientConfig::builder()
         .dangerous()
@@ -71,7 +79,10 @@ pub fn listen(
     identity: &DeviceIdentity,
     allowed: AllowedPeers,
 ) -> Result<quinn::Endpoint, P2pError> {
-    Ok(quinn::Endpoint::server(server_config(identity, allowed)?, bind)?)
+    Ok(quinn::Endpoint::server(
+        server_config(identity, allowed)?,
+        bind,
+    )?)
 }
 
 /// Dial a peer, verifying its certificate against `expected_fingerprint` and
@@ -81,7 +92,11 @@ pub async fn connect(
     identity: &DeviceIdentity,
     expected_fingerprint: &str,
 ) -> Result<quinn::Connection, P2pError> {
-    let bind: SocketAddr = if remote.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
+    let bind: SocketAddr = if remote.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
     let mut endpoint = quinn::Endpoint::client(bind)?;
     endpoint.set_default_client_config(client_config(identity, expected_fingerprint)?);
     // SNI is irrelevant under pinning but rustls requires a name; use a fixed one.
@@ -118,8 +133,12 @@ pub async fn connect_on_socket(
     identity: &DeviceIdentity,
     expected_fingerprint: &str,
 ) -> Result<quinn::Connection, P2pError> {
-    let mut endpoint =
-        quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     endpoint.set_default_client_config(client_config(identity, expected_fingerprint)?);
     let connection = endpoint
         .connect(remote, "swarm-peer")
@@ -130,7 +149,9 @@ pub async fn connect_on_socket(
 
 /// Read one `\n`-terminated JSON line from a stream, bounded by
 /// [`MAX_HEADER_LINE`].
-async fn read_json_line<T: serde::de::DeserializeOwned>(recv: &mut quinn::RecvStream) -> Result<T, P2pError> {
+async fn read_json_line<T: serde::de::DeserializeOwned>(
+    recv: &mut quinn::RecvStream,
+) -> Result<T, P2pError> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -166,13 +187,21 @@ pub async fn send_request(
 }
 
 /// Read a full response body of `header.len` bytes.
-pub async fn read_body(header: &PeerResponseHeader, recv: &mut quinn::RecvStream) -> Result<Vec<u8>, P2pError> {
+pub async fn read_body(
+    header: &PeerResponseHeader,
+    recv: &mut quinn::RecvStream,
+) -> Result<Vec<u8>, P2pError> {
     let mut body = vec![0u8; header.len as usize];
     let mut filled = 0;
     while filled < body.len() {
         match recv.read(&mut body[filled..]).await? {
             Some(n) => filled += n,
-            None => return Err(P2pError::Protocol(format!("body truncated at {filled}/{} bytes", body.len()))),
+            None => {
+                return Err(P2pError::Protocol(format!(
+                    "body truncated at {filled}/{} bytes",
+                    body.len()
+                )))
+            }
         }
     }
     Ok(body)

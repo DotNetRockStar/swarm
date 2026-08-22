@@ -442,6 +442,10 @@ impl ServerCore {
         self.transcription.set_enabled(enabled);
     }
 
+    pub fn set_transcription_pause_while_streaming(&self, enabled: bool) {
+        self.transcription.set_pause_while_streaming(enabled);
+    }
+
     pub async fn transcription_status(&self) -> Result<TranscriptionStatus, ServerError> {
         Ok(self.transcription.status().await?)
     }
@@ -573,7 +577,7 @@ impl ServerCore {
         let base_url = base_url.trim_end_matches('/').to_string();
         let claim_store = self.managed_claim_store()?;
         let existing = self.state_db.load_managed_swarm_identity().await?;
-        let (identity, claim_token) = match existing {
+        let (mut identity, claim_token) = match existing {
             Some(identity) => {
                 let claim = claim_store.load()?.ok_or_else(|| {
                     ServerError::Stun(swarm_stun_client::StunClientError::Decode(
@@ -593,24 +597,26 @@ impl ServerCore {
                 (identity, claim)
             }
         };
-        if identity.base_url.trim_end_matches('/') != base_url {
-            return Err(ServerError::Stun(
-                swarm_stun_client::StunClientError::Decode(
-                    "this server's managed swarm belongs to a different SWARM service".into(),
-                ),
-            ));
-        }
         let machine_id = swarm_stun_client::machine_id::ensure_machine_id(&self.data_dir)?;
         let registration = self.server_registration(device_name, machine_id);
         let client = StunClient::new(base_url.clone());
         let response = client
             .provision_managed_swarm(ProvisionManagedSwarmRequest {
-                swarm_id: identity.swarm_id,
+                swarm_id: identity.swarm_id.clone(),
                 claim_token,
                 swarm_name: format!("{}'s SWARM", device_name.trim()),
                 device: registration,
             })
             .await?;
+        // The configured endpoint is authoritative, but persist it only
+        // after the existing swarm id + owner claim have been accepted by
+        // that endpoint. This lets a service survive a hostname/IP change
+        // (notably DHCP after a desktop restart) without silently trusting
+        // an address that did not prove it owns the same managed swarm.
+        if identity.base_url.trim_end_matches('/') != base_url {
+            identity.base_url = base_url.clone();
+            self.state_db.save_managed_swarm_identity(&identity).await?;
+        }
         let token_store = self.token_store()?;
         token_store.save(&response.access_token)?;
         let link = StunLinkRecord {

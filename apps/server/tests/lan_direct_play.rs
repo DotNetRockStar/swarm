@@ -36,7 +36,9 @@ async fn spawn_test_server(tag: &str, allowed: &[&DeviceIdentity]) -> TestServer
     std::fs::create_dir_all(song_path.parent().unwrap()).unwrap();
     std::fs::write(&song_path, deterministic_bytes(90_000)).unwrap();
 
-    let library = Library::open(base.join("library.sqlite").to_str().unwrap()).await.unwrap();
+    let library = Library::open(base.join("library.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
     scan_root(&library, &media_root).await.unwrap();
 
     let identity = ensure_identity(&base.join("server-id")).unwrap();
@@ -46,7 +48,11 @@ async fn spawn_test_server(tag: &str, allowed: &[&DeviceIdentity]) -> TestServer
     let addr = endpoint.local_addr().unwrap();
     let service = Arc::new(MediaService::new(Arc::new(library), media_root));
     tokio::spawn(accept_loop(endpoint, service));
-    TestServer { addr, identity, movie_bytes }
+    TestServer {
+        addr,
+        identity,
+        movie_bytes,
+    }
 }
 
 fn client_identity(tag: &str) -> DeviceIdentity {
@@ -56,44 +62,69 @@ fn client_identity(tag: &str) -> DeviceIdentity {
 }
 
 fn no_range(path: &str) -> PeerRequest {
-    PeerRequest { path: path.into(), range: None, if_none_match: None, playback: None, error_report: None, like: None }
+    PeerRequest {
+        path: path.into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: None,
+    }
 }
 
 #[tokio::test]
 async fn direct_play_with_seek_over_pinned_quic() {
     let client = client_identity("good");
     let server = spawn_test_server("main", &[&client]).await;
-    let connection = connect(server.addr, &client, &server.identity.fingerprint).await.unwrap();
+    let connection = connect(server.addr, &client, &server.identity.fingerprint)
+        .await
+        .unwrap();
 
     // Catalog: thumbprint then manifest.
-    let (header, mut recv) = send_request(&connection, &no_range("/catalog/thumbprint")).await.unwrap();
+    let (header, mut recv) = send_request(&connection, &no_range("/catalog/thumbprint"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
     let thumbprint: CatalogThumbprint =
         serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
     assert_eq!(thumbprint.entry_count, 2);
 
-    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest")).await.unwrap();
+    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
     let manifest: CatalogManifest =
         serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
     assert_eq!(manifest.thumbprint, thumbprint.thumbprint);
-    let movie = manifest.entries.iter().find(|e| e.kind == MediaKind::Movie).unwrap();
+    let movie = manifest
+        .entries
+        .iter()
+        .find(|e| e.kind == MediaKind::Movie)
+        .unwrap();
     assert_eq!(movie.size, server.movie_bytes.len() as u64);
 
     // Full-file direct play: byte-exact, and the etag is the sample-fp identity.
     let media_path = format!("/media/{}", movie.entry_key);
-    let (header, mut recv) = send_request(&connection, &no_range(&media_path)).await.unwrap();
+    let (header, mut recv) = send_request(&connection, &no_range(&media_path))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
     assert_eq!(header.content_type.as_deref(), Some("video/x-matroska"));
     assert_eq!(header.etag.as_deref(), Some(movie.fingerprint.as_str()));
     let body = read_body(&header, &mut recv).await.unwrap();
-    assert_eq!(Sha256::digest(&body)[..], Sha256::digest(&server.movie_bytes)[..]);
+    assert_eq!(
+        Sha256::digest(&body)[..],
+        Sha256::digest(&server.movie_bytes)[..]
+    );
 
     // Seek: open-ended Range from the middle (what a player seek issues).
     let seek_offset = 1_500_000u64;
     let request = PeerRequest {
         path: media_path.clone(),
-        range: Some(ByteRange::FromTo { start: seek_offset, end: None }),
+        range: Some(ByteRange::FromTo {
+            start: seek_offset,
+            end: None,
+        }),
         if_none_match: None,
         playback: None,
         error_report: None,
@@ -110,7 +141,10 @@ async fn direct_play_with_seek_over_pinned_quic() {
     // Bounded and suffix ranges.
     let request = PeerRequest {
         path: media_path.clone(),
-        range: Some(ByteRange::FromTo { start: 100, end: Some(199) }),
+        range: Some(ByteRange::FromTo {
+            start: 100,
+            end: Some(199),
+        }),
         if_none_match: None,
         playback: None,
         error_report: None,
@@ -118,7 +152,10 @@ async fn direct_play_with_seek_over_pinned_quic() {
     };
     let (header, mut recv) = send_request(&connection, &request).await.unwrap();
     assert_eq!((header.status, header.len), (206, 100));
-    assert_eq!(read_body(&header, &mut recv).await.unwrap(), &server.movie_bytes[100..200]);
+    assert_eq!(
+        read_body(&header, &mut recv).await.unwrap(),
+        &server.movie_bytes[100..200]
+    );
 
     let request = PeerRequest {
         path: media_path.clone(),
@@ -136,7 +173,10 @@ async fn direct_play_with_seek_over_pinned_quic() {
     // Error paths: past-EOF range and unknown/invalid keys.
     let request = PeerRequest {
         path: media_path,
-        range: Some(ByteRange::FromTo { start: u64::MAX, end: None }),
+        range: Some(ByteRange::FromTo {
+            start: u64::MAX,
+            end: None,
+        }),
         if_none_match: None,
         playback: None,
         error_report: None,
@@ -144,9 +184,13 @@ async fn direct_play_with_seek_over_pinned_quic() {
     };
     let (header, _) = send_request(&connection, &request).await.unwrap();
     assert_eq!(header.status, 416);
-    let (header, _) = send_request(&connection, &no_range("/media/00000000deadbeef00000000")).await.unwrap();
+    let (header, _) = send_request(&connection, &no_range("/media/00000000deadbeef00000000"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 404);
-    let (header, _) = send_request(&connection, &no_range("/media/../etc/passwd")).await.unwrap();
+    let (header, _) = send_request(&connection, &no_range("/media/../etc/passwd"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 404);
 }
 
@@ -160,7 +204,10 @@ async fn unpinned_client_is_refused_at_tls() {
     // first stream) must fail — it must never get a byte of media.
     let outcome = match connect(server.addr, &intruder, &server.identity.fingerprint).await {
         Err(_) => Err(()),
-        Ok(connection) => send_request(&connection, &no_range("/catalog/thumbprint")).await.map(|_| ()).map_err(|_| ()),
+        Ok(connection) => send_request(&connection, &no_range("/catalog/thumbprint"))
+            .await
+            .map(|_| ())
+            .map_err(|_| ()),
     };
     assert!(outcome.is_err(), "unpinned client must be rejected");
 
@@ -169,7 +216,11 @@ async fn unpinned_client_is_refused_at_tls() {
     assert!(connect(server.addr, &trusted, &wrong_pin).await.is_err());
 
     // Sanity: the trusted client with the right pin works.
-    let connection = connect(server.addr, &trusted, &server.identity.fingerprint).await.unwrap();
-    let (header, _) = send_request(&connection, &no_range("/catalog/thumbprint")).await.unwrap();
+    let connection = connect(server.addr, &trusted, &server.identity.fingerprint)
+        .await
+        .unwrap();
+    let (header, _) = send_request(&connection, &no_range("/catalog/thumbprint"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
 }

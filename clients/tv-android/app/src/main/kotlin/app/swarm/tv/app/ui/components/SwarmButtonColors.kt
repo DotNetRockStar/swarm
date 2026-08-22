@@ -15,7 +15,7 @@ fun swarmActionButtonColors() = ButtonDefaults.colors(
     focusedContainerColor = SwarmAccent,
     focusedContentColor = Color(0xFF04263A),
     pressedContainerColor = SwarmAccentHot,
-    pressedContentColor = Color(0xFF3A0420),
+    pressedContentColor = Color(0xFF241A00),
     disabledContainerColor = SwarmMuted.copy(alpha = 0.45f),
     disabledContentColor = Color(0xFF101828).copy(alpha = 0.65f),
 )

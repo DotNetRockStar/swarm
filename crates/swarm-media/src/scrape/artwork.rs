@@ -7,10 +7,22 @@
 use crate::roots::SharedRootResolver;
 
 pub fn sanitize_stem(stem: &str) -> String {
-    let cleaned: String =
-        stem.chars().map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '(' | ')') { c } else { '_' }).collect();
+    let cleaned: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let trimmed = cleaned.trim();
-    if trimmed.is_empty() { "untitled".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "untitled".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn file_stem(relative_path: &str) -> &str {
@@ -69,9 +81,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("movies/Foo (2020)")).unwrap();
         let roots = SharedRootResolver::new(crate::roots::RootResolver::single(root.clone()));
-        let relative = save_artwork(&roots, "movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
-            .await
-            .unwrap();
+        let relative = save_artwork(
+            &roots,
+            "movies/Foo (2020)/Foo.2020.mkv",
+            "foo-tmdb-poster.jpg",
+            b"bytes",
+        )
+        .await
+        .unwrap();
         assert_eq!(relative, "movies/Foo (2020)/images/foo-tmdb-poster.jpg");
         assert_eq!(std::fs::read(root.join(&relative)).unwrap(), b"bytes");
         std::fs::remove_dir_all(&root).ok();
@@ -79,20 +96,34 @@ mod tests {
 
     #[tokio::test]
     async fn multi_root_artwork_is_written_under_the_owning_root_and_relabeled() {
-        let base = std::env::temp_dir().join(format!("swarm-artwork-multiroot-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("swarm-artwork-multiroot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let nas_root = base.join("nas");
         std::fs::create_dir_all(nas_root.join("movies/Foo (2020)")).unwrap();
         let roots = SharedRootResolver::new(crate::roots::RootResolver::new(vec![
-            crate::roots::MediaRoot { label: "local".into(), path: base.join("local") },
-            crate::roots::MediaRoot { label: "nas".into(), path: nas_root.clone() },
+            crate::roots::MediaRoot {
+                label: "local".into(),
+                path: base.join("local"),
+            },
+            crate::roots::MediaRoot {
+                label: "nas".into(),
+                path: nas_root.clone(),
+            },
         ]));
-        let relative =
-            save_artwork(&roots, "nas/movies/Foo (2020)/Foo.2020.mkv", "foo-tmdb-poster.jpg", b"bytes")
-                .await
-                .unwrap();
+        let relative = save_artwork(
+            &roots,
+            "nas/movies/Foo (2020)/Foo.2020.mkv",
+            "foo-tmdb-poster.jpg",
+            b"bytes",
+        )
+        .await
+        .unwrap();
         assert_eq!(relative, "nas/movies/Foo (2020)/images/foo-tmdb-poster.jpg");
-        assert_eq!(std::fs::read(nas_root.join("movies/Foo (2020)/images/foo-tmdb-poster.jpg")).unwrap(), b"bytes");
+        assert_eq!(
+            std::fs::read(nas_root.join("movies/Foo (2020)/images/foo-tmdb-poster.jpg")).unwrap(),
+            b"bytes"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 }

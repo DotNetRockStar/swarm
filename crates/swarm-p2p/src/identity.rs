@@ -31,7 +31,9 @@ pub struct DeviceIdentity {
 
 impl std::fmt::Debug for DeviceIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceIdentity").field("fingerprint", &self.fingerprint).finish()
+        f.debug_struct("DeviceIdentity")
+            .field("fingerprint", &self.fingerprint)
+            .finish()
     }
 }
 
@@ -69,13 +71,20 @@ pub fn ensure_identity(dir: &Path) -> Result<DeviceIdentity, IdentityError> {
 }
 
 fn load(cert_file: &Path, key_file: &Path) -> Result<DeviceIdentity, IdentityError> {
-    let cert_der = pem_to_der(&std::fs::read_to_string(cert_file)?, "CERTIFICATE")
-        .ok_or_else(|| IdentityError::Corrupt(format!("{} is not a PEM certificate", cert_file.display())))?;
+    let cert_der =
+        pem_to_der(&std::fs::read_to_string(cert_file)?, "CERTIFICATE").ok_or_else(|| {
+            IdentityError::Corrupt(format!("{} is not a PEM certificate", cert_file.display()))
+        })?;
     let key_pem = std::fs::read_to_string(key_file)?;
-    let key_der = pem_to_der(&key_pem, "PRIVATE KEY")
-        .ok_or_else(|| IdentityError::Corrupt(format!("{} is not a PEM private key", key_file.display())))?;
+    let key_der = pem_to_der(&key_pem, "PRIVATE KEY").ok_or_else(|| {
+        IdentityError::Corrupt(format!("{} is not a PEM private key", key_file.display()))
+    })?;
     let fingerprint = fingerprint_der(&cert_der);
-    Ok(DeviceIdentity { cert_der, key_der, fingerprint })
+    Ok(DeviceIdentity {
+        cert_der,
+        key_der,
+        fingerprint,
+    })
 }
 
 /// Minimal PEM decoder for the two block types we write ourselves.

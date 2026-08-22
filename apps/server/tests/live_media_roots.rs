@@ -16,11 +16,20 @@ use swarm_p2p::identity::ensure_identity;
 use swarm_server::{ServerConfig, ServerCore, TokenStoreMode};
 
 fn deterministic_bytes(len: usize, seed: u8) -> Vec<u8> {
-    (0..len).map(|i| seed.wrapping_add((i * 31 + i / 251) as u8)).collect()
+    (0..len)
+        .map(|i| seed.wrapping_add((i * 31 + i / 251) as u8))
+        .collect()
 }
 
 fn no_range(path: &str) -> PeerRequest {
-    PeerRequest { path: path.into(), range: None, if_none_match: None, playback: None, error_report: None, like: None }
+    PeerRequest {
+        path: path.into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: None,
+    }
 }
 
 #[tokio::test]
@@ -48,7 +57,10 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
     let client_identity = ensure_identity(&base.join("client-id")).unwrap();
 
     let config = ServerConfig {
-        media_roots: vec![MediaRoot { label: "local".into(), path: root_a.clone() }],
+        media_roots: vec![MediaRoot {
+            label: "local".into(),
+            path: root_a.clone(),
+        }],
         data_dir: base.join("server-data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![client_identity.fingerprint.clone()],
@@ -60,32 +72,64 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
     // doc comment) — wait for it explicitly so the assertions below are
     // deterministic instead of racing a real filesystem walk.
     let start_report = core.wait_for_scan().await.unwrap();
-    assert_eq!(start_report.added, 1, "root A's one file should be scanned at start");
+    assert_eq!(
+        start_report.added, 1,
+        "root A's one file should be scanned at start"
+    );
     assert_eq!(core.library.entry_count().await.unwrap(), 1);
 
-    let connection = connect(core.listen_addr, &client_identity, &core.identity.fingerprint).await.unwrap();
+    let connection = connect(
+        core.listen_addr,
+        &client_identity,
+        &core.identity.fingerprint,
+    )
+    .await
+    .unwrap();
 
     // Sanity before the swap: root A's file is really being served over
     // real QUIC by this exact core's MediaService.
-    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest")).await.unwrap();
+    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
-    let manifest: CatalogManifest = serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
+    let manifest: CatalogManifest =
+        serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
     assert_eq!(manifest.entries.len(), 1);
     let entry_a = manifest.entries[0].clone();
-    let (header, mut recv) = send_request(&connection, &no_range(&format!("/media/{}", entry_a.entry_key))).await.unwrap();
+    let (header, mut recv) = send_request(
+        &connection,
+        &no_range(&format!("/media/{}", entry_a.entry_key)),
+    )
+    .await
+    .unwrap();
     assert_eq!(header.status, 200);
     assert_eq!(read_body(&header, &mut recv).await.unwrap(), bytes_a);
 
     // The live swap — no restart, same running core, same open QUIC
     // connection reused below.
-    let update_report =
-        core.update_media_roots(vec![MediaRoot { label: "local".into(), path: root_b.clone() }]).await.unwrap();
+    let update_report = core
+        .update_media_roots(vec![MediaRoot {
+            label: "local".into(),
+            path: root_b.clone(),
+        }])
+        .await
+        .unwrap();
     assert_eq!(update_report.added, 1, "root B's file must be discovered");
-    assert_eq!(update_report.removed, 1, "root A's file must be reconciled away, same as any other deleted file");
+    assert_eq!(
+        update_report.removed, 1,
+        "root A's file must be reconciled away, same as any other deleted file"
+    );
 
     // ServerCore's own view (library/scan side) reflects only root B now.
     assert_eq!(core.library.entry_count().await.unwrap(), 1);
-    assert!(core.library.get(&entry_a.entry_key).await.unwrap().is_none(), "root A's entry must be gone");
+    assert!(
+        core.library
+            .get(&entry_a.entry_key)
+            .await
+            .unwrap()
+            .is_none(),
+        "root A's entry must be gone"
+    );
 
     // The real proof: MediaService — a SEPARATE struct holding its own
     // clone of the resolver handle — must see the same swap, over the SAME
@@ -93,21 +137,40 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
     // MediaService had drifted onto different resolvers (the bug this test
     // exists to catch), this would 404 even though the library says the
     // entry exists.
-    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest")).await.unwrap();
+    let (header, mut recv) = send_request(&connection, &no_range("/catalog/manifest"))
+        .await
+        .unwrap();
     assert_eq!(header.status, 200);
-    let manifest: CatalogManifest = serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
+    let manifest: CatalogManifest =
+        serde_json::from_slice(&read_body(&header, &mut recv).await.unwrap()).unwrap();
     assert_eq!(manifest.entries.len(), 1);
     let entry_b = &manifest.entries[0];
     assert_eq!(entry_b.kind, MediaKind::Movie);
-    assert_ne!(entry_b.entry_key, entry_a.entry_key, "different file, must be a different entry_key");
+    assert_ne!(
+        entry_b.entry_key, entry_a.entry_key,
+        "different file, must be a different entry_key"
+    );
 
-    let (header, mut recv) = send_request(&connection, &no_range(&format!("/media/{}", entry_b.entry_key))).await.unwrap();
-    assert_eq!(header.status, 200, "MediaService must resolve root B's file live, no restart");
+    let (header, mut recv) = send_request(
+        &connection,
+        &no_range(&format!("/media/{}", entry_b.entry_key)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        header.status, 200,
+        "MediaService must resolve root B's file live, no restart"
+    );
     assert_eq!(read_body(&header, &mut recv).await.unwrap(), bytes_b);
 
     // The old root's file must be genuinely unreachable now, not just
     // absent from the manifest.
-    let (header, _) = send_request(&connection, &no_range(&format!("/media/{}", entry_a.entry_key))).await.unwrap();
+    let (header, _) = send_request(
+        &connection,
+        &no_range(&format!("/media/{}", entry_a.entry_key)),
+    )
+    .await
+    .unwrap();
     assert_eq!(header.status, 404);
 
     // Rejects a swap down to zero roots rather than panicking.

@@ -17,6 +17,9 @@
 #   SWARM_TV_IP     default target IP if none is passed as an argument
 #   ANDROID_HOME    default ~/Library/Android/sdk
 #   JAVA_HOME       default /opt/homebrew/opt/openjdk@17
+#   SWARM_LAN_IP    optional LAN-IP override shared with run_now.sh
+#   SWARM_RENDEZVOUS_URL  SWARM service embedded in this debug build; when
+#                         unset, this script uses this Mac's LAN IP on :8080
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/clients/tv-android"
@@ -44,6 +47,26 @@ for arg in "$@"; do
     esac
 done
 TARGET="${TARGET:-${SWARM_TV_IP:-}}"
+
+# A debug deploy normally targets the local service started by run_now.sh.
+# Embed its current LAN address so a Mac DHCP change does not leave the TV
+# retrying an obsolete saved IP forever. An explicit environment value still
+# wins for testing against a remote/public service.
+if [ -z "${SWARM_RENDEZVOUS_URL:-}" ]; then
+    host_ip="${SWARM_LAN_IP:-}"
+    if [ -z "$host_ip" ]; then
+        for iface in en0 en1; do
+            host_ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+            [ -n "$host_ip" ] && break
+        done
+    fi
+    [ -z "$host_ip" ] || export SWARM_RENDEZVOUS_URL="http://$host_ip:8080"
+fi
+if [ -n "${SWARM_RENDEZVOUS_URL:-}" ]; then
+    echo "==> Debug SWARM service: $SWARM_RENDEZVOUS_URL"
+else
+    echo "==> No SWARM service URL detected; LAN-only discovery will still work."
+fi
 
 if [ -n "$TARGET" ]; then
     [[ "$TARGET" == *:* ]] || TARGET="$TARGET:5555"

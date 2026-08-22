@@ -4764,6 +4764,7 @@ name = "swarm-media"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "flate2",
  "hex",
  "image",
  "lofty",

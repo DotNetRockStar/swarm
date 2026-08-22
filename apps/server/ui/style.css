@@ -92,6 +92,19 @@ td.mono {
 .swarm-name { display: inline-flex; align-items: center; gap: 8px; }
 .swarm-name i { color: var(--accent); }
 
+/* Persistent storage warning. Unlike a toast, this stays visible across
+   every tab until all configured roots are readable again. */
+.media-root-warning {
+  display: flex; align-items: center; gap: 12px; margin: -4px 0 18px;
+  padding: 12px 14px; border: 1px solid #8b6b23; border-left: 4px solid #f5c451;
+  border-radius: 10px; background: rgba(245, 196, 81, .10); color: var(--text);
+}
+.media-root-warning.d-none { display: none; }
+.media-root-warning-icon { flex: 0 0 auto; color: #f5c451; font-size: 1.35rem; }
+.media-root-warning-copy { flex: 1; min-width: 0; font-size: .82rem; line-height: 1.4; }
+.media-root-warning-copy strong { display: block; margin-bottom: 2px; color: #ffe29a; }
+.media-root-warning-path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+
 /* Toast notifications: every success/warning/error message in the app
    surfaces here instead of scattered inline text, color-coded so status is
    readable at a glance. Stacked bottom-right, newest on top, each

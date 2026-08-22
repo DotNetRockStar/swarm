@@ -18,7 +18,10 @@ use swarm_server::{ServerConfig, ServerCore, TokenStoreMode};
 
 fn config(data_dir: std::path::PathBuf, media_root: std::path::PathBuf) -> ServerConfig {
     ServerConfig {
-        media_roots: vec![MediaRoot { label: "local".to_string(), path: media_root }],
+        media_roots: vec![MediaRoot {
+            label: "local".to_string(),
+            path: media_root,
+        }],
         data_dir,
         bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
@@ -31,13 +34,16 @@ fn config(data_dir: std::path::PathBuf, media_root: std::path::PathBuf) -> Serve
 /// it did, linearly, because it awaited the full scan inline.
 #[tokio::test]
 async fn start_returns_quickly_regardless_of_library_size() {
-    let base = std::env::temp_dir().join(format!("swarm-nonblocking-startup-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("swarm-nonblocking-startup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
     let empty_root = base.join("empty");
     std::fs::create_dir_all(&empty_root).unwrap();
     let started = Instant::now();
-    let empty_core = ServerCore::start(config(base.join("empty-data"), empty_root)).await.unwrap();
+    let empty_core = ServerCore::start(config(base.join("empty-data"), empty_root))
+        .await
+        .unwrap();
     let empty_elapsed = started.elapsed();
 
     let big_root = base.join("big");
@@ -48,12 +54,20 @@ async fn start_returns_quickly_regardless_of_library_size() {
         std::fs::write(&path, vec![7u8; 4096]).unwrap();
     }
     let started = Instant::now();
-    let big_core = ServerCore::start(config(base.join("big-data"), big_root)).await.unwrap();
+    let big_core = ServerCore::start(config(base.join("big-data"), big_root))
+        .await
+        .unwrap();
     let big_elapsed = started.elapsed();
 
-    assert!(empty_elapsed < Duration::from_millis(300), "empty-root start() took {empty_elapsed:?}");
-    assert!(big_elapsed < Duration::from_millis(300), "1000-file start() took {big_elapsed:?} — \
-        looks like the initial scan is being awaited inline again");
+    assert!(
+        empty_elapsed < Duration::from_millis(300),
+        "empty-root start() took {empty_elapsed:?}"
+    );
+    assert!(
+        big_elapsed < Duration::from_millis(300),
+        "1000-file start() took {big_elapsed:?} — \
+        looks like the initial scan is being awaited inline again"
+    );
 
     // The background scan does still genuinely happen and finish correctly
     // — this isn't "the scan silently never runs", just "it doesn't block
@@ -72,7 +86,8 @@ async fn start_returns_quickly_regardless_of_library_size() {
 /// wrapped in a timeout so a regression fails fast instead of hanging.
 #[tokio::test]
 async fn other_commands_stay_responsive_during_the_initial_scan() {
-    let base = std::env::temp_dir().join(format!("swarm-nonblocking-commands-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("swarm-nonblocking-commands-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let media_root = base.join("media");
     std::fs::create_dir_all(&media_root).unwrap();
@@ -82,7 +97,9 @@ async fn other_commands_stay_responsive_during_the_initial_scan() {
         std::fs::write(&path, vec![7u8; 4096]).unwrap();
     }
 
-    let core = ServerCore::start(config(base.join("data"), media_root)).await.unwrap();
+    let core = ServerCore::start(config(base.join("data"), media_root))
+        .await
+        .unwrap();
 
     // Deliberately not waiting for the scan here — status() must respond
     // promptly regardless of whether it's still in flight.

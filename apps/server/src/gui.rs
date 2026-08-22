@@ -15,7 +15,7 @@ mod mcp;
 mod settings;
 
 use rand::RngCore;
-use settings::{MediaRootSetting, Settings};
+use settings::{MediaRootHealth, MediaRootSetting, Settings};
 use std::path::PathBuf;
 use std::sync::Arc;
 use swarm_core::peer::MediaKind;
@@ -93,6 +93,7 @@ impl AppState {
                 let core = ServerCore::start(config).await.map_err(|e| e.to_string())?;
                 core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
+                core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
                 if settings.mcp_enabled {
                     if let Some(access_token) = settings.mcp_access_token.filter(|token| !token.is_empty()) {
                         let mcp_core = Arc::clone(&core);
@@ -153,6 +154,7 @@ struct SettingsView {
     has_tmdb_key: bool,
     streaming_upload_budget_enabled: bool,
     local_transcription_enabled: bool,
+    transcription_pause_while_streaming: bool,
     mcp_enabled: bool,
     mcp_port: u16,
     mcp_access_token: Option<String>,
@@ -166,10 +168,22 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
         has_tmdb_key: settings.tmdb_api_key.is_some(),
         streaming_upload_budget_enabled: settings.streaming_upload_budget_enabled,
         local_transcription_enabled: settings.local_transcription_enabled,
+        transcription_pause_while_streaming: settings.transcription_pause_while_streaming,
         mcp_enabled: settings.mcp_enabled,
         mcp_port: settings.mcp_port,
         mcp_access_token: settings.mcp_access_token,
     })
+}
+
+/// Does not initialize `ServerCore`, so the warning can render even when a
+/// disconnected file share is the very thing preventing normal dashboard
+/// work from completing.
+#[tauri::command]
+async fn get_media_root_health(app: tauri::AppHandle) -> Result<Vec<MediaRootHealth>, String> {
+    let roots = settings::load(&app_data_dir(&app)?).media_roots;
+    tokio::task::spawn_blocking(move || settings::media_root_health(&roots))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<String>, String> {
@@ -338,6 +352,21 @@ async fn set_local_transcription_enabled(
 }
 
 #[tauri::command]
+async fn set_transcription_pause_while_streaming(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.transcription_pause_while_streaming = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let core = state.core(&app).await?;
+    core.set_transcription_pause_while_streaming(enabled);
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_transcription_status(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -479,6 +508,8 @@ struct EntrySummary {
     cast: Vec<swarm_media::store::CastMember>,
     overview: Option<String>,
     rating: Option<String>,
+    community_rating: Option<f64>,
+    community_rating_votes: Option<u64>,
     like_count: u32,
 }
 
@@ -517,6 +548,8 @@ async fn list_entries(
             cast: entry.cast,
             overview: entry.overview,
             rating: entry.rating,
+            community_rating: entry.community_rating,
+            community_rating_votes: entry.community_rating_votes,
         })
         .collect())
 }
@@ -1196,6 +1229,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_media_root_health,
             hide_to_tray,
             open_external_url,
             choose_media_folder,
@@ -1208,6 +1242,7 @@ fn main() {
             set_tmdb_api_key,
             set_streaming_upload_budget_enabled,
             set_local_transcription_enabled,
+            set_transcription_pause_while_streaming,
             get_transcription_status,
             set_mcp_enabled,
             set_mcp_port,

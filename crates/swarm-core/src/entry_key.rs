@@ -22,7 +22,9 @@ pub fn entry_key(relative_path: &str) -> String {
 pub fn is_valid_entry_key(candidate: &str) -> bool {
     !candidate.is_empty()
         && candidate.len() <= 64
-        && candidate.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]

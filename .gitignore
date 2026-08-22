@@ -11,6 +11,8 @@ node_modules/
 clients/tv-android/.gradle/
 clients/tv-android/.kotlin/
 clients/tv-android/**/build/
+clients/tv-android/**/bin/
 clients/tv-android/local.properties
 clients/tv-android/*/gen/
 deploy/**/.env
+nohup.out

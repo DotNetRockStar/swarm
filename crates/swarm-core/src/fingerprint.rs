@@ -64,7 +64,10 @@ mod tests {
     // compatibility across the two codebases.
     #[test]
     fn matches_python_small_file_vector() {
-        assert_eq!(fp(b"swarm test vector\n"), "704ac5a4284267953aab77855e0e32aa");
+        assert_eq!(
+            fp(b"swarm test vector\n"),
+            "704ac5a4284267953aab77855e0e32aa"
+        );
     }
 
     #[test]

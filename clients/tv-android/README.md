@@ -108,10 +108,13 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   roster entry doesn't take down the rest) and fed to `PeerQuicClient.connect`
   via `connectToServer(device, ...)`. `CatalogSession` (`:core/catalog`) is
   the piece that actually uses this: given a swarm roster, it connects to
-  every server with a usable `peer_addr`, registers each live connection
-  with a `PeerLoopbackProxy`, fetches and merges their catalogs via
-  `CatalogMerger`, and reports which devices weren't reachable rather than
-  failing the whole refresh. The historical headless interop fixture proved a
+  every server with a usable `peer_addr`, registers each connection with a
+  `PeerLoopbackProxy`, and merges their catalogs via `CatalogMerger`. The TV
+  atomically persists the last good manifest per server, paints it before
+  network refresh, checks `/catalog/thumbprint` before transferring a full
+  catalog, and requests the gzip route when a changed manifest is required.
+  Interrupted refreshes retain stale-but-browsable content while reporting
+  which devices were unreachable. The historical headless interop fixture proved a
   roster with one real server (dialed purely from its self-reported
   address, no hardcoded host:port anywhere in the test) plus one
   never-registered device merges to the right one-entry catalog and streams
@@ -167,7 +170,8 @@ Google-Play-Services string anywhere in the APK despite adding
 `CatalogCard` now shows real artwork: `SwarmViewModel.artworkUrl(entry)`
 skips the request entirely when `artworkEtag == null` (no scrape ever
 found any), otherwise builds a `CatalogSession.urlFor(serverId,
-"/art/<entryKey>/<kind>")` URL — `poster` for movies/episodes, `cover` for
+"/art/<entryKey>/<kind>")` URL — `poster` for movies/show art, `season` for
+season posters, `backdrop` for episode stills, and `cover` for
 tracks — served over the exact same peer connection and loopback proxy as
 media, just a different path (`swarm-media`'s `/art/` route uses the same
 `PeerRequest`/`PeerResponseHeader` shape as `/media/`, Range and ETag
@@ -200,5 +204,7 @@ here, not just the fallback.
 - A diagnostics screen (NAT type, punch results, per-server RTT and current
   upload allocation) and real-device validation of adaptive switching under
   a shaped/variable uplink.
-- Room (local catalog cache) — no DAO/entity code exists yet, so it isn't
-  wired into the Gradle build; adding it means also adding the KSP plugin.
+- Incremental per-entry catalog deltas. Persistent full snapshots plus the
+  thumbprint check avoid unchanged transfers today; `/catalog/manifest.gz`
+  keeps changed/first-load transfers small until versioned delta history is
+  added server-side.

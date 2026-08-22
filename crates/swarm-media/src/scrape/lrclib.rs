@@ -35,7 +35,10 @@ impl LrclibClient {
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
-        Self { http, base: base.into().trim_end_matches('/').to_string() }
+        Self {
+            http,
+            base: base.into().trim_end_matches('/').to_string(),
+        }
     }
 
     pub async fn lookup(
@@ -72,7 +75,10 @@ impl LrclibClient {
             return Err(LrclibError::RateLimited(retry_after));
         }
         if !response.status().is_success() {
-            return Err(LrclibError::Unavailable(format!("lookup returned {}", response.status())));
+            return Err(LrclibError::Unavailable(format!(
+                "lookup returned {}",
+                response.status()
+            )));
         }
         let result: LrclibResponse = response
             .json()
@@ -103,7 +109,11 @@ impl Default for LrclibClient {
 fn non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
-        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     })
 }
 
@@ -143,9 +153,18 @@ mod tests {
         let router = Router::new().route(
             "/api/get",
             get(|Query(query): Query<HashMap<String, String>>| async move {
-                assert_eq!(query.get("track_name").map(String::as_str), Some("Test Song"));
-                assert_eq!(query.get("artist_name").map(String::as_str), Some("Test Artist"));
-                assert_eq!(query.get("album_name").map(String::as_str), Some("Test Album"));
+                assert_eq!(
+                    query.get("track_name").map(String::as_str),
+                    Some("Test Song")
+                );
+                assert_eq!(
+                    query.get("artist_name").map(String::as_str),
+                    Some("Test Artist")
+                );
+                assert_eq!(
+                    query.get("album_name").map(String::as_str),
+                    Some("Test Album")
+                );
                 assert_eq!(query.get("duration").map(String::as_str), Some("214"));
                 Json(json!({
                     "id": 17,
@@ -157,10 +176,17 @@ mod tests {
             }),
         );
         let client = LrclibClient::with_base_url(spawn_mock(router).await);
-        let lyrics = client.lookup("Test Song", "Test Artist", "Test Album", 213.7).await.unwrap();
+        let lyrics = client
+            .lookup("Test Song", "Test Artist", "Test Album", 213.7)
+            .await
+            .unwrap();
         assert_eq!(lyrics.provider_id, Some(17));
         assert_eq!(lyrics.language.as_deref(), Some("en"));
-        assert!(lyrics.synced_lyrics.as_deref().unwrap().contains("Second line"));
+        assert!(lyrics
+            .synced_lyrics
+            .as_deref()
+            .unwrap()
+            .contains("Second line"));
     }
 
     #[tokio::test]

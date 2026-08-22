@@ -24,11 +24,19 @@ pub struct CoverArtClient {
 
 impl CoverArtClient {
     pub fn new() -> Self {
-        Self { http: reqwest::Client::new(), base: DEFAULT_BASE.to_string(), upgrade_http: true }
+        Self {
+            http: reqwest::Client::new(),
+            base: DEFAULT_BASE.to_string(),
+            upgrade_http: true,
+        }
     }
 
     pub fn with_base_url(base: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), base: base.into(), upgrade_http: false }
+        Self {
+            http: reqwest::Client::new(),
+            base: base.into(),
+            upgrade_http: false,
+        }
     }
 
     pub async fn front_cover(&self, release_mbid: &str) -> Result<Vec<u8>, CoverArtError> {
@@ -42,22 +50,42 @@ impl CoverArtClient {
             return Err(CoverArtError::NotFound);
         }
         if !response.status().is_success() {
-            return Err(CoverArtError::Unavailable(format!("listing returned {}", response.status())));
+            return Err(CoverArtError::Unavailable(format!(
+                "listing returned {}",
+                response.status()
+            )));
         }
-        let body: ImageListResponse =
-            response.json().await.map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
-        let front = body.images.into_iter().find(|img| img.front).ok_or(CoverArtError::NotFound)?;
+        let body: ImageListResponse = response
+            .json()
+            .await
+            .map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
+        let front = body
+            .images
+            .into_iter()
+            .find(|img| img.front)
+            .ok_or(CoverArtError::NotFound)?;
         let image_url = if self.upgrade_http {
             front.image.replacen("http://", "https://", 1)
         } else {
             front.image
         };
-        let image_response =
-            self.http.get(&image_url).send().await.map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
+        let image_response = self
+            .http
+            .get(&image_url)
+            .send()
+            .await
+            .map_err(|e| CoverArtError::Unavailable(e.to_string()))?;
         if !image_response.status().is_success() {
-            return Err(CoverArtError::Unavailable(format!("image fetch returned {}", image_response.status())));
+            return Err(CoverArtError::Unavailable(format!(
+                "image fetch returned {}",
+                image_response.status()
+            )));
         }
-        image_response.bytes().await.map(|b| b.to_vec()).map_err(|e| CoverArtError::Unavailable(e.to_string()))
+        image_response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| CoverArtError::Unavailable(e.to_string()))
     }
 }
 
@@ -127,11 +155,16 @@ mod tests {
     async fn no_front_image_is_not_found() {
         let router = Router::new().route(
             "/release/rel-2",
-            get(|| async { Json(json!({"images": [{"front": false, "image": "http://x/y.jpg"}]})) }),
+            get(|| async {
+                Json(json!({"images": [{"front": false, "image": "http://x/y.jpg"}]}))
+            }),
         );
         let base = spawn_mock(router).await;
         let client = CoverArtClient::with_base_url(&base);
-        assert!(matches!(client.front_cover("rel-2").await, Err(CoverArtError::NotFound)));
+        assert!(matches!(
+            client.front_cover("rel-2").await,
+            Err(CoverArtError::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -142,6 +175,9 @@ mod tests {
         );
         let base = spawn_mock(router).await;
         let client = CoverArtClient::with_base_url(&base);
-        assert!(matches!(client.front_cover("nope").await, Err(CoverArtError::NotFound)));
+        assert!(matches!(
+            client.front_cover("nope").await,
+            Err(CoverArtError::NotFound)
+        ));
     }
 }

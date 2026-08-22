@@ -42,7 +42,7 @@ import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
-import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.app.ui.theme.SwarmError
 import app.swarm.tv.app.ui.theme.SwarmBorder
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
@@ -186,7 +186,7 @@ fun PasscodeEntryScreen(
 
         errorMessage?.let {
             Spacer(Modifier.height(16.dp))
-            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+            Text(it, color = SwarmError, fontSize = 14.sp)
         }
     }
 }
@@ -235,7 +235,7 @@ fun ActivationCodeScreen(
         Text("Waiting for approval · expires $expiresAt", color = SwarmMuted, fontSize = 13.sp)
         errorMessage?.let {
             Spacer(Modifier.height(12.dp))
-            Text(it, color = SwarmAccentHot, fontSize = 14.sp)
+            Text(it, color = SwarmError, fontSize = 14.sp)
         }
         Spacer(Modifier.height(24.dp))
         Button(onClick = onCancel, colors = swarmActionButtonColors()) { Text("Cancel") }

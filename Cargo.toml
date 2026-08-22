@@ -40,3 +40,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "pool", "builder"] }
 if-addrs = "0.13"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+flate2 = "1"

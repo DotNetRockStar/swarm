@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import kotlin.random.Random
 
 class CatalogGroupingTest {
 
@@ -134,6 +135,38 @@ class CatalogGroupingTest {
         val entries = listOf(episode("a1", "Show A", 1, 1), episode("b1", "Show B", 1, 1))
         val shows = CatalogGrouping.groupEpisodesByShowSeason(entries)
         assertEquals(2, shows.size)
+    }
+
+    @Test
+    fun `show previews exclude specials unnumbered seasons and featurettes`() {
+        val entries = listOf(
+            episode("special", "Dexter", 0, 1),
+            episode("loose", "Dexter", null, 1),
+            episode("featurette", "Dexter", 2, null),
+            episode("interview", "Dexter", 2, 0),
+            episode("real", "Dexter", 2, 3),
+        )
+        val show = CatalogGrouping.groupEpisodesByShowSeason(entries).single()
+
+        assertEquals(listOf(2), CatalogGrouping.previewSeasons(show).map { it.season })
+        assertEquals("real", CatalogGrouping.randomPreviewEpisode(show, Random(7))?.fingerprint)
+    }
+
+    @Test
+    fun `show preview randomizes both real seasons and their episodes`() {
+        val entries = listOf(
+            episode("s1e1", "Dexter", 1, 1),
+            episode("s1e2", "Dexter", 1, 2),
+            episode("s2e1", "Dexter", 2, 1),
+            episode("s2e2", "Dexter", 2, 2),
+        )
+        val show = CatalogGrouping.groupEpisodesByShowSeason(entries).single()
+        val selections = (0..100).mapNotNull { seed ->
+            CatalogGrouping.randomPreviewEpisode(show, Random(seed))
+        }
+
+        assertEquals(setOf(1, 2), selections.mapNotNull { it.entry.season }.toSet())
+        assertEquals(setOf(1, 2), selections.mapNotNull { it.entry.episode }.toSet())
     }
 
     @Test

@@ -16,7 +16,11 @@ pub struct AppError {
 
 impl AppError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into() }
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
@@ -36,7 +40,11 @@ impl AppError {
     }
 
     pub fn too_many_requests() -> Self {
-        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "too many attempts; try again later")
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many attempts; try again later",
+        )
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -46,7 +54,10 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = ApiError { code: self.code.to_string(), message: self.message };
+        let body = ApiError {
+            code: self.code.to_string(),
+            message: self.message,
+        };
         (self.status, Json(body)).into_response()
     }
 }

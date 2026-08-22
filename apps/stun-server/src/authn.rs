@@ -29,7 +29,10 @@ pub struct SessionUser {
 
 /// Resolve the session cookie to a user, sliding the expiry forward
 /// (throttled). Returns None for missing/expired/unknown sessions.
-pub async fn session_user(state: &SharedState, jar: &CookieJar) -> Result<Option<SessionUser>, AppError> {
+pub async fn session_user(
+    state: &SharedState,
+    jar: &CookieJar,
+) -> Result<Option<SessionUser>, AppError> {
     let Some(cookie) = jar.get(SESSION_COOKIE) else {
         return Ok(None);
     };
@@ -46,7 +49,10 @@ pub async fn session_user(state: &SharedState, jar: &CookieJar) -> Result<Option
         return Ok(None);
     };
     if expires_at < ts {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?").bind(&hash).execute(&state.db).await?;
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(&hash)
+            .execute(&state.db)
+            .await?;
         return Ok(None);
     }
     if ts - last_seen_at > TOUCH_THROTTLE_SECS {
@@ -60,15 +66,23 @@ pub async fn session_user(state: &SharedState, jar: &CookieJar) -> Result<Option
     Ok(Some(SessionUser { user_id, email }))
 }
 
-pub async fn require_session(state: &SharedState, jar: &CookieJar) -> Result<SessionUser, AppError> {
-    session_user(state, jar).await?.ok_or_else(|| AppError::unauthorized("login required"))
+pub async fn require_session(
+    state: &SharedState,
+    jar: &CookieJar,
+) -> Result<SessionUser, AppError> {
+    session_user(state, jar)
+        .await?
+        .ok_or_else(|| AppError::unauthorized("login required"))
 }
 
 /// Double-submit CSRF check for mutating session-authenticated routes.
 /// Device Bearer routes are exempt (no ambient cookie credential to ride).
 pub fn require_csrf(jar: &CookieJar, headers: &HeaderMap) -> Result<(), AppError> {
     let cookie = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
-    let header = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let header = headers
+        .get(CSRF_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     match (cookie, header) {
         (Some(c), Some(h)) if !c.is_empty() && c == h => Ok(()),
         _ => Err(AppError::forbidden("missing or mismatched CSRF token")),
@@ -81,19 +95,21 @@ pub struct DeviceAuth {
 
 /// Resolve `Authorization: Bearer <access_token>` to a non-revoked device,
 /// updating its last-seen timestamp.
-pub async fn require_device(state: &SharedState, headers: &HeaderMap) -> Result<DeviceAuth, AppError> {
+pub async fn require_device(
+    state: &SharedState,
+    headers: &HeaderMap,
+) -> Result<DeviceAuth, AppError> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| AppError::unauthorized("bearer token required"))?;
     let hash = token_hash(token);
-    let row: Option<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT id, revoked_at FROM devices WHERE access_token_hash = ?",
-    )
-    .bind(&hash)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(String, Option<i64>)> =
+        sqlx::query_as("SELECT id, revoked_at FROM devices WHERE access_token_hash = ?")
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
     match row {
         Some((device_id, None)) => {
             sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ?")

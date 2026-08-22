@@ -33,8 +33,13 @@ pub enum ReflectorError {
 /// for the actual hole punch afterward — the reflexive mapping a NAT hands
 /// out is only valid for the 4-tuple it was observed on; a new socket would
 /// get a new external port and invalidate the whole point of asking.
-pub async fn reflexive_addr(socket: &UdpSocket, reflector_addr: SocketAddr) -> Result<SocketAddr, ReflectorError> {
-    socket.send_to(REFLECTOR_BIND_REQUEST, reflector_addr).await?;
+pub async fn reflexive_addr(
+    socket: &UdpSocket,
+    reflector_addr: SocketAddr,
+) -> Result<SocketAddr, ReflectorError> {
+    socket
+        .send_to(REFLECTOR_BIND_REQUEST, reflector_addr)
+        .await?;
     let mut buf = [0u8; 512];
     let (len, from) = tokio::time::timeout(REFLECTOR_TIMEOUT, socket.recv_from(&mut buf))
         .await
@@ -43,12 +48,16 @@ pub async fn reflexive_addr(socket: &UdpSocket, reflector_addr: SocketAddr) -> R
         // Cheap sanity check, not real authentication: UDP has no session,
         // so don't trust the first datagram to land on this socket unless
         // it at least claims to be from the address we queried.
-        return Err(ReflectorError::Decode(format!("reply from unexpected address {from}")));
+        return Err(ReflectorError::Decode(format!(
+            "reply from unexpected address {from}"
+        )));
     }
     let response: ReflectorResponse =
         serde_json::from_slice(&buf[..len]).map_err(|e| ReflectorError::Decode(e.to_string()))?;
-    let ip: std::net::IpAddr =
-        response.ip.parse().map_err(|_| ReflectorError::Decode(format!("invalid ip in reply: {}", response.ip)))?;
+    let ip: std::net::IpAddr = response
+        .ip
+        .parse()
+        .map_err(|_| ReflectorError::Decode(format!("invalid ip in reply: {}", response.ip)))?;
     Ok(SocketAddr::new(ip, response.port))
 }
 
@@ -81,6 +90,9 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let nobody: SocketAddr = "127.0.0.1:1".parse().unwrap(); // privileged, unbound in any test env
         let result = reflexive_addr(&socket, nobody).await;
-        assert!(matches!(result, Err(ReflectorError::Timeout) | Err(ReflectorError::Network(_))));
+        assert!(matches!(
+            result,
+            Err(ReflectorError::Timeout) | Err(ReflectorError::Network(_))
+        ));
     }
 }

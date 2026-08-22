@@ -70,11 +70,17 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     library.upsert(&entry).await.unwrap();
     let subtitle_path = root.join("subtitles").join("example.vtt");
     std::fs::create_dir_all(subtitle_path.parent().unwrap()).unwrap();
-    std::fs::write(&subtitle_path, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n").unwrap();
+    std::fs::write(
+        &subtitle_path,
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n",
+    )
+    .unwrap();
     library
         .complete_transcription(&SubtitleRecord {
             id: "whisper-en".into(),
@@ -111,6 +117,7 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
             capabilities: CapabilityProfile::fire_tv_baseline(),
             start_position_secs: 0,
             prefer_direct: true,
+            preview: false,
         }),
         error_report: None,
         like: None,
@@ -124,9 +131,14 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
     assert_eq!(plan.mode, PlaybackMode::Direct);
     assert_eq!(plan.max_bitrate, 1_000_000);
     assert_eq!(plan.subtitles.len(), 1);
-    let subtitles = service.resolve(&request(plan.subtitles[0].path.clone())).await;
+    let subtitles = service
+        .resolve(&request(plan.subtitles[0].path.clone()))
+        .await;
     assert_eq!(subtitles.header.status, 200);
-    assert_eq!(subtitles.header.content_type.as_deref(), Some("text/vtt; charset=utf-8"));
+    assert_eq!(
+        subtitles.header.content_type.as_deref(),
+        Some("text/vtt; charset=utf-8")
+    );
     let Body::Bytes(subtitle_body) = subtitles.body else {
         panic!("subtitle must be served as bytes")
     };
@@ -221,6 +233,8 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
         cast: vec![],
         overview: None,
         rating: None,
+        community_rating: None,
+        community_rating_votes: None,
     };
     library.upsert(&entry).await.unwrap();
 
@@ -249,6 +263,7 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
             capabilities: CapabilityProfile::fire_tv_baseline(),
             start_position_secs: 0,
             prefer_direct: true,
+            preview: false,
         }),
         error_report: None,
         like: None,
@@ -351,6 +366,8 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             cast: vec![],
             overview: None,
             rating: None,
+            community_rating: None,
+            community_rating_votes: None,
         };
         library.upsert(&entry).await.unwrap();
         entry_keys.push(entry_key);
@@ -380,6 +397,7 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
                 capabilities: CapabilityProfile::fire_tv_baseline(),
                 start_position_secs: 0,
                 prefer_direct: true,
+                preview: false,
             }),
             error_report: None,
             like: None,

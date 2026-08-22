@@ -97,7 +97,7 @@ const INFO_TOPICS = {
   },
   "local-subtitles": {
     icon: "bi-badge-cc-fill", title: "Local subtitle generation",
-    body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a model of about 466 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU, so SWARM automatically pauses while anyone is streaming. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
+    body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a model of about 466 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU. By default SWARM pauses this work while anyone is streaming, but that protection can be disabled on the Details page when the server has enough CPU for both workloads. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
     link: "https://github.com/ggerganov/whisper.cpp", linkLabel: "Learn about Whisper.cpp",
   },
   "about-server": {
@@ -271,6 +271,38 @@ function showTab(name) {
   if (name === "ai") refreshAi();
 }
 
+let mediaRootHealthRefreshInFlight = false;
+let mediaRootHealthTimer = null;
+
+async function refreshMediaRootHealth() {
+  if (mediaRootHealthRefreshInFlight) return;
+  mediaRootHealthRefreshInFlight = true;
+  const warning = document.getElementById("mediaRootWarning");
+  const copy = document.getElementById("mediaRootWarningText");
+  try {
+    const roots = await invoke("get_media_root_health");
+    const unavailable = roots.filter(root => !root.available);
+    warning.classList.toggle("d-none", unavailable.length === 0);
+    if (unavailable.length > 0) {
+      const noun = unavailable.length === 1 ? "location is" : "locations are";
+      const recoveryPronoun = unavailable.length === 1 ? "it is" : "they are";
+      const paths = unavailable
+        .map(root => `<span class="media-root-warning-path">${esc(root.path)}</span>`)
+        .join(", ");
+      copy.innerHTML = `${unavailable.length} configured media ${noun} not readable: ${paths}. Reconnect the drive or network share. Playback, artwork, and subtitle generation will resume when ${recoveryPronoun} available; choose Rescan afterward to refresh library changes.`;
+    }
+  } catch (_) {
+    // Other status surfaces already report backend failures. This banner is
+    // specifically for a confirmed inaccessible root.
+  } finally {
+    mediaRootHealthRefreshInFlight = false;
+  }
+}
+
+document.getElementById("mediaRootWarningDetailsBtn").addEventListener("click", () => {
+  showTab("details");
+});
+
 for (const tab of TABS) {
   document.getElementById(`tabBtn-${tab}`).addEventListener("click", () => showTab(tab));
 }
@@ -327,7 +359,11 @@ async function enterDashboard() {
   show("dashView");
   showTab("media");
   refreshNotificationBadge();
+  refreshMediaRootHealth();
   setInterval(refreshNotificationBadge, 30000);
+  if (!mediaRootHealthTimer) {
+    mediaRootHealthTimer = setInterval(refreshMediaRootHealth, 10000);
+  }
 }
 
 async function boot() {

@@ -21,6 +21,7 @@ quinn = { workspace = true }
 reqwest = { workspace = true }
 rand = { workspace = true }
 image = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"

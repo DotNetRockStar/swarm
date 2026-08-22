@@ -13,6 +13,7 @@
 package app.swarm.tv.core.catalog
 
 import app.swarm.tv.core.peer.MediaKind
+import kotlin.random.Random
 
 const val UNKNOWN_ARTIST = "Unknown Artist"
 const val UNKNOWN_ALBUM = "Unknown Album"
@@ -77,6 +78,24 @@ object CatalogGrouping {
                     .map { (season, seasonEntries) -> SeasonGroup(season, seasonEntries.sortedWith(episodeOrder)) }
                 ShowGroup(show, seasons)
             }
+    }
+
+    /**
+     * Numbered seasons containing numbered episodes are the only safe source
+     * for a show-card preview. Season 0 is the conventional specials/extras
+     * bucket, while null seasons or episodes are commonly featurettes,
+     * interviews, and other bonus files inferred from a show's directory.
+     */
+    fun previewSeasons(show: ShowGroup): List<SeasonGroup> = show.seasons.mapNotNull { season ->
+        if ((season.season ?: 0) <= 0) return@mapNotNull null
+        val episodes = season.episodes.filter { (it.entry.episode ?: 0) > 0 }
+        season.copy(episodes = episodes).takeIf { episodes.isNotEmpty() }
+    }
+
+    /** Pick a season first and then an episode so both levels vary over time. */
+    fun randomPreviewEpisode(show: ShowGroup, random: Random = Random.Default): MergedEntry? {
+        val season = previewSeasons(show).randomOrNull(random) ?: return null
+        return season.episodes.randomOrNull(random)
     }
 
     /**

@@ -45,6 +45,16 @@ data class LanServer(
 }
 
 /**
+ * Re-resolving a known certificate is an address refresh, not a new pairing.
+ * The certificate fingerprint is the server's stable security identity; DHCP
+ * addresses and ports are only routing data and may legitimately change.
+ */
+internal fun preferDiscoveredLanServer(saved: LanServer, discovered: List<LanServer>): LanServer =
+    discovered.firstOrNull {
+        it.certFingerprint.trim().lowercase() == saved.certFingerprint.trim().lowercase()
+    } ?: saved
+
+/**
  * Discovers `_swarm-peer._udp` services using Android's native DNS-SD API.
  * A multicast lock is held only while discovery is active; some Fire TV and
  * Android TV Wi-Fi drivers otherwise filter mDNS packets before NSD sees them.

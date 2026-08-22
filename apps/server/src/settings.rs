@@ -12,6 +12,37 @@ pub struct MediaRootSetting {
     pub path: String,
 }
 
+/// A lightweight accessibility check used by the desktop UI. Opening the
+/// directory (rather than merely checking `Path::exists`) also catches a
+/// mounted network share that is present but no longer readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MediaRootHealth {
+    pub label: String,
+    pub path: String,
+    pub available: bool,
+    pub error: Option<String>,
+}
+
+pub fn media_root_health(roots: &[MediaRootSetting]) -> Vec<MediaRootHealth> {
+    roots
+        .iter()
+        .map(|root| match std::fs::read_dir(&root.path) {
+            Ok(_) => MediaRootHealth {
+                label: root.label.clone(),
+                path: root.path.clone(),
+                available: true,
+                error: None,
+            },
+            Err(error) => MediaRootHealth {
+                label: root.label.clone(),
+                path: root.path.clone(),
+                available: false,
+                error: Some(error.to_string()),
+            },
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -30,6 +61,10 @@ pub struct Settings {
     /// live in app data; disabling pauses work without discarding progress.
     #[serde(default)]
     pub local_transcription_enabled: bool,
+    /// Protect playback from Whisper's sustained CPU load. Users with CPU
+    /// headroom can opt out and allow both workloads to run concurrently.
+    #[serde(default = "default_transcription_pause_while_streaming")]
+    pub transcription_pause_while_streaming: bool,
     /// Whether the read-only MCP server (see `mcp.rs`) starts alongside the
     /// GUI app's core. Takes effect on next launch/restart — no hot-reload,
     /// same posture as `media_root`'s pre-multi-root upgrade above having no
@@ -44,6 +79,10 @@ pub struct Settings {
 }
 
 fn default_streaming_upload_budget_enabled() -> bool {
+    true
+}
+
+fn default_transcription_pause_while_streaming() -> bool {
     true
 }
 
@@ -65,6 +104,7 @@ impl Default for Settings {
             tmdb_api_key: None,
             streaming_upload_budget_enabled: true,
             local_transcription_enabled: false,
+            transcription_pause_while_streaming: true,
             mcp_enabled: false,
             mcp_port: default_mcp_port(),
             mcp_access_token: None,
@@ -126,7 +166,34 @@ mod tests {
         let loaded = load(&dir);
         assert!(loaded.streaming_upload_budget_enabled);
         assert!(!loaded.local_transcription_enabled);
+        assert!(loaded.transcription_pause_while_streaming);
         assert_eq!(loaded.mcp_access_token, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn media_root_health_reports_readable_and_missing_roots() {
+        let dir =
+            std::env::temp_dir().join(format!("swarm-root-health-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("disconnected-share");
+        let roots = vec![
+            MediaRootSetting {
+                label: "local".into(),
+                path: dir.to_string_lossy().into_owned(),
+            },
+            MediaRootSetting {
+                label: "nas".into(),
+                path: missing.to_string_lossy().into_owned(),
+            },
+        ];
+
+        let health = media_root_health(&roots);
+        assert!(health[0].available);
+        assert_eq!(health[0].error, None);
+        assert!(!health[1].available);
+        assert!(health[1].error.is_some());
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

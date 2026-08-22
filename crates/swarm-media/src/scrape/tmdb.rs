@@ -4,6 +4,7 @@
 
 use crate::store::CastMember;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 const DEFAULT_API_BASE: &str = "https://api.themoviedb.org/3";
 const DEFAULT_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
@@ -18,11 +19,20 @@ pub enum TmdbError {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ScrapedVideo {
+    /// TMDB's stable movie/show id. TV episode scraping uses the show id to
+    /// fetch the matching season exactly once, rather than trying to find
+    /// season and episode artwork in the show-level response (where TMDB
+    /// does not return it).
+    pub tmdb_id: u64,
     pub title: String,
     pub genres: Vec<String>,
     /// Fully-qualified image URLs, ready to download.
     pub poster_url: Option<String>,
     pub backdrop_url: Option<String>,
+    /// TV-only artwork from `/tv/{id}/season/{season}`. Kept distinct from
+    /// the show poster and episode still so each browse level can render the
+    /// image TMDB actually supplies for it.
+    pub season_poster_url: Option<String>,
     /// Top-billed cast, in TMDb's own billing order.
     pub cast: Vec<CastMember>,
     /// TMDb's synopsis — `None` when TMDb has no overview for this title
@@ -34,6 +44,20 @@ pub struct ScrapedVideo {
     /// for less-mainstream titles — same "real, if rare, gap" status as
     /// `overview`.
     pub certification: Option<String>,
+    /// TMDb user score (native 0–10 scale) and the number of votes behind
+    /// it. A zero-vote placeholder is represented as `None` rather than a
+    /// misleading 0/10 rating.
+    pub community_rating: Option<f64>,
+    pub community_rating_votes: Option<u64>,
+}
+
+/// Artwork returned by TMDB's season-details endpoint. One response covers
+/// every episode in a season, which lets the bulk scraper cache this by
+/// `(show_id, season_number)` instead of making one request per episode.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScrapedSeason {
+    pub poster_url: Option<String>,
+    pub episode_still_urls: HashMap<u32, String>,
 }
 
 /// A user-supplied manual TMDb match, bypassing search entirely — the
@@ -82,7 +106,10 @@ fn parse_tmdb_url_id(url: &str) -> Option<u64> {
         return None;
     }
     let id_segment = segments.next()?;
-    let digits: String = id_segment.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = id_segment
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.is_empty() {
         return None;
     }
@@ -119,10 +146,20 @@ impl TmdbClient {
         Self::with_base_urls(api_key, DEFAULT_API_BASE, DEFAULT_IMAGE_BASE)
     }
 
-    pub fn with_base_urls(api_key: impl Into<String>, api_base: impl Into<String>, image_base: impl Into<String>) -> Self {
+    pub fn with_base_urls(
+        api_key: impl Into<String>,
+        api_base: impl Into<String>,
+        image_base: impl Into<String>,
+    ) -> Self {
         let api_key = api_key.into();
         let bearer_token = is_v4_read_access_token(&api_key);
-        Self { http: reqwest::Client::new(), api_base: api_base.into(), image_base: image_base.into(), api_key, bearer_token }
+        Self {
+            http: reqwest::Client::new(),
+            api_base: api_base.into(),
+            image_base: image_base.into(),
+            api_key,
+            bearer_token,
+        }
     }
 
     /// Applies this client's detected auth style to a request: a v4 token as
@@ -151,7 +188,11 @@ impl TmdbClient {
     /// `pick_best_result`'s own exact-title-match scoring still does the
     /// real disambiguation work on the wider result set, this just stops a
     /// single off-by-one year from being an unconditional dead end.
-    pub async fn search_and_fetch_movie(&self, title: &str, year: Option<u32>) -> Result<ScrapedVideo, TmdbError> {
+    pub async fn search_and_fetch_movie(
+        &self,
+        title: &str,
+        year: Option<u32>,
+    ) -> Result<ScrapedVideo, TmdbError> {
         let id = match self.search(title, "movie", year).await {
             Err(TmdbError::NotFound) if year.is_some() => self.search(title, "movie", None).await?,
             other => other?,
@@ -164,7 +205,59 @@ impl TmdbClient {
         self.details_by_id(id, "tv").await
     }
 
-    async fn search(&self, query: &str, media_type: &str, year: Option<u32>) -> Result<u64, TmdbError> {
+    /// Fetches the season poster and each episode's still image from TMDB's
+    /// season endpoint. Those fields are not part of `/tv/{id}`, which is
+    /// why treating show details as episode details produced the same show
+    /// poster/backdrop on every season and episode.
+    pub async fn season_details(
+        &self,
+        show_id: u64,
+        season_number: u32,
+    ) -> Result<ScrapedSeason, TmdbError> {
+        let url = format!("{}/tv/{show_id}/season/{season_number}", self.api_base);
+        let response = self
+            .authed(self.http.get(&url).query(&[("language", "en-US")]))
+            .send()
+            .await
+            .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
+        if response.status().as_u16() == 404 {
+            return Err(TmdbError::NotFound);
+        }
+        if !response.status().is_success() {
+            return Err(TmdbError::Unavailable(format!(
+                "season details returned {}",
+                response.status()
+            )));
+        }
+        let body: SeasonDetailsResponse = response
+            .json()
+            .await
+            .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
+        Ok(ScrapedSeason {
+            poster_url: body
+                .poster_path
+                .map(|p| format!("{}/w342{p}", self.image_base)),
+            episode_still_urls: body
+                .episodes
+                .into_iter()
+                .filter_map(|episode| {
+                    episode.still_path.map(|path| {
+                        (
+                            episode.episode_number,
+                            format!("{}/w780{path}", self.image_base),
+                        )
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+        media_type: &str,
+        year: Option<u32>,
+    ) -> Result<u64, TmdbError> {
         let url = format!("{}/search/{media_type}", self.api_base);
         let year_str = year.map(|y| y.to_string());
         let mut params = vec![("query", query)];
@@ -179,17 +272,28 @@ impl TmdbClient {
             .await
             .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(TmdbError::Unavailable(format!("search returned {}", response.status())));
+            return Err(TmdbError::Unavailable(format!(
+                "search returned {}",
+                response.status()
+            )));
         }
-        let body: SearchResponse =
-            response.json().await.map_err(|e| TmdbError::Unavailable(e.to_string()))?;
-        pick_best_result(&body.results, query, year).map(|hit| hit.id).ok_or(TmdbError::NotFound)
+        let body: SearchResponse = response
+            .json()
+            .await
+            .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
+        pick_best_result(&body.results, query, year)
+            .map(|hit| hit.id)
+            .ok_or(TmdbError::NotFound)
     }
 
     /// Fetch details for a known TMDb id directly, skipping search entirely
     /// — the manual-URL-override path (see [`TmdbOverride`]) as well as the
     /// tail end of the normal search-then-fetch flow both land here.
-    pub async fn details_by_id(&self, id: u64, media_type: &str) -> Result<ScrapedVideo, TmdbError> {
+    pub async fn details_by_id(
+        &self,
+        id: u64,
+        media_type: &str,
+    ) -> Result<ScrapedVideo, TmdbError> {
         let url = format!("{}/{media_type}/{id}", self.api_base);
         // One request, not several: TMDb folds each sub-resource into the
         // main details payload under its own key when asked. The
@@ -197,7 +301,11 @@ impl TmdbClient {
         // (a movie has no `content_ratings` method, a show has no
         // `release_dates` one) so it's picked based on what's being fetched
         // rather than requesting both unconditionally.
-        let append = if media_type == "movie" { "credits,release_dates" } else { "credits,content_ratings" };
+        let append = if media_type == "movie" {
+            "credits,release_dates"
+        } else {
+            "credits,content_ratings"
+        };
         let response = self
             .authed(self.http.get(&url).query(&[("append_to_response", append)]))
             .send()
@@ -207,16 +315,31 @@ impl TmdbClient {
             return Err(TmdbError::NotFound);
         }
         if !response.status().is_success() {
-            return Err(TmdbError::Unavailable(format!("details returned {}", response.status())));
+            return Err(TmdbError::Unavailable(format!(
+                "details returned {}",
+                response.status()
+            )));
         }
-        let body: DetailsResponse =
-            response.json().await.map_err(|e| TmdbError::Unavailable(e.to_string()))?;
+        let body: DetailsResponse = response
+            .json()
+            .await
+            .map_err(|e| TmdbError::Unavailable(e.to_string()))?;
         // TMDb already orders cast by billing; keep only the headline names.
         let cast = body
             .credits
-            .map(|c| c.cast.into_iter().take(10).map(|m| CastMember { name: m.name, character: m.character }).collect())
+            .map(|c| {
+                c.cast
+                    .into_iter()
+                    .take(10)
+                    .map(|m| CastMember {
+                        name: m.name,
+                        character: m.character,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(ScrapedVideo {
+            tmdb_id: id,
             title: body.title.or(body.name).unwrap_or_default(),
             genres: body.genres.into_iter().map(|g| g.name).collect(),
             // w342, not TMDb's larger w500: posters are the one artwork kind
@@ -229,8 +352,13 @@ impl TmdbClient {
             // on screen. w342 is still comfortably sharp for the largest
             // place a poster renders today (this app's own ~190-200dp detail
             // view), while meaningfully lighter for every small grid card.
-            poster_url: body.poster_path.map(|p| format!("{}/w342{p}", self.image_base)),
-            backdrop_url: body.backdrop_path.map(|p| format!("{}/w1280{p}", self.image_base)),
+            poster_url: body
+                .poster_path
+                .map(|p| format!("{}/w342{p}", self.image_base)),
+            backdrop_url: body
+                .backdrop_path
+                .map(|p| format!("{}/w1280{p}", self.image_base)),
+            season_poster_url: None,
             cast,
             overview: body.overview.filter(|o| !o.is_empty()),
             // Only one of these two is ever populated for a given
@@ -241,7 +369,12 @@ impl TmdbClient {
                 .release_dates
                 .as_ref()
                 .and_then(|w| w.results.iter().find(|c| c.iso_3166_1 == "US"))
-                .and_then(|c| c.release_dates.iter().map(|r| r.certification.as_str()).find(|c| !c.is_empty()))
+                .and_then(|c| {
+                    c.release_dates
+                        .iter()
+                        .map(|r| r.certification.as_str())
+                        .find(|c| !c.is_empty())
+                })
                 .map(str::to_string)
                 .or_else(|| {
                     body.content_ratings
@@ -250,6 +383,11 @@ impl TmdbClient {
                         .map(|c| c.rating.clone())
                         .filter(|r| !r.is_empty())
                 }),
+            community_rating: (body.vote_count.unwrap_or(0) > 0)
+                .then_some(body.vote_average)
+                .flatten()
+                .filter(|rating| rating.is_finite() && (0.0..=10.0).contains(rating)),
+            community_rating_votes: body.vote_count.filter(|votes| *votes > 0),
         })
     }
 }
@@ -272,12 +410,24 @@ impl TmdbClient {
 /// (TMDb's own relevance signal) — first-seen (TMDb's own ranking) wins any
 /// remaining tie, so this never overrides TMDb's own ranking when nothing
 /// above distinguishes two results.
-fn pick_best_result<'a>(results: &'a [SearchHit], query: &str, year: Option<u32>) -> Option<&'a SearchHit> {
+fn pick_best_result<'a>(
+    results: &'a [SearchHit],
+    query: &str,
+    year: Option<u32>,
+) -> Option<&'a SearchHit> {
     let norm_query = normalize_for_match(query);
     let mut best: Option<(&SearchHit, (u8, u8, f64))> = None;
     for hit in results {
-        let candidate_title = hit.title.as_deref().or(hit.name.as_deref()).unwrap_or_default();
-        let original_title = hit.original_title.as_deref().or(hit.original_name.as_deref()).unwrap_or_default();
+        let candidate_title = hit
+            .title
+            .as_deref()
+            .or(hit.name.as_deref())
+            .unwrap_or_default();
+        let original_title = hit
+            .original_title
+            .as_deref()
+            .or(hit.original_name.as_deref())
+            .unwrap_or_default();
         let exact = (normalize_for_match(candidate_title) == norm_query
             || normalize_for_match(original_title) == norm_query) as u8;
         let candidate_year = hit
@@ -288,7 +438,10 @@ fn pick_best_result<'a>(results: &'a [SearchHit], query: &str, year: Option<u32>
             .and_then(|y| y.parse::<u32>().ok());
         let year_match = year.is_some_and(|y| candidate_year == Some(y)) as u8;
         let score = (exact, year_match, hit.popularity.unwrap_or(0.0));
-        if best.as_ref().is_none_or(|(_, best_score)| score > *best_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_score)| score > *best_score)
+        {
             best = Some((hit, score));
         }
     }
@@ -304,12 +457,31 @@ fn pick_best_result<'a>(results: &'a [SearchHit], query: &str, year: Option<u32>
 /// [pick_best_result] never kicks in for exactly the ambiguous case it
 /// exists for.
 fn normalize_for_match(s: &str) -> String {
-    const ROMAN: &[(&str, &str)] =
-        &[("ii", "2"), ("iii", "3"), ("iv", "4"), ("v", "5"), ("vi", "6"), ("vii", "7"), ("viii", "8"), ("ix", "9"), ("x", "10")];
-    let cleaned: String = s.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    const ROMAN: &[(&str, &str)] = &[
+        ("ii", "2"),
+        ("iii", "3"),
+        ("iv", "4"),
+        ("v", "5"),
+        ("vi", "6"),
+        ("vii", "7"),
+        ("viii", "8"),
+        ("ix", "9"),
+        ("x", "10"),
+    ];
+    let cleaned: String = s
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
     cleaned
         .split_whitespace()
-        .map(|word| ROMAN.iter().find(|(roman, _)| *roman == word).map(|(_, digit)| *digit).unwrap_or(word))
+        .map(|word| {
+            ROMAN
+                .iter()
+                .find(|(roman, _)| *roman == word)
+                .map(|(_, digit)| *digit)
+                .unwrap_or(word)
+        })
         .collect::<Vec<_>>()
         .join("")
 }
@@ -323,11 +495,11 @@ struct SearchResponse {
 #[derive(Deserialize)]
 struct SearchHit {
     id: u64,
-    title: Option<String>,         // movies
-    name: Option<String>,          // tv
+    title: Option<String>, // movies
+    name: Option<String>,  // tv
     original_title: Option<String>,
     original_name: Option<String>,
-    release_date: Option<String>,  // movies, "YYYY-MM-DD"
+    release_date: Option<String>,   // movies, "YYYY-MM-DD"
     first_air_date: Option<String>, // tv, "YYYY-MM-DD"
     popularity: Option<f64>,
 }
@@ -349,6 +521,21 @@ struct DetailsResponse {
     /// Present on a tv fetch (`append_to_response=...,content_ratings`);
     /// absent on a movie fetch.
     content_ratings: Option<ContentRatingsResponse>,
+    vote_average: Option<f64>,
+    vote_count: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SeasonDetailsResponse {
+    poster_path: Option<String>,
+    #[serde(default)]
+    episodes: Vec<SeasonEpisodeResponse>,
+}
+
+#[derive(Deserialize)]
+struct SeasonEpisodeResponse {
+    episode_number: u32,
+    still_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -423,7 +610,10 @@ mod tests {
     #[tokio::test]
     async fn search_and_fetch_movie_success() {
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 27205}]})) }))
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 27205}]})) }),
+            )
             .route(
                 "/movie/27205",
                 get(|| async {
@@ -439,10 +629,16 @@ mod tests {
             );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, "https://image.tmdb.org/t/p");
-        let result = client.search_and_fetch_movie("Inception", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Inception", None)
+            .await
+            .unwrap();
         assert_eq!(result.title, "Inception");
         assert_eq!(result.genres, vec!["Sci-Fi"]);
-        assert_eq!(result.poster_url.as_deref(), Some("https://image.tmdb.org/t/p/w342/poster.jpg"));
+        assert_eq!(
+            result.poster_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w342/poster.jpg")
+        );
         assert_eq!(result.cast.len(), 2);
         assert_eq!(result.cast[0].name, "Leonardo DiCaprio");
         assert_eq!(result.cast[0].character.as_deref(), Some("Cobb"));
@@ -457,6 +653,8 @@ mod tests {
                 get(|| async {
                     Json(json!({
                         "title": "Inception",
+                        "vote_average": 8.4,
+                        "vote_count": 36000,
                         "release_dates": {"results": [
                             {"iso_3166_1": "FR", "release_dates": [{"certification": "12"}]},
                             {"iso_3166_1": "US", "release_dates": [{"certification": ""}, {"certification": "PG-13"}]}
@@ -466,14 +664,22 @@ mod tests {
             );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Inception", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Inception", None)
+            .await
+            .unwrap();
         assert_eq!(result.certification.as_deref(), Some("PG-13"));
+        assert_eq!(result.community_rating, Some(8.4));
+        assert_eq!(result.community_rating_votes, Some(36_000));
     }
 
     #[tokio::test]
     async fn tv_certification_is_read_from_the_us_content_ratings_entry() {
         let router = Router::new()
-            .route("/search/tv", get(|| async { Json(json!({"results": [{"id": 1396}]})) }))
+            .route(
+                "/search/tv",
+                get(|| async { Json(json!({"results": [{"id": 1396}]})) }),
+            )
             .route(
                 "/tv/1396",
                 get(|| async {
@@ -493,42 +699,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn season_details_returns_distinct_season_poster_and_episode_stills() {
+        let router = Router::new().route(
+            "/tv/1433/season/2",
+            get(|| async {
+                Json(json!({
+                    "name": "Season 2",
+                    "season_number": 2,
+                    "poster_path": "/american-dad-season-2.jpg",
+                    "episodes": [
+                        {"episode_number": 1, "still_path": "/episode-1.jpg"},
+                        {"episode_number": 2, "still_path": "/episode-2.jpg"},
+                        {"episode_number": 3, "still_path": null}
+                    ]
+                }))
+            }),
+        );
+        let base = spawn_mock(router).await;
+        let client = TmdbClient::with_base_urls("key", &base, "https://image.tmdb.org/t/p");
+        let season = client.season_details(1433, 2).await.unwrap();
+
+        assert_eq!(
+            season.poster_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w342/american-dad-season-2.jpg")
+        );
+        assert_eq!(
+            season.episode_still_urls.get(&1).map(String::as_str),
+            Some("https://image.tmdb.org/t/p/w780/episode-1.jpg")
+        );
+        assert_eq!(
+            season.episode_still_urls.get(&2).map(String::as_str),
+            Some("https://image.tmdb.org/t/p/w780/episode-2.jpg")
+        );
+        assert!(!season.episode_still_urls.contains_key(&3));
+    }
+
+    #[tokio::test]
     async fn missing_certification_data_is_none_not_an_error() {
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
-            .route("/movie/1", get(|| async { Json(json!({"title": "No Ratings Data"})) }));
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 1}]})) }),
+            )
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "No Ratings Data"})) }),
+            );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("No Ratings Data", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("No Ratings Data", None)
+            .await
+            .unwrap();
         assert_eq!(result.certification, None);
     }
 
     #[tokio::test]
     async fn missing_credits_block_is_an_empty_cast_not_an_error() {
         let router = Router::new()
-            .route("/search/movie", get(|| async { Json(json!({"results": [{"id": 1}]})) }))
-            .route("/movie/1", get(|| async { Json(json!({"title": "No Credits"})) }));
+            .route(
+                "/search/movie",
+                get(|| async { Json(json!({"results": [{"id": 1}]})) }),
+            )
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "No Credits"})) }),
+            );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("No Credits", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("No Credits", None)
+            .await
+            .unwrap();
         assert!(result.cast.is_empty());
     }
 
     #[tokio::test]
     async fn empty_search_results_is_not_found() {
-        let router = Router::new().route("/search/movie", get(|| async { Json(json!({"results": []})) }));
+        let router = Router::new().route(
+            "/search/movie",
+            get(|| async { Json(json!({"results": []})) }),
+        );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        assert!(matches!(client.search_and_fetch_movie("Nope", None).await, Err(TmdbError::NotFound)));
+        assert!(matches!(
+            client.search_and_fetch_movie("Nope", None).await,
+            Err(TmdbError::NotFound)
+        ));
     }
 
     #[tokio::test]
     async fn server_error_is_unavailable_not_not_found() {
-        let router = Router::new()
-            .route("/search/movie", get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }));
+        let router = Router::new().route(
+            "/search/movie",
+            get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        assert!(matches!(client.search_and_fetch_movie("X", None).await, Err(TmdbError::Unavailable(_))));
+        assert!(matches!(
+            client.search_and_fetch_movie("X", None).await,
+            Err(TmdbError::Unavailable(_))
+        ));
     }
 
     // --- pick_best_result: the real "wrong movie matched" bug ---
@@ -572,10 +843,16 @@ mod tests {
                     ]}))
                 }),
             )
-            .route("/movie/2", get(|| async { Json(json!({"title": "Blade II"})) }));
+            .route(
+                "/movie/2",
+                get(|| async { Json(json!({"title": "Blade II"})) }),
+            );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Blade 2", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Blade 2", None)
+            .await
+            .unwrap();
         assert_eq!(result.title, "Blade II");
     }
 
@@ -594,7 +871,10 @@ mod tests {
             .route("/movie/2", get(|| async { Json(json!({"title": "Total Recall (2012)"})) }));
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Total Recall", Some(2012)).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Total Recall", Some(2012))
+            .await
+            .unwrap();
         assert_eq!(result.title, "Total Recall (2012)");
     }
 
@@ -607,7 +887,9 @@ mod tests {
             .route(
                 "/search/movie",
                 get(
-                    |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    |axum::extract::Query(params): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
                         if params.contains_key("year") {
                             Json(json!({"results": []}))
                         } else {
@@ -616,10 +898,16 @@ mod tests {
                     },
                 ),
             )
-            .route("/movie/1", get(|| async { Json(json!({"title": "Shaun of the Dead"})) }));
+            .route(
+                "/movie/1",
+                get(|| async { Json(json!({"title": "Shaun of the Dead"})) }),
+            );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Shaun of the Dead", Some(2003)).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Shaun of the Dead", Some(2003))
+            .await
+            .unwrap();
         assert_eq!(result.title, "Shaun of the Dead");
     }
 
@@ -638,7 +926,10 @@ mod tests {
             .route("/movie/1", get(|| async { Json(json!({"title": "Loosely Similar Title"})) }));
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Something Else Entirely", None).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Something Else Entirely", None)
+            .await
+            .unwrap();
         assert_eq!(result.title, "Loosely Similar Title");
     }
 
@@ -647,54 +938,96 @@ mod tests {
         let router = Router::new()
             .route(
                 "/search/movie",
-                get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-                    assert_eq!(params.get("year").map(String::as_str), Some("1995"));
-                    Json(json!({"results": [{"id": 949}]}))
-                }),
+                get(
+                    |axum::extract::Query(params): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
+                        assert_eq!(params.get("year").map(String::as_str), Some("1995"));
+                        Json(json!({"results": [{"id": 949}]}))
+                    },
+                ),
             )
-            .route("/movie/949", get(|| async { Json(json!({"title": "Heat"})) }));
+            .route(
+                "/movie/949",
+                get(|| async { Json(json!({"title": "Heat"})) }),
+            );
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("key", &base, &base);
-        let result = client.search_and_fetch_movie("Heat", Some(1995)).await.unwrap();
+        let result = client
+            .search_and_fetch_movie("Heat", Some(1995))
+            .await
+            .unwrap();
         assert_eq!(result.title, "Heat");
     }
 
     #[tokio::test]
     async fn v3_hex_key_is_sent_as_an_api_key_query_param() {
-        let router = Router::new().route(
-            "/search/movie",
-            get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-                 headers: axum::http::HeaderMap| async move {
-                assert_eq!(params.get("api_key").map(String::as_str), Some("0123456789abcdef0123456789abcdef"));
-                assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
-                Json(json!({"results": [{"id": 1}]}))
-            }),
-        )
-        .route("/movie/1", get(|| async { Json(json!({"title": "V3"})) }));
+        let router = Router::new()
+            .route(
+                "/search/movie",
+                get(
+                    |axum::extract::Query(params): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >,
+                     headers: axum::http::HeaderMap| async move {
+                        assert_eq!(
+                            params.get("api_key").map(String::as_str),
+                            Some("0123456789abcdef0123456789abcdef")
+                        );
+                        assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+                        Json(json!({"results": [{"id": 1}]}))
+                    },
+                ),
+            )
+            .route("/movie/1", get(|| async { Json(json!({"title": "V3"})) }));
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls("0123456789abcdef0123456789abcdef", &base, &base);
-        assert_eq!(client.search_and_fetch_movie("V3", None).await.unwrap().title, "V3");
+        assert_eq!(
+            client
+                .search_and_fetch_movie("V3", None)
+                .await
+                .unwrap()
+                .title,
+            "V3"
+        );
     }
 
     #[tokio::test]
     async fn v4_jwt_token_is_sent_as_a_bearer_header_not_a_query_param() {
         let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature";
-        let router = Router::new().route(
-            "/search/movie",
-            get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-                 headers: axum::http::HeaderMap| async move {
-                assert!(!params.contains_key("api_key"), "a v4 token must not also be sent as api_key");
-                assert_eq!(
-                    headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
-                    Some("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature")
-                );
-                Json(json!({"results": [{"id": 2}]}))
-            }),
-        )
-        .route("/movie/2", get(|| async { Json(json!({"title": "V4"})) }));
+        let router = Router::new()
+            .route(
+                "/search/movie",
+                get(
+                    |axum::extract::Query(params): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >,
+                     headers: axum::http::HeaderMap| async move {
+                        assert!(
+                            !params.contains_key("api_key"),
+                            "a v4 token must not also be sent as api_key"
+                        );
+                        assert_eq!(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok()),
+                            Some("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature")
+                        );
+                        Json(json!({"results": [{"id": 2}]}))
+                    },
+                ),
+            )
+            .route("/movie/2", get(|| async { Json(json!({"title": "V4"})) }));
         let base = spawn_mock(router).await;
         let client = TmdbClient::with_base_urls(token, &base, &base);
-        assert_eq!(client.search_and_fetch_movie("V4", None).await.unwrap().title, "V4");
+        assert_eq!(
+            client
+                .search_and_fetch_movie("V4", None)
+                .await
+                .unwrap()
+                .title,
+            "V4"
+        );
     }
 
     #[test]
@@ -705,23 +1038,33 @@ mod tests {
     #[test]
     fn parses_id_from_a_full_movie_url_with_slug() {
         assert_eq!(
-            TmdbOverride::Url("https://www.themoviedb.org/movie/27205-inception".into()).resolve_id(),
+            TmdbOverride::Url("https://www.themoviedb.org/movie/27205-inception".into())
+                .resolve_id(),
             Ok(27205)
         );
     }
 
     #[test]
     fn parses_id_from_a_tv_url_with_no_slug_and_trailing_slash() {
-        assert_eq!(TmdbOverride::Url("https://www.themoviedb.org/tv/1396/".into()).resolve_id(), Ok(1396));
+        assert_eq!(
+            TmdbOverride::Url("https://www.themoviedb.org/tv/1396/".into()).resolve_id(),
+            Ok(1396)
+        );
     }
 
     #[test]
     fn malformed_override_url_is_a_clean_typed_error_not_a_panic() {
         assert_eq!(
             TmdbOverride::Url("https://example.com/not-tmdb".into()).resolve_id(),
-            Err(TmdbOverrideError::UnparseableUrl("https://example.com/not-tmdb".into()))
+            Err(TmdbOverrideError::UnparseableUrl(
+                "https://example.com/not-tmdb".into()
+            ))
         );
-        assert!(TmdbOverride::Url("https://www.themoviedb.org/movie/not-a-number".into()).resolve_id().is_err());
+        assert!(
+            TmdbOverride::Url("https://www.themoviedb.org/movie/not-a-number".into())
+                .resolve_id()
+                .is_err()
+        );
         assert!(TmdbOverride::Url("garbage".into()).resolve_id().is_err());
     }
 }

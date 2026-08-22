@@ -25,7 +25,8 @@ pub fn read_tags(path: &Path) -> Option<EmbeddedTags> {
         artist: non_empty(tag.artist().map(|c| c.into_owned())),
         album: non_empty(tag.album().map(|c| c.into_owned())),
         track_number: tag.track().or_else(|| {
-            tag.get_string(&ItemKey::TrackNumber).and_then(|raw| raw.split('/').next()?.trim().parse().ok())
+            tag.get_string(&ItemKey::TrackNumber)
+                .and_then(|raw| raw.split('/').next()?.trim().parse().ok())
         }),
     };
     (tags != EmbeddedTags::default()).then_some(tags)

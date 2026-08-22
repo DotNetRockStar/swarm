@@ -39,7 +39,10 @@ pub enum PunchError {
 /// for this round may have gone out to a different candidate that didn't
 /// pan out, so this makes sure a packet flows back down the *confirmed*
 /// path immediately rather than waiting for the next round.
-pub async fn punch(socket: &UdpSocket, candidates: &[SocketAddr]) -> Result<SocketAddr, PunchError> {
+pub async fn punch(
+    socket: &UdpSocket,
+    candidates: &[SocketAddr],
+) -> Result<SocketAddr, PunchError> {
     if candidates.is_empty() {
         return Err(PunchError::NoResponse(0, 0));
     }
@@ -59,9 +62,9 @@ pub async fn punch(socket: &UdpSocket, candidates: &[SocketAddr]) -> Result<Sock
                     let _ = socket.send_to(PUNCH_MAGIC, from).await; // best-effort immediate reply
                     return Ok(from);
                 }
-                Ok(Ok(_)) => continue,       // stray/malformed datagram — keep waiting out this round
+                Ok(Ok(_)) => continue, // stray/malformed datagram — keep waiting out this round
                 Ok(Err(e)) => return Err(PunchError::Network(e)),
-                Err(_) => break,             // this round's window elapsed — try the next round
+                Err(_) => break, // this round's window elapsed — try the next round
             }
         }
     }
@@ -100,7 +103,9 @@ mod tests {
             listener.send_to(PUNCH_MAGIC, from).await.unwrap();
         });
 
-        let result = punch(&puncher, &[dead_candidate, listener_addr]).await.unwrap();
+        let result = punch(&puncher, &[dead_candidate, listener_addr])
+            .await
+            .unwrap();
         assert_eq!(result, listener_addr);
         listener_task.await.unwrap();
     }

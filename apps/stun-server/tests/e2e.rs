@@ -431,9 +431,18 @@ async fn full_phase1_flow() {
         .await
         .unwrap();
     assert_eq!(denied.status(), 401);
-    match recv_signal(&mut tv_ws).await {
-        SignalMessage::Error { code, .. } => assert_eq!(code, "revoked"),
-        other => panic!("expected revoked error, got {other:?}"),
+    // Presence events from the other device can still be queued ahead of
+    // the asynchronous revocation notification. Ignore those rather than
+    // making message scheduling part of this test's contract.
+    loop {
+        match recv_signal(&mut tv_ws).await {
+            SignalMessage::Error { code, .. } => {
+                assert_eq!(code, "revoked");
+                break;
+            }
+            SignalMessage::Presence { .. } => continue,
+            other => panic!("expected revoked error, got {other:?}"),
+        }
     }
 }
 

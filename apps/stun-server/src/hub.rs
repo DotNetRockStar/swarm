@@ -25,16 +25,25 @@ impl Default for Hub {
 
 impl Hub {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(HashMap::new()) }
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Register a device connection. A newer connection replaces an older one
     /// (the old receiver drops, ending its socket task).
-    pub fn connect(&self, device_id: &str, session_id: &str) -> mpsc::UnboundedReceiver<SignalMessage> {
+    pub fn connect(
+        &self,
+        device_id: &str,
+        session_id: &str,
+    ) -> mpsc::UnboundedReceiver<SignalMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.inner.lock().unwrap().insert(
             device_id.to_string(),
-            Connected { session_id: session_id.to_string(), sender: tx },
+            Connected {
+                session_id: session_id.to_string(),
+                sender: tx,
+            },
         );
         rx
     }
@@ -44,7 +53,10 @@ impl Hub {
     /// down by the old socket's cleanup.
     pub fn disconnect(&self, device_id: &str, session_id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.get(device_id).is_some_and(|c| c.session_id == session_id) {
+        if inner
+            .get(device_id)
+            .is_some_and(|c| c.session_id == session_id)
+        {
             inner.remove(device_id);
         }
     }

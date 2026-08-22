@@ -28,14 +28,23 @@ impl Mailer {
     /// dev/test behavior exactly, just centralized here instead of at each
     /// call site.
     pub fn from_config(smtp: Option<&SmtpConfig>) -> Self {
-        let Some(smtp) = smtp else { return Self { inner: None } };
+        let Some(smtp) = smtp else {
+            return Self { inner: None };
+        };
         let configured = || -> Result<Configured, Box<dyn std::error::Error>> {
             let tls_params = TlsParameters::new(smtp.host.clone())?;
-            let tls = if smtp.implicit_tls { Tls::Wrapper(tls_params) } else { Tls::Required(tls_params) };
+            let tls = if smtp.implicit_tls {
+                Tls::Wrapper(tls_params)
+            } else {
+                Tls::Required(tls_params)
+            };
             let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host)
                 .port(smtp.port)
                 .tls(tls)
-                .credentials(Credentials::new(smtp.username.clone(), smtp.password.clone()))
+                .credentials(Credentials::new(
+                    smtp.username.clone(),
+                    smtp.password.clone(),
+                ))
                 .build();
             let from = Mailbox::new(Some(smtp.from_name.clone()), smtp.from_email.parse()?);
             Ok(Configured { transport, from })
@@ -78,7 +87,11 @@ impl Mailer {
 
     async fn send(&self, to_email: &str, subject: &str, body: String, kind: &str) {
         let Some(configured) = &self.inner else {
-            tracing::info!(to = to_email, kind, "{kind} (SMTP not configured, logging instead): {body}");
+            tracing::info!(
+                to = to_email,
+                kind,
+                "{kind} (SMTP not configured, logging instead): {body}"
+            );
             return;
         };
         let to = match to_email.parse() {
@@ -88,7 +101,12 @@ impl Mailer {
                 return;
             }
         };
-        let message = match Message::builder().from(configured.from.clone()).to(to).subject(subject).body(body) {
+        let message = match Message::builder()
+            .from(configured.from.clone())
+            .to(to)
+            .subject(subject)
+            .body(body)
+        {
             Ok(m) => m,
             Err(error) => {
                 tracing::error!(%error, to = to_email, "failed to build {kind} email");
