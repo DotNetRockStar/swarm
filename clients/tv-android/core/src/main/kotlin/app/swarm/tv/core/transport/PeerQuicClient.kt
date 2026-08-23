@@ -236,4 +236,8 @@ internal class BoundedInputStream(private val delegate: InputStream, private val
         if (got > 0) remaining -= got
         return got
     }
+
+    override fun close() {
+        delegate.close()
+    }
 }

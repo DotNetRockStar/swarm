@@ -12,6 +12,7 @@
 //! matched/not-found/failed counts. Concurrent runs are the caller's
 //! responsibility to prevent (see `ServerCore`'s scrape guard).
 
+use crate::classify;
 use crate::roots::SharedRootResolver;
 use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
@@ -217,7 +218,7 @@ pub async fn run_bulk_scrape(
     let entries = if force {
         library.list().await?
     } else {
-        library.missing_scrape().await?
+        library.incomplete_scrape().await?
     };
     let (videos, tracks): (Vec<EntryRecord>, Vec<EntryRecord>) = entries
         .into_iter()
@@ -354,28 +355,155 @@ const SEARCH_QUERY_NOISE_TOKENS: &[&str] = &[
     "hmax",
     "atvp",
     "pcok",
+    // Release/distribution labels found in real failed rows. TMDb returns
+    // no results for e.g. "Dawn of the Dead Arrow" or "Mortal Kombat II
+    // NORDIC", while the title immediately before the label matches.
+    "arrow",
+    "nordic",
+    // Polish release shorthand (lektor polski), confirmed in a real
+    // filename: "Mumia LP r d11" fails while "Mumia" + year 2017 resolves
+    // TMDb movie 282035.
+    "lp",
 ];
 
 /// See [`SEARCH_QUERY_NOISE_TOKENS`]. Splits on whitespace, drops every
 /// token from the first noise token onward, and rejoins — cheap and
 /// dependency-free, matching this module's existing hand-rolled style.
 fn search_query_for(title: &str) -> String {
+    // Scene names commonly use dots/underscores as word separators. Tags
+    // read from the container can preserve those verbatim even when the
+    // filename classifier has already normalized them.
+    let normalized = title.replace(['.', '_'], " ");
+    // Some release names append a human-readable payload after a spaced
+    // dash, e.g. "Thirteen (Thir13en) Ghosts - Horror 2001 Eng Subs".
+    // Only cut at the dash when that suffix contains both a year and a
+    // recognizable release descriptor; a real title such as
+    // "Mission: Impossible - Ghost Protocol" remains untouched.
+    let release_suffix_tokens = [
+        "horror",
+        "eng",
+        "english",
+        "subs",
+        "multi-subs",
+        "bluray",
+        "brrip",
+        "webrip",
+        "720p",
+        "1080p",
+        "2160p",
+    ];
+    let candidate = normalized
+        .match_indices(" - ")
+        .find_map(|(index, _)| {
+            let suffix = &normalized[index + 3..];
+            let has_year = suffix.split(|c: char| !c.is_ascii_digit()).any(|part| {
+                part.len() == 4
+                    && part
+                        .parse::<u32>()
+                        .is_ok_and(|year| (1900..=2099).contains(&year))
+            });
+            let has_release_descriptor = suffix.split_whitespace().any(|word| {
+                let lower = word.to_lowercase();
+                release_suffix_tokens.contains(&lower.trim_matches(|c: char| !c.is_alphanumeric()))
+            });
+            (has_year && has_release_descriptor).then_some(normalized[..index].trim())
+        })
+        .unwrap_or(normalized.trim());
+    let words = candidate.split_whitespace().collect::<Vec<_>>();
     let mut kept = Vec::new();
-    for word in title.split_whitespace() {
+    for (index, word) in words.iter().enumerate() {
         let lower = word.to_lowercase();
-        if SEARCH_QUERY_NOISE_TOKENS
-            .iter()
-            .any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag)
+        let compound_edition = matches!(lower.as_str(), "director" | "directors" | "director's")
+            && words
+                .get(index + 1)
+                .is_some_and(|next| next.eq_ignore_ascii_case("cut"));
+        if compound_edition
+            || SEARCH_QUERY_NOISE_TOKENS
+                .iter()
+                .any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag)
         {
             break;
         }
-        kept.push(word);
+        kept.push(*word);
     }
     if kept.is_empty() {
         title.to_string()
     } else {
         kept.join(" ")
     }
+}
+
+/// A year embedded in a container title is still useful when the cleaner
+/// filename omitted it. Do not treat an all-numeric title (notably the real
+/// films "1917" and "1984") as its own release year.
+fn embedded_year_hint(title: &str) -> Option<u32> {
+    if title.trim().chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    title
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| part.len() == 4)
+        .filter_map(|part| part.parse::<u32>().ok())
+        .filter(|year| (1900..=2099).contains(year))
+        .next_back()
+}
+
+fn remove_year_from_query(query: &str, year: Option<u32>) -> String {
+    let Some(year) = year else {
+        return query.to_string();
+    };
+    let year = year.to_string();
+    let stripped = query
+        .split_whitespace()
+        .filter(|word| word.trim_matches(|c: char| !c.is_ascii_digit()) != year)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if stripped.is_empty() {
+        query.to_string()
+    } else {
+        stripped
+    }
+}
+
+/// Build conservative movie-search fallbacks from two independent sources:
+/// the embedded display title and the filename-derived classifier result.
+/// Container tags are often excellent, but real files also contain junk tags
+/// such as `JAWS_t02 mkv-muxed (1)` while their filenames are clean. Trying
+/// the path-derived query only after a definitive no-match preserves useful
+/// tags without allowing one bad tag to permanently hide a valid movie.
+fn movie_search_candidates(entry: &EntryRecord) -> Vec<(String, Option<u32>)> {
+    let embedded_year = entry.year.or_else(|| embedded_year_hint(&entry.title));
+    let mut candidates = Vec::new();
+    let mut push = |title: &str, year: Option<u32>| {
+        let query = remove_year_from_query(&search_query_for(title), year);
+        if !query.trim().is_empty()
+            && !candidates
+                .iter()
+                .any(|(existing, existing_year): &(String, Option<u32>)| {
+                    existing.eq_ignore_ascii_case(&query) && *existing_year == year
+                })
+        {
+            candidates.push((query, year));
+        }
+    };
+    push(&entry.title, embedded_year);
+    if let Some(path_entry) = classify::classify(&entry.relative_path) {
+        push(&path_entry.title, path_entry.year.or(embedded_year));
+    }
+    candidates
+}
+
+async fn search_movie_for_entry(
+    tmdb: &TmdbClient,
+    entry: &EntryRecord,
+) -> Result<ScrapedVideo, TmdbError> {
+    for (query, year) in movie_search_candidates(entry) {
+        match tmdb.search_and_fetch_movie(&query, year).await {
+            Err(TmdbError::NotFound) => continue,
+            result => return result,
+        }
+    }
+    Err(TmdbError::NotFound)
 }
 
 async fn scrape_videos(
@@ -414,10 +542,7 @@ async fn scrape_videos(
             break;
         }
         let outcome = match entry.kind {
-            MediaKind::Movie => {
-                tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year)
-                    .await
-            }
+            MediaKind::Movie => search_movie_for_entry(&tmdb, entry).await,
             MediaKind::Episode => {
                 let raw_query = entry
                     .show_title
@@ -956,10 +1081,7 @@ pub async fn scrape_one_video(
             tmdb.details_by_id(id, media_type).await?
         }
         None => match entry.kind {
-            MediaKind::Movie => {
-                tmdb.search_and_fetch_movie(&search_query_for(&entry.title), entry.year)
-                    .await?
-            }
+            MediaKind::Movie => search_movie_for_entry(&tmdb, entry).await?,
             MediaKind::Episode => {
                 let raw_query = entry
                     .show_title
@@ -1156,6 +1278,24 @@ mod tests {
             search_query_for("28 Years Later Proper 1080p WEB-DL DDP5 1 x265-NeoNoir"),
             "28 Years Later"
         );
+        // All four are taken verbatim from the current library's failed
+        // rows and were verified against TMDb's live search service.
+        assert_eq!(
+            search_query_for("Alien Resurrection Directors Cut 1080p BRrip x264"),
+            "Alien Resurrection"
+        );
+        assert_eq!(
+            search_query_for("Dawn of the Dead Arrow 1080p BluRay HEVC"),
+            "Dawn of the Dead"
+        );
+        assert_eq!(
+            search_query_for("Mortal.Kombat.II.2026.NORDIC.1080p.BluRay.x264"),
+            "Mortal Kombat II 2026"
+        );
+        assert_eq!(
+            search_query_for("Thirteen (Thir13en) Ghosts - Horror 2001 Eng Subs 1080p"),
+            "Thirteen (Thir13en) Ghosts"
+        );
     }
 
     #[test]
@@ -1170,6 +1310,10 @@ mod tests {
     fn search_query_with_no_noise_tokens_is_unchanged() {
         assert_eq!(search_query_for("Heat"), "Heat");
         assert_eq!(search_query_for("The Dark Knight"), "The Dark Knight");
+        assert_eq!(
+            search_query_for("Mission: Impossible - Ghost Protocol"),
+            "Mission: Impossible - Ghost Protocol"
+        );
     }
 
     #[test]
@@ -1177,6 +1321,66 @@ mod tests {
         // Never send TMDb an empty query — a title so noisy every token
         // matches should degrade to searching the raw title, not "".
         assert_eq!(search_query_for("1080p x264"), "1080p x264");
+    }
+
+    fn movie_entry(title: &str, relative_path: &str, year: Option<u32>) -> EntryRecord {
+        EntryRecord {
+            entry_key: "movie-key".into(),
+            relative_path: relative_path.into(),
+            kind: MediaKind::Movie,
+            title: title.into(),
+            size: 1,
+            modified_time: 0,
+            fingerprint: "fingerprint".into(),
+            artist: None,
+            album: None,
+            track_number: None,
+            show_title: None,
+            season: None,
+            episode: None,
+            year,
+            duration_secs: None,
+            video: None,
+            audio: None,
+            scraped_title: None,
+            genres: vec![],
+            artwork_version: 0,
+            cast: vec![],
+            overview: None,
+            rating: None,
+            community_rating: None,
+            community_rating_votes: None,
+        }
+    }
+
+    #[test]
+    fn movie_search_uses_embedded_year_without_leaving_it_in_the_query() {
+        let entry = movie_entry(
+            "A Nightmare On Elm Street 1984 1080p BrRip x264 YIFY",
+            "Batocera-movies-shows/A Nightmare On Elm Street (720p).mp4",
+            None,
+        );
+        assert_eq!(
+            movie_search_candidates(&entry),
+            vec![("A Nightmare On Elm Street".into(), Some(1984))]
+        );
+        assert_eq!(embedded_year_hint("1984"), None);
+    }
+
+    #[test]
+    fn movie_search_falls_back_from_bad_container_tag_to_clean_filename() {
+        let entry = movie_entry(
+            "JAWS_t02 mkv-muxed (1)",
+            "Batocera-movies-shows/Jaws.1975.1080p.BrRip.x264.bitloks.YIFY.mp4",
+            Some(1975),
+        );
+        assert_eq!(
+            movie_search_candidates(&entry),
+            vec![
+                ("JAWS t02 mkv-muxed (1)".into(), Some(1975)),
+                ("Jaws".into(), Some(1975)),
+            ]
+        );
     }
 
     // --- search_query_for_album: real-library-confirmed album name cleanup ---
@@ -1345,6 +1549,20 @@ mod tests {
         assert_eq!(art_version, 1);
         assert_eq!(std::fs::read(root.join(&art_path)).unwrap(), vec![9, 9, 9]);
         assert!(library.missing_scrape().await.unwrap().is_empty());
+        let repair = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repair.matched, 1,
+            "a processed entry with missing metadata/artwork must be retried"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -1520,8 +1738,22 @@ mod tests {
             )
             .route(
                 "/movie/1",
-                get(|| async { Json(json!({"title": "Heat", "genres": []})) }),
-            );
+                get(|| async {
+                    Json(json!({
+                        "title": "Heat",
+                        "genres": [{"name": "Crime"}],
+                        "overview": "A complete test record.",
+                        "poster_path": "/poster.jpg",
+                        "backdrop_path": "/backdrop.jpg",
+                        "credits": {"cast": [{"name": "Al Pacino", "character": "Vincent Hanna"}]},
+                        "release_dates": {"results": [{"iso_3166_1": "US", "release_dates": [{"certification": "R"}]}]},
+                        "vote_average": 8.3,
+                        "vote_count": 100
+                    }))
+                }),
+            )
+            .route("/w342/poster.jpg", get(|| async { [1u8, 2, 3] }))
+            .route("/w1280/backdrop.jpg", get(|| async { [4u8, 5, 6] }));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = ScrapeConfig {
             tmdb_api_key: Some("key".into()),

@@ -10,6 +10,7 @@ package app.swarm.tv.core.catalog
 
 import app.swarm.tv.core.peer.CatalogEntry
 import app.swarm.tv.core.peer.CatalogManifest
+import app.swarm.tv.core.peer.MediaKind
 
 data class MergedEntry(
     val fingerprint: String,
@@ -38,7 +39,12 @@ object CatalogMerger {
 
         return bestEntryByFingerprint.entries
             .map { (fingerprint, entry) -> MergedEntry(fingerprint, sourcesByFingerprint.getValue(fingerprint).toList(), entry) }
-            .sortedBy { it.entry.title.lowercase() }
+            .sortedWith(
+                compareBy<MergedEntry>(
+                    { it.entry.catalogSortTitle() },
+                    { it.entry.displayTitle().lowercase() },
+                ),
+            )
     }
 
     /**
@@ -51,4 +57,23 @@ object CatalogMerger {
         fun score(e: CatalogEntry) = (if (e.scrapedTitle != null) 1 else 0) + (if (e.artworkEtag != null) 1 else 0)
         return score(candidate) > score(existing)
     }
+
+    /**
+     * Movies are alphabetized like a media library: a leading standalone
+     * "The" does not separate a title from the rest of its series. The
+     * displayed title is untouched; this value is used only for ordering.
+     */
+    private fun CatalogEntry.catalogSortTitle(): String {
+        val title = displayTitle().trim()
+        val withoutLeadingArticle = if (
+            kind == MediaKind.MOVIE && title.startsWith("The ", ignoreCase = true)
+        ) {
+            title.substring(4).trimStart()
+        } else {
+            title
+        }
+        return withoutLeadingArticle.lowercase()
+    }
+
+    private fun CatalogEntry.displayTitle(): String = scrapedTitle?.takeIf { it.isNotBlank() } ?: title
 }

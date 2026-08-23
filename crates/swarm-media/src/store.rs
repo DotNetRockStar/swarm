@@ -164,6 +164,15 @@ pub struct ClientErrorRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerNotificationRecord {
+    pub id: i64,
+    pub level: String,
+    pub title: String,
+    pub message: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleRecord {
     pub id: String,
     pub entry_key: String,
@@ -319,6 +328,14 @@ impl Library {
                 received_at_ms INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_client_errors_received ON client_errors(received_at_ms DESC);
+            CREATE TABLE IF NOT EXISTS server_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT NOT NULL CHECK (level IN ('success','warning','error')),
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_server_notifications_created ON server_notifications(created_at_ms DESC, id DESC);
             CREATE TABLE IF NOT EXISTS entry_likes (
                 entry_key TEXT NOT NULL,
                 device_id TEXT NOT NULL,
@@ -725,6 +742,32 @@ impl Library {
         Ok(())
     }
 
+    /// Register a completed subtitle from a non-Whisper source. Playback
+    /// treats every row in `subtitle_tracks` uniformly, while transcription
+    /// job state remains untouched.
+    pub async fn upsert_subtitle(&self, subtitle: &SubtitleRecord) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO subtitle_tracks \
+             (entry_key, id, language, label, source, format, file_path, fingerprint, generated_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(entry_key, id) DO UPDATE SET language = excluded.language, label = excluded.label, \
+             source = excluded.source, format = excluded.format, file_path = excluded.file_path, \
+             fingerprint = excluded.fingerprint, generated_at_ms = excluded.generated_at_ms",
+        )
+        .bind(&subtitle.entry_key)
+        .bind(&subtitle.id)
+        .bind(&subtitle.language)
+        .bind(&subtitle.label)
+        .bind(&subtitle.source)
+        .bind(&subtitle.format)
+        .bind(&subtitle.file_path)
+        .bind(&subtitle.fingerprint)
+        .bind(unix_time_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn subtitle_tracks(&self, entry_key: &str) -> sqlx::Result<Vec<SubtitleRecord>> {
         type Row = (
             String,
@@ -886,6 +929,40 @@ impl Library {
             .bind(CURRENT_SCRAPE_VERSION)
             .fetch_all(&self.pool)
             .await?;
+        Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
+    /// Entries whose provider-backed presentation is incomplete. Unlike
+    /// [`Self::missing_scrape`], this also revisits a successfully processed
+    /// row when any metadata or artwork expected for that media kind is
+    /// absent. A user-triggered normal scrape therefore repairs partial
+    /// results without requiring the destructive "force re-scrape all"
+    /// option.
+    pub async fn incomplete_scrape(&self) -> sqlx::Result<Vec<EntryRecord>> {
+        let rows = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE scrape_version < ? \
+             OR (kind IN ('movie', 'episode') AND (\
+                 scraped_title IS NULL OR TRIM(scraped_title) = '' \
+                 OR genres_json IS NULL OR genres_json IN ('', '[]', 'null') \
+                 OR cast_json IS NULL OR cast_json IN ('', '[]', 'null') \
+                 OR overview IS NULL OR TRIM(overview) = '' \
+                 OR rating IS NULL OR TRIM(rating) = '' \
+                 OR community_rating IS NULL \
+                 OR poster_relative_path IS NULL OR TRIM(poster_relative_path) = '' \
+                 OR backdrop_relative_path IS NULL OR TRIM(backdrop_relative_path) = '' \
+                 OR (kind = 'episode' AND (season_poster_relative_path IS NULL OR TRIM(season_poster_relative_path) = ''))\
+             )) \
+             OR (kind = 'track' AND (\
+                 genres_json IS NULL OR genres_json IN ('', '[]', 'null') \
+                 OR community_rating IS NULL \
+                 OR cover_relative_path IS NULL OR TRIM(cover_relative_path) = '' \
+                 OR artist_art_relative_path IS NULL OR TRIM(artist_art_relative_path) = ''\
+             )) \
+             ORDER BY relative_path"
+        ))
+        .bind(CURRENT_SCRAPE_VERSION)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(EntryRecord::from).collect())
     }
 
@@ -1472,6 +1549,70 @@ impl Library {
 
     pub async fn clear_client_errors(&self) -> sqlx::Result<()> {
         sqlx::query("DELETE FROM client_errors")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn record_server_notification(
+        &self,
+        level: &str,
+        title: &str,
+        message: &str,
+    ) -> sqlx::Result<()> {
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO server_notifications (level, title, message, created_at_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind(level)
+        .bind(title)
+        .bind(message)
+        .bind(created_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_server_notifications(&self) -> sqlx::Result<Vec<ServerNotificationRecord>> {
+        let rows: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
+            "SELECT id, level, title, message, created_at_ms FROM server_notifications ORDER BY created_at_ms DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, level, title, message, created_at_ms)| ServerNotificationRecord {
+                    id,
+                    level,
+                    title,
+                    message,
+                    created_at_ms,
+                },
+            )
+            .collect())
+    }
+
+    pub async fn server_notification_count(&self) -> sqlx::Result<u64> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM server_notifications")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count as u64)
+    }
+
+    pub async fn delete_server_notification(&self, id: i64) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM server_notifications WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_server_notifications(&self) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM server_notifications")
             .execute(&self.pool)
             .await?;
         Ok(())

@@ -20,11 +20,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -48,11 +50,22 @@ fun ArtistShelfScreen(
     artistPhotoUrl: (MergedEntry) -> String?,
     onOpenArtist: (ArtistGroup) -> Unit,
     onBack: () -> Unit,
+    initialFocusKey: String? = null,
 ) {
     BackHandler(onBack = onBack)
 
     val firstCardFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(artists) { if (artists.isNotEmpty()) firstCardFocusRequester.requestFocus() }
+    val gridState = rememberLazyGridState()
+    val focusIndex = remember(artists, initialFocusKey) {
+        initialFocusKey?.let { key -> artists.indexOfFirst { it.artist == key }.takeIf { it >= 0 } } ?: 0
+    }
+    LaunchedEffect(artists, focusIndex) {
+        if (artists.isNotEmpty()) {
+            gridState.scrollToItem(focusIndex)
+            withFrameNanos {}
+            firstCardFocusRequester.requestFocus()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
         if (artists.isEmpty()) {
@@ -60,13 +73,14 @@ fun ArtistShelfScreen(
         } else {
             // top = 32.dp — see MovieShelfScreen's identical comment on why.
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(5),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
                 itemsIndexed(artists) { index, artist ->
-                    val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                    val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     val artwork = remember(artist, artworkUrl, artistPhotoUrl) {
                         artist.artworkUrls(artworkUrl, artistPhotoUrl)
                     }

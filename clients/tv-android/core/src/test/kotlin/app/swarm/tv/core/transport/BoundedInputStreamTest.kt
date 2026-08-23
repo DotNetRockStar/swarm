@@ -46,4 +46,19 @@ class BoundedInputStreamTest {
         assertArrayEquals(byteArrayOf(1, 2, 3), stream.readBytes())
         assertEquals(-1, stream.read())
     }
+
+    @Test
+    fun `close propagates to the transport stream so an abandoned seek is cancelled`() {
+        var closed = false
+        val delegate = object : ByteArrayInputStream(byteArrayOf(1, 2, 3)) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }
+
+        BoundedInputStream(delegate, 3).close()
+
+        assertTrue(closed)
+    }
 }

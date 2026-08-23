@@ -94,6 +94,28 @@ class CatalogMergerTest {
     }
 
     @Test
+    fun `movies ignore leading the when sorted by displayed title`() {
+        val manifests = mapOf(
+            "server-a" to CatalogManifest(
+                thumbprint = "tp",
+                entries = listOf(
+                    entry("k1", "fp-1", "The Addams Family.mkv", scrapedTitle = "The Addams Family"),
+                    entry("k2", "fp-2", "Alien.mkv", scrapedTitle = "Alien"),
+                    entry("k3", "fp-3", "Addams Family Values.mkv", scrapedTitle = "Addams Family Values"),
+                    entry("k4", "fp-4", "Theodore Rex.mkv", scrapedTitle = "Theodore Rex"),
+                ),
+            ),
+        )
+
+        val merged = CatalogMerger.merge(manifests)
+
+        assertEquals(
+            listOf("The Addams Family", "Addams Family Values", "Alien", "Theodore Rex"),
+            merged.map { it.entry.scrapedTitle },
+        )
+    }
+
+    @Test
     fun `empty manifests produce an empty merge`() {
         assertTrue(CatalogMerger.merge(emptyMap()).isEmpty())
     }

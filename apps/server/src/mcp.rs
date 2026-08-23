@@ -15,6 +15,7 @@
 //! out to be wanted.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -67,6 +68,10 @@ pub struct SearchResultEntry {
     pub community_rating: Option<f64>,
     pub community_rating_votes: Option<u64>,
     pub like_count: u32,
+    /// Filename exactly as it exists beneath the configured media root.
+    pub file_name: String,
+    /// Stored root-relative path, including the root label on multi-root servers.
+    pub relative_path: String,
 }
 
 /// Caps how much of a large library one `search_library` call can return —
@@ -101,6 +106,48 @@ pub struct EntryDetails {
     pub episode: Option<u32>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub file_name: String,
+    pub folder: String,
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub media_root_label: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowseMediaFilesParams {
+    /// Optional case-insensitive folder/path fragment to narrow the result.
+    pub path_prefix: Option<String>,
+    /// Optional configured media-root label.
+    pub root_label: Option<String>,
+    /// Maximum results (defaults to 200, capped at 500).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MediaFileInfo {
+    pub entry_key: String,
+    pub kind: String,
+    pub title: String,
+    pub media_root_label: String,
+    pub file_name: String,
+    pub folder: String,
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub size_bytes: u64,
+}
+
+fn path_parts(relative_path: &str) -> (String, String) {
+    let path = Path::new(relative_path);
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    (file_name, folder)
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -195,16 +242,21 @@ impl McpServer {
                 })
             })
             .take(SEARCH_RESULT_LIMIT)
-            .map(|e| SearchResultEntry {
-                like_count: like_counts.get(&e.entry_key).copied().unwrap_or(0),
-                entry_key: e.entry_key,
-                title: e.scraped_title.unwrap_or(e.title),
-                kind: kind_str(e.kind).to_string(),
-                year: e.year,
-                genres: e.genres,
-                rating: e.rating,
-                community_rating: e.community_rating,
-                community_rating_votes: e.community_rating_votes,
+            .map(|e| {
+                let (file_name, _) = path_parts(&e.relative_path);
+                SearchResultEntry {
+                    like_count: like_counts.get(&e.entry_key).copied().unwrap_or(0),
+                    entry_key: e.entry_key,
+                    title: e.scraped_title.unwrap_or(e.title),
+                    kind: kind_str(e.kind).to_string(),
+                    year: e.year,
+                    genres: e.genres,
+                    rating: e.rating,
+                    community_rating: e.community_rating,
+                    community_rating_votes: e.community_rating_votes,
+                    file_name,
+                    relative_path: e.relative_path,
+                }
             })
             .collect();
         Ok(Json(results))
@@ -230,6 +282,9 @@ impl McpServer {
             .like_counts()
             .await
             .map_err(|e| e.to_string())?;
+        let (file_name, folder) = path_parts(&entry.relative_path);
+        let absolute_path = self.core.media_roots.resolve(&entry.relative_path);
+        let media_root_label = self.core.media_roots.label_for(&entry.relative_path);
         Ok(Json(EntryDetails {
             like_count: like_counts.get(&entry.entry_key).copied().unwrap_or(0),
             entry_key: entry.entry_key.clone(),
@@ -257,7 +312,62 @@ impl McpServer {
             episode: entry.episode,
             artist: entry.artist,
             album: entry.album,
+            file_name,
+            folder,
+            relative_path: entry.relative_path,
+            absolute_path: absolute_path.to_string_lossy().into_owned(),
+            media_root_label,
         }))
+    }
+
+    #[tool(
+        description = "Browse the media server's real filesystem layout. Returns filenames, folders, root-relative paths, and resolved absolute paths for indexed media files. Read-only; defaults to 200 and is capped at 500 results."
+    )]
+    async fn browse_media_files(
+        &self,
+        Parameters(params): Parameters<BrowseMediaFilesParams>,
+    ) -> Result<Json<Vec<MediaFileInfo>>, String> {
+        let entries = self.core.library.list().await.map_err(|e| e.to_string())?;
+        let path_query = params.path_prefix.as_deref().map(str::to_lowercase);
+        let root_query = params.root_label.as_deref();
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let results = entries
+            .into_iter()
+            .filter(|entry| {
+                path_query
+                    .as_deref()
+                    .is_none_or(|query| entry.relative_path.to_lowercase().contains(query))
+            })
+            .filter(|entry| {
+                root_query.is_none_or(|root| {
+                    self.core
+                        .media_roots
+                        .label_for(&entry.relative_path)
+                        .eq_ignore_ascii_case(root)
+                })
+            })
+            .take(limit)
+            .map(|entry| {
+                let (file_name, folder) = path_parts(&entry.relative_path);
+                MediaFileInfo {
+                    entry_key: entry.entry_key,
+                    kind: kind_str(entry.kind).to_string(),
+                    title: entry.scraped_title.unwrap_or(entry.title),
+                    media_root_label: self.core.media_roots.label_for(&entry.relative_path),
+                    file_name,
+                    folder,
+                    absolute_path: self
+                        .core
+                        .media_roots
+                        .resolve(&entry.relative_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                    relative_path: entry.relative_path,
+                    size_bytes: entry.size,
+                }
+            })
+            .collect();
+        Ok(Json(results))
     }
 
     #[tool(
@@ -319,7 +429,8 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "Query this SWARM media server: search the library (search_library), \
-             inspect one entry in full (get_entry_details), check which swarm \
+             inspect one entry in full (get_entry_details), browse actual filenames \
+             and folder structure (browse_media_files), check which swarm \
              devices are online (list_swarm_devices), and review recent \
              client-reported errors (list_client_errors). All tools are read-only."
                 .into(),
@@ -389,5 +500,16 @@ mod tests {
         assert!(!has_valid_bearer(&headers, "secret"));
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         assert!(has_valid_bearer(&headers, "secret"));
+    }
+
+    #[test]
+    fn filesystem_path_parts_keep_real_filename_and_folder() {
+        assert_eq!(
+            path_parts("Shows/Dexter/Season 03/Dexter - S03E01.mkv"),
+            (
+                "Dexter - S03E01.mkv".to_string(),
+                "Shows/Dexter/Season 03".to_string()
+            )
+        );
     }
 }

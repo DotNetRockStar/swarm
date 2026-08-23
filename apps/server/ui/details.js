@@ -1,7 +1,7 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshTranscriptionSetting()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting()]);
 }
 
 async function refreshTmdbKeyField() {
@@ -10,6 +10,15 @@ async function refreshTmdbKeyField() {
   const status = document.getElementById("tmdbKeyStatus");
   status.textContent = settings.has_tmdb_key ? "A key is saved. Scraping is enabled." : "No key saved yet — scraping is disabled until one is added.";
   status.classList.toggle("error", !settings.has_tmdb_key);
+}
+
+async function refreshOpenSubtitlesKeyField() {
+  const settings = await invoke("get_settings");
+  const status = document.getElementById("openSubtitlesKeyStatus");
+  status.textContent = settings.has_opensubtitles_key
+    ? "An API key is saved. Subtitle download is available from each movie or episode's Manage panel."
+    : "No key saved — local Whisper generation still works, but subtitle download is disabled.";
+  status.classList.toggle("error", !settings.has_opensubtitles_key);
 }
 
 async function refreshTranscriptionSetting() {
@@ -84,6 +93,18 @@ document.getElementById("saveTmdbKeyBtn").addEventListener("click", async () => 
     input.value = "";
     await refreshTmdbKeyField();
     showToast("TMDb key saved.", "success");
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("saveOpenSubtitlesKeyBtn").addEventListener("click", async () => {
+  const input = document.getElementById("openSubtitlesKeyInput");
+  try {
+    await invoke("set_opensubtitles_api_key", { key: input.value });
+    input.value = "";
+    await refreshOpenSubtitlesKeyField();
+    showToast("OpenSubtitles key saved.", "success");
   } catch (err) {
     showToast(String(err), "error");
   }

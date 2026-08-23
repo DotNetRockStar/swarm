@@ -16,8 +16,10 @@ mod settings;
 
 use rand::RngCore;
 use settings::{MediaRootHealth, MediaRootSetting, Settings};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
@@ -57,10 +59,14 @@ impl AppState {
         self.core
             .get_or_try_init(|| async {
                 let dir = app_data_dir(app)?;
-                let settings = settings::load(&dir);
+                let mut settings = settings::load(&dir);
                 if settings.media_roots.is_empty() {
                     return Err("not_configured".to_string());
                 }
+                if settings::populate_reconnect_urls(&mut settings) {
+                    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+                }
+                let recovery_settings_dir = dir.clone();
                 let config = ServerConfig {
                     media_roots: to_media_roots(&settings.media_roots),
                     data_dir: dir,
@@ -94,6 +100,7 @@ impl AppState {
                 core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
+                start_media_root_recovery(Arc::clone(&core), recovery_settings_dir);
                 if settings.mcp_enabled {
                     if let Some(access_token) = settings.mcp_access_token.filter(|token| !token.is_empty()) {
                         let mcp_core = Arc::clone(&core);
@@ -138,6 +145,71 @@ impl AppState {
     }
 }
 
+/// Network mounts can remain present under `/Volumes` while every read
+/// fails. Poll the same real-read health check used by the UI, ask macOS to
+/// remount known SMB roots with saved credentials, and rescan once after a
+/// root becomes readable again. Attempts are throttled so an offline NAS
+/// cannot produce a reconnect storm.
+fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
+    tokio::spawn(async move {
+        let mut unavailable = HashSet::<String>::new();
+        let mut last_attempt = HashMap::<String, Instant>::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let mut persisted = settings::load(&settings_dir);
+            if settings::populate_reconnect_urls(&mut persisted) {
+                if let Err(error) = settings::save(&settings_dir, &persisted) {
+                    tracing::warn!(%error, "could not save detected network-share reconnect URL");
+                }
+            }
+            let roots = persisted.media_roots;
+            let health = tokio::task::spawn_blocking({
+                let roots = roots.clone();
+                move || settings::media_root_health(&roots)
+            })
+            .await
+            .unwrap_or_default();
+            let mut recovered = false;
+            for (root, status) in roots.iter().zip(health) {
+                if status.available {
+                    if unavailable.remove(&root.label) {
+                        tracing::info!(root = %root.label, path = %root.path, "media root recovered");
+                        recovered = true;
+                    }
+                    last_attempt.remove(&root.label);
+                    continue;
+                }
+                unavailable.insert(root.label.clone());
+                let should_attempt = root.reconnect_url.is_some()
+                    && last_attempt
+                        .get(&root.label)
+                        .is_none_or(|last| last.elapsed() >= Duration::from_secs(30));
+                if should_attempt {
+                    last_attempt.insert(root.label.clone(), Instant::now());
+                    let reconnect_root = root.clone();
+                    tokio::task::spawn_blocking(move || {
+                        match settings::reconnect_network_root(&reconnect_root) {
+                            Ok(true) => {
+                                tracing::info!(root = %reconnect_root.label, "requested network-share reconnect")
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(root = %reconnect_root.label, %error, "network-share reconnect request failed")
+                            }
+                        }
+                    });
+                }
+            }
+            if recovered {
+                if let Err(error) = core.rescan(None).await {
+                    tracing::warn!(%error, "media-root recovery rescan failed");
+                }
+            }
+        }
+    });
+}
+
 fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
     settings
         .iter()
@@ -152,6 +224,7 @@ fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
 struct SettingsView {
     media_roots: Vec<MediaRootSetting>,
     has_tmdb_key: bool,
+    has_opensubtitles_key: bool,
     streaming_upload_budget_enabled: bool,
     local_transcription_enabled: bool,
     transcription_pause_while_streaming: bool,
@@ -166,6 +239,7 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
     Ok(SettingsView {
         media_roots: settings.media_roots,
         has_tmdb_key: settings.tmdb_api_key.is_some(),
+        has_opensubtitles_key: settings.opensubtitles_api_key.is_some(),
         streaming_upload_budget_enabled: settings.streaming_upload_budget_enabled,
         local_transcription_enabled: settings.local_transcription_enabled,
         transcription_pause_while_streaming: settings.transcription_pause_while_streaming,
@@ -207,6 +281,7 @@ async fn choose_media_folder(app: tauri::AppHandle) -> Result<Option<String>, St
     settings.media_roots = vec![MediaRootSetting {
         label: "local".to_string(),
         path: path.clone(),
+        reconnect_url: settings::discover_reconnect_url(&path),
     }];
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     Ok(Some(path))
@@ -276,7 +351,12 @@ async fn add_media_root(
     if settings.media_roots.iter().any(|r| r.label == label) {
         return Err(format!("a root labeled \"{label}\" already exists"));
     }
-    settings.media_roots.push(MediaRootSetting { label, path });
+    let reconnect_url = settings::discover_reconnect_url(&path);
+    settings.media_roots.push(MediaRootSetting {
+        label,
+        path,
+        reconnect_url,
+    });
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     let rescan = state.apply_live_roots(&settings.media_roots).await?;
     Ok(MediaRootsResult {
@@ -318,6 +398,48 @@ async fn set_tmdb_api_key(app: tauri::AppHandle, key: String) -> Result<(), Stri
         Some(key.trim().to_string())
     };
     settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_opensubtitles_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.opensubtitles_api_key = if key.trim().is_empty() {
+        None
+    } else {
+        Some(key.trim().to_string())
+    };
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct SubtitleDownloadResult {
+    language: String,
+    label: String,
+}
+
+#[tauri::command]
+async fn download_subtitle(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+    language: String,
+) -> Result<SubtitleDownloadResult, String> {
+    let settings = settings::load(&app_data_dir(&app)?);
+    let api_key = settings
+        .opensubtitles_api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "Add an OpenSubtitles API key in Details first.".to_string())?;
+    let track = state
+        .core(&app)
+        .await?
+        .download_subtitle(api_key, &entry_key, &language)
+        .await?;
+    Ok(SubtitleDownloadResult {
+        language: track.language,
+        label: track.label,
+    })
 }
 
 #[tauri::command]
@@ -641,6 +763,46 @@ async fn run_scrape(
     // its final report, so the frontend can't see "done" before the last
     // per-entry update.
     let _ = forward.await;
+    match &result {
+        Ok(report) if !report.issues.is_empty() => {
+            let mut message = format!(
+                "Matched: {}\nNot found: {}\nFailed: {}\nSkipped: {}",
+                report.matched, report.not_found, report.failed, report.skipped,
+            );
+            if !report.issues.is_empty() {
+                message.push_str("\n\nIssues:\n");
+                for issue in &report.issues {
+                    message.push_str(&format!("• {} — {}\n", issue.title, issue.reason));
+                }
+            }
+            let level = if report.failed > 0 {
+                "error"
+            } else {
+                "warning"
+            };
+            if let Err(error) = core
+                .library
+                .record_server_notification(
+                    level,
+                    "Metadata scrape finished with issues",
+                    message.trim_end(),
+                )
+                .await
+            {
+                tracing::warn!(%error, "could not save bulk-scrape error notification");
+            }
+        }
+        Err(error) => {
+            if let Err(save_error) = core
+                .library
+                .record_server_notification("error", "Metadata scrape failed", &error.to_string())
+                .await
+            {
+                tracing::warn!(%save_error, "could not save bulk-scrape failure notification");
+            }
+        }
+        _ => {}
+    }
     result.map_err(|e| e.to_string())
 }
 
@@ -901,15 +1063,18 @@ async fn get_swarm_link(
     }))
 }
 
-/// Opens a short-lived, single-use pairing window for a client discovered on
-/// the local network. This path is independent of the configured STUN link.
+/// Accepts the short-lived code displayed by a TV discovered on the LAN.
+/// This approval path is entirely local and independent of the SWARM service.
 #[tauri::command]
-async fn open_lan_pairing(
+async fn approve_lan_pairing(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<swarm_server::lan::PairingStatus, String> {
+    code: String,
+) -> Result<swarm_server::lan::LanPairingApproval, String> {
     let core = state.core(&app).await?;
-    Ok(core.open_lan_pairing().await)
+    core.approve_lan_pairing(&code)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1125,6 +1290,89 @@ async fn clear_client_errors(
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct ServerNotificationView {
+    id: i64,
+    level: String,
+    title: String,
+    message: String,
+    created_at_ms: i64,
+}
+
+impl From<swarm_media::store::ServerNotificationRecord> for ServerNotificationView {
+    fn from(notification: swarm_media::store::ServerNotificationRecord) -> Self {
+        Self {
+            id: notification.id,
+            level: notification.level,
+            title: notification.title,
+            message: notification.message,
+            created_at_ms: notification.created_at_ms,
+        }
+    }
+}
+
+#[tauri::command]
+async fn list_server_notifications(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ServerNotificationView>, String> {
+    let core = state.core(&app).await?;
+    core.library
+        .list_server_notifications()
+        .await
+        .map(|notifications| {
+            notifications
+                .into_iter()
+                .map(ServerNotificationView::from)
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn notification_count(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<u64, String> {
+    let core = state.core(&app).await?;
+    let server = core
+        .library
+        .server_notification_count()
+        .await
+        .map_err(|error| error.to_string())?;
+    let client = core
+        .library
+        .client_error_count()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(server + client)
+}
+
+#[tauri::command]
+async fn delete_server_notification(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.library
+        .delete_server_notification(id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn clear_server_notifications(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.library
+        .clear_server_notifications()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 // The dashboard's info modal (apps/server/ui/app.js's INFO_TOPICS) links out to
 // external resources (protocol/standard explainers) for the curious — a plain
 // `<a target="_blank">` doesn't open the OS's default browser from inside a
@@ -1240,6 +1488,8 @@ fn main() {
             add_media_root,
             remove_media_root,
             set_tmdb_api_key,
+            set_opensubtitles_api_key,
+            download_subtitle,
             set_streaming_upload_budget_enabled,
             set_local_transcription_enabled,
             set_transcription_pause_while_streaming,
@@ -1261,7 +1511,7 @@ fn main() {
             upload_group_artwork,
             clear_scraped_metadata,
             get_swarm_link,
-            open_lan_pairing,
+            approve_lan_pairing,
             list_local_peers,
             revoke_local_peer,
             join_swarm,
@@ -1275,6 +1525,10 @@ fn main() {
             client_error_count,
             delete_client_error,
             clear_client_errors,
+            list_server_notifications,
+            notification_count,
+            delete_server_notification,
+            clear_server_notifications,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build SWARM Server");

@@ -5,10 +5,18 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class WatchStateTest {
+    @Test
+    fun `ninety five percent is watched but just under is not`() {
+        assertTrue(WatchState.fromPlayback(95.0, 100.0, 1).watched)
+        assertFalse(WatchState.fromPlayback(94.9, 100.0, 1).watched)
+    }
+
     @Test
     fun `wire shape uses snake_case fields`() {
         val state = WatchState(positionSecs = 125.5, durationSecs = 5400.0, watched = false, updatedAt = 1_700_000_000_000)
@@ -28,6 +36,7 @@ class WatchStateTest {
         val state = WatchState(positionSecs = 42.0, durationSecs = 100.0, watched = false, updatedAt = 1)
         store.set("fp-1", state)
         assertEquals(state, store.get("fp-1"))
+        assertEquals(mapOf("fp-1" to state), store.all())
         assertNull(store.get("fp-2")) // a different fingerprint is unaffected
 
         store.clear("fp-1")

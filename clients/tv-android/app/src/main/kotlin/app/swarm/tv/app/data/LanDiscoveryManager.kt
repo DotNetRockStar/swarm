@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -43,6 +44,15 @@ data class LanServer(
         )
     }
 }
+
+/** Short-lived LAN approval shown on the TV and privately polled afterward. */
+data class LanPairingActivation(
+    val serverFingerprint: String,
+    val code: String,
+    val activationId: String,
+    val pollToken: String,
+    val expiresInSeconds: Long,
+)
 
 /**
  * Re-resolving a known certificate is an address refresh, not a new pairing.
@@ -169,36 +179,88 @@ class LanDiscoveryManager(context: Context) : Closeable {
         }
     }
 
-    suspend fun pair(server: LanServer, code: String, deviceName: String, fingerprint: String): Result<Unit> =
+    suspend fun beginPairing(
+        server: LanServer,
+        deviceName: String,
+        fingerprint: String,
+    ): Result<LanPairingActivation> =
         withContext(Dispatchers.IO) {
             runCatching {
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(server.host, server.pairingPort), 5_000)
-                    socket.soTimeout = 5_000
-                    val request = LanPairRequest(code, deviceName, fingerprint)
-                    socket.getOutputStream().bufferedWriter().use { writer ->
-                        writer.write(SwarmJson.encodeToString(request))
-                        writer.newLine()
-                        writer.flush()
-                        val line = socket.getInputStream().bufferedReader().readLine()
-                            ?: error("The media server closed the pairing connection.")
-                        val response = SwarmJson.decodeFromString<LanPairResponse>(line)
-                        if (!response.ok) {
-                            val message = when (response.error) {
-                                "pairing_closed_or_bad_code" -> "The LAN pairing code is incorrect or expired."
-                                "not_lan" -> "The media server did not recognize this as a LAN connection."
-                                else -> "The media server rejected the pairing request."
-                            }
-                            error(message)
-                        }
-                    }
-                }
+                val response = exchange(
+                    server,
+                    LanPairRequest(
+                        action = "begin",
+                        name = deviceName,
+                        fingerprint = fingerprint,
+                    ),
+                )
+                requireSuccessful(response)
+                LanPairingActivation(
+                    serverFingerprint = server.certFingerprint,
+                    code = response.code ?: error("The media server did not return an activation code."),
+                    activationId = response.activationId ?: error("The media server returned an incomplete activation."),
+                    pollToken = response.pollToken ?: error("The media server returned an incomplete activation."),
+                    expiresInSeconds = response.expiresInSeconds ?: 300,
+                )
             }
         }
+
+    suspend fun pollPairing(server: LanServer, activation: LanPairingActivation): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val response = exchange(
+                    server,
+                    LanPairRequest(
+                        action = "poll",
+                        activationId = activation.activationId,
+                        pollToken = activation.pollToken,
+                    ),
+                )
+                requireSuccessful(response)
+                response.status ?: error("The media server returned no activation status.")
+            }
+        }
+
+    private fun exchange(server: LanServer, request: LanPairRequest): LanPairResponse =
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(server.host, server.pairingPort), 5_000)
+            socket.soTimeout = 5_000
+            val writer = socket.getOutputStream().bufferedWriter()
+            writer.write(SwarmJson.encodeToString(request))
+            writer.newLine()
+            writer.flush()
+            val line = socket.getInputStream().bufferedReader().readLine()
+                ?: error("The media server closed the activation connection.")
+            SwarmJson.decodeFromString(line)
+        }
+
+    private fun requireSuccessful(response: LanPairResponse) {
+        if (response.ok) return
+        val message = when (response.error) {
+            "not_lan" -> "The media server did not recognize this as a local-network connection."
+            "too_many_pending_activations" -> "The media server has too many pending TV approvals. Try again shortly."
+            else -> "The media server rejected the LAN activation request."
+        }
+        error(message)
+    }
 }
 
 @Serializable
-private data class LanPairRequest(val code: String, val name: String, val fingerprint: String)
+private data class LanPairRequest(
+    val action: String,
+    val name: String? = null,
+    val fingerprint: String? = null,
+    @SerialName("activation_id") val activationId: String? = null,
+    @SerialName("poll_token") val pollToken: String? = null,
+)
 
 @Serializable
-private data class LanPairResponse(val ok: Boolean, val error: String? = null)
+private data class LanPairResponse(
+    val ok: Boolean,
+    val error: String? = null,
+    val code: String? = null,
+    @SerialName("activation_id") val activationId: String? = null,
+    @SerialName("poll_token") val pollToken: String? = null,
+    @SerialName("expires_in_seconds") val expiresInSeconds: Long? = null,
+    val status: String? = null,
+)

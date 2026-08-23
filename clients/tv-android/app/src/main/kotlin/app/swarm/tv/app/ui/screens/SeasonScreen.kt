@@ -10,6 +10,7 @@ package app.swarm.tv.app.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,25 +19,27 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.Button
+import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
@@ -51,20 +54,35 @@ fun SeasonScreen(
     episodeArtworkUrl: (MergedEntry) -> String?,
     onPlayEpisode: (MergedEntry) -> Unit,
     onBack: () -> Unit,
+    selectedSeason: SeasonGroup?,
+    onSelectSeason: (SeasonGroup?) -> Unit,
+    isWatchlisted: Boolean,
+    onToggleWatchlist: () -> Unit,
 ) {
-    var selectedSeason by remember(show) { mutableStateOf<SeasonGroup?>(null) }
-    BackHandler { if (selectedSeason != null) selectedSeason = null else onBack() }
+    BackHandler { if (selectedSeason != null) onSelectSeason(null) else onBack() }
 
     val season = selectedSeason
     if (season == null) {
-        SeasonList(show, seasonArtworkUrl, onOpenSeason = { selectedSeason = it })
+        SeasonList(
+            show,
+            seasonArtworkUrl,
+            isWatchlisted,
+            onToggleWatchlist,
+            onOpenSeason = onSelectSeason,
+        )
     } else {
         EpisodeGrid(season, episodeArtworkUrl, onPlayEpisode)
     }
 }
 
 @Composable
-private fun SeasonList(show: ShowGroup, seasonArtworkUrl: (MergedEntry) -> String?, onOpenSeason: (SeasonGroup) -> Unit) {
+private fun SeasonList(
+    show: ShowGroup,
+    seasonArtworkUrl: (MergedEntry) -> String?,
+    isWatchlisted: Boolean,
+    onToggleWatchlist: () -> Unit,
+    onOpenSeason: (SeasonGroup) -> Unit,
+) {
     val firstCardFocusRequester = remember { FocusRequester() }
     LaunchedEffect(show) { if (show.seasons.isNotEmpty()) firstCardFocusRequester.requestFocus() }
 
@@ -76,6 +94,30 @@ private fun SeasonList(show: ShowGroup, seasonArtworkUrl: (MergedEntry) -> Strin
         // Room for tv-material3's focus-scale animation on edge cards — see CatalogScreen.kt.
         contentPadding = PaddingValues(12.dp),
     ) {
+        item(
+            key = "show-actions",
+            span = { GridItemSpan(maxLineSpan) },
+            contentType = "header",
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    show.show,
+                    color = SwarmText,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 16.dp),
+                )
+                Button(onClick = onToggleWatchlist, colors = swarmActionButtonColors()) {
+                    Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
+                }
+            }
+        }
         itemsIndexed(
             items = show.seasons,
             key = { _, season -> season.season ?: -1 },

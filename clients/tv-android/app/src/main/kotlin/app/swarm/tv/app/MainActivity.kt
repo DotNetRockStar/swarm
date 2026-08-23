@@ -43,8 +43,11 @@ import app.swarm.tv.app.data.AndroidLikedEntriesStore
 import app.swarm.tv.app.data.AndroidTokenStore
 import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.LanDiscoveryManager
+import app.swarm.tv.app.data.LanPairingActivation
 import app.swarm.tv.app.data.LanServer
 import app.swarm.tv.app.data.AndroidWatchStateStore
+import app.swarm.tv.app.data.AndroidWatchlistStore
+import app.swarm.tv.app.data.WatchlistKeys
 import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
@@ -56,11 +59,12 @@ import app.swarm.tv.app.ui.components.rememberClientToastHostState
 import app.swarm.tv.app.ui.screens.AlbumScreen
 import app.swarm.tv.app.ui.screens.ArtistShelfScreen
 import app.swarm.tv.app.ui.screens.CatalogScreen
+import app.swarm.tv.app.ui.screens.CatalogBrowseState
+import app.swarm.tv.app.ui.screens.ExitConfirmOverlay
 import app.swarm.tv.app.ui.screens.MiniPlayerBar
 import app.swarm.tv.app.ui.screens.MovieDetailScreen
 import app.swarm.tv.app.ui.screens.MovieShelfScreen
 import app.swarm.tv.app.ui.screens.MusicPlayerScreen
-import app.swarm.tv.app.ui.screens.PasscodeEntryScreen
 import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
@@ -72,9 +76,11 @@ import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmTvTheme
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
+import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
+import app.swarm.tv.core.watch.WatchState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 
@@ -107,6 +113,7 @@ class MainActivity : ComponentActivity() {
 
         val tokenStore = AndroidTokenStore(applicationContext)
         val watchStateStore = AndroidWatchStateStore(applicationContext)
+        val watchlistStore = AndroidWatchlistStore(applicationContext)
         val connectionStore = AndroidConnectionStore(applicationContext)
         val likedEntriesStore = AndroidLikedEntriesStore(applicationContext)
         val kidModeStore = AndroidKidModeStore(applicationContext)
@@ -122,7 +129,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, connectionStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore, disconnectedServerStore, catalogCache, BuildConfig.SWARM_RENDEZVOUS_URL) as T
+                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, watchlistStore, connectionStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore, disconnectedServerStore, catalogCache, BuildConfig.SWARM_RENDEZVOUS_URL) as T
         }
 
         setContent {
@@ -135,12 +142,15 @@ class MainActivity : ComponentActivity() {
                     }
                     val state by viewModel.state.collectAsState()
                     val likedFingerprints by viewModel.likedFingerprints.collectAsState()
+                    val watchStates by viewModel.watchStates.collectAsState()
+                    val watchlistKeys by viewModel.watchlistKeys.collectAsState()
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
                     val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
                     val browsePreview by viewModel.browsePreview.collectAsState()
                     val lanServers by viewModel.lanServers.collectAsState()
                     val lanPairingBusy by viewModel.lanPairingBusy.collectAsState()
+                    val lanPairingActivation by viewModel.lanPairingActivation.collectAsState()
                     val lanError by viewModel.lanError.collectAsState()
                     val pairedLanFingerprints by viewModel.pairedLanFingerprints.collectAsState()
                     val disconnectedServerFingerprints by viewModel.disconnectedServerFingerprints.collectAsState()
@@ -152,15 +162,21 @@ class MainActivity : ComponentActivity() {
                         defaultDeviceName = defaultDeviceName,
                         lanServers = lanServers,
                         lanPairingBusy = lanPairingBusy,
+                        lanPairingActivation = lanPairingActivation,
                         lanError = lanError,
                         pairedLanFingerprints = pairedLanFingerprints,
                         disconnectedServerFingerprints = disconnectedServerFingerprints,
                         onConnectLan = viewModel::connectLanServer,
-                        onPairLan = viewModel::pairLanServer,
+                        onStartLanPairing = viewModel::startLanPairing,
+                        onCancelLanPairing = viewModel::cancelLanPairing,
                         onDisconnectServer = viewModel::disconnectSwarmServer,
                         onReconnectServer = viewModel::reconnectSwarmServer,
                         isLiked = isLikedCallback,
                         onToggleLike = viewModel::toggleLike,
+                        watchStates = watchStates,
+                        watchlistKeys = watchlistKeys,
+                        onToggleMovieWatchlist = viewModel::toggleMovieWatchlist,
+                        onToggleShowWatchlist = viewModel::toggleShowWatchlist,
                         kidModeSettings = kidModeSettings,
                         onEnableKidMode = viewModel::enableKidMode,
                         onUpdateKidModeRules = viewModel::updateKidModeRules,
@@ -179,12 +195,12 @@ class MainActivity : ComponentActivity() {
                         artistPhotoUrl = viewModel::artistPhotoUrl,
                         artistPhotoThumbnailUrl = viewModel::artistPhotoThumbnailUrl,
                         fullArtworkUrl = viewModel::fullArtworkUrl,
-                        onSubmit = viewModel::submitPasscode,
                         onStartActivation = viewModel::startActivation,
                         onCancelActivation = viewModel::cancelActivation,
                         onBrowseCatalog = viewModel::browseCatalog,
                         onPlay = viewModel::play,
                         onPlayNext = viewModel::playNext,
+                        onSeekPlayback = viewModel::seekPlayback,
                         onStopPlayback = viewModel::stopPlayback,
                         onBackToDashboard = viewModel::backToDashboard,
                         artworkUrl = viewModel::artworkUrl,
@@ -195,7 +211,6 @@ class MainActivity : ComponentActivity() {
                         onSavePlaybackPosition = viewModel::savePlaybackPosition,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
                         onOpenSettings = viewModel::openSettings,
-                        onJoinAdditionalSwarm = viewModel::joinAdditionalSwarm,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
                         onUpdateDeviceName = viewModel::updateDeviceName,
                         onBackFromSettings = viewModel::backFromSettings,
@@ -209,6 +224,7 @@ class MainActivity : ComponentActivity() {
                         onBackFromArtistAlbums = viewModel::backFromArtistAlbums,
                         onOpenShowShelf = viewModel::openShowShelf,
                         onOpenShow = viewModel::openShowSeasons,
+                        onSelectShowSeason = viewModel::selectShowSeason,
                         onBackFromShowShelf = viewModel::backFromShowShelf,
                         onBackFromShowSeasons = viewModel::backFromShowSeasons,
                     )
@@ -231,15 +247,21 @@ private fun SwarmApp(
     defaultDeviceName: String,
     lanServers: List<LanServer>,
     lanPairingBusy: Boolean,
+    lanPairingActivation: LanPairingActivation?,
     lanError: String?,
     pairedLanFingerprints: Set<String>,
     disconnectedServerFingerprints: Set<String>,
     onConnectLan: (server: LanServer, deviceName: String) -> Unit,
-    onPairLan: (server: LanServer, code: String, deviceName: String) -> Unit,
+    onStartLanPairing: (server: LanServer, deviceName: String) -> Unit,
+    onCancelLanPairing: () -> Unit,
     onDisconnectServer: (SwarmDevice) -> Unit,
     onReconnectServer: (SwarmDevice) -> Unit,
     isLiked: (MergedEntry) -> Boolean,
     onToggleLike: (MergedEntry) -> Unit,
+    watchStates: Map<String, WatchState>,
+    watchlistKeys: Set<String>,
+    onToggleMovieWatchlist: (MergedEntry) -> Unit,
+    onToggleShowWatchlist: (ShowGroup) -> Unit,
     kidModeSettings: KidModeSettings?,
     onEnableKidMode: (pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
     onUpdateKidModeRules: (allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
@@ -258,12 +280,12 @@ private fun SwarmApp(
     artistPhotoUrl: (MergedEntry) -> String?,
     artistPhotoThumbnailUrl: (MergedEntry) -> String?,
     fullArtworkUrl: (MergedEntry) -> String?,
-    onSubmit: (baseUrl: String, code: String, deviceName: String) -> Unit,
     onStartActivation: (deviceName: String) -> Unit,
     onCancelActivation: () -> Unit,
     onBrowseCatalog: () -> Unit,
     onPlay: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
+    onSeekPlayback: (Double) -> Unit,
     onStopPlayback: () -> Unit,
     onBackToDashboard: () -> Unit,
     artworkUrl: (MergedEntry) -> String?,
@@ -271,10 +293,9 @@ private fun SwarmApp(
     episodeArtworkUrl: (MergedEntry) -> String?,
     backdropUrl: (MergedEntry) -> String?,
     onReportProblem: (MergedEntry) -> Unit,
-    onSavePlaybackPosition: (fingerprint: String, positionSecs: Double, durationSecs: Double) -> Unit,
-    onPlaybackRuntimeError: (message: String) -> Unit,
+    onSavePlaybackPosition: (entry: MergedEntry, positionSecs: Double, durationSecs: Double) -> Unit,
+    onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onOpenSettings: () -> Unit,
-    onJoinAdditionalSwarm: (code: String) -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
     onBackFromSettings: () -> Unit,
@@ -288,6 +309,7 @@ private fun SwarmApp(
     onBackFromArtistAlbums: () -> Unit,
     onOpenShowShelf: () -> Unit,
     onOpenShow: (ShowGroup) -> Unit,
+    onSelectShowSeason: (SeasonGroup?) -> Unit,
     onBackFromShowShelf: () -> Unit,
     onBackFromShowSeasons: () -> Unit,
 ) {
@@ -314,6 +336,8 @@ private fun SwarmApp(
     var lastFocusedMovieKey by remember { mutableStateOf<String?>(null) }
     var lastFocusedShowKey by remember { mutableStateOf<String?>(null) }
     var lastFocusedArtistKey by remember { mutableStateOf<String?>(null) }
+    var catalogBrowseState by remember { mutableStateOf(CatalogBrowseState()) }
+    var showCatalogExitConfirm by remember { mutableStateOf(false) }
 
     // The one track session actually live right now, whichever of the two
     // places it can be is holding it — see minimizePlayback's doc comment.
@@ -397,7 +421,7 @@ private fun SwarmApp(
             activeMusicSession?.let { session ->
                 val positionSecs = session.positionOffsetSecs + (player?.currentPosition ?: 0L) / 1000.0
                 val durationSecs = player?.duration?.takeIf { it != C.TIME_UNSET }?.let { session.positionOffsetSecs + it / 1000.0 } ?: 0.0
-                onSavePlaybackPosition(session.fingerprint, positionSecs, session.mediaDurationSecs ?: durationSecs)
+                onSavePlaybackPosition(session.entry, positionSecs, session.mediaDurationSecs ?: durationSecs)
             }
             player?.release()
         }
@@ -430,31 +454,9 @@ private fun SwarmApp(
     Box(modifier = contentModifier) {
         when (state) {
             is UiState.Loading ->
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { SwarmLoadingIndicator() }
-            is UiState.PasscodeEntry ->
-                PasscodeEntryScreen(
-                    isSubmitting = false,
-                    errorMessage = lanError,
-                    defaultDeviceName = defaultDeviceName,
-                    lanServers = lanServers,
-                    lanPairingBusy = lanPairingBusy,
-                    onConnectLan = onConnectLan,
-                    onPairLan = onPairLan,
-                    onSubmit = onSubmit,
-                    onStartActivation = onStartActivation,
-                )
-            is UiState.Registering ->
-                PasscodeEntryScreen(
-                    isSubmitting = true,
-                    errorMessage = lanError,
-                    defaultDeviceName = defaultDeviceName,
-                    lanServers = lanServers,
-                    lanPairingBusy = lanPairingBusy,
-                    onConnectLan = onConnectLan,
-                    onPairLan = onPairLan,
-                    onSubmit = onSubmit,
-                    onStartActivation = onStartActivation,
-                )
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
+                }
             is UiState.RequestingActivation ->
                 ActivationRequestScreen(onCancel = onCancelActivation)
             is UiState.Activating ->
@@ -464,18 +466,6 @@ private fun SwarmApp(
                     errorMessage = state.error,
                     onCancel = onCancelActivation,
                 )
-            is UiState.Error ->
-                PasscodeEntryScreen(
-                    isSubmitting = false,
-                    errorMessage = state.message,
-                    defaultDeviceName = defaultDeviceName,
-                    lanServers = lanServers,
-                    lanPairingBusy = lanPairingBusy,
-                    onConnectLan = onConnectLan,
-                    onPairLan = onPairLan,
-                    onSubmit = onSubmit,
-                    onStartActivation = onStartActivation,
-                )
             is UiState.Dashboard ->
                 SwarmDashboardScreen(
                     swarm = state.swarm,
@@ -484,6 +474,7 @@ private fun SwarmApp(
                     pairedLanFingerprints = pairedLanFingerprints,
                     disconnectedServerFingerprints = disconnectedServerFingerprints,
                     lanPairingBusy = lanPairingBusy,
+                    lanPairingActivation = lanPairingActivation,
                     lanError = lanError,
                     deviceName = defaultDeviceName,
                     joiningServer = state.joiningServer,
@@ -492,9 +483,11 @@ private fun SwarmApp(
                     onOpenSettings = onOpenSettings,
                     onAddServer = { onStartActivation(defaultDeviceName) },
                     onConnectLan = onConnectLan,
-                    onPairLan = onPairLan,
+                    onStartLanPairing = onStartLanPairing,
+                    onCancelLanPairing = onCancelLanPairing,
                     onDisconnectServer = onDisconnectServer,
                     onReconnectServer = onReconnectServer,
+                    onBackToBrowse = onBrowseCatalog,
                 )
             is UiState.Settings ->
                 SwarmSettingsScreen(
@@ -519,34 +512,87 @@ private fun SwarmApp(
                     playbackError = state.playbackError,
                     artworkUrl = artworkUrl,
                     artistPhotoUrl = artistPhotoThumbnailUrl,
-                    onOpenMovie = { entry -> lastFocusedMovieKey = entry.entry.entryKey; onOpenMovie(entry) },
+                    onOpenMovie = { entry ->
+                        lastFocusedMovieKey = entry.entry.entryKey
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = null
+                        onOpenMovie(entry)
+                    },
                     onOpenMovieShelf = onOpenMovieShelf,
                     onOpenArtistShelf = onOpenArtistShelf,
-                    onOpenArtist = { artist -> lastFocusedArtistKey = artist.artist; onOpenArtist(artist) },
+                    onOpenArtist = { artist ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = artist.artist
+                        onOpenArtist(artist)
+                    },
                     onOpenShowShelf = onOpenShowShelf,
-                    onOpenShow = { show -> lastFocusedShowKey = show.show; onOpenShow(show) },
-                    onBack = onBackToDashboard,
+                    onOpenShow = { show ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = show.show
+                        lastFocusedArtistKey = null
+                        onOpenShow(show)
+                    },
+                    onOpenSwarm = {
+                        showCatalogExitConfirm = false
+                        onBackToDashboard()
+                    },
+                    onBack = {
+                        val unreachableIds = state.unreachable.mapTo(mutableSetOf()) { it.deviceId }
+                        val hasConnectedServer = state.devices.any {
+                            (it.deviceType == app.swarm.tv.core.rest.DeviceType.SERVER ||
+                                it.deviceType == app.swarm.tv.core.rest.DeviceType.BOTH) &&
+                                it.online && it.deviceId !in unreachableIds
+                        }
+                        if (hasConnectedServer) {
+                            showCatalogExitConfirm = true
+                        } else {
+                            onBackToDashboard()
+                        }
+                    },
                     initialFocusMovieKey = lastFocusedMovieKey,
                     initialFocusShowKey = lastFocusedShowKey,
                     initialFocusArtistKey = lastFocusedArtistKey,
                     isLiked = isLiked,
+                    watchStates = watchStates,
+                    watchlistKeys = watchlistKeys,
+                    onPlay = onPlay,
                     preview = browsePreview,
                     onStartPreview = onStartBrowsePreview,
                     onStopPreview = onStopBrowsePreview,
                     onPreviewFinished = onFinishBrowsePreview,
+                    initialBrowseState = catalogBrowseState,
+                    onBrowseStateChange = { catalogBrowseState = it },
                 )
             is UiState.ArtistShelf ->
                 ArtistShelfScreen(
                     state.artists,
                     artworkUrl = artworkUrl,
                     artistPhotoUrl = artistPhotoThumbnailUrl,
-                    onOpenArtist = onOpenArtist,
+                    onOpenArtist = { artist ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = artist.artist
+                        onOpenArtist(artist)
+                    },
                     onBack = onBackFromArtistShelf,
+                    initialFocusKey = lastFocusedArtistKey,
                 )
             is UiState.ArtistAlbums ->
                 AlbumScreen(state.artist, artworkUrl, onPlay = onPlay, onBack = onBackFromArtistAlbums)
             is UiState.MovieShelf ->
-                MovieShelfScreen(state.movies, artworkUrl, onOpenMovie = onOpenMovie, onBack = onBackFromMovieShelf)
+                MovieShelfScreen(
+                    state.movies,
+                    artworkUrl,
+                    onOpenMovie = { entry ->
+                        lastFocusedMovieKey = entry.entry.entryKey
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = null
+                        onOpenMovie(entry)
+                    },
+                    onBack = onBackFromMovieShelf,
+                    initialFocusKey = lastFocusedMovieKey,
+                )
             is UiState.MovieDetail ->
                 MovieDetailScreen(
                     state.entry,
@@ -557,9 +603,22 @@ private fun SwarmApp(
                     onReportProblem = onReportProblem,
                     isLiked = isLiked(state.entry),
                     onToggleLike = { onToggleLike(state.entry) },
+                    isWatchlisted = WatchlistKeys.movie(state.entry) in watchlistKeys,
+                    onToggleWatchlist = { onToggleMovieWatchlist(state.entry) },
                 )
             is UiState.ShowShelf ->
-                ShowShelfScreen(state.shows, artworkUrl, onOpenShow = onOpenShow, onBack = onBackFromShowShelf)
+                ShowShelfScreen(
+                    state.shows,
+                    artworkUrl,
+                    onOpenShow = { show ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = show.show
+                        lastFocusedArtistKey = null
+                        onOpenShow(show)
+                    },
+                    onBack = onBackFromShowShelf,
+                    initialFocusKey = lastFocusedShowKey,
+                )
             is UiState.ShowSeasons ->
                 SeasonScreen(
                     state.show,
@@ -567,6 +626,10 @@ private fun SwarmApp(
                     episodeArtworkUrl = episodeArtworkUrl,
                     onPlayEpisode = onPlay,
                     onBack = onBackFromShowSeasons,
+                    selectedSeason = state.selectedSeason,
+                    onSelectSeason = onSelectShowSeason,
+                    isWatchlisted = WatchlistKeys.show(state.show) in watchlistKeys,
+                    onToggleWatchlist = { onToggleShowWatchlist(state.show) },
                 )
             is UiState.Player ->
                 if (state.entry.entry.kind == MediaKind.TRACK) {
@@ -592,8 +655,10 @@ private fun SwarmApp(
                     PlayerScreen(
                         url = state.url,
                         title = state.title,
+                        playbackMode = state.playbackMode,
                         resumePositionSecs = state.resumePositionSecs,
                         positionOffsetSecs = state.positionOffsetSecs,
+                        mediaDurationSecs = state.mediaDurationSecs,
                         maxBitrate = state.maxBitrate,
                         subtitles = state.subtitles,
                         hasNext = state.nextEntry != null,
@@ -601,12 +666,13 @@ private fun SwarmApp(
                         onBack = onStopPlayback,
                         onPositionUpdate = { positionSecs, durationSecs ->
                             onSavePlaybackPosition(
-                                state.fingerprint,
+                                state.entry,
                                 positionSecs,
                                 state.mediaDurationSecs ?: durationSecs,
                             )
                         },
                         onContinue = onPlayNext,
+                        onSeekOutsideBuffer = onSeekPlayback,
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
                     )
                 }
@@ -626,6 +692,12 @@ private fun SwarmApp(
                 onReopen = onRestoreMinimizedPlayback,
                 onStop = onStopMinimizedPlayback,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+            )
+        }
+        if (state is UiState.Catalog && showCatalogExitConfirm) {
+            ExitConfirmOverlay(
+                onConfirmExit = { (context as? Activity)?.finish() },
+                onDismiss = { showCatalogExitConfirm = false },
             )
         }
     }

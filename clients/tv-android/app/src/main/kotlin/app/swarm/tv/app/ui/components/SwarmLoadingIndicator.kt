@@ -91,8 +91,12 @@ private val LOADING_MESSAGES = listOf(
 )
 
 @Composable
-fun SwarmLoadingIndicator(modifier: Modifier = Modifier, onBlackBackground: Boolean = false) {
-    val loadingMessage = remember { LOADING_MESSAGES.random() }
+fun SwarmLoadingIndicator(
+    modifier: Modifier = Modifier,
+    onBlackBackground: Boolean = false,
+    messageOverride: String? = null,
+) {
+    val loadingMessage = remember(messageOverride) { messageOverride ?: LOADING_MESSAGES.random() }
     val gif = if (onBlackBackground) R.drawable.loading_black else R.drawable.loading
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         AsyncImage(model = gif, contentDescription = null, modifier = Modifier.size(160.dp))

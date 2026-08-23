@@ -18,11 +18,13 @@ import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.transport.PeerConnection
 import app.swarm.tv.core.transport.PeerResponse
 import java.io.ByteArrayInputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
@@ -85,6 +87,29 @@ class PeerLoopbackProxyTest {
         }
         assertEquals("/media/abc", fake.lastPath)
         assertNull(fake.lastRange)
+    }
+
+    @Test
+    fun `completed proxy response closes its peer stream`() {
+        val closed = AtomicBoolean(false)
+        val payload = "seek-safe".toByteArray()
+        val fake = FakePeerConnection { _, _, _ ->
+            PeerResponse(
+                PeerResponseHeader(status = 200, len = payload.size.toLong()),
+                object : ByteArrayInputStream(payload) {
+                    override fun close() {
+                        closed.set(true)
+                        super.close()
+                    }
+                },
+            )
+        }
+        proxy.register("srv1", fake)
+
+        http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/media/abc")).build())
+            .execute().use { response -> assertEquals("seek-safe", response.body!!.string()) }
+
+        assertTrue(closed.get())
     }
 
     @Test

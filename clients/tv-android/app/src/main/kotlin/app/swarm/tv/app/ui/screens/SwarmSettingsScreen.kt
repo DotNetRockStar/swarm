@@ -48,6 +48,7 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.peer.MediaKind
+import kotlinx.coroutines.delay
 
 @Composable
 fun SwarmSettingsScreen(
@@ -239,7 +240,7 @@ private fun KidModeCard(
     val isEnabled = kidModeSettings?.enabled == true
     var step by remember { mutableStateOf(KidModeStep.COLLAPSED) }
     var pinField by remember(step) { mutableStateOf("") }
-    var pinError by remember(step) { mutableStateOf(false) }
+    var pinError by remember { mutableStateOf(false) }
     // Only meaningful mid-setup, between SET_PIN and CONFIRM_PIN.
     var pendingNewPin by remember { mutableStateOf<String?>(null) }
 
@@ -256,6 +257,42 @@ private fun KidModeCard(
         draftGenres = kidModeSettings?.allowedGenres
         draftMaxMovieRating = kidModeSettings?.maxMovieRating
         draftMaxTvRating = kidModeSettings?.maxTvRating
+    }
+
+    // Let Compose paint the final digit before advancing. Performing the
+    // transition inside the keypad's click callback replaced this screen in
+    // the same frame, so the fourth slot was never visibly filled even though
+    // the correct PIN was processed.
+    LaunchedEffect(step, pinField) {
+        if (pinField.length != KID_MODE_PIN_LENGTH) return@LaunchedEffect
+        delay(100)
+        when (step) {
+            KidModeStep.ENTER_PIN -> {
+                if (kidModeSettings?.pinMatches(pinField) == true) {
+                    seedDraftFromCurrent()
+                    step = KidModeStep.EDIT_RULES
+                } else {
+                    pinError = true
+                    pinField = ""
+                }
+            }
+            KidModeStep.SET_PIN -> {
+                pendingNewPin = pinField
+                seedDraftFromCurrent()
+                step = KidModeStep.CONFIRM_PIN
+            }
+            KidModeStep.CONFIRM_PIN -> {
+                if (pinField == pendingNewPin) {
+                    step = KidModeStep.EDIT_RULES
+                } else {
+                    pinError = true
+                    pinField = ""
+                    pendingNewPin = null
+                    step = KidModeStep.SET_PIN
+                }
+            }
+            else -> Unit
+        }
     }
 
     Text("Kid Mode", color = SwarmMuted, fontSize = 14.sp)
@@ -291,15 +328,7 @@ private fun KidModeCard(
                 maxLength = KID_MODE_PIN_LENGTH,
                 onValueChange = { entered ->
                     pinField = entered
-                    if (entered.length == KID_MODE_PIN_LENGTH) {
-                        if (kidModeSettings?.pinMatches(entered) == true) {
-                            seedDraftFromCurrent()
-                            step = KidModeStep.EDIT_RULES
-                        } else {
-                            pinError = true
-                            pinField = ""
-                        }
-                    }
+                    pinError = false
                 },
             )
             if (pinError) {
@@ -315,11 +344,7 @@ private fun KidModeCard(
                 maxLength = KID_MODE_PIN_LENGTH,
                 onValueChange = { entered ->
                     pinField = entered
-                    if (entered.length == KID_MODE_PIN_LENGTH) {
-                        pendingNewPin = entered
-                        seedDraftFromCurrent()
-                        step = KidModeStep.CONFIRM_PIN
-                    }
+                    pinError = false
                 },
             )
         }
@@ -331,16 +356,7 @@ private fun KidModeCard(
                 maxLength = KID_MODE_PIN_LENGTH,
                 onValueChange = { entered ->
                     pinField = entered
-                    if (entered.length == KID_MODE_PIN_LENGTH) {
-                        if (entered == pendingNewPin) {
-                            step = KidModeStep.EDIT_RULES
-                        } else {
-                            pinError = true
-                            pinField = ""
-                            pendingNewPin = null
-                            step = KidModeStep.SET_PIN
-                        }
-                    }
+                    pinError = false
                 },
             )
             if (pinError) {

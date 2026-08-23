@@ -614,11 +614,16 @@ fn parse_episode_marker(stem: &str) -> Option<(u32, u32, &str)> {
 }
 
 /// Find an `SxxEyy` marker (case-insensitive); returns (season, episode, text
-/// before the marker).
+/// before the marker). Common punctuation/spacing between the two halves is
+/// accepted (`S02 E01`, `S02-E01`, `S02.E01`, `S02_E01`) because real DVD
+/// rips frequently format the marker as two readable tokens rather than one.
 fn parse_sxxeyy_marker(stem: &str) -> Option<(u32, u32, &str)> {
     let bytes = stem.as_bytes();
+    let is_boundary_before = |i: usize| i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+    let is_boundary_at = |i: usize| i == bytes.len() || !bytes[i].is_ascii_alphanumeric();
+    let is_separator = |byte: u8| matches!(byte, b' ' | b'.' | b'_' | b'-');
     for start in 0..bytes.len() {
-        if !bytes[start].eq_ignore_ascii_case(&b's') {
+        if !bytes[start].eq_ignore_ascii_case(&b's') || !is_boundary_before(start) {
             continue;
         }
         let mut i = start + 1;
@@ -626,22 +631,29 @@ fn parse_sxxeyy_marker(stem: &str) -> Option<(u32, u32, &str)> {
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
-        if i == season_start
-            || i - season_start > 3
-            || i >= bytes.len()
-            || !bytes[i].eq_ignore_ascii_case(&b'e')
-        {
+        if i == season_start || i - season_start > 3 {
             continue;
         }
-        let episode_start = i + 1;
+        let season_end = i;
+        while i < bytes.len() && is_separator(bytes[i]) {
+            i += 1;
+        }
+        if i >= bytes.len() || !bytes[i].eq_ignore_ascii_case(&b'e') {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && is_separator(bytes[i]) {
+            i += 1;
+        }
+        let episode_start = i;
         let mut j = episode_start;
         while j < bytes.len() && bytes[j].is_ascii_digit() {
             j += 1;
         }
-        if j == episode_start || j - episode_start > 4 {
+        if j == episode_start || j - episode_start > 4 || !is_boundary_at(j) {
             continue;
         }
-        let season = stem[season_start..i].parse().ok()?;
+        let season = stem[season_start..season_end].parse().ok()?;
         let episode = stem[episode_start..j].parse().ok()?;
         return Some((season, episode, &stem[..start]));
     }
@@ -955,6 +967,35 @@ mod tests {
         assert_eq!(entry.season, Some(2));
         assert_eq!(entry.episode, Some(5));
         assert_eq!(entry.show_title.as_deref(), Some("The Expanse"));
+    }
+
+    #[test]
+    fn spaced_sxx_eyy_marker_from_real_dvd_rip_is_recognized() {
+        let entry = classify(
+            "Shows/The REAL ADVENTURES of JONNY QUEST/Season 2/\
+             The Real Adventures of Jonny Quest - S02 E01 - The Mummies of Malenque \
+             (480p - DVDRip).mp4",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(
+            entry.show_title.as_deref(),
+            Some("The REAL ADVENTURES of JONNY QUEST")
+        );
+        assert_eq!(entry.season, Some(2));
+        assert_eq!(entry.episode, Some(1));
+    }
+
+    #[test]
+    fn common_sxx_eyy_separators_are_recognized_without_false_word_matches() {
+        for marker in ["S02E01", "S02 E01", "S02-E01", "S02.E01", "S02_E01"] {
+            assert_eq!(
+                parse_sxxeyy_marker(&format!("Show - {marker} - Title")).map(|v| (v.0, v.1)),
+                Some((2, 1))
+            );
+        }
+        assert_eq!(parse_sxxeyy_marker("ThingS02 E01"), None);
+        assert_eq!(parse_sxxeyy_marker("Show S02 E01Title"), None);
     }
 
     #[test]

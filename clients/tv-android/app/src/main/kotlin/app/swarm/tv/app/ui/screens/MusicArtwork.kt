@@ -18,6 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +68,7 @@ internal fun ArtworkImage(
     var useFallback by remember(primaryUrl, fallbackUrl) { mutableStateOf(primaryUrl == null) }
     val resolvedFallback = fallbackUrl?.takeUnless { it == primaryUrl }
     val model = if (useFallback) resolvedFallback else primaryUrl
+    val placeholderLabel = if (placeholderType == "Movie" || placeholderType == "Show") label else placeholderType
 
     Box(
         modifier = modifier.background(
@@ -79,11 +82,14 @@ internal fun ArtworkImage(
             modifier = Modifier.fillMaxWidth(0.48f).aspectRatio(1f),
         )
         Text(
-            placeholderType.uppercase(),
+            placeholderLabel,
             color = SwarmAccent,
             fontSize = 11.sp,
             fontWeight = FontWeight.Black,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp),
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(10.dp),
         )
         if (model != null) {
             AsyncImage(

@@ -43,8 +43,9 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.data.CONNECTION_SETUP_SWARM_ID
+import app.swarm.tv.app.data.LanPairingActivation
 import app.swarm.tv.app.data.LanServer
-import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
@@ -67,6 +68,7 @@ fun SwarmDashboardScreen(
     pairedLanFingerprints: Set<String>,
     disconnectedServerFingerprints: Set<String>,
     lanPairingBusy: Boolean,
+    lanPairingActivation: LanPairingActivation?,
     lanError: String?,
     deviceName: String,
     joiningServer: Boolean,
@@ -75,22 +77,23 @@ fun SwarmDashboardScreen(
     onOpenSettings: () -> Unit,
     onAddServer: () -> Unit,
     onConnectLan: (LanServer, String) -> Unit,
-    onPairLan: (LanServer, String, String) -> Unit,
+    onStartLanPairing: (LanServer, String) -> Unit,
+    onCancelLanPairing: () -> Unit,
     onDisconnectServer: (SwarmDevice) -> Unit,
     onReconnectServer: (SwarmDevice) -> Unit,
+    onBackToBrowse: () -> Unit,
 ) {
     fun normalized(value: String) = value.trim().lowercase()
 
-    val browseLibraryFocusRequester = remember { FocusRequester() }
+    val initialActionFocusRequester = remember { FocusRequester() }
     val firstServerFocusRequester = remember { FocusRequester() }
     var showExitConfirm by remember { mutableStateOf(false) }
     var selectedSwarmServer by remember { mutableStateOf<SwarmDevice?>(null) }
     var selectedLanServer by remember { mutableStateOf<LanServer?>(null) }
     var showAddServer by remember { mutableStateOf(false) }
-    var pairingCode by remember { mutableStateOf("") }
-    var pairingAttempted by remember { mutableStateOf(false) }
     val activity = LocalContext.current as? Activity
     val modalOpen = showExitConfirm || selectedSwarmServer != null || selectedLanServer != null || showAddServer
+    val isConnectionSetup = swarm.id == CONNECTION_SETUP_SWARM_ID
 
     val serversInSwarm = if (swarm.id == "lan") {
         emptyList()
@@ -101,6 +104,11 @@ fun SwarmDashboardScreen(
     val swarmFingerprints = serversInSwarm.mapTo(mutableSetOf()) { normalized(it.certFingerprint) }
     val paired = pairedLanFingerprints.mapTo(mutableSetOf(), ::normalized)
     val disconnected = disconnectedServerFingerprints.mapTo(mutableSetOf(), ::normalized)
+    val hasConnectedServer = devices.any {
+        (it.deviceType == DeviceType.SERVER || it.deviceType == DeviceType.BOTH) &&
+            it.online &&
+            normalized(it.certFingerprint) !in disconnected
+    }
     val hasServerRows = serversInSwarm.isNotEmpty() || lanServers.isNotEmpty()
     val downToFirstServer = if (hasServerRows) {
         Modifier.focusProperties { down = firstServerFocusRequester }
@@ -109,16 +117,17 @@ fun SwarmDashboardScreen(
     }
 
     LaunchedEffect(modalOpen) {
-        if (!modalOpen) browseLibraryFocusRequester.requestFocus()
+        if (!modalOpen) initialActionFocusRequester.requestFocus()
     }
     LaunchedEffect(pairedLanFingerprints, selectedLanServer?.certFingerprint) {
         val selected = selectedLanServer ?: return@LaunchedEffect
         if (normalized(selected.certFingerprint) in paired) {
             selectedLanServer = null
-            pairingCode = ""
         }
     }
-    BackHandler(enabled = !modalOpen) { showExitConfirm = true }
+    BackHandler(enabled = !modalOpen) {
+        if (hasConnectedServer) onBackToBrowse() else showExitConfirm = true
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -142,13 +151,18 @@ fun SwarmDashboardScreen(
                             onClick = {
                                 showAddServer = true
                             },
-                            modifier = downToFirstServer,
+                            modifier = downToFirstServer.then(
+                                if (isConnectionSetup) Modifier.focusRequester(initialActionFocusRequester) else Modifier,
+                            ),
                             colors = swarmActionButtonColors(),
                         ) { Text("Add Server") }
                     }
                     Button(
                         onClick = onBrowseCatalog,
-                        modifier = downToFirstServer.focusRequester(browseLibraryFocusRequester),
+                        enabled = hasConnectedServer,
+                        modifier = downToFirstServer.then(
+                            if (!isConnectionSetup) Modifier.focusRequester(initialActionFocusRequester) else Modifier,
+                        ),
                         colors = swarmActionButtonColors(),
                     ) { Text("Browse library") }
                     Button(
@@ -160,35 +174,49 @@ fun SwarmDashboardScreen(
             }
             Spacer(Modifier.height(24.dp))
 
+            if (isConnectionSetup) {
+                Text(
+                    "Connect through SWARM for access away from home, or select a media server found on this network.",
+                    color = SwarmMuted,
+                    fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+            }
+            joinServerError?.let {
+                Text(it, color = SwarmError, fontSize = 12.sp)
+                Spacer(Modifier.height(12.dp))
+            }
+
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                item {
-                    Text("Servers in this swarm (${serversInSwarm.size})", color = SwarmMuted, fontSize = 14.sp)
-                }
-                if (serversInSwarm.isEmpty()) {
+                if (!isConnectionSetup) {
                     item {
-                        Text(
-                            "No media servers have joined this swarm yet.",
-                            color = SwarmMuted,
-                            fontSize = 14.sp,
-                        )
+                        Text("Servers in this swarm (${serversInSwarm.size})", color = SwarmMuted, fontSize = 14.sp)
                     }
-                } else {
-                    itemsIndexed(serversInSwarm, key = { _, server -> "swarm-${server.deviceId}" }) { index, server ->
-                        val fingerprint = normalized(server.certFingerprint)
-                        ServerRow(
-                            modifier = if (index == 0) Modifier.focusRequester(firstServerFocusRequester) else Modifier,
-                            device = server,
-                            onLan = fingerprint in lanFingerprints,
-                            disconnected = fingerprint in disconnected,
-                            onClick = { selectedSwarmServer = server },
-                        )
+                    if (serversInSwarm.isEmpty()) {
+                        item {
+                            Text(
+                                "No media servers have joined this swarm yet.",
+                                color = SwarmMuted,
+                                fontSize = 14.sp,
+                            )
+                        }
+                    } else {
+                        itemsIndexed(serversInSwarm, key = { _, server -> "swarm-${server.deviceId}" }) { index, server ->
+                            val fingerprint = normalized(server.certFingerprint)
+                            ServerRow(
+                                modifier = if (index == 0) Modifier.focusRequester(firstServerFocusRequester) else Modifier,
+                                device = server,
+                                onLan = fingerprint in lanFingerprints,
+                                disconnected = fingerprint in disconnected,
+                                onClick = { selectedSwarmServer = server },
+                            )
+                        }
                     }
+                    item { Spacer(Modifier.height(14.dp)) }
                 }
-
-                item { Spacer(Modifier.height(14.dp)) }
                 item {
                     Text("Servers on LAN (${lanServers.size})", color = SwarmMuted, fontSize = 14.sp)
                 }
@@ -224,9 +252,8 @@ fun SwarmDashboardScreen(
                                 if (inSwarm || isPaired) {
                                     onConnectLan(server, deviceName)
                                 } else {
-                                    pairingCode = ""
-                                    pairingAttempted = false
                                     selectedLanServer = server
+                                    onStartLanPairing(server, deviceName)
                                 }
                             },
                         )
@@ -251,18 +278,15 @@ fun SwarmDashboardScreen(
         selectedLanServer?.let { server ->
             LanPairingOverlay(
                 server = server,
-                code = pairingCode,
-                busy = lanPairingBusy,
-                error = lanError.takeIf { pairingAttempted },
-                onCodeChange = { pairingCode = it },
-                onPair = {
-                    pairingAttempted = true
-                    onPairLan(server, pairingCode, deviceName)
+                activation = lanPairingActivation?.takeIf {
+                    normalized(it.serverFingerprint) == normalized(server.certFingerprint)
                 },
+                busy = lanPairingBusy,
+                error = lanError,
+                onRetry = { onStartLanPairing(server, deviceName) },
                 onDismiss = {
+                    onCancelLanPairing()
                     selectedLanServer = null
-                    pairingCode = ""
-                    pairingAttempted = false
                 },
             )
         }
@@ -365,7 +389,7 @@ private fun LanServerRow(
                         disconnected -> "Disconnected from this TV"
                         inSwarm -> "Connected directly on your network"
                         paired -> "Paired with this TV"
-                        else -> "Select to enter the server pairing code"
+                        else -> "Select to show an approval code on this TV"
                     },
                     color = SwarmMuted,
                     fontSize = 12.sp,
@@ -461,40 +485,44 @@ private fun ServerConnectionOverlay(
 @Composable
 private fun LanPairingOverlay(
     server: LanServer,
-    code: String,
+    activation: LanPairingActivation?,
     busy: Boolean,
     error: String?,
-    onCodeChange: (String) -> Unit,
-    onPair: () -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
-    val keypadFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { keypadFocusRequester.requestFocus() }
+    val actionFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { actionFocusRequester.requestFocus() }
 
     ModalSurface {
         Text("Pair with ${server.name}", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Black)
         Spacer(Modifier.height(6.dp))
-        Text("Enter the 6-digit code shown by the media server.", color = SwarmMuted, fontSize = 13.sp)
-        Spacer(Modifier.height(16.dp))
-        NumberPadEntry(
-            value = code,
-            maxLength = 6,
-            onValueChange = onCodeChange,
-            enabled = !busy,
-            firstKeyFocusRequester = keypadFocusRequester,
-        )
+        if (activation == null && busy) {
+            Text("Requesting a secure activation code…", color = SwarmMuted, fontSize = 13.sp)
+        } else if (activation != null) {
+            Text("Enter this code on the media server's SWARM page", color = SwarmMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(18.dp))
+            Text(
+                activation.code.chunked(4).joinToString("  "),
+                color = SwarmAccent,
+                fontSize = 42.sp,
+                fontWeight = FontWeight.Black,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text("Waiting for approval · expires in about five minutes", color = SwarmMuted, fontSize = 12.sp)
+        }
         if (error != null) {
             Spacer(Modifier.height(10.dp))
             Text(error, color = SwarmError, fontSize = 12.sp)
         }
         Spacer(Modifier.height(14.dp))
         Button(
-            onClick = onPair,
-            enabled = code.length == 6 && !busy,
+            onClick = if (error != null) onRetry else onDismiss,
+            modifier = Modifier.focusRequester(actionFocusRequester),
             colors = swarmActionButtonColors(),
         ) {
-            Text(if (busy) "Connecting…" else "Pair and connect", fontWeight = FontWeight.Bold)
+            Text(if (error != null) "Try again" else "Cancel", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -519,15 +547,15 @@ private fun ModalSurface(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun ExitConfirmOverlay(onConfirmExit: () -> Unit, onDismiss: () -> Unit) {
+internal fun ExitConfirmOverlay(onConfirmExit: () -> Unit, onDismiss: () -> Unit) {
     BackHandler(onBack = onDismiss)
     val exitFocusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { exitFocusRequester.requestFocus() }
 
     ModalSurface {
-        Text("Exit SWARM?", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Black)
+        Text("Exit app?", color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Black)
         Spacer(Modifier.height(8.dp))
-        Text("Press Back again to stay.", color = SwarmMuted, fontSize = 13.sp)
+        Text("Choose Exit app to close SWARM.", color = SwarmMuted, fontSize = 13.sp)
         Spacer(Modifier.height(20.dp))
         Button(
             onClick = onConfirmExit,

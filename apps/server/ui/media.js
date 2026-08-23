@@ -18,6 +18,7 @@ let kindFilter = "all"; // "all" | "movie" | "episode" | "track"
 // concept/table: every distinct genre value in use anywhere in the library
 // doubles as a browsable, filterable "category".
 let categoryFilter = "all";
+let completenessFilter = "all"; // "all" | "missing_metadata" | "missing_artwork"
 let allCategories = []; // every distinct genre/category currently in use — refreshed alongside libraryEntries
 let groupRescrapeRunning = false;
 const KIND_FILTER_LABELS = { all: "Filter: all kinds", movie: "Filter: Movies", episode: "Filter: Shows", track: "Filter: Music" };
@@ -78,11 +79,24 @@ function filteredEntries() {
   return libraryEntries.filter(e => {
     if (kindFilter !== "all" && e.kind !== kindFilter) return false;
     if (categoryFilter !== "all" && !(e.genres || []).includes(categoryFilter)) return false;
+    if (completenessFilter === "missing_artwork" && e.has_artwork) return false;
+    if (completenessFilter === "missing_metadata" && hasUsefulMetadata(e)) return false;
     if (!q) return true;
     return [e.scraped_title, e.title, e.artist, e.album, e.show_title]
       .filter(Boolean)
       .some(field => field.toLowerCase().includes(q));
   });
+}
+
+function hasUsefulMetadata(entry) {
+  return Boolean(
+    entry.scraped_title ||
+    (entry.genres || []).length ||
+    entry.overview ||
+    entry.rating ||
+    entry.community_rating != null ||
+    (entry.cast || []).length
+  );
 }
 
 async function refreshMedia() {
@@ -140,6 +154,14 @@ function renderMediaTab() {
       </select>
       <i class="bi bi-tags icon-select-icon"></i>
     </div>
+    <div class="icon-select-wrap">
+      <select id="mediaCompletenessFilter" class="icon-select${completenessFilter !== "all" ? " icon-select-active" : ""}" title="Find media that needs attention">
+        <option value="all">All media</option>
+        <option value="missing_metadata">Missing metadata (${libraryEntries.filter(e => !hasUsefulMetadata(e)).length})</option>
+        <option value="missing_artwork">Missing artwork (${libraryEntries.filter(e => !e.has_artwork).length})</option>
+      </select>
+      <i class="bi bi-exclamation-diamond icon-select-icon"></i>
+    </div>
   </div>`;
   container.innerHTML = toggle + `<div id="mediaSectionBody"></div>`;
   document.getElementById("mediaSectionBrowseBtn").addEventListener("click", () => {
@@ -170,6 +192,14 @@ function renderMediaTab() {
     categoryFilter = event.target.value;
     categoryFilterSelect.title = categoryFilter === "all" ? "Filter: all categories" : `Filter: ${categoryFilter}`;
     categoryFilterSelect.classList.toggle("icon-select-active", categoryFilter !== "all");
+    if (mediaSection === "browse") browsePath = { kind: "root" };
+    renderMediaResults();
+  });
+  const completenessFilterSelect = document.getElementById("mediaCompletenessFilter");
+  completenessFilterSelect.value = completenessFilter;
+  completenessFilterSelect.addEventListener("change", (event) => {
+    completenessFilter = event.target.value;
+    completenessFilterSelect.classList.toggle("icon-select-active", completenessFilter !== "all");
     if (mediaSection === "browse") browsePath = { kind: "root" };
     renderMediaResults();
   });
@@ -425,7 +455,7 @@ function renderBrowseRoot(body) {
   // scroll — every tile visible). Deeper drill-down views (an artist's
   // albums, a show's seasons, etc.) stay as plain .media-grid too.
   const nothingMatched = !movies.length && !tracks.size && !shows.size;
-  const emptyMessage = searchQuery.trim() || kindFilter !== "all"
+  const emptyMessage = searchQuery.trim() || kindFilter !== "all" || categoryFilter !== "all" || completenessFilter !== "all"
     ? "No matches for the current search/filter."
     : "No movies, music, or shows found yet.";
   body.innerHTML = `
@@ -498,6 +528,7 @@ function wireDetailManage(entry) {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(entry.entry_key));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(entry.entry_key));
+    wireSubtitleDownload(entry.entry_key);
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(entry.entry_key));
     wireAddCategoryBtn();
     wireMoveKindFields(entry.entry_key);
@@ -633,6 +664,7 @@ function wireTrackManageHandlers(container) {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
+    wireSubtitleDownload(openManageKey);
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
     wireAddCategoryBtn();
     wireMoveKindFields(openManageKey);
@@ -812,6 +844,7 @@ function renderLibrary() {
     document.getElementById("pickArtworkBtn")?.addEventListener("click", pickArtwork);
     document.getElementById("uploadArtworkBtn")?.addEventListener("click", () => uploadArtwork(openManageKey));
     document.getElementById("rescrapeBtn")?.addEventListener("click", () => rescrapeEntry(openManageKey));
+    wireSubtitleDownload(openManageKey);
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
     wireAddCategoryBtn();
     wireMoveKindFields(openManageKey);
@@ -825,78 +858,147 @@ function manageRow(entry) {
   // own allCategories cache has been refreshed) — so the picker never
   // silently hides a category this entry is actually tagged with.
   const pickerCategories = [...new Set([...allCategories, ...entry.genres])].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const selectedCategoryLabel = entry.genres.length
+    ? `${entry.genres.length} selected: ${entry.genres.join(", ")}`
+    : "Choose categories";
   return `
-    <div class="inline-edit">
-      <h2 style="margin-top:0">Edit metadata</h2>
-      <label>Title</label>
-      <input id="editTitleInput" value="${esc(entry.scraped_title || entry.title)}">
-      <label>Description</label>
-      <textarea id="editOverviewInput" rows="4" style="width:100%; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-family:inherit; resize:vertical">${esc(entry.overview || "")}</textarea>
-      ${entry.kind !== "track" ? `
-      <label>Content rating</label>
-      <input id="editRatingInput" placeholder="${entry.kind === "episode" ? "e.g. TV-14" : "e.g. PG-13"}" value="${esc(entry.rating || "")}">
-      ` : ""}
-      <label>Categories</label>
-      <div class="category-picker">
-        ${pickerCategories.length ? pickerCategories.map(c => `
-          <label class="checkbox-label category-picker-item">
-            <input type="checkbox" class="editCategoryCheck" value="${esc(c)}"${entry.genres.includes(c) ? " checked" : ""}>
-            ${esc(c)}
-          </label>`).join("") : `<span class="muted category-picker-empty" style="font-size:.85rem">No categories yet — add one below.</span>`}
-      </div>
-      <div class="row" style="margin-top:8px">
-        <input id="editNewCategoryInput" placeholder="New category name">
-        <button id="editAddCategoryBtn" class="secondary" type="button"><i class="bi bi-plus-lg"></i>Add</button>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button id="editSaveBtn"><i class="bi bi-check-lg"></i>Save metadata</button>
+    <div class="inline-edit metadata-editor">
+      <section class="metadata-editor-section metadata-editor-section-first">
+        <div class="metadata-editor-heading">
+          <div><h2>Edit metadata</h2><p class="muted">Update the information people see while browsing this item.</p></div>
+          <button id="editSaveBtn"><i class="bi bi-check-lg"></i>Save metadata</button>
+        </div>
+        <div class="metadata-form-grid">
+          <label class="metadata-field">
+            <span>Title</span>
+            <input id="editTitleInput" value="${esc(entry.scraped_title || entry.title)}">
+          </label>
+          ${entry.kind !== "track" ? `
+          <label class="metadata-field">
+            <span>Content rating</span>
+            <input id="editRatingInput" placeholder="${entry.kind === "episode" ? "e.g. TV-14" : "e.g. PG-13"}" value="${esc(entry.rating || "")}">
+          </label>` : ""}
+          <label class="metadata-field metadata-field-wide">
+            <span>Description</span>
+            <textarea id="editOverviewInput" rows="6">${esc(entry.overview || "")}</textarea>
+          </label>
+          <div class="metadata-field metadata-field-wide">
+            <span>Categories</span>
+            <details class="category-dropdown">
+              <summary id="editCategorySummary">${esc(selectedCategoryLabel)}</summary>
+              <div class="category-dropdown-panel">
+                <div class="search-input-wrap category-search-wrap">
+                  <i class="bi bi-search search-input-icon"></i>
+                  <input id="editCategorySearch" class="search-input" placeholder="Filter categories…">
+                </div>
+                <div class="category-picker" id="editCategoryPicker">
+                  ${pickerCategories.length ? pickerCategories.map(c => `
+                    <label class="checkbox-label category-picker-item">
+                      <input type="checkbox" class="editCategoryCheck" value="${esc(c)}"${entry.genres.includes(c) ? " checked" : ""}>
+                      ${esc(c)}
+                    </label>`).join("") : `<span class="muted category-picker-empty">No categories yet — add one below.</span>`}
+                </div>
+                <div class="row category-add-row">
+                  <input id="editNewCategoryInput" placeholder="New category name">
+                  <button id="editAddCategoryBtn" class="secondary" type="button"><i class="bi bi-plus-lg"></i>Add</button>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="metadata-editor-section pinpoint-rescrape-section">
+        <div class="metadata-editor-heading">
+          <div>
+            <h2><i class="bi bi-bullseye"></i>Pinpoint re-scrape</h2>
+            <p class="muted">${entry.kind === "movie"
+              ? "Refresh only this movie's metadata and artwork."
+              : entry.kind === "episode"
+                ? "Refresh only this episode. Use the show or season action above to refresh a group."
+                : "Refresh this track and its album together so album data stays consistent."}</p>
+          </div>
+        </div>
+        ${entry.kind !== "track" ? `
+          <label class="metadata-field metadata-field-wide">
+            <span>TMDb URL override <span class="muted">(optional)</span></span>
+            <input id="rescrapeUrlInput" placeholder="https://www.themoviedb.org/${entry.kind === "movie" ? "movie/27205-inception" : "tv/1402-the-walking-dead"}">
+          </label>
+        ` : ""}
+        <div class="row metadata-action-row">
+          <button id="rescrapeBtn"><i class="bi bi-arrow-repeat"></i>${entry.kind === "movie" ? "Re-scrape this movie" : entry.kind === "episode" ? "Re-scrape this episode" : "Re-scrape this track / album"}</button>
+          ${entry.scraped_title || entry.genres.length || entry.has_artwork
+            ? `<button id="revertScrapeBtn" class="danger"><i class="bi bi-arrow-counterclockwise"></i>Revert to unscraped</button>`
+            : ""}
+        </div>
+      </section>
+
+      <div class="metadata-editor-columns">
+        <section class="metadata-editor-section metadata-editor-column">
+          <h2><i class="bi bi-image"></i>Artwork</h2>
+          <label class="metadata-field">
+            <span>Artwork type</span>
+            <select id="artworkKindSelect">
+              <option value="poster">Poster</option>
+              <option value="season">Season poster</option>
+              <option value="backdrop">Backdrop</option>
+              <option value="cover">Cover</option>
+              <option value="artist">Artist photo</option>
+            </select>
+          </label>
+          <div class="row metadata-action-row">
+            <button id="pickArtworkBtn" class="secondary"><i class="bi bi-image"></i>Choose image…</button>
+            <button id="uploadArtworkBtn"><i class="bi bi-upload"></i>Upload</button>
+          </div>
+          <p class="muted compact-help" id="artworkPickedNote">${pickedArtworkPath ? esc(pickedArtworkPath) : "No file chosen."}</p>
+        </section>
+
+        ${entry.kind !== "track" ? `
+        <section class="metadata-editor-section metadata-editor-column">
+          <h2><i class="bi bi-badge-cc"></i>Subtitles</h2>
+          <p class="muted compact-help">Find a subtitle for this exact ${entry.kind === "episode" ? "episode" : "movie"} and store it for TV playback.</p>
+          <label class="metadata-field">
+            <span>Language</span>
+            <select id="subtitleLanguageSelect">
+              <option value="en">English</option><option value="es">Spanish</option>
+              <option value="fr">French</option><option value="de">German</option>
+              <option value="it">Italian</option><option value="pt-br">Portuguese (Brazil)</option>
+              <option value="pt-pt">Portuguese (Portugal)</option><option value="ja">Japanese</option>
+            </select>
+          </label>
+          <div class="row metadata-action-row">
+            <button id="downloadSubtitleBtn" class="secondary"><i class="bi bi-cloud-arrow-down"></i>Find and download</button>
+          </div>
+        </section>` : ""}
       </div>
 
-      <h2>Upload artwork</h2>
-      <div class="row">
-        <label style="flex:0 0 100%">Kind</label>
-        <select id="artworkKindSelect" style="flex:1; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
-          <option value="poster">Poster</option>
-          <option value="season">Season poster</option>
-          <option value="backdrop">Backdrop</option>
-          <option value="cover">Cover</option>
-          <option value="artist">Artist photo</option>
-        </select>
-        <button id="pickArtworkBtn" class="secondary"><i class="bi bi-image"></i>Choose image…</button>
-        <button id="uploadArtworkBtn"><i class="bi bi-upload"></i>Upload</button>
-      </div>
-      <p class="muted" id="artworkPickedNote">${pickedArtworkPath ? esc(pickedArtworkPath) : "No file chosen."}</p>
+      <section class="metadata-editor-section">
+        <h2><i class="bi bi-folder-symlink"></i>Asset type</h2>
+        <p class="muted compact-help">Correct a file placed in the wrong library section. This choice is retained across rescans and classification repairs.</p>
+        <div class="metadata-form-grid">
+          <label class="metadata-field">
+            <span>Library section</span>
+            <select id="moveKindSelect">
+              <option value="movie"${entry.kind === "movie" ? " selected" : ""}>Movie</option>
+              <option value="episode"${entry.kind === "episode" ? " selected" : ""}>TV show episode</option>
+              <option value="track"${entry.kind === "track" ? " selected" : ""}>Music track</option>
+            </select>
+          </label>
+          <div id="moveTrackFields" class="metadata-field metadata-field-wide metadata-inline-fields" style="display:${entry.kind === "track" ? "grid" : "none"}">
+            <input id="moveArtistInput" placeholder="Artist" value="${entry.kind === "track" ? esc(entry.artist || "") : ""}">
+            <input id="moveAlbumInput" placeholder="Album" value="${entry.kind === "track" ? esc(entry.album || "") : ""}">
+          </div>
+          <div id="moveEpisodeFields" class="metadata-field metadata-field-wide" style="display:${entry.kind === "episode" ? "block" : "none"}">
+            <input id="moveShowInput" placeholder="Show name" value="${entry.kind === "episode" ? esc(entry.show_title || "") : ""}">
+          </div>
+        </div>
+        <div class="row metadata-action-row"><button id="moveKindBtn" class="secondary"><i class="bi bi-arrow-left-right"></i>Move to this type</button></div>
+      </section>
 
-      <h2>Rescrape</h2>
-      <label>TMDb URL override (optional — leave blank to search normally)</label>
-      <input id="rescrapeUrlInput" placeholder="https://www.themoviedb.org/movie/27205-inception">
-      <div class="row" style="margin-top:10px">
-        <button id="rescrapeBtn" class="secondary"><i class="bi bi-arrow-repeat"></i>Rescrape this entry</button>
-        ${entry.scraped_title || entry.genres.length || entry.has_artwork
-          ? `<button id="revertScrapeBtn" class="danger"><i class="bi bi-arrow-counterclockwise"></i>Revert to unscraped</button>`
-          : ""}
-      </div>
-
-      <h2>Asset type</h2>
-      <p class="muted" style="margin-top:-6px">For a file that ended up in the wrong section — most often a music video stored as a movie/show. Moving it here sticks: it's remembered across rescans and "Fix classifications".</p>
-      <select id="moveKindSelect" style="width:100%; background:var(--surface-muted); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px">
-        <option value="movie"${entry.kind === "movie" ? " selected" : ""}>Movie</option>
-        <option value="episode"${entry.kind === "episode" ? " selected" : ""}>TV show episode</option>
-        <option value="track"${entry.kind === "track" ? " selected" : ""}>Music track</option>
-      </select>
-      <div id="moveTrackFields" class="row" style="margin-top:8px; display:${entry.kind === "track" ? "flex" : "none"}">
-        <input id="moveArtistInput" placeholder="Artist" value="${entry.kind === "track" ? esc(entry.artist || "") : ""}">
-        <input id="moveAlbumInput" placeholder="Album" value="${entry.kind === "track" ? esc(entry.album || "") : ""}">
-      </div>
-      <div id="moveEpisodeFields" class="row" style="margin-top:8px; display:${entry.kind === "episode" ? "flex" : "none"}">
-        <input id="moveShowInput" placeholder="Show name" value="${entry.kind === "episode" ? esc(entry.show_title || "") : ""}">
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button id="moveKindBtn" class="secondary"><i class="bi bi-arrow-left-right"></i>Move to this type</button>
-      </div>
-
-      <h2>File</h2>
-      <p class="mono muted" style="font-size:.78rem" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
+      <section class="metadata-editor-section metadata-file-section">
+        <h2><i class="bi bi-file-earmark-play"></i>File</h2>
+        <p class="mono muted" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
+      </section>
     </div>`;
 }
 
@@ -931,8 +1033,8 @@ function wireMoveKindFields(entryKey) {
   const trackFields = document.getElementById("moveTrackFields");
   const episodeFields = document.getElementById("moveEpisodeFields");
   const sync = () => {
-    trackFields.style.display = select.value === "track" ? "flex" : "none";
-    episodeFields.style.display = select.value === "episode" ? "flex" : "none";
+    trackFields.style.display = select.value === "track" ? "grid" : "none";
+    episodeFields.style.display = select.value === "episode" ? "block" : "none";
   };
   select.addEventListener("change", sync);
   document.getElementById("moveKindBtn")?.addEventListener("click", () => moveKind(entryKey));
@@ -959,11 +1061,27 @@ async function moveKind(entryKey) {
 // other category, matching the "categories = genres, no separate registry"
 // design (Library::distinct_genres' doc comment).
 function wireAddCategoryBtn() {
-  document.getElementById("editAddCategoryBtn")?.addEventListener("click", () => {
+  const picker = document.getElementById("editCategoryPicker");
+  if (!picker) return;
+  const summary = document.getElementById("editCategorySummary");
+  const search = document.getElementById("editCategorySearch");
+  const syncSummary = () => {
+    const selected = [...picker.querySelectorAll(".editCategoryCheck:checked")].map(cb => cb.value);
+    summary.textContent = selected.length ? `${selected.length} selected: ${selected.join(", ")}` : "Choose categories";
+  };
+  const wireCheckbox = checkbox => checkbox.addEventListener("change", syncSummary);
+  picker.querySelectorAll(".editCategoryCheck").forEach(wireCheckbox);
+  search?.addEventListener("input", () => {
+    const query = search.value.trim().toLowerCase();
+    picker.querySelectorAll(".category-picker-item").forEach(label => {
+      label.hidden = Boolean(query) && !label.textContent.toLowerCase().includes(query);
+    });
+  });
+
+  const addCategory = () => {
     const input = document.getElementById("editNewCategoryInput");
     const name = input.value.trim();
     if (!name) return;
-    const picker = document.querySelector(".category-picker");
     const existing = [...picker.querySelectorAll(".editCategoryCheck")].find(cb => cb.value.toLowerCase() === name.toLowerCase());
     if (existing) {
       existing.checked = true;
@@ -973,9 +1091,20 @@ function wireAddCategoryBtn() {
       label.className = "checkbox-label category-picker-item";
       label.innerHTML = `<input type="checkbox" class="editCategoryCheck" value="${esc(name)}" checked> ${esc(name)}`;
       picker.appendChild(label);
+      wireCheckbox(label.querySelector(".editCategoryCheck"));
     }
+    syncSummary();
+    if (search) search.value = "";
+    picker.querySelectorAll(".category-picker-item").forEach(label => { label.hidden = false; });
     input.value = "";
     input.focus();
+  };
+  document.getElementById("editAddCategoryBtn")?.addEventListener("click", addCategory);
+  document.getElementById("editNewCategoryInput")?.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addCategory();
+    }
   });
 }
 
@@ -1008,7 +1137,7 @@ async function uploadArtwork(entryKey) {
 }
 
 async function rescrapeEntry(entryKey) {
-  const tmdbUrl = document.getElementById("rescrapeUrlInput").value.trim();
+  const tmdbUrl = document.getElementById("rescrapeUrlInput")?.value.trim() || "";
   const btn = document.getElementById("rescrapeBtn");
   if (btn) btn.disabled = true;
   try {
@@ -1021,6 +1150,24 @@ async function rescrapeEntry(entryKey) {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+function wireSubtitleDownload(entryKey) {
+  document.getElementById("downloadSubtitleBtn")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const language = document.getElementById("subtitleLanguageSelect").value;
+    button.disabled = true;
+    button.innerHTML = '<i class="bi bi-hourglass-split"></i>Searching…';
+    try {
+      const result = await invoke("download_subtitle", { entryKey, language });
+      showToast(`${result.label} downloaded and ready for playback.`, "success", { duration: 6000 });
+    } catch (err) {
+      showToast(String(err), "error", { duration: 8000 });
+    } finally {
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>Find and download';
+    }
+  });
 }
 
 // Real bug this fixes: a rescan over a slow network mount (SMB/NFS) can
@@ -1155,23 +1302,35 @@ document.getElementById("scrapeBtn").addEventListener("click", async () => {
     progressText.textContent = `Scraping ${payload.processed} of ${payload.total} — ${payload.scraped_title || payload.title}`;
     patchEntryLive(payload);
   });
+  const hideProgress = () => {
+    progressBox.classList.add("d-none");
+    progressFill.style.width = "0%";
+    progressText.textContent = "";
+    renderScrapeIssues(null);
+  };
   try {
     const force = document.getElementById("forceScrapeCheck").checked;
     const r = await invoke("run_scrape", { force });
+    hideProgress();
+    const issueCount = Number(r.failed || 0) + Number(r.not_found || 0);
     showToast(
-      `matched ${r.matched}, not found ${r.not_found}, failed ${r.failed}, skipped ${r.skipped}`,
-      r.failed > 0 ? "warning" : "success",
+      issueCount > 0
+        ? `Metadata scraping finished with ${issueCount} issue${issueCount === 1 ? "" : "s"} (${r.not_found} not found, ${r.failed} failed). View Notifications for details.`
+        : `Metadata scraping finished: matched ${r.matched}, not found ${r.not_found}, skipped ${r.skipped}.`,
+      issueCount > 0 ? "warning" : "success",
     );
-    renderScrapeIssues(r.issues);
+    if (issueCount > 0) await refreshNotificationBadge();
     // A final full refresh as a safety net (picks up anything not visible
     // in the current view during the run) — most of what it would show is
     // already on screen from live patching by this point, so it no longer
     // reads as content suddenly appearing out of nowhere.
     await refreshLibrary();
   } catch (err) {
-    showToast(String(err), "error");
+    hideProgress();
+    showToast(`Metadata scraping failed. View Notifications for details. ${String(err)}`, "error");
+    await refreshNotificationBadge();
   } finally {
     unlisten();
-    progressBox.classList.add("d-none");
+    hideProgress();
   }
 });

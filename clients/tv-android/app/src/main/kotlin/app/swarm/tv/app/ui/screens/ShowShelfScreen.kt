@@ -19,11 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -40,11 +42,27 @@ import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
 
 @Composable
-fun ShowShelfScreen(shows: List<ShowGroup>, artworkUrl: (MergedEntry) -> String?, onOpenShow: (ShowGroup) -> Unit, onBack: () -> Unit) {
+fun ShowShelfScreen(
+    shows: List<ShowGroup>,
+    artworkUrl: (MergedEntry) -> String?,
+    onOpenShow: (ShowGroup) -> Unit,
+    onBack: () -> Unit,
+    initialFocusKey: String? = null,
+) {
     BackHandler(onBack = onBack)
 
     val firstCardFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(shows) { if (shows.isNotEmpty()) firstCardFocusRequester.requestFocus() }
+    val gridState = rememberLazyGridState()
+    val focusIndex = remember(shows, initialFocusKey) {
+        initialFocusKey?.let { key -> shows.indexOfFirst { it.show == key }.takeIf { it >= 0 } } ?: 0
+    }
+    LaunchedEffect(shows, focusIndex) {
+        if (shows.isNotEmpty()) {
+            gridState.scrollToItem(focusIndex)
+            withFrameNanos {}
+            firstCardFocusRequester.requestFocus()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
         if (shows.isEmpty()) {
@@ -52,6 +70,7 @@ fun ShowShelfScreen(shows: List<ShowGroup>, artworkUrl: (MergedEntry) -> String?
         } else {
             // top = 32.dp — see MovieShelfScreen's identical comment on why.
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(5),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
@@ -63,7 +82,7 @@ fun ShowShelfScreen(shows: List<ShowGroup>, artworkUrl: (MergedEntry) -> String?
                     contentType = { _, _ -> "show" },
                 ) { index, show ->
                     val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
-                    val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                    val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenShow(show) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                         Column {
                             ArtworkImage(

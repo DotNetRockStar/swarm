@@ -7,6 +7,7 @@ mod bandwidth;
 pub mod lan;
 pub mod punch_connect;
 mod state_db;
+mod subtitle_download;
 pub mod transcription;
 
 use std::collections::{BTreeMap, HashSet};
@@ -450,6 +451,18 @@ impl ServerCore {
         Ok(self.transcription.status().await?)
     }
 
+    /// Download one subtitle from OpenSubtitles and register it in the same
+    /// durable playback catalog used by generated subtitles.
+    pub async fn download_subtitle(
+        &self,
+        api_key: &str,
+        entry_key: &str,
+        language: &str,
+    ) -> Result<swarm_media::store::SubtitleRecord, String> {
+        subtitle_download::download(&self.library, &self.data_dir, api_key, entry_key, language)
+            .await
+    }
+
     /// Live preference used by the desktop app. LAN connections always
     /// bypass the budget in `swarm_media::serve`, even when this is true.
     pub fn set_streaming_upload_budget_enabled(&self, enabled: bool) {
@@ -774,11 +787,14 @@ impl ServerCore {
         self.sync_roster().await
     }
 
-    /// Opens the time-limited, single-use LAN pairing window advertised over
-    /// mDNS. Discovery remains available all the time; only authorization is
-    /// gated by this explicit user action.
-    pub async fn open_lan_pairing(&self) -> lan::PairingStatus {
-        self.lan_service.open_pairing_window().await
+    /// Approves the short-lived code displayed by a TV on this LAN. The
+    /// pending request is bound to that TV's certificate fingerprint; once
+    /// approved, future mTLS reconnects do not require another code.
+    pub async fn approve_lan_pairing(
+        &self,
+        code: &str,
+    ) -> Result<lan::LanPairingApproval, lan::LanPairingError> {
+        self.lan_service.approve_pairing_code(code).await
     }
 
     pub async fn local_peers(&self) -> Result<Vec<LocalPeerRecord>, ServerError> {

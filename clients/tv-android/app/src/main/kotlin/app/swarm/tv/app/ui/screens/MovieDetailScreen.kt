@@ -64,6 +64,8 @@ fun MovieDetailScreen(
     onReportProblem: (MergedEntry) -> Unit,
     isLiked: Boolean,
     onToggleLike: () -> Unit,
+    isWatchlisted: Boolean,
+    onToggleWatchlist: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val playFocusRequester = remember { FocusRequester() }
@@ -143,6 +145,12 @@ fun MovieDetailScreen(
                             colors = swarmActionButtonColors(),
                         ) {
                             Text(if (isLiked) "♥ Liked" else "♡ Like", fontSize = 13.sp)
+                        }
+                        Button(
+                            onClick = onToggleWatchlist,
+                            colors = swarmActionButtonColors(),
+                        ) {
+                            Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
                         }
                         // Feeds the same client-error pipeline
                         // reportPlaybackRuntimeError does (SwarmViewModel.

@@ -25,8 +25,17 @@ class AndroidWatchStateStore(context: Context) : WatchStateStore {
 
     override suspend fun get(fingerprint: String): WatchState? = withContext(Dispatchers.IO) {
         prefs.getString(fingerprint, null)?.let { json ->
-            runCatching { SwarmJson.decodeFromString<WatchState>(json) }.getOrNull()
+            runCatching { SwarmJson.decodeFromString<WatchState>(json).withCurrentCompletionRule() }.getOrNull()
         }
+    }
+
+    override suspend fun all(): Map<String, WatchState> = withContext(Dispatchers.IO) {
+        prefs.all.mapNotNull { (fingerprint, value) ->
+            val json = value as? String ?: return@mapNotNull null
+            runCatching {
+                fingerprint to SwarmJson.decodeFromString<WatchState>(json).withCurrentCompletionRule()
+            }.getOrNull()
+        }.toMap()
     }
 
     override suspend fun set(fingerprint: String, state: WatchState) = withContext(Dispatchers.IO) {
@@ -37,3 +46,7 @@ class AndroidWatchStateStore(context: Context) : WatchStateStore {
         prefs.edit().remove(fingerprint).apply()
     }
 }
+
+/** Re-evaluates records written by older builds that used a 90% threshold. */
+private fun WatchState.withCurrentCompletionRule(): WatchState =
+    WatchState.fromPlayback(positionSecs, durationSecs, updatedAt)

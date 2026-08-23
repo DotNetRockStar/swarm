@@ -176,7 +176,12 @@ class PeerLoopbackProxy private constructor(
             return
         }
 
-        writeResponse(output, response.header, response.body)
+        // Media3 abandons the current HTTP request whenever the user seeks
+        // and immediately opens a replacement Range request. Closing the
+        // peer body in both the success and aborted-socket paths propagates
+        // that cancellation to the old QUIC stream instead of leaving the
+        // server uploading an obsolete range in the background.
+        response.body.use { body -> writeResponse(output, response.header, body) }
     }
 
     private fun writeResponse(output: OutputStream, header: PeerResponseHeader, body: InputStream) {

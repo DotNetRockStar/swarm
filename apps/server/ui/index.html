@@ -117,15 +117,27 @@
       </div>
       <p id="tmdbKeyStatus" class="note"></p>
     </div>
+
+    <div class="card">
+      <h2 class="info-trigger" data-info="opensubtitles-downloads" tabindex="0" role="button"><i class="bi bi-cloud-arrow-down heading-icon"></i>Subtitle downloads <i class="bi bi-info-circle info-affordance"></i></h2>
+      <div class="row">
+        <input id="openSubtitlesKeyInput" type="password" placeholder="OpenSubtitles.com API key">
+        <button id="saveOpenSubtitlesKeyBtn" class="secondary"><i class="bi bi-key"></i>Save key</button>
+      </div>
+      <p id="openSubtitlesKeyStatus" class="note"></p>
+    </div>
   </div>
 
   <div id="tabPanel-swarm" class="d-none">
     <div class="card">
       <div class="card-head">
         <h2 class="info-trigger" data-info="lan-network" tabindex="0" role="button">Local network <i class="bi bi-info-circle info-affordance"></i></h2>
-        <button id="openLanPairingBtn"><i class="bi bi-broadcast-pin"></i>Pair a client</button>
       </div>
-      <p class="muted">Nearby clients find this server automatically. Choose <strong>Pair a client</strong>, then enter the six-digit code on the client the first time it connects.</p>
+      <p class="muted">On the TV, select this server under <strong>Servers on LAN</strong>. Enter the temporary code shown on the TV here to approve it.</p>
+      <div class="row">
+        <input id="lanActivationCode" inputmode="numeric" placeholder="8-digit TV code" maxlength="8">
+        <button id="approveLanPairingBtn"><i class="bi bi-shield-check"></i>Approve TV</button>
+      </div>
       <div id="lanPairingStatus" class="d-none" style="margin-top:10px"></div>
       <div id="localPeersList" style="margin-top:12px">Loading…</div>
     </div>
@@ -136,6 +148,17 @@
   </div>
 
   <div id="tabPanel-notifications" class="d-none">
+    <div class="card">
+      <div class="card-head">
+        <h2>Server notifications</h2>
+        <div class="card-head-actions">
+          <span id="serverNotificationsCount" class="muted" style="font-size:.8rem"></span>
+          <button id="clearServerNotificationsBtn" class="secondary d-none"><i class="bi bi-check2-all"></i>Clear all</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:-6px">Important background-task results and errors from this media server. Select a notification to view its full details.</p>
+      <div id="serverNotificationsList" style="margin-top:10px">Loading…</div>
+    </div>
     <div class="card">
       <div class="card-head">
         <h2>Client errors</h2>
@@ -344,6 +367,16 @@
     <h2 id="infoModalTitle"></h2>
     <p id="infoModalBody" class="muted"></p>
     <div id="infoModalLinks" class="modal-links"></div>
+  </div>
+</div>
+
+<div id="notificationModalBackdrop" class="modal-backdrop d-none">
+  <div class="modal-box notification-modal-box" role="dialog" aria-modal="true" aria-labelledby="notificationModalTitle">
+    <button id="notificationModalClose" class="modal-close" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    <div class="modal-icon"><i id="notificationModalIcon" class="bi bi-bell-fill"></i></div>
+    <h2 id="notificationModalTitle"></h2>
+    <div id="notificationModalMeta" class="client-error-meta"></div>
+    <div id="notificationModalBody" class="notification-modal-body"></div>
   </div>
 </div>
 

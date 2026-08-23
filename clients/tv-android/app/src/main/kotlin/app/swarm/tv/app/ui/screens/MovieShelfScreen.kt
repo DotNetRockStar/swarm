@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -42,11 +44,27 @@ import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 
 @Composable
-fun MovieShelfScreen(movies: List<MergedEntry>, artworkUrl: (MergedEntry) -> String?, onOpenMovie: (MergedEntry) -> Unit, onBack: () -> Unit) {
+fun MovieShelfScreen(
+    movies: List<MergedEntry>,
+    artworkUrl: (MergedEntry) -> String?,
+    onOpenMovie: (MergedEntry) -> Unit,
+    onBack: () -> Unit,
+    initialFocusKey: String? = null,
+) {
     BackHandler(onBack = onBack)
 
     val firstCardFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(movies) { if (movies.isNotEmpty()) firstCardFocusRequester.requestFocus() }
+    val gridState = rememberLazyGridState()
+    val focusIndex = remember(movies, initialFocusKey) {
+        initialFocusKey?.let { key -> movies.indexOfFirst { it.entry.entryKey == key }.takeIf { it >= 0 } } ?: 0
+    }
+    LaunchedEffect(movies, focusIndex) {
+        if (movies.isNotEmpty()) {
+            gridState.scrollToItem(focusIndex)
+            withFrameNanos {}
+            firstCardFocusRequester.requestFocus()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
         if (movies.isEmpty()) {
@@ -60,6 +78,7 @@ fun MovieShelfScreen(movies: List<MergedEntry>, artworkUrl: (MergedEntry) -> Str
             // MovieRow's LazyRow in CatalogScreen.kt ("contentPadding, not
             // just the Column's own outer padding").
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(5),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
@@ -70,7 +89,7 @@ fun MovieShelfScreen(movies: List<MergedEntry>, artworkUrl: (MergedEntry) -> Str
                     key = { _, movie -> movie.entry.entryKey },
                     contentType = { _, _ -> "movie" },
                 ) { index, movie ->
-                    val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                    val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenMovie(movie) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
                         Column {
                             ArtworkImage(

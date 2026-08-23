@@ -29,9 +29,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
+import androidx.compose.material3.CircularProgressIndicator
 import app.swarm.tv.R
 import app.swarm.tv.app.data.BrowsePreview
-import coil.compose.AsyncImage
+import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import kotlinx.coroutines.delay
 
 private const val PREVIEW_PLAY_TIME_MS = 30_000L
@@ -42,17 +43,17 @@ internal fun PreviewLoadingIndicator(modifier: Modifier = Modifier) {
         modifier = modifier.background(Color.Black).focusProperties { canFocus = false },
         contentAlignment = Alignment.Center,
     ) {
-        AsyncImage(
-            model = R.drawable.preview_loading_circle,
-            contentDescription = "Loading preview",
-            modifier = Modifier.size(56.dp),
+        CircularProgressIndicator(
+            color = SwarmAccentHot,
+            strokeWidth = 5.dp,
+            modifier = Modifier.size(48.dp),
         )
     }
 }
 
 /** Inline video preview with its original audio. `Player.stop()` cancels every media request after the
- * preview window; PlayerView's keep-content flag preserves the final decoded
- * frame instead of flashing back to artwork or black. */
+ * preview window; the catalog then fades this layer away and collapses the
+ * still-focused card back to its box art. */
 @OptIn(UnstableApi::class)
 @Composable
 internal fun BrowsePreviewPlayer(

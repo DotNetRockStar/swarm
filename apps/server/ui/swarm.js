@@ -47,15 +47,23 @@ async function loadLocalPeers() {
   }
 }
 
-document.getElementById("openLanPairingBtn").addEventListener("click", async () => {
+document.getElementById("approveLanPairingBtn").addEventListener("click", async () => {
+  const input = document.getElementById("lanActivationCode");
+  const code = input.value.replace(/\D/g, "");
   const status = document.getElementById("lanPairingStatus");
+  if (code.length !== 8) {
+    showToast("Enter the 8-digit code shown on the TV.", "error");
+    return;
+  }
   try {
-    const pairing = await invoke("open_lan_pairing");
+    const pairing = await invoke("approve_lan_pairing", { code });
     status.classList.remove("d-none");
     status.innerHTML = `<div class="note">
-      Enter this code on the client within five minutes:
-      <strong class="mono" style="font-size:1.4rem; margin-left:8px">${esc(pairing.code)}</strong>
+      <strong>${esc(pairing.name)}</strong> was approved. The TV will connect automatically.
     </div>`;
+    input.value = "";
+    showToast(`${pairing.name} was paired on the local network.`, "success");
+    await loadLocalPeers();
   } catch (err) {
     showToast(String(err), "error");
   }

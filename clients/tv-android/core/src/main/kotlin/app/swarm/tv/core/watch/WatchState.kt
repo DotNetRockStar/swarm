@@ -10,11 +10,10 @@
  * Deliberately not Room, despite the project plan naming a "client-local
  * Room table": every other piece of local state in this app
  * (`TokenStore`) already uses a plain key/value store, not a database, for
- * data this simple (one JSON blob per fingerprint) — adding Room's KSP
- * annotation-processing toolchain for a single-table, no-query-beyond-
- * lookup-by-key need isn't a trade worth making. Revisit only if resume
- * state grows real query needs (e.g. "everything in progress," sorted)
- * that a key/value store can't answer cleanly.
+ * data this simple (one JSON blob per fingerprint) — adding another Room
+ * entity is not a useful trade. The Android implementation can snapshot its
+ * small dedicated preference file for Continue Watching, while lookup by
+ * fingerprint remains the playback hot path.
  */
 package app.swarm.tv.core.watch
 
@@ -26,10 +25,21 @@ data class WatchState(
     val durationSecs: Double,
     val watched: Boolean,
     val updatedAt: Long,
-)
+) {
+    companion object {
+        /** Credits commonly start before the media timeline reaches 100%. */
+        const val WATCHED_FRACTION = 0.95
+
+        fun fromPlayback(positionSecs: Double, durationSecs: Double, updatedAt: Long): WatchState {
+            val watched = durationSecs > 0 && positionSecs / durationSecs >= WATCHED_FRACTION
+            return WatchState(positionSecs, durationSecs, watched, updatedAt)
+        }
+    }
+}
 
 interface WatchStateStore {
     suspend fun get(fingerprint: String): WatchState?
+    suspend fun all(): Map<String, WatchState>
     suspend fun set(fingerprint: String, state: WatchState)
     suspend fun clear(fingerprint: String)
 }
@@ -39,6 +49,8 @@ class InMemoryWatchStateStore : WatchStateStore {
     private val states = mutableMapOf<String, WatchState>()
 
     override suspend fun get(fingerprint: String): WatchState? = states[fingerprint]
+
+    override suspend fun all(): Map<String, WatchState> = states.toMap()
 
     override suspend fun set(fingerprint: String, state: WatchState) {
         states[fingerprint] = state

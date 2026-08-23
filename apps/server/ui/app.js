@@ -100,6 +100,11 @@ const INFO_TOPICS = {
     body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a model of about 466 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU. By default SWARM pauses this work while anyone is streaming, but that protection can be disabled on the Details page when the server has enough CPU for both workloads. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
     link: "https://github.com/ggerganov/whisper.cpp", linkLabel: "Learn about Whisper.cpp",
   },
+  "opensubtitles-downloads": {
+    icon: "bi-cloud-arrow-down", title: "Subtitle downloads",
+    body: "Use an OpenSubtitles.com API key to search for an existing subtitle for one movie or episode. SWARM downloads it only when you request it, converts it to a TV-compatible format, stores it on this server, and offers it alongside locally generated subtitles during playback. OpenSubtitles applies its own account and daily download limits.",
+    link: "https://www.opensubtitles.com/consumers", linkLabel: "Get an OpenSubtitles API key",
+  },
   "about-server": {
     icon: "bi-hdd-network-fill", title: "Your server",
     body: "Runs on your own computer, scans your media, and streams files directly to your devices — there's no cloud in between.",
@@ -161,7 +166,7 @@ const INFO_TOPICS = {
   },
   "lan-network": {
     icon: "bi-broadcast-pin", title: "Local network",
-    body: "Clients on the same Wi-Fi or wired network discover this server automatically without a SWARM server. Choose Pair a client and enter the short-lived code on a new client once; trusted clients reconnect directly afterward.",
+    body: "TVs on the same Wi-Fi or wired network discover this server automatically without a SWARM service. Select this server on a new TV, then enter the short-lived code shown by the TV here. Trusted TVs reconnect directly afterward.",
     link: "https://en.wikipedia.org/wiki/Multicast_DNS", linkLabel: "Learn about mDNS",
   },
   "swarm-concept": {
@@ -289,7 +294,11 @@ async function refreshMediaRootHealth() {
       const paths = unavailable
         .map(root => `<span class="media-root-warning-path">${esc(root.path)}</span>`)
         .join(", ");
-      copy.innerHTML = `${unavailable.length} configured media ${noun} not readable: ${paths}. Reconnect the drive or network share. Playback, artwork, and subtitle generation will resume when ${recoveryPronoun} available; choose Rescan afterward to refresh library changes.`;
+      const healing = unavailable.filter(root => root.auto_reconnect).length;
+      const recovery = healing
+        ? `SWARM is automatically trying to reconnect ${healing === unavailable.length ? recoveryPronoun : `${healing} network share${healing === 1 ? "" : "s"}`}.`
+        : "Reconnect the drive or network share.";
+      copy.innerHTML = `${unavailable.length} configured media ${noun} not readable: ${paths}. ${recovery} Playback, artwork, and subtitles will resume automatically after the share becomes available.`;
     }
   } catch (_) {
     // Other status surfaces already report backend failures. This banner is
@@ -339,15 +348,15 @@ document.getElementById("onboardSkipBtn").addEventListener("click", enterDashboa
 
 // ---- boot -------------------------------------------------------------------
 
-// Notification bubble on the Notifications tab (client-reported error
-// count) — kept here rather than in notifications.js despite belonging
+// Notification bubble on the Notifications tab (server notifications plus
+// client-reported error count) — kept here rather than in notifications.js despite belonging
 // conceptually to that tab's feature, purely so it sits next to
 // enterDashboard() below, the other thing that touches it at boot.
 async function refreshNotificationBadge() {
   const badge = document.getElementById("notificationBadge");
   if (!badge) return;
   try {
-    const count = Number(await invoke("client_error_count")) || 0;
+    const count = Number(await invoke("notification_count")) || 0;
     badge.textContent = count > 99 ? "99+" : String(count);
     badge.classList.toggle("d-none", count <= 0);
   } catch {

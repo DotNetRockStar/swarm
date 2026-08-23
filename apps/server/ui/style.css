@@ -225,10 +225,24 @@ td.mono {
   padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--surface-muted); margin-bottom: 8px;
 }
+.client-error-row[data-open-notification] { cursor: pointer; }
+.client-error-row[data-open-notification]:hover { border-color: var(--accent); }
 .client-error-row:last-child { margin-bottom: 0; }
 .client-error-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: .75rem; color: var(--muted); margin-top: 4px; }
 .client-error-message { color: var(--text); font-size: .85rem; }
-.client-error-context { font-size: .75rem; color: var(--muted); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.client-error-context, .notification-preview {
+  font-size: .75rem; color: var(--muted); margin-top: 4px; white-space: pre-line; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+.notification-level-error { border-left: 4px solid #ff5d7a; }
+.notification-level-warning { border-left: 4px solid #f5c451; }
+.notification-level-success { border-left: 4px solid var(--green); }
+.notification-modal-box { max-width: 680px; }
+.notification-modal-body {
+  margin-top: 16px; max-height: 58vh; overflow: auto; padding: 14px;
+  border-radius: 8px; background: var(--surface-muted); color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; line-height: 1.5;
+}
 
 /* Passcode display (Swarm tab) */
 .passcode {
@@ -242,6 +256,35 @@ td.mono {
 .entry-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .entry-actions button { padding: 5px 10px; font-size: .78rem; }
 
+/* The per-asset editor is deliberately sectional rather than one long flow
+   of unrelated labels and buttons. Metadata uses a responsive two-column
+   form; secondary tools sit in their own clearly separated regions. */
+.metadata-editor { padding: 0 18px 8px; background: var(--surface); }
+.metadata-editor-section { padding: 22px 0; border-top: 1px solid var(--border); }
+.metadata-editor-section-first { border-top: 0; }
+.metadata-editor-section h2 { margin: 0 0 7px; color: var(--text); text-transform: none; font-size: 1rem; }
+.metadata-editor-section h2 i { color: var(--accent); margin-right: 7px; }
+.metadata-editor-section p { margin: 0 0 12px; }
+.metadata-editor-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
+.metadata-editor-heading > div { min-width: 0; }
+.metadata-editor-heading > button { flex: 0 0 auto; }
+.metadata-form-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr); gap: 16px; align-items: end; }
+.metadata-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--text); font-size: .82rem; font-weight: 650; }
+.metadata-field-wide { grid-column: 1 / -1; }
+.metadata-field input, .metadata-field select, .metadata-field textarea,
+.metadata-editor-section > select {
+  width: 100%; box-sizing: border-box; background: var(--surface-muted); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; font: inherit;
+}
+.metadata-field textarea { min-height: 138px; resize: vertical; line-height: 1.45; }
+.metadata-editor-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; border-top: 1px solid var(--border); }
+.metadata-editor-columns .metadata-editor-section { border-top: 0; }
+.metadata-editor-column { min-width: 0; }
+.metadata-action-row { align-items: center; margin-top: 12px; }
+.metadata-inline-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.metadata-file-section .mono { font-size: .78rem; overflow-wrap: anywhere; }
+.pinpoint-rescrape-section { background: rgba(0, 194, 255, .055); margin: 0 -18px; padding-left: 18px; padding-right: 18px; }
+
 /* Categories = genres — a movie/show detail's clickable tag list (clicking
    one filters the browse grid to that category) and the edit panel's
    assign-to-category checkbox picker. */
@@ -251,12 +294,26 @@ td.mono {
   border-radius: 999px; padding: 4px 12px; font-size: .78rem; font-weight: 600;
 }
 .category-chip:hover { border-color: var(--accent); background-color: rgba(0, 194, 255, .12); }
+.category-dropdown { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); }
+.category-dropdown summary { cursor: pointer; padding: 10px 12px; color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.category-dropdown[open] summary { border-bottom: 1px solid var(--border); }
+.category-dropdown-panel { padding: 10px; }
+.category-search-wrap { margin-bottom: 8px; }
 .category-picker {
-  display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 12px;
-  border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted);
-  max-height: 160px; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 5px 12px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); max-height: 185px; overflow-y: auto;
 }
-.category-picker-item { font-size: .82rem; }
+.category-picker-item { font-size: .82rem; padding: 3px 0; }
+.category-picker-item[hidden] { display: none; }
+.category-picker-empty { font-size: .82rem; }
+.category-add-row { margin-top: 8px; }
+
+@media (max-width: 760px) {
+  .metadata-form-grid, .metadata-editor-columns { grid-template-columns: 1fr; }
+  .metadata-field-wide { grid-column: 1; }
+  .metadata-editor-heading { flex-direction: column; }
+}
 
 /* Media tab: hierarchical browse (Phase 4) */
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); align-items: start; gap: 14px; margin-bottom: 8px; }

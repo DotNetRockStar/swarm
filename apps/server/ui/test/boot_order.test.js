@@ -34,6 +34,7 @@ const UI_DIR = path.join(__dirname, "..");
 const invokeCalls = [];
 let testLibraryEntries = [];
 let testRootHealth = [{ label: "test", path: "/tmp/swarm-boot-order-test", available: true, error: null }];
+let testServerNotifications = [];
 
 function invokeStub(command, args) {
   invokeCalls.push({ command, args });
@@ -91,7 +92,10 @@ function invokeStub(command, args) {
     case "list_categories":
     case "list_client_errors":
       return [];
+    case "list_server_notifications":
+      return testServerNotifications;
     case "client_error_count":
+    case "notification_count":
       return 0;
     case "get_swarm_link":
       return null;
@@ -219,6 +223,27 @@ async function main() {
   }
   if (document.querySelectorAll("#infoModalLinks a").length !== 2) {
     failures.push("Expected Try asking help to offer both Codex and Claude links.");
+  }
+
+  testServerNotifications = [{
+    id: 7,
+    level: "error",
+    title: "Metadata scrape finished with issues",
+    message: "Matched: 2\nFailed: 1\n\nIssues:\n• Example Movie — request timed out",
+    created_at_ms: Date.now(),
+  }];
+  await dom.window.refreshNotifications();
+  const notificationRow = document.querySelector('[data-open-notification="server-7"]');
+  if (!notificationRow) {
+    failures.push("Expected persistent server notifications to render on the Notifications page.");
+  } else {
+    notificationRow.click();
+    if (document.getElementById("notificationModalBackdrop").classList.contains("d-none")) {
+      failures.push("Expected clicking a notification preview to open its full-detail modal.");
+    }
+    if (!document.getElementById("notificationModalBody").textContent.includes("request timed out")) {
+      failures.push("Expected the notification modal to contain the full scrape error report.");
+    }
   }
 
   // Group re-scrape regression: the show action must include episodes from
