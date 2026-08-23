@@ -40,6 +40,7 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.Button
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
+import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
@@ -180,7 +181,7 @@ private fun EpisodeGrid(
             ) {
                 Column {
                     ArtworkImage(
-                        label = episode.entry.scrapedTitle ?: episode.entry.title,
+                        label = episode.entry.displayTitle(),
                         placeholderType = "Show",
                         primaryUrl = episodeArtworkUrl(episode),
                         modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(4.dp)),
@@ -191,7 +192,7 @@ private fun EpisodeGrid(
                             color = SwarmMuted,
                             fontSize = 11.sp,
                         )
-                        Text(episode.entry.scrapedTitle ?: episode.entry.title, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
+                        Text(episode.entry.displayTitle(), color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
                     }
                 }
             }

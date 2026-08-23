@@ -245,6 +245,7 @@ pub async fn scan_roots(
             // must never clobber existing scrape results), so these values
             // are unused placeholders on the write path.
             scraped_title: None,
+            episode_title: None,
             genres: Vec::new(),
             artwork_version: 0,
             cast: Vec::new(),

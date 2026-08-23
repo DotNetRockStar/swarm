@@ -18,7 +18,7 @@ use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
 use crate::scrape::lrclib::{LrclibClient, LrclibError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
-use crate::scrape::tmdb::{ScrapedSeason, ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
+use crate::scrape::tmdb::{ScrapedEpisode, ScrapedSeason, ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
 use crate::scrape::wikimedia::WikimediaClient;
 use crate::store::{ArtworkKind, CastMember, EntryRecord, Library};
 use std::collections::HashMap;
@@ -506,6 +506,46 @@ async fn search_movie_for_entry(
     Err(TmdbError::NotFound)
 }
 
+/// TMDb specials are season 0, but local DVD extras usually have no numeric
+/// episode number. Match their filename title to TMDb's season-0 episode
+/// names, retaining the episode metadata instead of displaying the show's
+/// title for every special. Compacting punctuation also handles common
+/// filename variants such as "Sit-down" vs "Sitdown".
+fn compact_episode_title(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn match_tmdb_episode_title<'a>(
+    title: &str,
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    season: &'a ScrapedSeason,
+) -> Option<&'a ScrapedEpisode> {
+    if let Some(number) = episode_number {
+        return season.episode_details.get(&number);
+    }
+    if season_number != Some(0) {
+        return None;
+    }
+    let local = compact_episode_title(title);
+    if local.len() < 8 {
+        return None;
+    }
+    season.episode_details.values().find(|episode| {
+        let remote = compact_episode_title(&episode.title);
+        !remote.is_empty()
+            && (remote == local || remote.starts_with(&local) || remote.ends_with(&local))
+    })
+}
+
+fn match_tmdb_episode<'a>(entry: &EntryRecord, season: &'a ScrapedSeason) -> Option<&'a ScrapedEpisode> {
+    match_tmdb_episode_title(&entry.title, entry.season, entry.episode, season)
+}
+
 async fn scrape_videos(
     library: &Library,
     roots: &SharedRootResolver,
@@ -569,12 +609,13 @@ async fn scrape_videos(
                                 };
                             match season_result {
                                 Ok(season) => {
-                                    scraped.season_poster_url = season.poster_url;
-                                    if let Some(still) = entry
-                                        .episode
-                                        .and_then(|number| season.episode_still_urls.get(&number))
-                                    {
-                                        scraped.backdrop_url = Some(still.clone());
+                                    scraped.season_poster_url = season.poster_url.clone();
+                                    if let Some(episode) = match_tmdb_episode(entry, &season) {
+                                        scraped.episode_title = Some(episode.title.clone());
+                                        scraped.episode_overview = episode.overview.clone();
+                                        if let Some(still) = &episode.still_url {
+                                            scraped.backdrop_url = Some(still.clone());
+                                        }
                                     }
                                     Ok(scraped)
                                 }
@@ -607,7 +648,14 @@ async fn scrape_videos(
                         scraped.community_rating_votes,
                     )
                     .await?;
-                if let Some(overview) = &scraped.overview {
+                library
+                    .set_episode_title(&entry.entry_key, scraped.episode_title.as_deref())
+                    .await?;
+                if let Some(overview) = scraped
+                    .episode_overview
+                    .as_deref()
+                    .or(scraped.overview.as_deref())
+                {
                     library.set_overview(&entry.entry_key, overview).await?;
                 }
                 if let Some(url) = &scraped.poster_url {
@@ -1097,12 +1145,13 @@ pub async fn scrape_one_video(
         if let Some(season_number) = entry.season {
             match tmdb.season_details(scraped.tmdb_id, season_number).await {
                 Ok(season) => {
-                    scraped.season_poster_url = season.poster_url;
-                    if let Some(still) = entry
-                        .episode
-                        .and_then(|number| season.episode_still_urls.get(&number))
-                    {
-                        scraped.backdrop_url = Some(still.clone());
+                    scraped.season_poster_url = season.poster_url.clone();
+                    if let Some(episode) = match_tmdb_episode(entry, &season) {
+                        scraped.episode_title = Some(episode.title.clone());
+                        scraped.episode_overview = episode.overview.clone();
+                        if let Some(still) = &episode.still_url {
+                            scraped.backdrop_url = Some(still.clone());
+                        }
                     }
                 }
                 // Preserve the successfully matched show for custom season
@@ -1123,7 +1172,14 @@ pub async fn scrape_one_video(
             scraped.community_rating_votes,
         )
         .await?;
-    if let Some(overview) = &scraped.overview {
+    library
+        .set_episode_title(&entry.entry_key, scraped.episode_title.as_deref())
+        .await?;
+    if let Some(overview) = scraped
+        .episode_overview
+        .as_deref()
+        .or(scraped.overview.as_deref())
+    {
         library.set_overview(&entry.entry_key, overview).await?;
     }
     if let Some(url) = &scraped.poster_url {
@@ -1323,6 +1379,66 @@ mod tests {
         assert_eq!(search_query_for("1080p x264"), "1080p x264");
     }
 
+    #[test]
+    fn specials_match_tmdb_names_even_when_filename_punctuation_differs() {
+        let season = ScrapedSeason {
+            episode_details: [
+                (
+                    13,
+                    ScrapedEpisode {
+                        title: "A Sitdown with Michael C. Hall and John Lithgow".into(),
+                        overview: Some("A conversation.".into()),
+                        still_url: None,
+                    },
+                ),
+                (
+                    33,
+                    ScrapedEpisode {
+                        title: "Dissecting Dexter 01 - Dexter's Origins".into(),
+                        overview: None,
+                        still_url: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let matched = match_tmdb_episode_title(
+            "A Sit-down With Michael C. Hall and John Lithgow",
+            Some(0),
+            None,
+            &season,
+        )
+        .unwrap();
+        assert_eq!(matched.title, "A Sitdown with Michael C. Hall and John Lithgow");
+        assert_eq!(
+            match_tmdb_episode_title("Dissecting Dexter", Some(0), None, &season)
+                .unwrap()
+                .title,
+            "Dissecting Dexter 01 - Dexter's Origins"
+        );
+        let dark_defender = ScrapedSeason {
+            episode_details: [(
+                21,
+                ScrapedEpisode {
+                    title: "The Dark Defender: Little Chino".into(),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            match_tmdb_episode_title("Little Chino", Some(0), None, &dark_defender)
+                .unwrap()
+                .title,
+            "The Dark Defender: Little Chino"
+        );
+        assert!(match_tmdb_episode_title("Michael C Hall", Some(0), None, &season).is_none());
+    }
+
     fn movie_entry(title: &str, relative_path: &str, year: Option<u32>) -> EntryRecord {
         EntryRecord {
             entry_key: "movie-key".into(),
@@ -1343,6 +1459,7 @@ mod tests {
             video: None,
             audio: None,
             scraped_title: None,
+            episode_title: None,
             genres: vec![],
             artwork_version: 0,
             cast: vec![],

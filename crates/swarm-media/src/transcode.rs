@@ -1136,6 +1136,7 @@ mod tests {
                 bitrate: Some(192_000),
             }),
             scraped_title: None,
+            episode_title: None,
             genres: vec![],
             artwork_version: 0,
             cast: vec![],

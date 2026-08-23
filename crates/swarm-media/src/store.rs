@@ -35,6 +35,9 @@ pub struct EntryRecord {
     pub audio: Option<AudioStreamInfo>,
     /// Scraper overlay — display-only, never a grouping key (Drone rule).
     pub scraped_title: Option<String>,
+    /// TV episode/special title from TMDb, separate from the canonical show
+    /// title stored in `scraped_title` for cross-folder grouping.
+    pub episode_title: Option<String>,
     pub genres: Vec<String>,
     pub artwork_version: u32,
     /// Scraper overlay, movies/episodes only — empty for tracks (music has
@@ -63,7 +66,7 @@ pub struct EntryRecord {
 /// Bump whenever a successful online scrape begins populating new durable
 /// metadata. Rows written by an older scraper version become eligible for a
 /// one-time backfill even though their title/artwork scrape already finished.
-const CURRENT_SCRAPE_VERSION: i64 = 1;
+const CURRENT_SCRAPE_VERSION: i64 = 2;
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
 /// order) at scrape time. Same status as `scraped_title`/`genres` — display
@@ -366,6 +369,7 @@ impl Library {
             ("community_rating", "REAL"),
             ("community_rating_votes", "INTEGER"),
             ("scrape_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("episode_title", "TEXT"),
         ] {
             ensure_column(&pool, "library_entries", column, ddl_type).await?;
         }
@@ -1096,7 +1100,7 @@ impl Library {
         let genres_json = serde_json::to_string(genres).unwrap_or_else(|_| "[]".into());
         let cast_json = serde_json::to_string(cast).unwrap_or_else(|_| "[]".into());
         sqlx::query(
-            "UPDATE library_entries SET scraped_title = ?, genres_json = ?, cast_json = ?, \
+            "UPDATE library_entries SET scraped_title = ?, episode_title = NULL, genres_json = ?, cast_json = ?, \
              rating = ?, community_rating = ?, community_rating_votes = ?, scrape_version = ? \
              WHERE entry_key = ?",
         )
@@ -1180,7 +1184,7 @@ impl Library {
         };
         sqlx::query(
             "UPDATE library_entries SET kind = ?, artist = ?, album = ?, show_title = ?, \
-             season = NULL, episode = NULL, track_number = NULL, kind_overridden = 1 \
+             season = NULL, episode = NULL, episode_title = NULL, track_number = NULL, kind_overridden = 1 \
              WHERE entry_key = ?",
         )
         .bind(kind_str(kind))
@@ -1202,6 +1206,21 @@ impl Library {
     pub async fn set_overview(&self, entry_key: &str, overview: &str) -> sqlx::Result<()> {
         sqlx::query("UPDATE library_entries SET overview = ? WHERE entry_key = ?")
             .bind(overview)
+            .bind(entry_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Stores the episode/special title returned by TMDb while leaving the
+    /// path-derived filename title and canonical show title untouched.
+    pub async fn set_episode_title(
+        &self,
+        entry_key: &str,
+        title: Option<&str>,
+    ) -> sqlx::Result<()> {
+        sqlx::query("UPDATE library_entries SET episode_title = ? WHERE entry_key = ?")
+            .bind(title.filter(|value| !value.trim().is_empty()))
             .bind(entry_key)
             .execute(&self.pool)
             .await?;
@@ -1320,7 +1339,7 @@ impl Library {
             .collect();
 
         sqlx::query(
-            "UPDATE library_entries SET scraped_title = NULL, genres_json = NULL, cast_json = NULL, overview = NULL, \
+            "UPDATE library_entries SET scraped_title = NULL, episode_title = NULL, genres_json = NULL, cast_json = NULL, overview = NULL, \
              rating = NULL, community_rating = NULL, community_rating_votes = NULL, scrape_version = 0, \
              poster_relative_path = NULL, season_poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
              artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
@@ -1706,7 +1725,7 @@ async fn ensure_column(
 const ENTRY_SELECT: &str =
     "SELECT entry_key, relative_path, kind, title, size, modified_time, fingerprint, artist, album, \
      track_number, show_title, season, episode, duration_secs, video_json, audio_json, \
-     scraped_title, genres_json, artwork_version, year, cast_json, overview, rating, \
+     scraped_title, episode_title, genres_json, artwork_version, year, cast_json, overview, rating, \
      community_rating, community_rating_votes FROM library_entries";
 
 #[derive(sqlx::FromRow)]
@@ -1728,6 +1747,7 @@ struct EntryRow {
     video_json: Option<String>,
     audio_json: Option<String>,
     scraped_title: Option<String>,
+    episode_title: Option<String>,
     genres_json: Option<String>,
     artwork_version: i64,
     year: Option<i64>,
@@ -1766,6 +1786,7 @@ impl From<EntryRow> for EntryRecord {
             // Empty string is the "scraped, no match found" marker (see
             // set_scrape_not_found) — surface it as no display overlay.
             scraped_title: row.scraped_title.filter(|t| !t.is_empty()),
+            episode_title: row.episode_title.filter(|t| !t.is_empty()),
             genres: row
                 .genres_json
                 .as_deref()
@@ -1802,6 +1823,7 @@ impl EntryRecord {
             album: self.album.clone(),
             track_number: self.track_number,
             scraped_title: self.scraped_title.clone(),
+            episode_title: self.episode_title.clone(),
             genres: self.genres.clone(),
             video: self.video.clone(),
             audio: self.audio.clone(),

@@ -34,6 +34,7 @@ fn entry(entry_key: &str) -> EntryRecord {
         video: None,
         audio: None,
         scraped_title: None,
+        episode_title: None,
         genres: vec![],
         artwork_version: 0,
         cast: vec![],

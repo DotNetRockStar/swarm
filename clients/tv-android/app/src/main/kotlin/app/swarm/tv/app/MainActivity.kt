@@ -78,6 +78,7 @@ import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
@@ -635,7 +636,7 @@ private fun SwarmApp(
                 if (state.entry.entry.kind == MediaKind.TRACK) {
                     MusicPlayerScreen(
                         entry = state.entry,
-                        nextTitle = state.nextEntry?.let { it.entry.scrapedTitle ?: it.entry.title },
+                        nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
                         isPlaying = musicIsPlaying,
                         isLoading = musicIsLoading,
                         shuffleEnabled = shuffleEnabled,
@@ -662,7 +663,7 @@ private fun SwarmApp(
                         maxBitrate = state.maxBitrate,
                         subtitles = state.subtitles,
                         hasNext = state.nextEntry != null,
-                        nextTitle = state.nextEntry?.let { it.entry.scrapedTitle ?: it.entry.title },
+                        nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
                         onBack = onStopPlayback,
                         onPositionUpdate = { positionSecs, durationSecs ->
                             onSavePlaybackPosition(

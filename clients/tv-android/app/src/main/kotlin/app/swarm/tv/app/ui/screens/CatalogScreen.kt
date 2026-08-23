@@ -105,6 +105,7 @@ import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.CatalogGrouping
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
@@ -1540,7 +1541,7 @@ private fun CatalogCard(
         Column {
             Box(modifier = Modifier.fillMaxWidth().height(CARD_MEDIA_HEIGHT).clip(RoundedCornerShape(4.dp))) {
                 ArtworkImage(
-                    label = merged.entry.scrapedTitle ?: merged.entry.title,
+                    label = merged.entry.displayTitle(),
                     placeholderType = placeholderType,
                     primaryUrl = artworkUrl,
                     modifier = Modifier.fillMaxSize(),
@@ -1581,7 +1582,7 @@ private fun CatalogCard(
             if (showCardText) {
                 Column(modifier = Modifier.padding(10.dp)) {
                     Text(
-                        titleOverride ?: merged.entry.scrapedTitle ?: merged.entry.title,
+                        titleOverride ?: merged.entry.displayTitle(),
                         color = SwarmText,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,

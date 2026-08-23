@@ -49,6 +49,12 @@ pub struct ScrapedVideo {
     /// misleading 0/10 rating.
     pub community_rating: Option<f64>,
     pub community_rating_votes: Option<u64>,
+    /// TMDb's episode/special title, when this video was matched to a TV
+    /// season entry. Kept separate from `title`, which is the canonical show
+    /// title used for grouping.
+    pub episode_title: Option<String>,
+    /// Episode-specific synopsis, when TMDb supplies one.
+    pub episode_overview: Option<String>,
 }
 
 /// Artwork returned by TMDB's season-details endpoint. One response covers
@@ -58,6 +64,16 @@ pub struct ScrapedVideo {
 pub struct ScrapedSeason {
     pub poster_url: Option<String>,
     pub episode_still_urls: HashMap<u32, String>,
+    /// Episode metadata keyed by TMDb episode number. Specials are included
+    /// here as season 0, even when the local file has no numeric episode.
+    pub episode_details: HashMap<u32, ScrapedEpisode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScrapedEpisode {
+    pub title: String,
+    pub overview: Option<String>,
+    pub still_url: Option<String>,
 }
 
 /// A user-supplied manual TMDb match, bypassing search entirely — the
@@ -239,14 +255,31 @@ impl TmdbClient {
                 .map(|p| format!("{}/w342{p}", self.image_base)),
             episode_still_urls: body
                 .episodes
-                .into_iter()
+                .iter()
                 .filter_map(|episode| {
-                    episode.still_path.map(|path| {
+                    episode.still_path.clone().map(|path| {
                         (
                             episode.episode_number,
                             format!("{}/w780{path}", self.image_base),
                         )
                     })
+                })
+                .collect(),
+            episode_details: body
+                .episodes
+                .into_iter()
+                .map(|episode| {
+                    let still_url = episode
+                        .still_path
+                        .map(|path| format!("{}/w780{path}", self.image_base));
+                    (
+                        episode.episode_number,
+                        ScrapedEpisode {
+                            title: episode.name,
+                            overview: episode.overview.filter(|value| !value.trim().is_empty()),
+                            still_url,
+                        },
+                    )
                 })
                 .collect(),
         })
@@ -388,6 +421,8 @@ impl TmdbClient {
                 .flatten()
                 .filter(|rating| rating.is_finite() && (0.0..=10.0).contains(rating)),
             community_rating_votes: body.vote_count.filter(|votes| *votes > 0),
+            episode_title: None,
+            episode_overview: None,
         })
     }
 }
@@ -535,6 +570,9 @@ struct SeasonDetailsResponse {
 #[derive(Deserialize)]
 struct SeasonEpisodeResponse {
     episode_number: u32,
+    #[serde(default)]
+    name: String,
+    overview: Option<String>,
     still_path: Option<String>,
 }
 
@@ -708,9 +746,9 @@ mod tests {
                     "season_number": 2,
                     "poster_path": "/american-dad-season-2.jpg",
                     "episodes": [
-                        {"episode_number": 1, "still_path": "/episode-1.jpg"},
-                        {"episode_number": 2, "still_path": "/episode-2.jpg"},
-                        {"episode_number": 3, "still_path": null}
+                        {"episode_number": 1, "name": "The One", "overview": "First.", "still_path": "/episode-1.jpg"},
+                        {"episode_number": 2, "name": "The Two", "still_path": "/episode-2.jpg"},
+                        {"episode_number": 3, "name": "The Three", "still_path": null}
                     ]
                 }))
             }),
@@ -732,6 +770,9 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w780/episode-2.jpg")
         );
         assert!(!season.episode_still_urls.contains_key(&3));
+        assert_eq!(season.episode_details.get(&1).unwrap().title, "The One");
+        assert_eq!(season.episode_details.get(&1).unwrap().overview.as_deref(), Some("First."));
+        assert_eq!(season.episode_details.get(&3).unwrap().title, "The Three");
     }
 
     #[tokio::test]

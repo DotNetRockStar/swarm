@@ -12,6 +12,11 @@ import app.swarm.tv.core.peer.CatalogEntry
 import app.swarm.tv.core.peer.CatalogManifest
 import app.swarm.tv.core.peer.MediaKind
 
+fun CatalogEntry.displayTitle(): String = when (kind) {
+    MediaKind.EPISODE -> episodeTitle?.takeIf { it.isNotBlank() } ?: title
+    else -> scrapedTitle?.takeIf { it.isNotBlank() } ?: title
+}
+
 data class MergedEntry(
     val fingerprint: String,
     /** Server ids holding this fingerprint, sorted for determinism. */
@@ -54,7 +59,10 @@ object CatalogMerger {
      * merge is reproducible given the same inputs regardless of map order.
      */
     private fun isRicher(candidate: CatalogEntry, existing: CatalogEntry): Boolean {
-        fun score(e: CatalogEntry) = (if (e.scrapedTitle != null) 1 else 0) + (if (e.artworkEtag != null) 1 else 0)
+        fun score(e: CatalogEntry) =
+            (if (e.scrapedTitle != null) 1 else 0) +
+                (if (e.episodeTitle != null) 1 else 0) +
+                (if (e.artworkEtag != null) 1 else 0)
         return score(candidate) > score(existing)
     }
 
@@ -75,5 +83,4 @@ object CatalogMerger {
         return withoutLeadingArticle.lowercase()
     }
 
-    private fun CatalogEntry.displayTitle(): String = scrapedTitle?.takeIf { it.isNotBlank() } ?: title
 }

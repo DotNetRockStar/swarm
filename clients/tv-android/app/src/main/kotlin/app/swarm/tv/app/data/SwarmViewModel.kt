@@ -10,6 +10,7 @@ import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.PunchFallback
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
 import app.swarm.tv.core.client.StunClientError
@@ -1645,7 +1646,7 @@ class SwarmViewModel(
                         device = device,
                         message = message,
                         entryKey = entry.entry.entryKey,
-                        assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
+                        assetTitle = entry.entry.displayTitle(),
                         kind = entry.entry.kind.name.lowercase(),
                     )
                 }
@@ -1665,7 +1666,7 @@ class SwarmViewModel(
             val cleanedPrevious = if (previousScreen is UiState.Catalog) previousScreen.copy(playbackError = null) else previousScreen
             val playerState = UiState.Player(
                 url = selection.url,
-                title = entry.entry.scrapedTitle ?: entry.entry.title,
+                title = entry.entry.displayTitle(),
                 playbackMode = selection.mode,
                 fingerprint = fingerprint,
                 resumePositionSecs = if (isHls) 0.0 else resumePositionSecs,
@@ -1707,7 +1708,7 @@ class SwarmViewModel(
             device = device,
             message = message,
             entryKey = current.entry.entry.entryKey,
-            assetTitle = current.entry.entry.scrapedTitle ?: current.entry.entry.title,
+            assetTitle = current.entry.entry.displayTitle(),
             kind = current.entry.entry.kind.name.lowercase(),
             context = context,
         )
@@ -1730,7 +1731,7 @@ class SwarmViewModel(
             device = device,
             message = "User reported a problem with this asset from its detail page.",
             entryKey = entry.entry.entryKey,
-            assetTitle = entry.entry.scrapedTitle ?: entry.entry.title,
+                assetTitle = entry.entry.displayTitle(),
             kind = entry.entry.kind.name.lowercase(),
         )
         notify("Problem report sent.", ClientNotificationKind.SUCCESS)

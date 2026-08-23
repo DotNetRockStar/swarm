@@ -612,6 +612,7 @@ struct EntrySummary {
     relative_path: String,
     size: u64,
     scraped_title: Option<String>,
+    episode_title: Option<String>,
     genres: Vec<String>,
     has_artwork: bool,
     // Grouping/detail fields for the Media tab's hierarchical browse view
@@ -657,6 +658,7 @@ async fn list_entries(
             relative_path: entry.relative_path,
             size: entry.size,
             scraped_title: entry.scraped_title,
+            episode_title: entry.episode_title,
             genres: entry.genres,
             has_artwork: entry.artwork_version > 0,
             artist: entry.artist,

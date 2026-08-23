@@ -253,6 +253,11 @@ pub struct CatalogEntry {
     pub track_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scraped_title: Option<String>,
+    /// Scraper overlay for a TV episode/special's own title. Kept separate
+    /// from `scraped_title`, which is the canonical show title used to merge
+    /// differently named on-disk show folders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_title: Option<String>,
     #[serde(default)]
     pub genres: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +435,7 @@ mod tests {
                 album: None,
                 track_number: None,
                 scraped_title: Some("Inception (2010)".into()),
+                episode_title: None,
                 genres: vec!["Sci-Fi".into()],
                 video: Some(VideoStreamInfo {
                     codec: "h264".into(),

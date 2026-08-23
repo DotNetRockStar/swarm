@@ -74,6 +74,8 @@ data class CatalogEntry(
     val album: String? = null,
     val trackNumber: Int? = null,
     val scrapedTitle: String? = null,
+    /** TMDb's display title for a TV episode/special; separate from the canonical show title in scrapedTitle. */
+    val episodeTitle: String? = null,
     val genres: List<String> = emptyList(),
     val video: VideoStreamInfo? = null,
     val audio: AudioStreamInfo? = null,

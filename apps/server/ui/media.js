@@ -28,6 +28,11 @@ function formatBytes(bytes) {
   return `${(bytes / 1048576).toFixed(bytes >= 104857600 ? 0 : 1)} MB`;
 }
 
+function displayEntryTitle(entry) {
+  if (entry.kind === "episode") return entry.episode_title || entry.title || entry.scraped_title || "Episode";
+  return entry.scraped_title || entry.title || "Untitled";
+}
+
 // This panel deliberately lives outside renderMediaTab(), so browsing,
 // searching, or rebuilding the library never interrupts its updates.
 async function refreshTranscriptionProgress() {
@@ -82,7 +87,7 @@ function filteredEntries() {
     if (completenessFilter === "missing_artwork" && e.has_artwork) return false;
     if (completenessFilter === "missing_metadata" && hasUsefulMetadata(e)) return false;
     if (!q) return true;
-    return [e.scraped_title, e.title, e.artist, e.album, e.show_title]
+    return [e.episode_title, e.scraped_title, e.title, e.artist, e.album, e.show_title]
       .filter(Boolean)
       .some(field => field.toLowerCase().includes(q));
   });
@@ -494,7 +499,7 @@ function detailView(entry, backCrumbs) {
         ${artImg(entry.entry_key, "poster", "detail-poster")}
         <div>
           <h2 style="margin-top:0; text-transform:none; font-size:1.2rem; color:var(--text)">
-            ${esc(entry.scraped_title || entry.title)}${entry.year ? ` <span class="muted">(${entry.year})</span>` : ""}
+            ${esc(displayEntryTitle(entry))}${entry.year ? ` <span class="muted">(${entry.year})</span>` : ""}
             ${entry.rating ? `<span class="tag" style="margin-left:8px; vertical-align:middle">${esc(entry.rating)}</span>` : ""}
             ${entry.community_rating != null ? `<span class="tag" style="margin-left:8px; vertical-align:middle">${communityRating(entry)}</span>` : ""}
             ${entry.like_count ? `<span class="muted" style="margin-left:8px; font-size:.85rem; vertical-align:middle"><i class="bi bi-heart-fill" style="color:#ff5d7a"></i> ${entry.like_count}</span>` : ""}
@@ -538,7 +543,7 @@ function wireDetailManage(entry) {
 function renderMovieDetail(body, entryKey) {
   const entry = libraryEntries.find(e => e.entry_key === entryKey);
   if (!entry) { browsePath = { kind: "root" }; return renderBrowse(); }
-  const crumbs = [{ label: "Media", onClick: () => browsePath = { kind: "root" } }, { label: entry.scraped_title || entry.title }];
+  const crumbs = [{ label: "Media", onClick: () => browsePath = { kind: "root" } }, { label: displayEntryTitle(entry) }];
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
   wireDetailManage(entry);
@@ -767,7 +772,7 @@ function renderSeason(body, show, season) {
     <div class="media-card" data-episode="${esc(ep.entry_key)}">
       ${artImg(ep.entry_key, "backdrop", "card-art")}
       ${likeBadge(ep.like_count)}
-      <div class="card-title" title="${esc(ep.scraped_title || ep.title)}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(ep.scraped_title || ep.title)}</div>
+      <div class="card-title" title="${esc(displayEntryTitle(ep))}">${ep.episode ? `E${ep.episode} — ` : ""}${esc(displayEntryTitle(ep))}</div>
     </div>`).join("");
   body.innerHTML = `${breadcrumb(crumbs)}
     <div class="row media-group-actions">
@@ -794,7 +799,7 @@ function renderEpisodeDetail(body, entryKey) {
     { label: "Media", onClick: () => browsePath = { kind: "root" } },
     { label: show, onClick: () => browsePath = { kind: "show", show } },
     { label: season === -1 ? "Unknown Season" : `Season ${season}`, onClick: () => browsePath = { kind: "season", show, season } },
-    { label: entry.scraped_title || entry.title },
+    { label: displayEntryTitle(entry) },
   ];
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
@@ -821,7 +826,7 @@ function renderLibrary() {
     <thead><tr><th>Title</th><th>Kind</th><th>Genres</th><th>Art</th><th>Path</th><th>Size</th><th></th></tr></thead>
     <tbody>` + entries.map(e => `
       <tr data-entry-row="${esc(e.entry_key)}">
-        <td>${esc(e.scraped_title || e.title)}</td>
+        <td>${esc(displayEntryTitle(e))}</td>
         <td>${esc(e.kind)}</td>
         <td>${e.genres.map(esc).join(", ") || "—"}</td>
         <td>${e.has_artwork ? "✓" : "—"}</td>
