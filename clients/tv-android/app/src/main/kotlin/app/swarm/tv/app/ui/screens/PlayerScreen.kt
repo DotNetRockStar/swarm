@@ -84,6 +84,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -357,6 +358,7 @@ fun PlayerScreen(
     onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
     onServerOffline: (context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
+    onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -382,6 +384,12 @@ fun PlayerScreen(
         )
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
+    // Distinguishes a mid-playback bandwidth stall (viewer already saw a
+    // frame; show "Buffering…" in the warm accent color) from the initial
+    // negotiate-and-buffer wait above, which keeps its randomized caption.
+    var isRebuffering by remember(sessionId) { mutableStateOf(false) }
+    var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
+    var lastVideoHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
     var trackAvailability by remember(sessionId) {
@@ -476,6 +484,23 @@ fun PlayerScreen(
                 serverOffline = false
                 if (player.playbackState == Player.STATE_READY) isLoading = false
             }
+
+            // Only fires more than once per session for an adaptive HLS
+            // ladder (see TranscodeManager's multi-rendition master
+            // playlist) — a direct-play or single-rendition source selects
+            // its one format once and never triggers this again, so
+            // playbackQualityChange's null-on-first-format guard keeps this
+            // silent for those.
+            override fun onVideoInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: Format,
+                decoderReuseEvaluation: DecoderReuseEvaluation?,
+            ) {
+                val newHeight = format.height
+                if (newHeight <= 0) return
+                playbackQualityChange(lastVideoHeight, newHeight)?.let(onPlaybackQualityChanged)
+                lastVideoHeight = newHeight
+            }
         }
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -483,9 +508,20 @@ fun PlayerScreen(
                 // so onRenderedFirstFrame below would never fire for them).
                 if (playbackState == Player.STATE_READY) {
                     isLoading = false
+                    isRebuffering = false
+                    hasStartedPlayback = true
                 }
                 if (playbackState == Player.STATE_BUFFERING && serverOffline) {
                     isLoading = true
+                }
+                // A stall after the viewer already saw a frame is a real
+                // mid-playback rebuffer (almost always the bandwidth running
+                // out from under the current rendition) rather than the
+                // initial negotiate-and-buffer wait — flag it so the overlay
+                // below shows "Buffering…" instead of the cold-start caption.
+                if (playbackState == Player.STATE_BUFFERING && hasStartedPlayback && !showPauseOverlay) {
+                    isLoading = true
+                    isRebuffering = true
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     showPauseOverlay = false
@@ -507,6 +543,8 @@ fun PlayerScreen(
             // dead frame between "ready" and pixels actually landing.
             override fun onRenderedFirstFrame() {
                 isLoading = false
+                isRebuffering = false
+                hasStartedPlayback = true
             }
 
             // Runtime failures after negotiation already succeeded (network
@@ -631,7 +669,11 @@ fun PlayerScreen(
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                SwarmLoadingIndicator(onBlackBackground = true)
+                SwarmLoadingIndicator(
+                    onBlackBackground = true,
+                    messageOverride = if (isRebuffering) "Buffering…" else null,
+                    messageColor = if (isRebuffering) SwarmAccentHot else SwarmMuted,
+                )
             }
         }
 
@@ -875,6 +917,22 @@ private fun durationLabel(durationSecs: Double): String {
  * error path instead of an automatic replay loop. */
 internal fun shouldRecoverExpiredPlaybackSession(errorCode: Int, responseCode: Int?): Boolean =
     errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && responseCode == 404
+
+/** ExoPlayer's adaptive track selector free-switches between the HLS
+ * renditions `TranscodeManager` laddered server-side as its own bandwidth
+ * estimate rises and falls — this only classifies the resulting
+ * [AnalyticsListener.onVideoInputFormatChanged] height change so the caller
+ * can notify the viewer. `null` for the first format of a session (nothing
+ * to compare against yet) and for a same-height reselect (audio-only
+ * re-muxing, not a quality change). */
+internal fun playbackQualityChange(previousHeight: Int?, newHeight: Int): Boolean? {
+    if (previousHeight == null || previousHeight <= 0 || newHeight <= 0) return null
+    return when {
+        newHeight < previousHeight -> true
+        newHeight > previousHeight -> false
+        else -> null
+    }
+}
 
 /**
  * Gives Media3's stock TV controller an absolute, full-length timeline even

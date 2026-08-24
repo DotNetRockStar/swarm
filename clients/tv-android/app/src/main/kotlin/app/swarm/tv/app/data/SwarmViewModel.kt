@@ -1942,6 +1942,21 @@ class SwarmViewModel(
         )
     }
 
+    /** [PlayerScreen] detects HLS rendition switches entirely on its own —
+     * ExoPlayer's adaptive track selector already reacts to the measured
+     * bandwidth of the ladder `TranscodeManager` produces server-side, so
+     * this only surfaces that automatic switch to the viewer. A lower-
+     * quality picture during a slow connection then reads as "the app
+     * adapted for you" instead of "the app is broken". */
+    fun reportPlaybackQualityChanged(downgraded: Boolean) {
+        if (_state.value !is UiState.Player) return
+        if (downgraded) {
+            notify("Playback quality reduced due to a slow connection.", ClientNotificationKind.WARNING)
+        } else {
+            notify("Playback quality restored.", ClientNotificationKind.SUCCESS)
+        }
+    }
+
     /**
      * Replaces a server-side playback session that expired while Media3 was
      * paused. [sessionId] rejects a late callback from an already-disposed

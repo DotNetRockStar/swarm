@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -95,12 +96,13 @@ fun SwarmLoadingIndicator(
     modifier: Modifier = Modifier,
     onBlackBackground: Boolean = false,
     messageOverride: String? = null,
+    messageColor: Color = SwarmMuted,
 ) {
     val loadingMessage = remember(messageOverride) { messageOverride ?: LOADING_MESSAGES.random() }
     val gif = if (onBlackBackground) R.drawable.loading_black else R.drawable.loading
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         AsyncImage(model = gif, contentDescription = null, modifier = Modifier.size(160.dp))
         Spacer(Modifier.height(14.dp))
-        Text(loadingMessage, color = SwarmMuted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(loadingMessage, color = messageColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
     }
 }
