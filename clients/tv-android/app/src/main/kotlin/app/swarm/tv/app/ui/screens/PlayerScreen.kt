@@ -27,9 +27,10 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import android.content.Context
+import android.content.res.ColorStateList
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
-import android.content.res.ColorStateList
 import android.view.ViewGroup
 import android.widget.ImageButton
 import androidx.activity.compose.BackHandler
@@ -75,6 +76,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
+import app.swarm.tv.app.data.PreparedEpisodePlayback
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
@@ -94,9 +96,129 @@ private const val CONTINUE_COUNTDOWN_SECS = 8
 // audible clipping/distortion louder passages start to show past ~15-20dB of gain.
 private const val AUDIO_BOOST_MILLIBELS = 1000
 
+private data class PlaybackPlayerConfig(
+    val sessionId: String,
+    val url: String,
+    val title: String,
+    val maxBitrate: Long,
+    val subtitles: List<SubtitleTrack>,
+    val resumePositionSecs: Double,
+)
+
+private fun PreparedEpisodePlayback.toPlayerConfig() = PlaybackPlayerConfig(
+    sessionId = sessionId,
+    url = url,
+    title = title,
+    maxBitrate = maxBitrate,
+    subtitles = subtitles,
+    resumePositionSecs = resumePositionSecs,
+)
+
+/** Owns the active video player plus at most one paused, buffering successor.
+ * The pool lives across UiState.Player-to-UiState.Player recompositions, which
+ * lets [activate] promote the exact preloaded ExoPlayer instead of throwing
+ * away its buffer during the state handoff. */
+@androidx.annotation.OptIn(UnstableApi::class)
+private class VideoPlayerPool(context: Context) {
+    private val appContext = context.applicationContext
+    private var activeSessionId: String? = null
+    private var activePlayer: ExoPlayer? = null
+    private var preloadedSessionId: String? = null
+    private var preloadedPlayer: ExoPlayer? = null
+
+    fun activate(config: PlaybackPlayerConfig): ExoPlayer {
+        if (activeSessionId == config.sessionId) return checkNotNull(activePlayer)
+
+        var player = if (preloadedSessionId == config.sessionId) {
+            preloadedSessionId = null
+            preloadedPlayer.also { preloadedPlayer = null } ?: createPlayer(config, playWhenReady = true)
+        } else {
+            createPlayer(config, playWhenReady = true)
+        }
+        // A preload can fail while it has no UI listener. Recreate from the
+        // still-valid negotiated URL on promotion so the active listener gets
+        // a normal retry/error path instead of inheriting a silent terminal
+        // player state.
+        if (player.playerError != null) {
+            player.release()
+            player = createPlayer(config, playWhenReady = true)
+        }
+        activeSessionId = config.sessionId
+        activePlayer = player
+        player.playWhenReady = true
+        return player
+    }
+
+    fun preload(config: PlaybackPlayerConfig) {
+        if (activeSessionId == config.sessionId || preloadedSessionId == config.sessionId) return
+        releasePreloaded()
+        preloadedSessionId = config.sessionId
+        preloadedPlayer = createPlayer(config, playWhenReady = false)
+    }
+
+    fun release(player: ExoPlayer) {
+        if (activePlayer === player) {
+            activePlayer = null
+            activeSessionId = null
+        }
+        if (preloadedPlayer === player) {
+            preloadedPlayer = null
+            preloadedSessionId = null
+        }
+        player.release()
+    }
+
+    fun releasePreloaded() {
+        preloadedPlayer?.release()
+        preloadedPlayer = null
+        preloadedSessionId = null
+    }
+
+    private fun createPlayer(config: PlaybackPlayerConfig, playWhenReady: Boolean): ExoPlayer {
+        // The HTTP URL is loopback, so Media3's network-type-based initial
+        // estimate describes the TV's Wi-Fi rather than the media server's
+        // constrained uplink. Start conservatively; segment transfer samples
+        // will replace this estimate as playback proceeds.
+        val initialBitrate = config.maxBitrate.coerceIn(250_000L, 2_000_000L)
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
+            .setInitialBitrateEstimate(initialBitrate)
+            .build()
+        return ExoPlayer.Builder(appContext).setBandwidthMeter(bandwidthMeter).build().apply {
+            // Direct-play containers may expose several embedded audio tracks.
+            // Prefer English when it is tagged, while Media3 naturally falls
+            // back to the container default when no English track exists.
+            trackSelectionParameters = trackSelectionParameters
+                .buildUpon()
+                .setPreferredAudioLanguages("en", "eng")
+                .build()
+            val subtitleConfigurations = config.subtitles.map { track ->
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(track.language)
+                    .setLabel(track.label)
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                    .build()
+            }
+            setMediaItem(
+                MediaItem.Builder()
+                    .setUri(Uri.parse(config.url))
+                    .setMediaId(config.title)
+                    .setSubtitleConfigurations(subtitleConfigurations)
+                    .build(),
+            )
+            if (config.resumePositionSecs > 0) {
+                seekTo((config.resumePositionSecs * 1000).toLong())
+            }
+            this.playWhenReady = playWhenReady
+            prepare()
+        }
+    }
+}
+
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
+    sessionId: String,
     url: String,
     title: String,
     playbackMode: PlaybackMode,
@@ -107,63 +229,54 @@ fun PlayerScreen(
     subtitles: List<SubtitleTrack>,
     hasNext: Boolean,
     nextTitle: String?,
+    preloadedNext: PreparedEpisodePlayback?,
     onBack: () -> Unit,
     onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
     onContinue: () -> Unit,
+    onPreloadNext: () -> Unit,
     onSeekOutsideBuffer: (positionSecs: Double) -> Unit,
     onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
-    var showContinuePrompt by remember(url) { mutableStateOf(false) }
+    var showContinuePrompt by remember(sessionId) { mutableStateOf(false) }
     // Covers the gap between "screen opened" and "a frame is actually up" —
     // negotiation already succeeded by the time this screen exists, but the
     // player still has to buffer its first segment(s) over the peer proxy,
     // which visibly took long enough on real hardware to look broken with
-    // nothing on screen but a black box. Keyed on url so autoplaying into
-    // the next episode (a fresh ExoPlayer instance, same screen) shows it
-    // again rather than staying permanently dismissed from the first play.
-    var isLoading by remember(url) { mutableStateOf(true) }
+    // nothing on screen but a black box. Keyed on sessionId so autoplaying
+    // into a preloaded next episode shows it again only when that player has
+    // not already reached READY during the countdown.
+    val playerPool = remember(context) { VideoPlayerPool(context) }
+    val player = remember(playerPool, sessionId) {
+        playerPool.activate(
+            PlaybackPlayerConfig(
+                sessionId = sessionId,
+                url = url,
+                title = title,
+                maxBitrate = maxBitrate,
+                subtitles = subtitles,
+                resumePositionSecs = resumePositionSecs,
+            ),
+        )
+    }
+    var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
 
-    val player = remember(url, maxBitrate, subtitles) {
-        // The HTTP URL is loopback, so Media3's network-type-based initial
-        // estimate describes the TV's Wi-Fi rather than the media server's
-        // constrained uplink. Start conservatively; segment transfer samples
-        // will replace this estimate as playback proceeds.
-        val initialBitrate = maxBitrate.coerceIn(250_000L, 2_000_000L)
-        val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-            .setInitialBitrateEstimate(initialBitrate)
-            .build()
-        ExoPlayer.Builder(context).setBandwidthMeter(bandwidthMeter).build().apply {
-            // Direct-play containers may expose several embedded audio tracks.
-            // Prefer English when it is tagged, while Media3 naturally falls
-            // back to the container default when no English track exists.
-            trackSelectionParameters = trackSelectionParameters
-                .buildUpon()
-                .setPreferredAudioLanguages("en", "eng")
-                .build()
-            val subtitleConfigurations = subtitles.map { track ->
-                MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
-                    .setMimeType(MimeTypes.TEXT_VTT)
-                    .setLanguage(track.language)
-                    .setLabel(track.label)
-                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                    .build()
-            }
-            setMediaItem(
-                MediaItem.Builder()
-                    .setUri(Uri.parse(url))
-                    .setMediaId(title)
-                    .setSubtitleConfigurations(subtitleConfigurations)
-                    .build(),
-            )
-            if (resumePositionSecs > 0) {
-                seekTo((resumePositionSecs * 1000).toLong())
-            }
-            playWhenReady = true
-            prepare()
+    // Negotiation finishes asynchronously during the Continue countdown.
+    // Preparing with playWhenReady=false makes Media3 fetch and buffer the
+    // next stream without advancing away from the ended episode. When the
+    // ViewModel promotes this session, activate() returns this same player
+    // instance instead of creating one with an empty buffer.
+    LaunchedEffect(preloadedNext?.sessionId) {
+        if (preloadedNext == null) {
+            playerPool.releasePreloaded()
+        } else {
+            playerPool.preload(preloadedNext.toPlayerConfig())
         }
+    }
+    DisposableEffect(playerPool) {
+        onDispose { playerPool.releasePreloaded() }
     }
     // An EVENT HLS playlist grows as ffmpeg produces segments, so its native
     // Media3 timeline ends at the generated/buffered edge rather than at the
@@ -208,6 +321,7 @@ fun PlayerScreen(
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     showContinuePrompt = true
+                    onPreloadNext()
                 }
             }
 
@@ -272,7 +386,7 @@ fun PlayerScreen(
             val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { positionOffsetSecs + it / 1000.0 } ?: 0.0
             onPositionUpdate(positionSecs, durationSecs)
             loudnessEnhancer?.release()
-            player.release()
+            playerPool.release(player)
         }
     }
 
@@ -290,14 +404,14 @@ fun PlayerScreen(
                 }
             },
             // Real bug, found live: autoplaying the next episode creates a
-            // brand-new ExoPlayer (`remember(url, maxBitrate)` above keys on
-            // the new url), but `factory` only ever runs once for a given
-            // AndroidView call site — without this `update`, the on-screen
-            // PlayerView stayed bound to the *previous*, already-released
-            // player forever. Audio kept working regardless (ExoPlayer's
-            // audio output doesn't need a bound view, only video rendering
-            // does), which is exactly why sound played over a frozen frame
-            // showing the old episode's final "ended" progress bar.
+            // new active ExoPlayer (either freshly created or promoted from
+            // the preload pool), but `factory` only ever runs once for a
+            // given AndroidView call site — without this `update`, the
+            // on-screen PlayerView stayed bound to the *previous*, already-
+            // released player forever. Audio kept working regardless
+            // (ExoPlayer's audio output doesn't need a bound view, only video
+            // rendering does), which is exactly why sound played over a
+            // frozen frame showing the old episode's final progress bar.
             update = { view -> view.player = controllerPlayer },
         )
 

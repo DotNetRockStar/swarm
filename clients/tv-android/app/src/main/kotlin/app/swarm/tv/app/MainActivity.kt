@@ -220,6 +220,7 @@ class MainActivity : ComponentActivity() {
                         onBrowseCatalog = viewModel::browseCatalog,
                         onPlay = viewModel::play,
                         onPlayNext = viewModel::playNext,
+                        onPreloadNextEpisode = viewModel::preloadNextEpisode,
                         onSeekPlayback = viewModel::seekPlayback,
                         onStopPlayback = viewModel::stopPlayback,
                         onBackToDashboard = viewModel::backToDashboard,
@@ -306,6 +307,7 @@ private fun SwarmApp(
     onBrowseCatalog: () -> Unit,
     onPlay: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
+    onPreloadNextEpisode: (String) -> Unit,
     onSeekPlayback: (Double) -> Unit,
     onStopPlayback: () -> Unit,
     onBackToDashboard: () -> Unit,
@@ -682,6 +684,7 @@ private fun SwarmApp(
                     )
                 } else {
                     PlayerScreen(
+                        sessionId = state.sessionId,
                         url = state.url,
                         title = state.title,
                         playbackMode = state.playbackMode,
@@ -692,6 +695,7 @@ private fun SwarmApp(
                         subtitles = state.subtitles,
                         hasNext = state.nextEntry != null,
                         nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
+                        preloadedNext = state.preloadedNext,
                         onBack = onStopPlayback,
                         onPositionUpdate = { positionSecs, durationSecs ->
                             onSavePlaybackPosition(
@@ -701,6 +705,7 @@ private fun SwarmApp(
                             )
                         },
                         onContinue = onPlayNext,
+                        onPreloadNext = { onPreloadNextEpisode(state.sessionId) },
                         onSeekOutsideBuffer = onSeekPlayback,
                         onPlaybackSessionExpired = { positionSecs, context ->
                             onRecoverExpiredPlaybackSession(state.sessionId, positionSecs, context)

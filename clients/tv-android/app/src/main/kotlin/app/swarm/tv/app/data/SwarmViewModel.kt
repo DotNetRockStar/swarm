@@ -72,6 +72,26 @@ data class BrowsePreview(
     val released: Boolean = false,
 )
 
+/** A next-episode session negotiated while the finished episode's Continue
+ * prompt is still visible. [PlayerScreen] prepares this URL in a paused
+ * ExoPlayer so the server negotiation and initial buffering are both already
+ * complete when the viewer accepts the handoff. */
+data class PreparedEpisodePlayback(
+    val url: String,
+    val title: String,
+    val playbackMode: PlaybackMode,
+    val fingerprint: String,
+    val resumePositionSecs: Double,
+    val positionOffsetSecs: Double,
+    val maxBitrate: Long,
+    val mediaDurationSecs: Double?,
+    val entry: MergedEntry,
+    val nextEntry: MergedEntry?,
+    val serverId: String,
+    val sessionId: String,
+    val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
+)
+
 sealed class UiState {
     /**
      * The real initial state — shown only until [SwarmViewModel.restoreSession]
@@ -176,6 +196,13 @@ sealed class UiState {
         val sessionId: String,
         val lyrics: TrackLyrics? = null,
         val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
+        /** Populated after an episode ends while the Continue countdown is
+         * visible. Its server session and client buffer must be released if
+         * the viewer cancels instead of continuing. */
+        val preloadedNext: PreparedEpisodePlayback? = null,
+        /** The ended session is released before [preloadedNext] is negotiated
+         * so a one-slot server can reserve the next stream immediately. */
+        val sessionReleased: Boolean = false,
     ) : UiState()
 }
 
@@ -301,6 +328,12 @@ class SwarmViewModel(
     private var lanPairingJob: Job? = null
     /** Serializes play/skip/autoplay negotiation so repeated callbacks cannot reserve duplicate server sessions. */
     private var playbackNegotiationJob: Job? = null
+    /** Enhancement-only next-episode negotiation performed during the
+     * Continue countdown. Separate from [playbackNegotiationJob] so a viewer
+     * accepting the prompt can wait for and promote this exact reservation. */
+    private var nextEpisodePreloadJob: Job? = null
+    private var nextEpisodePreloadSessionId: String? = null
+    private var continueAfterPreloadSessionId: String? = null
     /** Dashboard to restore when Add Server's activation is cancelled or fails. */
     private var activationReturnState: UiState.Dashboard? = null
     /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
@@ -1378,18 +1411,138 @@ class SwarmViewModel(
     }
 
     /**
+     * Starts the next episode's server stream as soon as the current episode
+     * reaches ENDED. The finished reservation is released first so this also
+     * works against a server with only one available transcode/upload slot.
+     * Failures stay silent here: preloading is an optimization, and [playNext]
+     * retries through the normal user-visible negotiation path if needed.
+     */
+    fun preloadNextEpisode(sessionId: String) {
+        val current = _state.value as? UiState.Player ?: return
+        val next = current.nextEntry ?: return
+        if (current.sessionId != sessionId || current.entry.entry.kind != MediaKind.EPISODE) return
+        if (current.preloadedNext != null || nextEpisodePreloadJob?.isActive == true) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+
+        val job = viewModelScope.launch {
+            val released = if (current.sessionReleased) {
+                true
+            } else {
+                runCatching {
+                    releasePlaybackSessionNow(catalog, current.serverId, current.sessionId)
+                }.onFailure {
+                    Log.w(logTag, "failed to release ended episode ${current.sessionId} before preloading", it)
+                }.isSuccess
+            }
+
+            val stillCurrent = (_state.value as? UiState.Player)
+                ?.takeIf { it.sessionId == current.sessionId && it.nextEntry?.entry?.fingerprint == next.entry.fingerprint }
+                ?: return@launch
+            if (released && !stillCurrent.sessionReleased) {
+                _state.value = stillCurrent.copy(sessionReleased = true)
+            }
+
+            val serverId = next.sources.firstOrNull() ?: return@launch
+            val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute)
+                ?: return@launch
+            val resumePositionSecs = watchStateStore.get(next.entry.fingerprint)
+                ?.takeUnless { it.watched }
+                ?.positionSecs
+                ?: 0.0
+            val selection = runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.preparePlayback(
+                        device,
+                        next.entry.entryKey,
+                        resumePositionSecs.toLong(),
+                        clientCertificate,
+                        clientKey,
+                    )
+                }
+            }.onFailure {
+                Log.w(logTag, "next-episode preload failed for ${next.entry.entryKey}", it)
+            }.getOrNull() ?: return@launch
+
+            val currentAfterNegotiation = (_state.value as? UiState.Player)
+                ?.takeIf { it.sessionId == current.sessionId && it.nextEntry?.entry?.fingerprint == next.entry.fingerprint }
+            if (currentAfterNegotiation == null) {
+                runCatching {
+                    releasePlaybackSessionNow(catalog, serverId, selection.sessionId)
+                }.onFailure { Log.w(logTag, "failed to release abandoned next-episode preload", it) }
+                return@launch
+            }
+
+            val isHls = selection.mode == PlaybackMode.HLS
+            val followingEntry = CatalogGrouping.nextEpisode(
+                next,
+                CatalogGrouping.groupEpisodesByShowSeason(catalog.entries),
+            )
+            _state.value = currentAfterNegotiation.copy(
+                preloadedNext = PreparedEpisodePlayback(
+                    url = selection.url,
+                    title = next.entry.displayTitle(),
+                    playbackMode = selection.mode,
+                    fingerprint = next.entry.fingerprint,
+                    resumePositionSecs = if (isHls) 0.0 else resumePositionSecs,
+                    positionOffsetSecs = if (isHls) resumePositionSecs else 0.0,
+                    maxBitrate = selection.maxBitrate,
+                    mediaDurationSecs = next.entry.durationSecs,
+                    entry = next,
+                    nextEntry = followingEntry,
+                    serverId = serverId,
+                    sessionId = selection.sessionId,
+                    subtitles = selection.subtitles,
+                ),
+                sessionReleased = currentAfterNegotiation.sessionReleased || released,
+            )
+        }
+        nextEpisodePreloadSessionId = sessionId
+        nextEpisodePreloadJob = job
+        job.invokeOnCompletion {
+            viewModelScope.launch {
+                if (nextEpisodePreloadSessionId == sessionId) {
+                    nextEpisodePreloadSessionId = null
+                }
+                if (continueAfterPreloadSessionId == sessionId) {
+                    continueAfterPreloadSessionId = null
+                    playNext()
+                }
+            }
+        }
+    }
+
+    /**
      * Finds and plays whatever comes after the *currently active* session's
      * entry — [UiState.Player.entry] if the full player screen is showing,
      * or [minimizedPlayer]'s if music is playing in the background while
      * the user browses elsewhere (see [activePlayerSession]). No-op if
      * neither is active or there's no next entry ([UiState.Player.nextEntry],
      * from [CatalogGrouping.nextEpisode]/[CatalogGrouping.nextTrack]).
+     * A prepared episode is promoted directly, preserving the ExoPlayer
+     * buffer built during the Continue countdown.
      */
     fun playNext() {
         val current = activePlayerSession() ?: return
         val next = current.nextEntry ?: return
         val catalog = current.previous.embeddedCatalog() ?: return
         val wasMinimized = _minimizedPlayer.value != null
+        if (!wasMinimized && current.entry.entry.kind == MediaKind.EPISODE) {
+            current.preloadedNext?.let { prepared ->
+                // A failed best-effort stop must not hold the old reservation
+                // until its idle timeout just because the next reservation
+                // happened to succeed anyway. Retry in the background without
+                // delaying promotion of the already-buffering player.
+                if (!current.sessionReleased) {
+                    releasePlaybackSession(catalog, current.serverId, current.sessionId)
+                }
+                _state.value = prepared.toPlayerState(current.previous)
+                return
+            }
+            if (nextEpisodePreloadJob?.isActive == true && nextEpisodePreloadSessionId == current.sessionId) {
+                continueAfterPreloadSessionId = current.sessionId
+                return
+            }
+        }
         // Carries the same `previous` forward (not just `catalog`) so Back
         // after auto-playing into a second, third, ... episode/track still
         // returns to the screen the user actually started browsing from,
@@ -1404,6 +1557,23 @@ class SwarmViewModel(
             replaceSession = current,
         )
     }
+
+    private fun PreparedEpisodePlayback.toPlayerState(previous: UiState) = UiState.Player(
+        url = url,
+        title = title,
+        playbackMode = playbackMode,
+        fingerprint = fingerprint,
+        resumePositionSecs = resumePositionSecs,
+        positionOffsetSecs = positionOffsetSecs,
+        maxBitrate = maxBitrate,
+        mediaDurationSecs = mediaDurationSecs,
+        entry = entry,
+        nextEntry = nextEntry,
+        previous = previous,
+        serverId = serverId,
+        sessionId = sessionId,
+        subtitles = subtitles,
+    )
 
     /**
      * Seeks a movie/episode to an absolute position in the original media.
@@ -1620,7 +1790,18 @@ class SwarmViewModel(
             // playback with 429.
             browsePreviewWorker?.join()
             browsePreviewReleaseJob?.join()
-            if (replaceSession != null) {
+            if (replaceSession?.preloadedNext != null) {
+                runCatching {
+                    releasePlaybackSessionNow(
+                        catalog,
+                        replaceSession.preloadedNext.serverId,
+                        replaceSession.preloadedNext.sessionId,
+                    )
+                }.onFailure {
+                    Log.w(logTag, "failed to release unused next-episode preload ${replaceSession.preloadedNext.sessionId}", it)
+                }
+            }
+            if (replaceSession != null && !replaceSession.sessionReleased) {
                 runCatching {
                     releasePlaybackSessionNow(
                         catalog,
@@ -2055,7 +2236,15 @@ class SwarmViewModel(
     fun stopPlayback() {
         val current = _state.value
         if (current is UiState.Player) {
-            current.previous.embeddedCatalog()?.let { releasePlaybackSession(it, current.serverId, current.sessionId) }
+            continueAfterPreloadSessionId = null
+            current.previous.embeddedCatalog()?.let { catalog ->
+                if (!current.sessionReleased) {
+                    releasePlaybackSession(catalog, current.serverId, current.sessionId)
+                }
+                current.preloadedNext?.let { prepared ->
+                    releasePlaybackSession(catalog, prepared.serverId, prepared.sessionId)
+                }
+            }
             _state.value = current.previous
         }
     }
