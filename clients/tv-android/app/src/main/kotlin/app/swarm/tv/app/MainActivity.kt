@@ -225,6 +225,7 @@ class MainActivity : ComponentActivity() {
                         onCancelActivation = viewModel::cancelActivation,
                         onBrowseCatalog = viewModel::browseCatalog,
                         onPlay = viewModel::play,
+                        onPlayPauseRecommendation = viewModel::playPauseRecommendation,
                         onPlayNext = viewModel::playNext,
                         onPreloadNextEpisode = viewModel::preloadNextEpisode,
                         onSeekPlayback = viewModel::seekPlayback,
@@ -313,6 +314,7 @@ private fun SwarmApp(
     onCancelActivation: () -> Unit,
     onBrowseCatalog: () -> Unit,
     onPlay: (MergedEntry) -> Unit,
+    onPlayPauseRecommendation: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
     onPreloadNextEpisode: (String) -> Unit,
     onSeekPlayback: (Double) -> Unit,
@@ -739,6 +741,9 @@ private fun SwarmApp(
                         mediaDurationSecs = state.mediaDurationSecs,
                         maxBitrate = state.maxBitrate,
                         subtitles = state.subtitles,
+                        entry = state.entry,
+                        recommendations = state.recommendations,
+                        artworkUrl = artworkUrl,
                         hasNext = state.nextEntry != null,
                         nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
                         preloadedNext = state.preloadedNext,
@@ -751,6 +756,7 @@ private fun SwarmApp(
                             )
                         },
                         onContinue = onPlayNext,
+                        onPlayRecommendation = onPlayPauseRecommendation,
                         onPreloadNext = { onPreloadNextEpisode(state.sessionId) },
                         onSeekOutsideBuffer = onSeekPlayback,
                         onPlaybackSessionExpired = { positionSecs, context ->

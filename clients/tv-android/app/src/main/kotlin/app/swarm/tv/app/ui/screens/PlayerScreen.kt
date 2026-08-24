@@ -41,9 +41,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -56,6 +60,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -64,12 +70,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -82,13 +90,21 @@ import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
+import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.data.episodeNumberLabel
+import app.swarm.tv.app.data.pauseRecommendationTitle
 import app.swarm.tv.app.data.PreparedEpisodePlayback
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmMuted
+import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
+import app.swarm.tv.core.catalog.MergedEntry
+import app.swarm.tv.core.catalog.displayTitle
+import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.peer.SubtitleTrack
 import java.io.EOFException
@@ -96,6 +112,7 @@ import java.io.IOException
 import java.net.ProtocolException
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.util.Locale
 import kotlinx.coroutines.delay
 
 private const val CONTINUE_COUNTDOWN_SECS = 8
@@ -289,12 +306,16 @@ fun PlayerScreen(
     mediaDurationSecs: Double?,
     maxBitrate: Long,
     subtitles: List<SubtitleTrack>,
+    entry: MergedEntry,
+    recommendations: List<MergedEntry>,
+    artworkUrl: (MergedEntry) -> String?,
     hasNext: Boolean,
     nextTitle: String?,
     preloadedNext: PreparedEpisodePlayback?,
     onBack: () -> Unit,
     onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
     onContinue: () -> Unit,
+    onPlayRecommendation: (MergedEntry) -> Unit,
     onPreloadNext: () -> Unit,
     onSeekOutsideBuffer: (positionSecs: Double) -> Unit,
     onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
@@ -326,6 +347,10 @@ fun PlayerScreen(
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
+    var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
+    var trackAvailability by remember(sessionId) {
+        mutableStateOf(trackAvailability(player.currentTracks, subtitles))
+    }
 
     // Negotiation finishes asynchronously during the Continue countdown.
     // Preparing with playWhenReady=false makes Media3 fetch and buffer the
@@ -418,9 +443,18 @@ fun PlayerScreen(
                     isLoading = true
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
+                    showPauseOverlay = false
                     showContinuePrompt = true
                     onPreloadNext()
                 }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                showPauseOverlay = !playWhenReady && player.playbackState != Player.STATE_ENDED
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                trackAvailability = trackAvailability(tracks, subtitles)
             }
 
             // Fires strictly before STATE_READY can be observed for video,
@@ -512,7 +546,11 @@ fun PlayerScreen(
             // (ExoPlayer's audio output doesn't need a bound view, only video
             // rendering does), which is exactly why sound played over a
             // frozen frame showing the old episode's final progress bar.
-            update = { view -> view.player = controllerPlayer },
+            update = { view ->
+                view.player = controllerPlayer
+                view.useController = !showPauseOverlay
+                if (showPauseOverlay) view.hideController()
+            },
         )
 
         if (isLoading) {
@@ -528,7 +566,232 @@ fun PlayerScreen(
                 onCancel = { showContinuePrompt = false; onBack() },
             )
         }
+
+        if (showPauseOverlay && !showContinuePrompt) {
+            PauseOverlay(
+                entry = entry,
+                recommendations = recommendations,
+                artworkUrl = artworkUrl,
+                audioLanguages = trackAvailability.audioLanguages,
+                subtitleLabels = trackAvailability.subtitles,
+                onResume = player::play,
+                onPlayRecommendation = onPlayRecommendation,
+            )
+        }
     }
+}
+
+private data class TrackAvailability(
+    val audioLanguages: List<String>,
+    val subtitles: List<String>,
+)
+
+private fun trackAvailability(tracks: Tracks, configuredSubtitles: List<SubtitleTrack>): TrackAvailability {
+    val audioLanguages = mutableListOf<String>()
+    val subtitleLabels = configuredSubtitles.mapTo(mutableListOf()) { track ->
+        track.label.takeIf(String::isNotBlank) ?: languageDisplayName(track.language)
+    }
+    for (group in tracks.groups) {
+        for (index in 0 until group.length) {
+            val format = group.getTrackFormat(index)
+            when (group.type) {
+                C.TRACK_TYPE_AUDIO -> audioLanguages += audioTrackLabel(format)
+                C.TRACK_TYPE_TEXT -> subtitleLabels += subtitleTrackLabel(format, index)
+            }
+        }
+    }
+    return TrackAvailability(
+        audioLanguages = audioLanguages.distinctLabels(),
+        subtitles = subtitleLabels.distinctLabels(),
+    )
+}
+
+private fun audioTrackLabel(format: Format): String =
+    format.language?.takeIf(String::isNotBlank)?.let(::languageDisplayName)
+        ?: format.label?.takeIf(String::isNotBlank)
+        ?: "Default audio"
+
+private fun subtitleTrackLabel(format: Format, index: Int): String =
+    format.label?.takeIf(String::isNotBlank)
+        ?: format.language?.takeIf(String::isNotBlank)?.let(::languageDisplayName)
+        ?: "Subtitle ${index + 1}"
+
+private fun languageDisplayName(code: String): String {
+    val normalized = code.trim().replace('_', '-')
+    val locale = Locale.forLanguageTag(normalized)
+    return locale.getDisplayLanguage(Locale.getDefault())
+        .takeIf { it.isNotBlank() && !it.equals(normalized, ignoreCase = true) }
+        ?: code.uppercase()
+}
+
+private fun List<String>.distinctLabels(): List<String> =
+    distinctBy { it.trim().lowercase() }
+
+@Composable
+private fun PauseOverlay(
+    entry: MergedEntry,
+    recommendations: List<MergedEntry>,
+    artworkUrl: (MergedEntry) -> String?,
+    audioLanguages: List<String>,
+    subtitleLabels: List<String>,
+    onResume: () -> Unit,
+    onPlayRecommendation: (MergedEntry) -> Unit,
+) {
+    val resumeFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(entry.fingerprint) { resumeFocusRequester.requestFocus() }
+    val media = entry.entry
+    val title = if (media.kind == MediaKind.EPISODE) pauseRecommendationTitle(entry) else media.displayTitle()
+    val metadata = listOfNotNull(
+        media.year?.toString(),
+        media.durationSecs?.takeIf { it.isFinite() && it > 0.0 }?.let(::durationLabel),
+        media.rating?.takeIf(String::isNotBlank)?.let { "Rated $it" },
+        media.communityRating?.let { score ->
+            val votes = media.communityRatingVotes?.takeIf { it > 0 }
+                ?.let { String.format(Locale.US, " (%,d votes)", it) }
+                .orEmpty()
+            String.format(Locale.US, "★ %.1f/10", score) + votes
+        },
+        media.video?.height?.takeIf { it > 0 }?.let { "${it}p" },
+    )
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(
+            Brush.horizontalGradient(
+                listOf(Color.Black.copy(alpha = 0.96f), Color.Black.copy(alpha = 0.90f), Color.Black.copy(alpha = 0.82f)),
+            ),
+        ),
+    ) {
+        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 28.dp)) {
+            Row(modifier = Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(36.dp)) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Paused", color = SwarmAccent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(5.dp))
+                    Text(title, color = SwarmText, fontSize = 28.sp, fontWeight = FontWeight.Black, maxLines = 2)
+                    episodeNumberLabel(entry)?.let { episodeLabel ->
+                        Spacer(Modifier.height(4.dp))
+                        Text(episodeLabel, color = SwarmText, fontSize = 15.sp, maxLines = 1)
+                    }
+                    if (metadata.isNotEmpty()) {
+                        Spacer(Modifier.height(7.dp))
+                        Text(metadata.joinToString("  •  "), color = SwarmMuted, fontSize = 13.sp, maxLines = 1)
+                    }
+                    if (media.genres.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(media.genres.take(4).joinToString("  •  "), color = SwarmAccent, fontSize = 12.sp, maxLines = 1)
+                    }
+                    if (media.cast.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Cast: ${media.cast.take(5).joinToString { it.name }}",
+                            color = SwarmMuted,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                    media.overview?.takeIf(String::isNotBlank)?.let { overview ->
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            overview,
+                            color = SwarmMuted,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            maxLines = 3,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = onResume,
+                        modifier = Modifier.focusRequester(resumeFocusRequester),
+                        colors = swarmActionButtonColors(),
+                    ) {
+                        Text("▶  Resume", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
+                    }
+                }
+                Column(modifier = Modifier.width(285.dp)) {
+                    AvailabilityBlock(
+                        heading = "Audio languages",
+                        values = audioLanguages,
+                        emptyLabel = "None reported",
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    AvailabilityBlock(
+                        heading = "Available subtitles",
+                        values = subtitleLabels,
+                        emptyLabel = "None available",
+                    )
+                }
+            }
+
+            if (recommendations.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("More like this", color = SwarmText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth().height(142.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(recommendations, key = { it.fingerprint }) { recommendation ->
+                        PauseRecommendationCard(
+                            entry = recommendation,
+                            artworkUrl = artworkUrl(recommendation),
+                            onClick = { onPlayRecommendation(recommendation) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AvailabilityBlock(heading: String, values: List<String>, emptyLabel: String) {
+    Text(heading, color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(5.dp))
+    Text(
+        values.take(6).joinToString("  •  ").ifBlank { emptyLabel },
+        color = SwarmText,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        maxLines = 4,
+        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun PauseRecommendationCard(entry: MergedEntry, artworkUrl: String?, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.colors(containerColor = SwarmSurface),
+        scale = CardDefaults.scale(scale = 1f, focusedScale = 1.06f, pressedScale = 0.98f),
+        modifier = Modifier.width(102.dp),
+    ) {
+        Column {
+            ArtworkImage(
+                label = pauseRecommendationTitle(entry),
+                placeholderType = if (entry.entry.kind == MediaKind.MOVIE) "Movie" else "Show",
+                primaryUrl = artworkUrl,
+                modifier = Modifier.fillMaxWidth().height(102.dp).clip(RoundedCornerShape(4.dp)),
+            )
+            Text(
+                pauseRecommendationTitle(entry),
+                color = SwarmText,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+private fun durationLabel(durationSecs: Double): String {
+    val totalMinutes = (durationSecs / 60.0).toInt().coerceAtLeast(1)
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return if (hours == 0) "${minutes}m" else "${hours}h ${minutes}m"
 }
 
 /** Only a missing negotiated stream is self-healable. A 404 reported under

@@ -196,6 +196,8 @@ sealed class UiState {
         val sessionId: String,
         val lyrics: TrackLyrics? = null,
         val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
+        /** Locally ranked movies and one representative episode per show for the pause screen. */
+        val recommendations: List<MergedEntry> = emptyList(),
         /** Populated after an episode ends while the Continue countdown is
          * visible. Its server session and client buffer must be released if
          * the viewer cancels instead of continuing. */
@@ -1303,6 +1305,19 @@ class SwarmViewModel(
         )
     }
 
+    /** Replaces the active movie/episode from its pause-screen recommendation shelf. */
+    fun playPauseRecommendation(entry: MergedEntry) {
+        val current = _state.value as? UiState.Player ?: return
+        if (current.entry.entry.kind == MediaKind.TRACK || entry.entry.kind == MediaKind.TRACK) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+        playEntry(
+            entry = entry,
+            catalog = catalog,
+            previousScreen = current.previous,
+            replaceSession = current,
+        )
+    }
+
     /**
      * Begins a preview for the currently focused browse card. Requests are
      * serialized: fast D-pad movement only changes the latest requested
@@ -1573,6 +1588,9 @@ class SwarmViewModel(
         serverId = serverId,
         sessionId = sessionId,
         subtitles = subtitles,
+        recommendations = previous.embeddedCatalog()?.entries
+            ?.let { pauseRecommendations(entry, it) }
+            .orEmpty(),
     )
 
     /**
@@ -1870,6 +1888,7 @@ class SwarmViewModel(
                 sessionId = selection.sessionId,
                 lyrics = selection.lyrics,
                 subtitles = selection.subtitles,
+                recommendations = pauseRecommendations(entry, catalog.entries),
             )
             // keepMinimized: an autoplay-to-next-track that started while
             // the mini-bar (not the full screen) was showing stays in the
