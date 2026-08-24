@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use swarm_core::capability::CapabilityProfile;
@@ -5,7 +6,7 @@ use swarm_core::peer::{
     AudioStreamInfo, ByteRange, MediaKind, PeerRequest, PlaybackMode, PlaybackPlan,
     PlaybackPreferences, VideoStreamInfo,
 };
-use swarm_media::serve::{Body, MediaService};
+use swarm_media::serve::{stream_body, Body, MediaService};
 use swarm_media::store::{EntryRecord, Library, SubtitleRecord};
 use swarm_media::transcode::TranscodeConfig;
 
@@ -301,6 +302,153 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
     assert_eq!(
         retry_after_stop.header.status, 200,
         "retry must succeed right away now, not after waiting out idle_timeout"
+    );
+
+    drop(service);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `stream_body` exists specifically so an HTTP transport (unlike QUIC's
+/// `handle_stream`, which only ever exits by finishing or erroring) can
+/// abandon a response stream mid-read — an HTTP client seeking within a
+/// `<video>` element, or simply disconnecting, routinely drops the
+/// connection before the body is fully sent. This proves the session that
+/// stream was serving still gets released in that case, not just when the
+/// stream runs to completion: an early-dropped stream that leaked its
+/// session would leave `in_use` stuck above zero forever, which
+/// `expire_idle` (run at the top of every `plan()` call) only reclaims once
+/// `in_use == 0` — so a still-stuck reservation after `idle_timeout` has
+/// elapsed is the observable symptom of exactly the bug this guards against.
+#[tokio::test]
+async fn dropping_a_stream_body_early_still_releases_the_session() {
+    let root = std::env::temp_dir().join(format!("swarm-playback-cancel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let media_root = root.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+    let relative_path = "movies/example.mp4";
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, vec![7u8; 1_000_000]).unwrap();
+
+    let library = Arc::new(
+        Library::open(root.join("library.sqlite").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let entry = EntryRecord {
+        entry_key: "0123456789abcdef01234567".into(),
+        relative_path: relative_path.into(),
+        kind: MediaKind::Movie,
+        title: "Example".into(),
+        size: 1_000_000,
+        modified_time: 0,
+        fingerprint: "fingerprint".into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: Some(10.0),
+        video: Some(VideoStreamInfo {
+            codec: "h264".into(),
+            width: 640,
+            height: 360,
+            level: Some("4.1".into()),
+            bitrate: Some(700_000),
+        }),
+        audio: Some(AudioStreamInfo {
+            codec: "aac".into(),
+            channels: 2,
+            bitrate: Some(96_000),
+        }),
+        scraped_title: None,
+        episode_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+        overview: None,
+        rating: None,
+        community_rating: None,
+        community_rating_votes: None,
+    };
+    library.upsert(&entry).await.unwrap();
+
+    // Same budget-sizing trick as the reservation-release test above: exactly
+    // enough upload budget for one of this entry's 1,000,000bps sessions and
+    // nothing more, plus a near-zero idle_timeout so `expire_idle` reclaims a
+    // truly-released session almost immediately instead of a realistic wait.
+    let service = Arc::new(MediaService::with_transcoding(
+        library,
+        media_root,
+        TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 1_000_000,
+            reserve_percent: 0,
+            max_sessions: 1,
+            idle_timeout: Duration::from_millis(50),
+            segment_duration_secs: 4,
+        },
+    ));
+    let negotiate = || PeerRequest {
+        path: format!("/play/{}", entry.entry_key),
+        range: None,
+        if_none_match: None,
+        playback: Some(PlaybackPreferences {
+            capabilities: CapabilityProfile::fire_tv_baseline(),
+            start_position_secs: 0,
+            prefer_direct: true,
+            preview: false,
+        }),
+        error_report: None,
+        like: None,
+    };
+
+    let negotiated = service.resolve(&negotiate()).await;
+    assert_eq!(negotiated.header.status, 200);
+    let Body::Bytes(body) = negotiated.body else {
+        panic!("playback plan must be JSON")
+    };
+    let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
+
+    // Negotiation only reserves the session; resolving the media path is
+    // what actually opens it (`open_direct`, bumping `in_use`).
+    let resolved = service.resolve(&request(plan.path.clone())).await;
+    assert_eq!(resolved.header.status, 200);
+
+    // Simulate an HTTP client that reads one chunk, then disconnects or
+    // seeks away mid-range-request: poll exactly once, then drop the stream
+    // without ever letting it reach its natural end.
+    {
+        let body = stream_body(resolved, &service);
+        let mut body = std::pin::pin!(body);
+        let first_chunk = body.next().await;
+        assert!(
+            first_chunk.is_some_and(|chunk| chunk.is_ok()),
+            "expected a real first chunk before dropping the stream early"
+        );
+    } // `body`, and the session guard it owns, drops here — mid-stream.
+
+    // A second concurrent negotiation must still fail immediately: the
+    // reservation is real and hasn't idled out yet.
+    let stuck_retry = service.resolve(&negotiate()).await;
+    assert_eq!(
+        stuck_retry.header.status, 429,
+        "budget must still be held immediately after the early drop"
+    );
+
+    // Once idle_timeout elapses, `expire_idle` reclaims the session only if
+    // `in_use` is back to 0. A cleanup that ran solely "after the read loop
+    // finishes normally" (not on drop) would leave `in_use` stuck at 1
+    // forever, and this retry would keep failing no matter how long we wait.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let retry_after_idle = service.resolve(&negotiate()).await;
+    assert_eq!(
+        retry_after_idle.header.status, 200,
+        "an early-dropped stream must still release its session so idle reclamation can free the budget"
     );
 
     drop(service);

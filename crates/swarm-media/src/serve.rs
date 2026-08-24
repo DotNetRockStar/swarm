@@ -13,8 +13,10 @@ use crate::store::{ArtworkKind, Library};
 use crate::transcode::{
     hls_content_type, SessionRateLimiter, TranscodeConfig, TranscodeError, TranscodeManager,
 };
+use bytes::Bytes;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures_util::stream::{self, Stream};
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -740,56 +742,203 @@ fn image_content_type(relative_path: &str) -> &'static str {
     }
 }
 
+/// Calls [`TranscodeManager::finish_use`] exactly once when dropped — on
+/// natural stream completion (the final yielded [`BodyState`] is dropped)
+/// and on early drop alike, since a caller abandoning a stream mid-read (an
+/// HTTP client seeking or disconnecting mid-range-request, say) is routine,
+/// not exceptional, and must not leak the session either way. Kept private:
+/// [`Resolved::session_id`] is private for the same reason — nothing outside
+/// [`stream_body`] should be able to forget to release it.
+struct SessionGuard {
+    manager: Arc<TranscodeManager>,
+    session_id: Option<String>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take() {
+            self.manager.finish_use(&session_id);
+        }
+    }
+}
+
+enum BodyState {
+    Bytes {
+        bytes: Bytes,
+        guard: SessionGuard,
+    },
+    FilePending {
+        path: PathBuf,
+        offset: u64,
+        remaining: u64,
+        rate_limiters: Vec<Arc<SessionRateLimiter>>,
+        bandwidth: Arc<BandwidthMeter>,
+        guard: SessionGuard,
+    },
+    FileOpen {
+        file: tokio::fs::File,
+        remaining: u64,
+        rate_limiters: Vec<Arc<SessionRateLimiter>>,
+        bandwidth: Arc<BandwidthMeter>,
+        guard: SessionGuard,
+    },
+    Finished {
+        #[allow(dead_code)]
+        guard: SessionGuard,
+    },
+}
+
+/// Reads at most one 64 KiB chunk from `file`, applying every rate limiter
+/// and recording bandwidth exactly as the QUIC transport always has.
+/// `Ok(None)` means `remaining` was already zero — the body is exhausted.
+async fn read_file_chunk(
+    file: &mut tokio::fs::File,
+    remaining: u64,
+    rate_limiters: &[Arc<SessionRateLimiter>],
+    bandwidth: &Arc<BandwidthMeter>,
+) -> std::io::Result<Option<Bytes>> {
+    if remaining == 0 {
+        return Ok(None);
+    }
+    let want = (64 * 1024).min(remaining as usize);
+    let mut buffer = vec![0u8; want];
+    let got = file.read(&mut buffer).await?;
+    if got == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "file truncated while serving",
+        ));
+    }
+    for limiter in rate_limiters {
+        limiter.wait_for(got).await;
+    }
+    bandwidth.record(got as u64);
+    buffer.truncate(got);
+    Ok(Some(Bytes::from(buffer)))
+}
+
+/// Shared by both [`FilePending`](BodyState::FilePending) (after it opens
+/// and seeks the file) and [`FileOpen`](BodyState::FileOpen) (every poll
+/// after the first) so there is exactly one place that decides "yield a
+/// chunk, keep going" vs. "done, let `guard` drop" vs. "error, then done."
+async fn read_next(
+    mut file: tokio::fs::File,
+    remaining: u64,
+    rate_limiters: Vec<Arc<SessionRateLimiter>>,
+    bandwidth: Arc<BandwidthMeter>,
+    guard: SessionGuard,
+) -> Option<(std::io::Result<Bytes>, BodyState)> {
+    match read_file_chunk(&mut file, remaining, &rate_limiters, &bandwidth).await {
+        Ok(Some(bytes)) => {
+            let got = bytes.len() as u64;
+            Some((
+                Ok(bytes),
+                BodyState::FileOpen {
+                    file,
+                    remaining: remaining - got,
+                    rate_limiters,
+                    bandwidth,
+                    guard,
+                },
+            ))
+        }
+        // remaining == 0: body exhausted. Returning None here — rather than
+        // yielding one last empty chunk — drops `guard` (owned by this
+        // match arm's consumed state) right now, which is what actually
+        // releases the transcode session.
+        Ok(None) => None,
+        Err(err) => Some((Err(err), BodyState::Finished { guard })),
+    }
+}
+
+async fn next_body_chunk(state: BodyState) -> Option<(std::io::Result<Bytes>, BodyState)> {
+    match state {
+        BodyState::Bytes { bytes, guard } => Some((Ok(bytes), BodyState::Finished { guard })),
+        BodyState::FilePending {
+            path,
+            offset,
+            remaining,
+            rate_limiters,
+            bandwidth,
+            guard,
+        } => {
+            let mut file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(err) => return Some((Err(err), BodyState::Finished { guard })),
+            };
+            if let Err(err) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                return Some((Err(err), BodyState::Finished { guard }));
+            }
+            read_next(file, remaining, rate_limiters, bandwidth, guard).await
+        }
+        BodyState::FileOpen {
+            file,
+            remaining,
+            rate_limiters,
+            bandwidth,
+            guard,
+        } => read_next(file, remaining, rate_limiters, bandwidth, guard).await,
+        BodyState::Finished { .. } => None,
+    }
+}
+
+/// Turns a [`Resolved`] into a chunked byte stream — the QUIC transport
+/// ([`handle_stream`]) and any HTTP transport both consume this, so the
+/// 64 KiB chunking, per-chunk rate limiting, bandwidth accounting, and
+/// session-release-on-drop logic is written and tested exactly once rather
+/// than reimplemented per transport (see [`SessionGuard`] for why the
+/// release specifically must not depend on the stream finishing normally).
+pub fn stream_body(
+    resolved: Resolved,
+    service: &Arc<MediaService>,
+) -> impl Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    let guard = SessionGuard {
+        manager: Arc::clone(service.transcode_manager()),
+        session_id: resolved.session_id,
+    };
+    let initial = match resolved.body {
+        Body::Bytes(bytes) => BodyState::Bytes {
+            bytes: Bytes::from(bytes),
+            guard,
+        },
+        Body::File {
+            path,
+            offset,
+            len,
+            rate_limiters,
+        } => BodyState::FilePending {
+            path,
+            offset,
+            remaining: len,
+            rate_limiters,
+            bandwidth: Arc::clone(service.bandwidth_meter()),
+            guard,
+        },
+    };
+    stream::unfold(initial, next_body_chunk)
+}
+
 /// Serve one accepted bidi stream: read the request, resolve it, stream the
-/// body out in 64 KiB chunks.
+/// body out via [`stream_body`]. Takes `&Arc<MediaService>` rather than
+/// `&MediaService` specifically so `stream_body`'s returned stream — which
+/// must be `'static` since it can outlive this function's own stack frame if
+/// ever spawned/boxed independently — can clone its own owned `Arc` instead
+/// of borrowing one it doesn't have.
 pub async fn handle_stream(
-    service: &MediaService,
+    service: &Arc<MediaService>,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     is_lan: bool,
 ) -> Result<(), P2pError> {
     let request = read_request(&mut recv).await?;
     let resolved = service.resolve_for_network(&request, is_lan).await;
-    let session_id = resolved.session_id.clone();
-    let result = async {
-        write_response_header(&mut send, &resolved.header).await?;
-        match resolved.body {
-            Body::Bytes(bytes) => {
-                send.write_all(&bytes).await?;
-            }
-            Body::File {
-                path,
-                offset,
-                len,
-                rate_limiters,
-            } => {
-                let mut file = tokio::fs::File::open(&path).await?;
-                file.seek(std::io::SeekFrom::Start(offset)).await?;
-                let mut remaining = len;
-                let mut buffer = vec![0u8; 64 * 1024];
-                while remaining > 0 {
-                    let want = buffer.len().min(remaining as usize);
-                    let got = file.read(&mut buffer[..want]).await?;
-                    if got == 0 {
-                        return Err(P2pError::Protocol("file truncated while serving".into()));
-                    }
-                    for limiter in &rate_limiters {
-                        limiter.wait_for(got).await;
-                    }
-                    send.write_all(&buffer[..got]).await?;
-                    service.bandwidth.record(got as u64);
-                    remaining -= got as u64;
-                }
-            }
-        }
-        send.finish().ok();
-        Ok(())
+    write_response_header(&mut send, &resolved.header).await?;
+    let mut body = std::pin::pin!(stream_body(resolved, service));
+    while let Some(chunk) = futures_util::StreamExt::next(&mut body).await {
+        send.write_all(&chunk?).await?;
     }
-    .await;
-    if let Some(session_id) = session_id {
-        service.transcodes.finish_use(&session_id);
-    }
-    result
+    send.finish().ok();
+    Ok(())
 }
 
 /// Serve every request stream an already-established connection sends,
@@ -812,7 +961,12 @@ pub async fn serve_connection(connection: quinn::Connection, service: Arc<MediaS
     }
 }
 
-fn is_lan_ip(ip: IpAddr) -> bool {
+/// Shared LAN/private-address check — used to decide whether the shared
+/// upload-bandwidth budget applies (see [`TranscodeManager::should_throttle`])
+/// for QUIC peers here, and reused as-is by callers outside this crate
+/// (`apps/server`'s LAN pairing and, later, its HTTP media surface) so there
+/// is exactly one definition rather than an independent copy per transport.
+pub fn is_lan_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
         IpAddr::V6(ip) => {
