@@ -43,23 +43,6 @@
   </div>
 </div>
 
-<div id="onboardSwarmView" class="d-none">
-  <div class="card centered-card">
-    <h2>Join a swarm (optional)</h2>
-    <p class="muted">Enter the SWARM server address and an 8-digit join code generated there. You can do this later from the Swarm card.</p>
-    <label>SWARM server URL</label>
-    <input id="onboardBaseUrl" placeholder="https://swarm.example.com">
-    <label>Join code</label>
-    <input id="onboardCode" placeholder="12345678" maxlength="8">
-    <label>Device name</label>
-    <input id="onboardDeviceName" value="SWARM Server">
-    <div class="row" style="margin-top:14px">
-      <button id="onboardJoinBtn"><i class="bi bi-box-arrow-in-right"></i>Join swarm</button>
-      <button id="onboardSkipBtn" class="secondary"><i class="bi bi-skip-forward"></i>Skip for now</button>
-    </div>
-  </div>
-</div>
-
 <div id="dashView" class="d-none">
   <div class="tabnav">
     <button id="tabBtn-media" class="tab-active"><i class="bi bi-collection-play"></i>Media</button>
@@ -131,15 +114,20 @@
   <div id="tabPanel-swarm" class="d-none">
     <div class="card">
       <div class="card-head">
+        <h2 class="info-trigger" data-info="approve-tv" tabindex="0" role="button">Approve a TV <i class="bi bi-info-circle info-affordance"></i></h2>
+      </div>
+      <p class="muted">On the TV, choose <strong>Connect through SWARM</strong> or select this server under <strong>Servers on LAN</strong>. Enter the code shown there — the same box works either way.</p>
+      <div class="row">
+        <input id="approveTvCode" inputmode="numeric" placeholder="8-digit TV code" maxlength="8">
+        <button id="approveTvBtn"><i class="bi bi-shield-check"></i>Approve TV</button>
+      </div>
+      <div id="approveTvStatus" class="d-none" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
         <h2 class="info-trigger" data-info="lan-network" tabindex="0" role="button">Local network <i class="bi bi-info-circle info-affordance"></i></h2>
       </div>
-      <p class="muted">On the TV, select this server under <strong>Servers on LAN</strong>. Enter the temporary code shown on the TV here to approve it.</p>
-      <div class="row">
-        <input id="lanActivationCode" inputmode="numeric" placeholder="8-digit TV code" maxlength="8">
-        <button id="approveLanPairingBtn"><i class="bi bi-shield-check"></i>Approve TV</button>
-      </div>
-      <div id="lanPairingStatus" class="d-none" style="margin-top:10px"></div>
-      <div id="localPeersList" style="margin-top:12px">Loading…</div>
+      <div id="localPeersList" style="margin-top:4px">Loading…</div>
     </div>
     <div class="card swarm-remote-card">
       <h2 class="info-trigger" data-info="swarm-concept" tabindex="0" role="button">Swarm <i class="bi bi-info-circle info-affordance"></i></h2>

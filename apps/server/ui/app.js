@@ -164,22 +164,18 @@ const INFO_TOPICS = {
     icon: "bi-bell-fill", title: "list_client_errors",
     body: "Returns recent client-reported problems, like failed playback or an unreachable server — the same list shown on the Notifications tab.",
   },
+  "approve-tv": {
+    icon: "bi-shield-check", title: "Approve a TV",
+    body: "Enter the short-lived code shown on the TV here. This one box works whether the TV found this server on the local network or connected through the SWARM service.",
+  },
   "lan-network": {
     icon: "bi-broadcast-pin", title: "Local network",
-    body: "TVs on the same Wi-Fi or wired network discover this server automatically without a SWARM service. Select this server on a new TV, then enter the short-lived code shown by the TV here. Trusted TVs reconnect directly afterward.",
+    body: "TVs on the same Wi-Fi or wired network discover this server automatically without a SWARM service. Approve one above, then trusted TVs reconnect directly afterward.",
     link: "https://en.wikipedia.org/wiki/Multicast_DNS", linkLabel: "Learn about mDNS",
   },
   "swarm-concept": {
     icon: "bi-diagram-3-fill", title: "Swarm",
-    body: "A swarm is a private group of your own devices — servers and clients — that can find and stream from each other. A device joins one with a short one-time code, and can belong to more than one swarm at a time.",
-  },
-  "stun-server-address": {
-    icon: "bi-hdd-network-fill", title: "SWARM server",
-    body: "The coordination server that helps your devices find each other away from home. It handles introductions and membership; your media streams directly between your devices.",
-  },
-  "trusted-peers": {
-    icon: "bi-people-fill", title: "Trusted peers",
-    body: "How many devices, across every swarm this server has joined, are currently allowed to connect to it.",
+    body: "A swarm is a private group of your own devices — servers and clients — that can find and stream from each other away from home. This server automatically creates and manages its own swarm; approve a TV above to add it.",
   },
 };
 
@@ -249,7 +245,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 function show(id) {
-  for (const el of document.querySelectorAll("#onboardFolderView, #onboardSwarmView, #dashView")) {
+  for (const el of document.querySelectorAll("#onboardFolderView, #dashView")) {
     el.classList.toggle("d-none", el.id !== id);
   }
   // Pairs with index.html's inline `body { visibility: hidden; }` guard —
@@ -322,29 +318,12 @@ document.getElementById("chooseFolderBtn").addEventListener("click", async () =>
   try {
     const path = await invoke("choose_media_folder");
     if (path) {
-      show("onboardSwarmView");
+      await enterDashboard();
     }
   } catch (err) {
     showToast(String(err), "error");
   }
 });
-
-// ---- onboarding: optional swarm join ---------------------------------------
-
-document.getElementById("onboardJoinBtn").addEventListener("click", async () => {
-  try {
-    await invoke("join_swarm", {
-      baseUrl: document.getElementById("onboardBaseUrl").value,
-      code: document.getElementById("onboardCode").value,
-      deviceName: document.getElementById("onboardDeviceName").value || "SWARM Server",
-    });
-    await enterDashboard();
-  } catch (err) {
-    showToast(String(err), "error");
-  }
-});
-
-document.getElementById("onboardSkipBtn").addEventListener("click", enterDashboard);
 
 // ---- boot -------------------------------------------------------------------
 

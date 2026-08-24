@@ -1137,42 +1137,6 @@ async fn revoke_local_peer(
 }
 
 #[tauri::command]
-async fn join_swarm(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    base_url: String,
-    code: String,
-    device_name: String,
-) -> Result<SwarmSummaryView, String> {
-    let core = state.core(&app).await?;
-    let swarm = core
-        .register_with_stun(&base_url, &code, &device_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(SwarmSummaryView {
-        id: swarm.id,
-        name: swarm.name,
-    })
-}
-
-#[tauri::command]
-async fn join_additional_swarm(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    code: String,
-) -> Result<SwarmSummaryView, String> {
-    let core = state.core(&app).await?;
-    let swarm = core
-        .join_additional_swarm(&code)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(SwarmSummaryView {
-        id: swarm.id,
-        name: swarm.name,
-    })
-}
-
-#[tauri::command]
 async fn lookup_tv_activation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -1553,8 +1517,6 @@ fn main() {
             approve_lan_pairing,
             list_local_peers,
             revoke_local_peer,
-            join_swarm,
-            join_additional_swarm,
             lookup_tv_activation,
             approve_tv_activation,
             resync_swarm,
