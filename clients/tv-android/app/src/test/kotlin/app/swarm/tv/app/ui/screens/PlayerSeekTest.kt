@@ -2,6 +2,9 @@ package app.swarm.tv.app.ui.screens
 
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
+import java.io.EOFException
+import java.io.IOException
+import java.net.SocketException
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -51,5 +54,20 @@ class PlayerSeekTest {
                 responseCode = 404,
             ),
         )
+    }
+
+    @Test
+    fun `server failure statuses are retried but permanent asset errors are not`() {
+        assertTrue(isServerOfflineHttpStatus(500))
+        assertTrue(isServerOfflineHttpStatus(503))
+        assertFalse(isServerOfflineHttpStatus(404))
+        assertFalse(isServerOfflineHttpStatus(416))
+    }
+
+    @Test
+    fun `interrupted transport chains are recognized as server outages`() {
+        assertTrue(isServerOfflineLoadError(EOFException("truncated response")))
+        assertTrue(isServerOfflineLoadError(IOException("load failed", SocketException("connection reset"))))
+        assertFalse(isServerOfflineLoadError(IOException("malformed media")))
     }
 }

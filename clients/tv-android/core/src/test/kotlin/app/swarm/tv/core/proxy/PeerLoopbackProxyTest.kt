@@ -189,13 +189,25 @@ class PeerLoopbackProxyTest {
     }
 
     @Test
-    fun `a peer connection failure becomes 500 not a hung or crashed proxy`() {
+    fun `a peer connection failure becomes 503 not a hung or crashed proxy`() {
         proxy.register("srv1", FakePeerConnection { _, _, _ -> throw java.io.IOException("connection reset") })
 
         http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/media/abc")).build())
-            .execute().use { assertEquals(500, it.code) }
+            .execute().use { assertEquals(503, it.code) }
 
         // The proxy itself must still be usable for the next request.
+        proxy.register("srv2", FakePeerConnection { _, _, _ -> bodyResponse(200, "ok".toByteArray()) })
+        http.newCall(Request.Builder().url(proxy.urlFor("srv2", "/media/abc")).build())
+            .execute().use { assertEquals(200, it.code) }
+    }
+
+    @Test
+    fun `an unchecked transport failure is contained as 503`() {
+        proxy.register("srv1", FakePeerConnection { _, _, _ -> throw IllegalStateException("connection closed") })
+
+        http.newCall(Request.Builder().url(proxy.urlFor("srv1", "/media/abc")).build())
+            .execute().use { assertEquals(503, it.code) }
+
         proxy.register("srv2", FakePeerConnection { _, _, _ -> bodyResponse(200, "ok".toByteArray()) })
         http.newCall(Request.Builder().url(proxy.urlFor("srv2", "/media/abc")).build())
             .execute().use { assertEquals(200, it.code) }

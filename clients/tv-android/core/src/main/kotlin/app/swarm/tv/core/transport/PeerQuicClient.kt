@@ -167,13 +167,27 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
         errorReport: ClientErrorReport?,
         like: LikeToggle?,
     ): PeerResponse {
-        val stream: QuicStream = connection.createStream(true)
-        val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback, errorReport, like)) + "\n"
-        stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }
+        return try {
+            val stream: QuicStream = connection.createStream(true)
+            val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback, errorReport, like)) + "\n"
+            stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }
 
-        val input = stream.inputStream
-        val header = SwarmJson.decodeFromString<PeerResponseHeader>(readHeaderLine(input))
-        return PeerResponse(header, BoundedInputStream(input, header.len))
+            val input = stream.inputStream
+            val header = SwarmJson.decodeFromString<PeerResponseHeader>(readHeaderLine(input))
+            PeerResponse(header, BoundedInputStream(input, header.len))
+        } catch (error: IOException) {
+            throw error
+        } catch (error: RuntimeException) {
+            // kwik reports some connection-closed races as unchecked
+            // exceptions (for example while creating a stream). Let every
+            // caller handle those as an ordinary transport failure instead
+            // of allowing an executor thread's uncaught exception to bring
+            // down the Android process.
+            throw IOException(
+                "peer request failed: ${error.message ?: error.javaClass.simpleName}",
+                error,
+            )
+        }
     }
 
     override fun close() {
@@ -212,11 +226,18 @@ internal class BoundedInputStream(private val delegate: InputStream, private val
         error,
     )
 
+    private fun interrupted(error: RuntimeException): IOException = IOException(
+        "response body interrupted at ${limit - remaining}/$limit bytes: ${error.message ?: error.javaClass.simpleName}",
+        error,
+    )
+
     override fun read(): Int {
         if (remaining <= 0) return -1
         val b = try {
             delegate.read()
         } catch (error: IOException) {
+            throw interrupted(error)
+        } catch (error: RuntimeException) {
             throw interrupted(error)
         }
         if (b < 0) throw PeerQuicError.TruncatedBody(limit - remaining, limit)
@@ -230,6 +251,8 @@ internal class BoundedInputStream(private val delegate: InputStream, private val
         val got = try {
             delegate.read(b, off, toRead)
         } catch (error: IOException) {
+            throw interrupted(error)
+        } catch (error: RuntimeException) {
             throw interrupted(error)
         }
         if (got < 0) throw PeerQuicError.TruncatedBody(limit - remaining, limit)

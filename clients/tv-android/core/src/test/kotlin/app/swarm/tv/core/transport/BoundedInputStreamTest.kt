@@ -40,6 +40,19 @@ class BoundedInputStreamTest {
     }
 
     @Test
+    fun `unchecked transport error is normalized to an IOException`() {
+        val delegate = object : InputStream() {
+            override fun read(): Int = throw IllegalStateException("connection closed")
+        }
+        val stream = BoundedInputStream(delegate, 10)
+
+        val error = assertThrows(IOException::class.java) { stream.read() }
+
+        assertTrue(error.message.orEmpty().contains("0/10 bytes"))
+        assertTrue(error.cause is IllegalStateException)
+    }
+
+    @Test
     fun `reads exactly the advertised body length`() {
         val stream = BoundedInputStream(ByteArrayInputStream(byteArrayOf(1, 2, 3, 4, 5)), 3)
 

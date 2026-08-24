@@ -116,6 +116,10 @@ class PeerLoopbackProxy private constructor(
                 serve(requestLine, headers, output)
             } catch (e: IOException) {
                 // Peer went away mid-request (player seeked/aborted) — nothing to respond to.
+            } catch (e: RuntimeException) {
+                // Last-resort containment for transport implementations that
+                // violate InputStream's IOException contract. An uncaught
+                // exception on an Android executor thread is process-fatal.
             }
         }
     }
@@ -151,8 +155,7 @@ class PeerLoopbackProxy private constructor(
         val response = try {
             connection.request(peerPath, range, ifNoneMatch)
         } catch (e: PeerQuicError) {
-            e.printStackTrace()
-            writeStatusOnly(output, 500, "Internal Server Error")
+            writeStatusOnly(output, 503, "Service Unavailable")
             return
         } catch (e: IOException) {
             // Real bug, found live: this used to remove `serverId` from
@@ -171,8 +174,13 @@ class PeerLoopbackProxy private constructor(
             // health and reconnection are entirely
             // [app.swarm.tv.core.catalog.CatalogSession]'s job now, via the
             // self-healing [PeerConnection] it registers.
-            e.printStackTrace()
-            writeStatusOnly(output, 500, "Internal Server Error")
+            writeStatusOnly(output, 503, "Service Unavailable")
+            return
+        } catch (e: RuntimeException) {
+            // A closed kwik connection can race a new stream request and
+            // throw unchecked. Keep that failure inside the proxy boundary
+            // so Media3 receives a recoverable server-offline response.
+            writeStatusOnly(output, 503, "Service Unavailable")
             return
         }
 

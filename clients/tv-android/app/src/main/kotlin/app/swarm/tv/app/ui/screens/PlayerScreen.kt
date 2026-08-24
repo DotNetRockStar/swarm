@@ -73,7 +73,13 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
 import app.swarm.tv.app.data.PreparedEpisodePlayback
@@ -85,9 +91,15 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.peer.SubtitleTrack
+import java.io.EOFException
+import java.io.IOException
+import java.net.ProtocolException
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import kotlinx.coroutines.delay
 
 private const val CONTINUE_COUNTDOWN_SECS = 8
+private const val SERVER_OFFLINE_RETRY_DELAY_MS = 2_000L
 
 // Real complaint from live use: even at max system/TV volume, some content isn't
 // loud enough. LoudnessEnhancer processes the decoded PCM before it reaches the
@@ -113,6 +125,52 @@ private fun PreparedEpisodePlayback.toPlayerConfig() = PlaybackPlayerConfig(
     subtitles = subtitles,
     resumePositionSecs = resumePositionSecs,
 )
+
+/** Media3 normally gives up after a small number of failed loads. A server
+ * outage is different from a bad asset or decoder failure: keep requesting
+ * the current Range/HLS segment so already-buffered media can play out and
+ * playback can resume without user intervention when the route returns. */
+private class ServerOfflineRetryPolicy : DefaultLoadErrorHandlingPolicy(Int.MAX_VALUE) {
+    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorInfo): Long {
+        val responseCode = httpResponseCode(loadErrorInfo.exception)
+        return when {
+            isServerOfflineLoadError(loadErrorInfo.exception) -> SERVER_OFFLINE_RETRY_DELAY_MS
+            // A permanent HTTP response (especially the expired-session
+            // 404 handled by onPlayerError) must not inherit the unlimited
+            // transport retry count.
+            responseCode != null -> C.TIME_UNSET
+            else -> super.getRetryDelayMsFor(loadErrorInfo)
+        }
+    }
+}
+
+internal fun serverOfflineMediaSourceFactory(context: Context): DefaultMediaSourceFactory =
+    DefaultMediaSourceFactory(context.applicationContext)
+        .setLoadErrorHandlingPolicy(ServerOfflineRetryPolicy())
+
+internal fun isServerOfflineHttpStatus(responseCode: Int): Boolean =
+    responseCode == 500 || responseCode == 502 || responseCode == 503 || responseCode == 504
+
+private fun httpResponseCode(error: IOException): Int? =
+    generateSequence<Throwable>(error) { it.cause }
+        .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
+        .firstOrNull()
+        ?.responseCode
+
+/** Intentionally narrow: codec/parser failures and permanent 4xx asset
+ * errors must still become terminal player errors instead of retry loops. */
+internal fun isServerOfflineLoadError(error: IOException): Boolean =
+    generateSequence<Throwable>(error) { it.cause }.any { cause ->
+        when (cause) {
+            is HttpDataSource.InvalidResponseCodeException -> isServerOfflineHttpStatus(cause.responseCode)
+            is SocketException,
+            is SocketTimeoutException,
+            is EOFException,
+            is ProtocolException,
+            -> true
+            else -> false
+        }
+    }
 
 /** Owns the active video player plus at most one paused, buffering successor.
  * The pool lives across UiState.Player-to-UiState.Player recompositions, which
@@ -183,7 +241,11 @@ private class VideoPlayerPool(context: Context) {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
             .setInitialBitrateEstimate(initialBitrate)
             .build()
-        return ExoPlayer.Builder(appContext).setBandwidthMeter(bandwidthMeter).build().apply {
+        return ExoPlayer.Builder(appContext)
+            .setBandwidthMeter(bandwidthMeter)
+            .setMediaSourceFactory(serverOfflineMediaSourceFactory(appContext))
+            .build()
+            .apply {
             // Direct-play containers may expose several embedded audio tracks.
             // Prefer English when it is tagged, while Media3 naturally falls
             // back to the container default when no English track exists.
@@ -236,6 +298,7 @@ fun PlayerScreen(
     onPreloadNext: () -> Unit,
     onSeekOutsideBuffer: (positionSecs: Double) -> Unit,
     onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
+    onServerOffline: (context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -262,6 +325,7 @@ fun PlayerScreen(
         )
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
+    var serverOffline by remember(sessionId) { mutableStateOf(false) }
 
     // Negotiation finishes asynchronously during the Continue countdown.
     // Preparing with playWhenReady=false makes Media3 fetch and buffer the
@@ -312,12 +376,46 @@ fun PlayerScreen(
     }
 
     DisposableEffect(player) {
+        val analyticsListener = object : AnalyticsListener {
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: IOException,
+                wasCanceled: Boolean,
+            ) {
+                if (wasCanceled || !isServerOfflineLoadError(error)) return
+                if (!serverOffline) {
+                    serverOffline = true
+                    onServerOffline(
+                        "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
+                            "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                    )
+                }
+                // Let the buffered picture continue uninterrupted. The
+                // loading overlay appears only once playback actually runs
+                // out of buffered media and transitions to BUFFERING.
+                if (player.playbackState == Player.STATE_BUFFERING) isLoading = true
+            }
+
+            override fun onLoadCompleted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+            ) {
+                serverOffline = false
+                if (player.playbackState == Player.STATE_READY) isLoading = false
+            }
+        }
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 // Covers audio (tracks never render a video frame at all,
                 // so onRenderedFirstFrame below would never fire for them).
                 if (playbackState == Player.STATE_READY) {
                     isLoading = false
+                }
+                if (playbackState == Player.STATE_BUFFERING && serverOffline) {
+                    isLoading = true
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     showContinuePrompt = true
@@ -379,8 +477,10 @@ fun PlayerScreen(
                 )
             }
         }
+        player.addAnalyticsListener(analyticsListener)
         player.addListener(listener)
         onDispose {
+            player.removeAnalyticsListener(analyticsListener)
             player.removeListener(listener)
             val positionSecs = positionOffsetSecs + player.currentPosition / 1000.0
             val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { positionOffsetSecs + it / 1000.0 } ?: 0.0

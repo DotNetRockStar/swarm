@@ -34,6 +34,9 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import app.swarm.tv.app.data.AndroidCatalogCache
 import app.swarm.tv.app.data.AndroidConnectionStore
 import app.swarm.tv.app.data.AndroidDeviceIdentity
@@ -70,6 +73,8 @@ import app.swarm.tv.app.ui.screens.MusicPlayerScreen
 import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
+import app.swarm.tv.app.ui.screens.isServerOfflineLoadError
+import app.swarm.tv.app.ui.screens.serverOfflineMediaSourceFactory
 import app.swarm.tv.app.ui.screens.SeasonScreen
 import app.swarm.tv.app.ui.screens.ShowShelfScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
@@ -84,6 +89,7 @@ import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
+import java.io.IOException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 
@@ -231,6 +237,7 @@ class MainActivity : ComponentActivity() {
                         onReportProblem = viewModel::reportAssetProblem,
                         onSavePlaybackPosition = viewModel::savePlaybackPosition,
                         onRecoverExpiredPlaybackSession = viewModel::recoverExpiredPlaybackSession,
+                        onServerOffline = viewModel::reportServerOffline,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
                         onOpenSettings = viewModel::openSettings,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
@@ -318,6 +325,7 @@ private fun SwarmApp(
     onReportProblem: (MergedEntry) -> Unit,
     onSavePlaybackPosition: (entry: MergedEntry, positionSecs: Double, durationSecs: Double) -> Unit,
     onRecoverExpiredPlaybackSession: (sessionId: String, positionSecs: Double, context: String?) -> Unit,
+    onServerOffline: (sessionId: String, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onOpenSettings: () -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
@@ -381,7 +389,10 @@ private fun SwarmApp(
     val context = LocalContext.current
     val musicPlayer = remember(activeMusicSession?.sessionId) {
         activeMusicSession?.let { session ->
-            ExoPlayer.Builder(context).build().apply {
+            ExoPlayer.Builder(context)
+                .setMediaSourceFactory(serverOfflineMediaSourceFactory(context))
+                .build()
+                .apply {
                 setMediaItem(MediaItem.Builder().setUri(Uri.parse(session.url)).setMediaId(session.title).build())
                 if (session.resumePositionSecs > 0) seekTo((session.resumePositionSecs * 1000).toLong())
                 playWhenReady = true
@@ -393,6 +404,7 @@ private fun SwarmApp(
     var musicIsLoading by remember(musicPlayer) { mutableStateOf(true) }
     var musicPositionMs by remember(musicPlayer) { mutableLongStateOf(0L) }
     var musicPausedForPreview by remember(musicPlayer) { mutableStateOf(false) }
+    var musicServerOffline by remember(musicPlayer) { mutableStateOf(false) }
 
     // Inline previews intentionally include audio. If music was already
     // playing in the minimized bar, pause it for the preview and restore it
@@ -422,12 +434,44 @@ private fun SwarmApp(
 
     DisposableEffect(musicPlayer) {
         val player = musicPlayer
+        val analyticsListener = object : AnalyticsListener {
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: IOException,
+                wasCanceled: Boolean,
+            ) {
+                if (player == null || wasCanceled || !isServerOfflineLoadError(error)) return
+                if (!musicServerOffline) {
+                    musicServerOffline = true
+                    activeMusicSession?.let { session ->
+                        onServerOffline(
+                            session.sessionId,
+                            "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
+                                "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                        )
+                    }
+                }
+                if (player.playbackState == Player.STATE_BUFFERING) musicIsLoading = true
+            }
+
+            override fun onLoadCompleted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+            ) {
+                musicServerOffline = false
+                if (player?.playbackState == Player.STATE_READY) musicIsLoading = false
+            }
+        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 musicIsPlaying = isPlaying
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) musicIsLoading = false
+                if (playbackState == Player.STATE_BUFFERING && musicServerOffline) musicIsLoading = true
                 // onTrackPlaybackEnded reads the *current* session fresh off
                 // the ViewModel's own state rather than anything captured
                 // here, so this stays correct even if nextEntry changed
@@ -435,8 +479,10 @@ private fun SwarmApp(
                 if (playbackState == Player.STATE_ENDED) onTrackPlaybackEnded()
             }
         }
+        player?.addAnalyticsListener(analyticsListener)
         player?.addListener(listener)
         onDispose {
+            player?.removeAnalyticsListener(analyticsListener)
             player?.removeListener(listener)
             // Position save-on-exit for whichever session *this* player
             // instance was actually playing — mirrors PlayerScreen's own
@@ -710,6 +756,7 @@ private fun SwarmApp(
                         onPlaybackSessionExpired = { positionSecs, context ->
                             onRecoverExpiredPlaybackSession(state.sessionId, positionSecs, context)
                         },
+                        onServerOffline = { context -> onServerOffline(state.sessionId, context) },
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
                     )
                 }

@@ -1904,6 +1904,25 @@ class SwarmViewModel(
         )
     }
 
+    /** A recoverable media-load failure: the player keeps its current buffer
+     * and retries forever, so this path only informs the viewer and records
+     * diagnostics. [sessionId] rejects late callbacks after Back/cancel or a
+     * successful replacement session. */
+    fun reportServerOffline(sessionId: String, context: String? = null) {
+        val current = activePlayerSession()?.takeIf { it.sessionId == sessionId } ?: return
+        val message = "server has gone offline"
+        notify(message, ClientNotificationKind.ERROR)
+        val device = current.previous.embeddedCatalog()?.devices?.find { it.deviceId == current.serverId } ?: return
+        reportClientError(
+            device = device,
+            message = message,
+            entryKey = current.entry.entry.entryKey,
+            assetTitle = current.entry.entry.displayTitle(),
+            kind = current.entry.entry.kind.name.lowercase(),
+            context = context,
+        )
+    }
+
     /**
      * Replaces a server-side playback session that expired while Media3 was
      * paused. [sessionId] rejects a late callback from an already-disposed
