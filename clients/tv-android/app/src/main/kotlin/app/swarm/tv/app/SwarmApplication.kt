@@ -1,7 +1,7 @@
 /**
  * Registers a Coil [ImageLoader] with [ArtworkCache] wired in so the whole
  * app's artwork requests (every screen already just calls `AsyncImage`
- * against Coil's default singleton loader) get the fixed one-day cache TTL
+ * against Coil's default singleton loader) get the fixed 30-day cache TTL
  * without touching each call site — [ImageLoaderFactory] is Coil's
  * supported hook for replacing that singleton, resolved once at process
  * start from the `Application` class named in AndroidManifest.xml.

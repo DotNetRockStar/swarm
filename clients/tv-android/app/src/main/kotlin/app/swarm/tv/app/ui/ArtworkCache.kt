@@ -1,5 +1,5 @@
 /**
- * Enforces a one-day max-age on Coil's artwork cache.
+ * Enforces a 30-day max-age on Coil's artwork cache.
  * Coil's own [coil.disk.DiskCache]/[coil.memory.MemoryCache]
  * are pure LRU (size-bounded, not time-bounded), and the loopback proxy
  * artwork actually loads through ([app.swarm.tv.core.proxy.PeerLoopbackProxy])

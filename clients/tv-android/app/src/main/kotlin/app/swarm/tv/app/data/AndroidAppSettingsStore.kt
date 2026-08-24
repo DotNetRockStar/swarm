@@ -12,9 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
-// Artwork URLs carry the catalog's version, so updates invalidate exactly;
-// a one-day default avoids needless revalidation while remaining user-tunable.
-const val DEFAULT_ARTWORK_CACHE_MINUTES = 1440
+// Artwork URLs carry the catalog's version, so server updates invalidate
+// exactly without routinely re-fetching unchanged images.
+const val DEFAULT_ARTWORK_CACHE_MINUTES = 30 * 24 * 60
 
 class AndroidAppSettingsStore(context: Context) {
     private val dao = AppDatabase.getInstance(context).appSettingsDao()
