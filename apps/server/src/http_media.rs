@@ -308,11 +308,24 @@ pub async fn start(
         .route("/play/{entry_key}", post(play))
         .route("/stream/{session_id}/media", get(media_get))
         .route("/media/{entry_key}", get(media_get))
-        .route("/hls/{session_id}/{rendition}/{file}", get(media_get))
+        // `{*rest}` (axum's catch-all), not a fixed `{rendition}/{file}` two
+        // segments: swarm-media's safe_hls_path validates each `/`-separated
+        // segment individually with no depth limit, and the QUIC dispatch
+        // only ever splits `session_id` off the front (`rest.split_once('/')`)
+        // — a fixed-depth route here would silently 404 anything nested
+        // deeper than one level, a real mismatch this route pattern must not
+        // reintroduce.
+        .route("/hls/{session_id}/{*rest}", get(media_get))
         .route("/catalog/thumbprint", get(media_get))
         .route("/catalog/manifest", get(media_get))
         .route("/catalog/manifest.gz", get(media_get))
         .route("/art/{entry_key}/{kind}", get(media_get))
+        // Same resolve_for_network dispatch as everything else above, so no
+        // new handler — /stop is a mutation (releases a session early), POST
+        // to match /play's convention, but media_get itself has no
+        // verb-specific logic.
+        .route("/stop/{session_id}", post(media_get))
+        .route("/subtitles/{entry_key}/{filename}", get(media_get))
         .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
 
     let app = pairing_routes.merge(media_routes).with_state(state);

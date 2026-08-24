@@ -61,6 +61,62 @@ fn deterministic_bytes(len: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
+fn test_config(media_root: &std::path::Path, data_dir: std::path::PathBuf) -> ServerConfig {
+    ServerConfig {
+        media_roots: vec![MediaRoot {
+            label: "local".into(),
+            path: media_root.to_path_buf(),
+        }],
+        data_dir,
+        bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        allowed_fingerprints: vec![],
+        token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: None,
+    }
+}
+
+/// A direct-play-eligible (h264/aac) movie entry, matching the codec fields
+/// crates/swarm-media/tests/playback.rs already established as the
+/// convention for tests that are about the serving layer, not real ffprobe
+/// scanning — only `entry_key`/`relative_path`/`size` vary per call site.
+fn direct_play_entry(entry_key: &str, relative_path: &str, size: u64) -> EntryRecord {
+    EntryRecord {
+        entry_key: entry_key.into(),
+        relative_path: relative_path.into(),
+        kind: MediaKind::Movie,
+        title: "Example".into(),
+        size,
+        modified_time: 0,
+        fingerprint: "fingerprint".into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: Some(10.0),
+        video: Some(VideoStreamInfo {
+            codec: "h264".into(),
+            width: 640,
+            height: 360,
+            level: Some("4.1".into()),
+            bitrate: Some(700_000),
+        }),
+        audio: None,
+        scraped_title: None,
+        episode_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+        overview: None,
+        rating: None,
+        community_rating: None,
+        community_rating_votes: None,
+    }
+}
+
 #[tokio::test]
 async fn pair_negotiate_and_range_fetch_media_over_real_http() {
     let base = std::env::temp_dir().join(format!("swarm-http-media-{}", std::process::id()));
@@ -353,6 +409,286 @@ async fn browse_catalog_and_fetch_artwork_over_real_http() {
         cached.status(),
         304,
         "a matching If-None-Match must short-circuit to 304, proving the ETag round trip actually works over HTTP"
+    );
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// `/stop` is not a nice-to-have: without it, an HTTP client that stops
+/// playback early (user presses back, or just closes the app) has no way to
+/// release its session's upload-bandwidth reservation — the exact bug
+/// crates/swarm-media/tests/playback.rs's
+/// `stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeout`
+/// documents being found live and fixed for QUIC clients. That test forces
+/// a visible 429 by negotiating with `is_lan: false` directly against
+/// `MediaService`; a real HTTP round trip can't do that — a loopback
+/// `reqwest` connection genuinely *is* LAN (`is_lan_ip(127.0.0.1)` is
+/// `true`), and LAN playback deliberately bypasses budget admission control
+/// entirely, by design (see `settings.rs`'s "LAN playback always bypasses
+/// it" doc comment) — so this proves the same release via
+/// `TranscodeManager::reserved_bps()` instead, which still tracks every
+/// session's reservation regardless of whether admission control enforced
+/// anything for it.
+#[tokio::test]
+async fn stop_releases_the_reservation_over_http() {
+    let base = std::env::temp_dir().join(format!("swarm-http-stop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+
+    let core = ServerCore::start(test_config(&media_root, base.join("server-data")))
+        .await
+        .unwrap();
+    core.wait_for_scan().await.unwrap();
+
+    let relative_path = "movies/example.mp4";
+    let media_bytes = deterministic_bytes(1_000_000, 5);
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, &media_bytes).unwrap();
+    let entry = direct_play_entry("aaaa11112222333344445555", relative_path, media_bytes.len() as u64);
+    core.library.upsert(&entry).await.unwrap();
+
+    let base_url = format!("http://{}", core.http_media_addr);
+    let client = reqwest::Client::new();
+    let token = pair_and_get_token(&client, &base_url, &core, "Living Room Roku").await;
+
+    let plan: PlaybackPlan = client
+        .post(format!("{base_url}/play/{}", entry.entry_key))
+        .bearer_auth(&token)
+        .json(&json!({
+            "capabilities": CapabilityProfile::fire_tv_baseline(),
+            "start_position_secs": 0,
+            "prefer_direct": true,
+            "preview": false,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(plan.mode, PlaybackMode::Direct);
+    assert!(
+        core.media_service().transcode_manager().reserved_bps() > 0,
+        "negotiating a direct-play session must reserve real bandwidth"
+    );
+
+    let stop = client
+        .post(format!("{base_url}/stop/{}", plan.session_id))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stop.status(), 200);
+    assert_eq!(
+        core.media_service().transcode_manager().reserved_bps(),
+        0,
+        "/stop must release the whole reservation immediately, not just mark it idle"
+    );
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A device can't caption anything without this route: `PlaybackPlan.subtitles`
+/// points at server-generated paths (WebVTT from local transcription, in
+/// this case), not directly-fetchable file paths — without `/subtitles/*`
+/// mirrored to HTTP, a paired device has no way to ever resolve them.
+#[tokio::test]
+async fn subtitles_are_served_over_http() {
+    let base = std::env::temp_dir().join(format!("swarm-http-subtitles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+
+    let core = ServerCore::start(test_config(&media_root, base.join("server-data")))
+        .await
+        .unwrap();
+    core.wait_for_scan().await.unwrap();
+
+    let relative_path = "movies/example.mp4";
+    let media_bytes = deterministic_bytes(1_000_000, 11);
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, &media_bytes).unwrap();
+    let entry = direct_play_entry("bbbb11112222333344445555", relative_path, media_bytes.len() as u64);
+    core.library.upsert(&entry).await.unwrap();
+
+    let subtitle_path = base.join("subtitles").join("example.vtt");
+    std::fs::create_dir_all(subtitle_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &subtitle_path,
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n",
+    )
+    .unwrap();
+    core.library
+        .complete_transcription(&swarm_media::store::SubtitleRecord {
+            id: "whisper-en".into(),
+            entry_key: entry.entry_key.clone(),
+            language: "en".into(),
+            label: "English — AI generated".into(),
+            source: "whisper".into(),
+            format: "vtt".into(),
+            file_path: subtitle_path.to_string_lossy().to_string(),
+            fingerprint: entry.fingerprint.clone(),
+        })
+        .await
+        .unwrap();
+
+    let base_url = format!("http://{}", core.http_media_addr);
+    let client = reqwest::Client::new();
+    let token = pair_and_get_token(&client, &base_url, &core, "Living Room Roku").await;
+
+    let plan: PlaybackPlan = client
+        .post(format!("{base_url}/play/{}", entry.entry_key))
+        .bearer_auth(&token)
+        .json(&json!({
+            "capabilities": CapabilityProfile::fire_tv_baseline(),
+            "start_position_secs": 0,
+            "prefer_direct": true,
+            "preview": false,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(plan.subtitles.len(), 1);
+
+    let subtitle_response = client
+        .get(format!("{base_url}{}", plan.subtitles[0].path))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(subtitle_response.status(), 200);
+    assert_eq!(
+        subtitle_response.headers().get("content-type").unwrap(),
+        "text/vtt; charset=utf-8"
+    );
+    let body = subtitle_response.text().await.unwrap();
+    assert!(body.contains("Hello"));
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The `/hls/{session_id}/{*rest}` route uses an axum catch-all
+/// specifically because `swarm-media`'s `safe_hls_path` permits any number
+/// of `/`-separated segments (a fixed `{rendition}/{file}` two-segment
+/// pattern would 404 a real request, since a real HLS session's *master*
+/// playlist sits at a single-segment path and its rendition playlists sit
+/// one level deeper). Real ffmpeg-generated media, real transcoding, real
+/// nested-path fetch — the only way to actually prove the wildcard route
+/// works, since a bogus/nonexistent session_id would 404 identically
+/// whether the route matched-then-failed or never matched at all. Skips
+/// gracefully if ffmpeg isn't available, matching
+/// crates/swarm-media/src/transcode.rs's own
+/// `ffmpeg_hls_pipeline_smoke_test_when_ffmpeg_is_available` convention.
+#[tokio::test]
+async fn hls_master_and_nested_rendition_playlist_serve_over_real_http() {
+    let base = std::env::temp_dir().join(format!("swarm-http-hls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+
+    let relative_path = "movies/source.mp4";
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    let generated = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=duration=2:size=1280x720:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y",
+        ])
+        .arg(&media_path)
+        .status()
+        .await
+        .unwrap();
+    if !generated.success() {
+        eprintln!("skipping: ffmpeg could not generate the test fixture");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+
+    let config = test_config(&media_root, base.join("server-data"));
+    let core = ServerCore::start(config).await.unwrap();
+    // Unlike every other test in this file, the real media file already
+    // exists on disk *before* ServerCore::start (ffmpeg wrote it above, so
+    // this test's own negotiation has something real to transcode) — the
+    // initial background scan discovers and upserts it under its own
+    // real-ffprobe-derived entry_key before this line returns. A second,
+    // synthetic upsert at the same relative_path would collide with that
+    // row (relative_path is UNIQUE) — use the real scanned entry instead of
+    // constructing one, which is also more honest for an HLS test: the
+    // video/audio codec info driving transcode eligibility comes from real
+    // ffprobe output, not hand-picked fields.
+    let scan_report = core.wait_for_scan().await.unwrap();
+    assert_eq!(scan_report.added, 1);
+    let entry = core.library.list().await.unwrap().into_iter().next().unwrap();
+
+    let base_url = format!("http://{}", core.http_media_addr);
+    let client = reqwest::Client::new();
+    let token = pair_and_get_token(&client, &base_url, &core, "Living Room Roku").await;
+
+    let plan: PlaybackPlan = client
+        .post(format!("{base_url}/play/{}", entry.entry_key))
+        .bearer_auth(&token)
+        .json(&json!({
+            "capabilities": CapabilityProfile::fire_tv_baseline(),
+            "start_position_secs": 0,
+            "prefer_direct": false,
+            "preview": false,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(plan.mode, PlaybackMode::Hls);
+
+    let master = client
+        .get(format!("{base_url}{}", plan.path))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(master.status(), 200);
+    let master_body = master.text().await.unwrap();
+    assert!(master_body.contains("#EXTM3U"));
+
+    // The master playlist references each rendition's own playlist at a
+    // *nested* relative path (e.g. "0/index.m3u8") — fetching one proves
+    // the catch-all route actually forwards a multi-segment path, not just
+    // the single-segment master playlist request above.
+    let rendition_relative_path = master_body
+        .lines()
+        .find(|line| !line.starts_with('#') && line.ends_with("index.m3u8"))
+        .expect("a real HLS master playlist references at least one rendition playlist")
+        .to_string();
+    assert!(
+        rendition_relative_path.contains('/'),
+        "expected a nested rendition path, got {rendition_relative_path:?}"
+    );
+
+    let rendition = client
+        .get(format!(
+            "{base_url}/hls/{}/{rendition_relative_path}",
+            plan.session_id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        rendition.status(),
+        200,
+        "the catch-all /hls route must forward a nested rendition-playlist path, not 404 it"
     );
 
     drop(core);
