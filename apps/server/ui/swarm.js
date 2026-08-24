@@ -47,11 +47,12 @@ async function loadLocalPeers() {
   }
 }
 
-// Approve TV is a single code box for both pairing paths: LAN pairing is a
-// fast, fully local check (no network round trip), so it's tried first and
-// only falls through to the SWARM activation lookup (which hits the STUN
-// service) if the code isn't a pending LAN request. A given 8-digit code is
-// only ever valid for one of the two, so trying both in sequence is safe.
+// Approve TV is a single code box for every pairing path: LAN pairing and
+// plain-HTTP pairing are both fast, fully local checks (no network round
+// trip), so they're tried first and only fall through to the SWARM
+// activation lookup (which hits the STUN service) if the code isn't a
+// pending local request. A given 8-digit code is only ever valid for one of
+// the three, so trying them in sequence is safe.
 document.getElementById("approveTvBtn").addEventListener("click", async () => {
   const input = document.getElementById("approveTvCode");
   const code = input.value.replace(/\D/g, "");
@@ -67,7 +68,16 @@ document.getElementById("approveTvBtn").addEventListener("click", async () => {
     await loadLocalPeers();
     return;
   } catch (_lanErr) {
-    // Not a pending LAN code -- fall through and try a SWARM activation.
+    // Not a pending LAN code -- fall through and try plain-HTTP pairing.
+  }
+  try {
+    const deviceName = await invoke("approve_http_media_pairing", { code });
+    input.value = "";
+    showToast(`${deviceName} was approved. It will connect automatically.`, "success");
+    await loadHttpMediaDevices();
+    return;
+  } catch (_httpErr) {
+    // Not a pending plain-HTTP code either -- fall through and try a SWARM activation.
   }
   try {
     const pending = await invoke("lookup_tv_activation", { code });
@@ -93,8 +103,45 @@ document.getElementById("approveTvBtn").addEventListener("click", async () => {
   }
 });
 
+// Same shape as loadLocalPeers() above, for devices that pair over plain
+// HTTP instead of the peer/LAN protocol (http_media.rs) — a separate list
+// since they're a separate credential (a bearer token, not a cert
+// fingerprint) with no "online" status to show. token_hash is a plain
+// SHA-256 hex string, the same length/shape as a cert fingerprint, so
+// formatFingerprint()'s truncation applies unchanged.
+async function loadHttpMediaDevices() {
+  const list = document.getElementById("httpMediaDevicesList");
+  try {
+    const devices = await invoke("list_http_media_devices");
+    list.innerHTML = devices.length ? `<table>
+      <thead><tr><th>Name</th><th>Paired</th><th>Token</th><th></th></tr></thead>
+      <tbody>${devices.map(device => `<tr>
+        <td>${esc(device.name)}</td>
+        <td>${esc(new Date(device.paired_at * 1000).toLocaleString())}</td>
+        <td class="mono" title="${esc(device.token_hash)}">${esc(formatFingerprint(device.token_hash))}</td>
+        <td><button class="danger" data-revoke-http-media="${esc(device.token_hash)}"><i class="bi bi-x-lg"></i>Revoke</button></td>
+      </tr>`).join("")}</tbody>
+    </table>` : `<p class="muted">No plain-HTTP devices have been paired yet.</p>`;
+    list.querySelectorAll("[data-revoke-http-media]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await invoke("revoke_http_media_device", { tokenHash: btn.dataset.revokeHttpMedia });
+          showToast("Device revoked.", "success");
+          await loadHttpMediaDevices();
+        } catch (err) {
+          showToast(String(err), "error");
+        }
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<p class="muted">Unable to load paired plain-HTTP devices.</p>`;
+    showToast(String(err), "error");
+  }
+}
+
 async function refreshSwarm() {
   loadLocalPeers();
+  loadHttpMediaDevices();
   const content = document.getElementById("swarmContent");
   let link;
   try {

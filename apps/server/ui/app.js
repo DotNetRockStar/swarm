@@ -170,12 +170,16 @@ const INFO_TOPICS = {
   },
   "approve-tv": {
     icon: "bi-shield-check", title: "Approve a TV",
-    body: "Enter the short-lived code shown on the TV here. This one box works whether the TV found this server on the local network or connected through the SWARM service.",
+    body: "Enter the short-lived code shown on the device here. This one box works no matter how it found this server — locally, over plain HTTP, or through the SWARM service.",
   },
   "lan-network": {
     icon: "bi-broadcast-pin", title: "Local network",
     body: "TVs on the same Wi-Fi or wired network discover this server automatically without a SWARM service. Approve one above, then trusted TVs reconnect directly afterward.",
     link: "https://en.wikipedia.org/wiki/Multicast_DNS", linkLabel: "Learn about mDNS",
+  },
+  "http-media-device": {
+    icon: "bi-wifi", title: "Plain-HTTP devices",
+    body: "Some devices can't use SWARM's peer protocol and pair over plain HTTP instead. Approve one above using the same code box; it gets its own access token here, separate from the local network list.",
   },
   "swarm-concept": {
     icon: "bi-diagram-3-fill", title: "Swarm",

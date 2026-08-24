@@ -253,3 +253,25 @@ next begins. Real feedback this fixed: a plain stack of `.row` divs (no
 border, no background, no margin) read as "too close together, no
 delineation" once there was more than one entry — the fix is the same
 "give it a card" shape `.client-error-row` already uses, scaled down.
+
+## One code box, several pairing paths tried in sequence
+
+The Swarm tab's "Approve a TV" box (`approveTvCode`/`approveTvBtn` in
+`index.html`, the click handler in `swarm.js`) is shared across every
+device-pairing flow this app has, not one box per flow. Each flow is
+tried in turn — fully local, no-network-round-trip checks first
+(`approve_lan_pairing`, then `approve_http_media_pairing`), falling
+through to the one flow that actually hits the STUN service
+(`lookup_tv_activation`/`approve_tv_activation`) only if none of the
+local ones claim the code. This works because every flow's codes share
+one 8-digit format and a given code is only ever pending in one of
+them, so trying each `invoke()` in sequence and catching-and-falling-through
+on failure is safe — no need to ask the user which kind of device
+they're approving. When a new pairing flow is added anywhere in this
+app (device_a on the peer/cert protocol, device_b on plain HTTP, or
+otherwise), add its `approve_*` call as another rung in this same
+try/catch chain rather than a new input box — see the ordering comment
+directly above the click handler in `swarm.js` for why local checks are
+tried before the network one specifically (latency and cost, not
+correctness — a network call working first would still behave
+correctly, just slower for the common local case).
