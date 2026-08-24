@@ -33,6 +33,42 @@ use tokio::sync::OnceCell;
 
 struct AppState {
     core: OnceCell<Arc<ServerCore>>,
+    // The OS releases this process-scoped power assertion when the state is
+    // dropped, which only happens when the user actually quits the app (not
+    // when the main window is hidden to the tray).
+    _sleep_inhibitor: Option<keepawake::KeepAwake>,
+}
+
+fn acquire_sleep_inhibitor() -> Option<keepawake::KeepAwake> {
+    let combined = keepawake::Builder::default()
+        // Let the display turn off, but keep the server and network stack
+        // running through idle and explicit sleep requests (including lid
+        // close where the operating system permits applications to block it).
+        .idle(true)
+        .sleep(true)
+        .reason("Keep the SWARM media server available")
+        .app_name("SWARM Server")
+        .app_reverse_domain("app.swarm.server")
+        .create();
+    match combined {
+        Ok(inhibitor) => Some(inhibitor),
+        Err(error) => {
+            eprintln!("SWARM could not block explicit system sleep: {error}");
+            // Explicit sleep blocking is more restricted than ordinary idle
+            // sleep on several platforms. Preserve the widely-supported idle
+            // assertion when the stronger request is unavailable.
+            keepawake::Builder::default()
+                .idle(true)
+                .reason("Keep the SWARM media server available")
+                .app_name("SWARM Server")
+                .app_reverse_domain("app.swarm.server")
+                .create()
+                .map_err(|fallback_error| {
+                    eprintln!("SWARM could not prevent idle sleep: {fallback_error}");
+                })
+                .ok()
+        }
+    }
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -1419,7 +1455,7 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let running = MenuItem::with_id(
         app,
         "tray-running",
-        "Media server continues while hidden",
+        "Media server keeps this computer awake",
         false,
         None::<&str>,
     )?;
@@ -1476,6 +1512,7 @@ fn main() {
         })
         .manage(AppState {
             core: OnceCell::new(),
+            _sleep_inhibitor: acquire_sleep_inhibitor(),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,

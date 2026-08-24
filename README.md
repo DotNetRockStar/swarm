@@ -10,7 +10,7 @@ Everything runs on this one machine; the Fire TV just needs to be on the same Wi
 ```bash
 ./run_now.sh
 ```
-Builds and runs two real processes together: the hosted-style SWARM service and the desktop media-server app (a window should open). The desktop app is the media server; there is no second headless server. Closing its window hides it to the system tray so streaming continues, and **Quit SWARM** in the tray menu stops it. `Ctrl+C` stops both development processes together.
+Builds and runs two real processes together: the hosted-style SWARM service and the desktop media-server app (a window should open). The desktop app is the media server; there is no second headless server. Closing its window hides it to the system tray so streaming continues, and the app asks the operating system to keep the computer awake until **Quit SWARM** is selected in the tray menu. `Ctrl+C` stops both development processes together. Some laptops restrict blocking lid-close sleep (for example, based on power or external-display state), so the operating system's hardware policy still applies in those configurations.
 
 **2. Configure the desktop media server:**
 In the window `run_now.sh` opened, choose a media folder. With the development SWARM service URL supplied by the script, the desktop app securely creates and owns its swarm automatically. The service remains infrastructure rather than something an ordinary user has to configure.
