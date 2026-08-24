@@ -237,12 +237,12 @@ td.mono {
 .notification-level-error { border-left: 4px solid #ff5d7a; }
 .notification-level-warning { border-left: 4px solid #f5c451; }
 .notification-level-success { border-left: 4px solid var(--green); }
-.notification-modal-box { max-width: 680px; }
 .notification-modal-body {
   margin-top: 16px; max-height: 58vh; overflow: auto; padding: 14px;
   border-radius: 8px; background: var(--surface-muted); color: var(--text);
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; line-height: 1.5;
 }
+.notification-modal-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 
 /* Passcode display (Swarm tab) */
 .passcode {
@@ -468,6 +468,7 @@ td.mono {
   padding: 28px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
   animation: modal-pop-in .15s ease-out;
 }
+.modal-box.notification-modal-box { max-width: 1360px; }
 .modal-close {
   position: absolute; top: 14px; right: 14px;
   background: transparent; color: var(--muted); border: 0; padding: 4px; font-size: .95rem;

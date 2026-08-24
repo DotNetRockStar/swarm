@@ -18,6 +18,19 @@ function openNotificationModal({ title, body, meta, level = "error", icon = "bi-
 }
 
 document.getElementById("notificationModalClose").addEventListener("click", closeNotificationModal);
+document.getElementById("notificationModalCopy").addEventListener("click", async () => {
+  const notificationText = [
+    document.getElementById("notificationModalTitle").textContent,
+    document.getElementById("notificationModalMeta").textContent,
+    document.getElementById("notificationModalBody").textContent,
+  ].filter(Boolean).join("\n\n");
+  try {
+    await navigator.clipboard.writeText(notificationText);
+    showToast("Notification copied.", "success");
+  } catch (error) {
+    showToast(`Could not copy the notification: ${error}`, "error");
+  }
+});
 notificationModalBackdrop.addEventListener("click", event => {
   if (event.target === notificationModalBackdrop) closeNotificationModal();
 });

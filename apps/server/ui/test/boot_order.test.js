@@ -35,6 +35,7 @@ const invokeCalls = [];
 let testLibraryEntries = [];
 let testRootHealth = [{ label: "test", path: "/tmp/swarm-boot-order-test", available: true, error: null }];
 let testServerNotifications = [];
+let copiedText = null;
 
 function invokeStub(command, args) {
   invokeCalls.push({ command, args });
@@ -133,6 +134,12 @@ async function main() {
         event: { listen: () => Promise.resolve(() => {}) },
       };
       window.IntersectionObserver = FakeIntersectionObserver;
+      window.navigator.clipboard = {
+        writeText: (text) => {
+          copiedText = text;
+          return Promise.resolve();
+        },
+      };
       window.addEventListener("error", (event) => {
         const err = event.error;
         windowErrors.push(err && err.stack ? err.stack : String(event.message || err));
@@ -243,6 +250,20 @@ async function main() {
     }
     if (!document.getElementById("notificationModalBody").textContent.includes("request timed out")) {
       failures.push("Expected the notification modal to contain the full scrape error report.");
+    }
+    const notificationModalMaxWidth = dom.window.getComputedStyle(document.querySelector(".notification-modal-box")).maxWidth;
+    if (notificationModalMaxWidth !== "1360px") {
+      failures.push(`Expected the notification modal to have a 1360px maximum width, got ${notificationModalMaxWidth || "no value"}.`);
+    }
+    document.getElementById("notificationModalCopy").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const expectedCopiedText = [
+      document.getElementById("notificationModalTitle").textContent,
+      document.getElementById("notificationModalMeta").textContent,
+      document.getElementById("notificationModalBody").textContent,
+    ].join("\n\n");
+    if (copiedText !== expectedCopiedText) {
+      failures.push("Expected Copy notification to include the title, metadata, and full notification details.");
     }
   }
 
