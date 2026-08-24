@@ -4,10 +4,10 @@
 foreground runner immediately invokes it again after each successful issue:
 
 1. Retry any pending GitHub comment or completion email from a successful commit.
-2. Choose Claude when both its five-hour and weekly windows have at least 5%
-   remaining; otherwise choose Codex when all reported Codex windows do.
-3. Fetch open issues assigned to `DotNetRockStar`, then choose the oldest one
+2. Fetch open issues assigned to `DotNetRockStar`, then choose the oldest one
    that has not already completed successfully.
+3. Choose Claude when both its session and weekly windows have at least 5%
+   remaining; otherwise choose Codex when all reported Codex windows do.
 4. Run the selected agent in the SWARM repository and require it to leave one
    or more descendant commits on a clean `main` branch.
 5. Ensure the commit message references the issue number.
@@ -22,6 +22,13 @@ run is still active. State and logs default to
 An issue is recorded there after its notification succeeds, which prevents an
 open issue from being implemented again on the next tick. Failed AI runs are
 not recorded and are retried later. The worker never pushes or closes issues.
+
+Quota checks run only after an eligible issue is found. Claude usage comes from
+Claude Code's non-interactive `/usage` command, allowing the CLI to refresh its
+own OAuth credentials; the worker does not call Anthropic's private OAuth usage
+URL. Codex usage comes from the local `codex app-server` over stdio using the
+`account/rateLimits/read` method; the Codex CLI owns its authenticated network
+connection, so the worker does not hard-code a remote Codex endpoint.
 
 Preview a read-only selection run:
 

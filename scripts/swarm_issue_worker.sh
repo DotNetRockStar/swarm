@@ -41,7 +41,6 @@ export PATH="$USER_HOME_DIR/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin
 
 GH_BIN="${GH_BIN:-$(command -v gh || true)}"
 JQ_BIN="${JQ_BIN:-$(command -v jq || true)}"
-CURL_BIN="${CURL_BIN:-$(command -v curl || true)}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || true)}"
 CODEX_BIN="${CODEX_BIN:-$(command -v codex || true)}"
@@ -108,67 +107,48 @@ require_tool() {
 }
 
 claude_has_capacity() {
-    local credentials_json=""
-    local access_token=""
     local usage_file
-    local summary
-
-    if [ -f "$USER_HOME_DIR/.claude/.credentials.json" ]; then
-        credentials_json="$(<"$USER_HOME_DIR/.claude/.credentials.json")"
-    elif [ -x /usr/bin/security ]; then
-        credentials_json="$(/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
-    fi
-
-    if [ -n "$credentials_json" ]; then
-        access_token="$(printf '%s' "$credentials_json" | "$JQ_BIN" -r '.claudeAiOauth.accessToken // .accessToken // empty' 2>/dev/null || true)"
-    fi
-    unset credentials_json
-
-    if [ -z "$access_token" ]; then
-        log "Claude quota unavailable: no Claude Code OAuth token could be read."
-        return 1
-    fi
+    local usage_result
+    local session_used
+    local week_used
+    local session_remaining
+    local week_remaining
 
     usage_file="$(mktemp "$STATE_DIR/claude-usage.XXXXXX")"
-    # Feed the bearer header over stdin so the OAuth token never appears in
-    # curl's process arguments.
-    if ! printf '%s\n' \
-        "header = \"Authorization: Bearer $access_token\"" \
-        'header = "anthropic-beta: oauth-2025-04-20"' \
-        'header = "Content-Type: application/json"' \
-        | "$CURL_BIN" -fsS --max-time 20 --config - \
-            'https://api.anthropic.com/api/oauth/usage' > "$usage_file"; then
-        unset access_token
+    if ! "$CLAUDE_BIN" -p '/usage' \
+        --output-format json \
+        --tools '' \
+        --no-session-persistence > "$usage_file" 2>&1; then
         rm -f -- "$usage_file"
-        log "Claude quota unavailable: the usage request failed."
+        log "Claude quota unavailable: Claude Code's /usage command failed. Run 'claude auth login' if this persists."
         return 1
     fi
-    unset access_token
 
-    summary="$("$JQ_BIN" -r '
-        def remaining($window):
-            if ($window | type) == "object"
-               and ($window.utilization | type) == "number"
-            then "\(100 - $window.utilization)%"
-            else "unavailable"
-            end;
-        "5-hour: \(remaining(.five_hour)); 7-day: \(remaining(.seven_day))"
-    ' "$usage_file" 2>/dev/null || printf 'unparseable response')"
-    log "Claude remaining quota — $summary."
+    usage_result="$("$JQ_BIN" -r '.result // empty' "$usage_file" 2>/dev/null || true)"
+    rm -f -- "$usage_file"
+    session_used="$(printf '%s\n' "$usage_result" \
+        | sed -nE 's/^Current session: ([0-9]+([.][0-9]+)?)% used$/\1/p' \
+        | sed -n '1p')"
+    week_used="$(printf '%s\n' "$usage_result" \
+        | sed -nE 's/^Current week( \([^)]*\))?: ([0-9]+([.][0-9]+)?)% used$/\2/p' \
+        | sed -n '1p')"
 
-    if "$JQ_BIN" -e --arg minimum "$MIN_REMAINING_PERCENT" '
-        [.five_hour, .seven_day] as $windows
-        | all($windows[];
-            type == "object"
-            and (.utilization | type == "number")
-            and .utilization <= (100 - ($minimum | tonumber)))
-    ' "$usage_file" >/dev/null 2>&1; then
-        rm -f -- "$usage_file"
-        return 0
+    if [ -z "$session_used" ] || [ -z "$week_used" ]; then
+        log "Claude quota unavailable: Claude Code returned an unrecognized /usage format."
+        return 1
     fi
 
-    rm -f -- "$usage_file"
-    return 1
+    session_remaining="$("$JQ_BIN" -nr --arg used "$session_used" '100 - ($used | tonumber)')"
+    week_remaining="$("$JQ_BIN" -nr --arg used "$week_used" '100 - ($used | tonumber)')"
+    log "Claude remaining quota — session: $session_remaining%; week: $week_remaining%."
+
+    "$JQ_BIN" -en \
+        --arg session "$session_remaining" \
+        --arg week "$week_remaining" \
+        --arg minimum "$MIN_REMAINING_PERCENT" '
+            ($session | tonumber) >= ($minimum | tonumber)
+            and ($week | tonumber) >= ($minimum | tonumber)
+        ' >/dev/null
 }
 
 codex_has_capacity() {
@@ -323,7 +303,6 @@ trap 'exit 130' INT TERM
 acquire_lock
 require_tool "$GH_BIN" gh
 require_tool "$JQ_BIN" jq
-require_tool "$CURL_BIN" curl
 require_tool "$PYTHON_BIN" python3
 
 if [ -f "$PENDING_EMAIL_FILE" ]; then
@@ -335,37 +314,6 @@ if [ -f "$PENDING_EMAIL_FILE" ]; then
     add_pending_ready_for_testing_label
     deliver_pending_email
 fi
-
-SELECTED_AI=""
-SELECTED_MODEL=""
-SELECTED_EFFORT=""
-CLAUDE_AVAILABLE=0
-CODEX_AVAILABLE=0
-
-if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
-    if claude_has_capacity; then
-        CLAUDE_AVAILABLE=1
-    fi
-else
-    log "Claude remaining quota — unavailable (claude was not found in PATH)."
-fi
-if codex_has_capacity; then
-    CODEX_AVAILABLE=1
-fi
-
-if [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
-    SELECTED_AI="Claude"
-    SELECTED_MODEL="$CLAUDE_MODEL"
-    SELECTED_EFFORT="$CLAUDE_EFFORT"
-elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
-    SELECTED_AI="Codex"
-    SELECTED_MODEL="$CODEX_MODEL"
-    SELECTED_EFFORT="$CODEX_EFFORT"
-else
-    log "Neither Claude nor Codex has at least $MIN_REMAINING_PERCENT% in every active quota window; stopping."
-    exit 0
-fi
-log "Selected $SELECTED_AI model $SELECTED_MODEL with effort $SELECTED_EFFORT for this run."
 
 ISSUES_FILE="$(mktemp "$STATE_DIR/github-issues.XXXXXX")"
 if ! "$GH_BIN" api --method GET --paginate --slurp \
@@ -405,6 +353,37 @@ ISSUE_DESCRIPTION="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.body // ""')"
 ISSUE_TAGS="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '[.labels[].name] | join(", ")')"
 ISSUE_URL="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.html_url')"
 log "Selected oldest unprocessed assigned issue: #$ISSUE_NUMBER $ISSUE_TITLE"
+
+SELECTED_AI=""
+SELECTED_MODEL=""
+SELECTED_EFFORT=""
+CLAUDE_AVAILABLE=0
+CODEX_AVAILABLE=0
+
+if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
+    if claude_has_capacity; then
+        CLAUDE_AVAILABLE=1
+    fi
+else
+    log "Claude remaining quota — unavailable (claude was not found in PATH)."
+fi
+if codex_has_capacity; then
+    CODEX_AVAILABLE=1
+fi
+
+if [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
+    SELECTED_AI="Claude"
+    SELECTED_MODEL="$CLAUDE_MODEL"
+    SELECTED_EFFORT="$CLAUDE_EFFORT"
+elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
+    SELECTED_AI="Codex"
+    SELECTED_MODEL="$CODEX_MODEL"
+    SELECTED_EFFORT="$CODEX_EFFORT"
+else
+    log "Neither Claude nor Codex has at least $MIN_REMAINING_PERCENT% remaining in every active quota window; stopping."
+    exit 0
+fi
+log "Selected $SELECTED_AI model $SELECTED_MODEL with effort $SELECTED_EFFORT for this run."
 
 if [ "$DRY_RUN" = "1" ]; then
     log "Dry run complete: would run $SELECTED_AI for $ISSUE_URL."
