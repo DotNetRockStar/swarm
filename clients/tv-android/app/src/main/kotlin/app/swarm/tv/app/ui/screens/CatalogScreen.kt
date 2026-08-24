@@ -67,6 +67,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -78,6 +79,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.TextUnit
@@ -223,6 +225,7 @@ internal fun CatalogScreen(
     var ratingFilter by remember { mutableStateOf(initialBrowseState.ratingFilter) }
     var likedOnly by remember { mutableStateOf(initialBrowseState.likedOnly) }
     var filterRailExpanded by remember { mutableStateOf(false) }
+    var filterRailHasFocus by remember { mutableStateOf(false) }
     var automaticInitialFocusEnabled by remember { mutableStateOf(true) }
     var initialSelectionRestorePending by remember(
         initialFocusMovieKey,
@@ -243,8 +246,6 @@ internal fun CatalogScreen(
             onBrowseStateChange(currentBrowseState)
         }
     }
-    BackHandler(enabled = filterRailExpanded) { filterRailExpanded = false }
-    BackHandler(enabled = !filterRailExpanded, onBack = onBack)
     val anyFilterActive = kindFilter != KindFilter.ALL || genreFilter != null || ratingFilter != null || likedOnly
     // Keep navigation from the controls separate from initial/restored focus.
     // A restored requester can remain attached to a card far down the catalog;
@@ -256,6 +257,29 @@ internal fun CatalogScreen(
     val watchlistRowFocusRequester = remember { FocusRequester() }
     val catalogListState = rememberLazyListState()
     val focusNavigationScope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val leaveFilterRail = {
+        // Move while the focused rail item still exists. Collapsing first can
+        // dispose a focused option and leave Compose without a source from
+        // which to perform directional focus search.
+        val moved = focusManager.moveFocus(FocusDirection.Right)
+        filterRailExpanded = false
+        if (!moved) {
+            focusNavigationScope.launch {
+                // Give the narrower rail/content layout one frame, then let
+                // geometric focus search choose a currently visible browse
+                // target. Unlike the old first-card requester, this also
+                // works after the first lazy catalog row has scrolled away.
+                withFrameNanos {}
+                focusManager.moveFocus(FocusDirection.Right)
+            }
+        }
+        Unit
+    }
+    BackHandler(enabled = shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus)) {
+        leaveFilterRail()
+    }
+    BackHandler(enabled = !shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus), onBack = onBack)
     val catalogControls: @Composable ((() -> Unit)?) -> Unit = { onNavigateDown ->
         CatalogControls(
             searchText = searchText,
@@ -300,10 +324,11 @@ internal fun CatalogScreen(
             // interpret that transient focus as an intentional LEFT press;
             // doing so expands the rail and cancels the card restoration.
             onExpand = {
+                filterRailHasFocus = true
                 if (!initialSelectionRestorePending) filterRailExpanded = true
             },
             firstFocusRequester = filterRailFocusRequester,
-            contentFocusRequester = catalogEntryFocusRequester,
+            onLeave = leaveFilterRail,
             kindFilter = kindFilter,
             onKindSelect = { kindFilter = it },
             genres = allGenres,
@@ -332,6 +357,7 @@ internal fun CatalogScreen(
                 .padding(horizontal = 8.dp, vertical = 8.dp)
                 .onFocusChanged { state ->
                     if (state.hasFocus) {
+                        filterRailHasFocus = false
                         initialSelectionRestorePending = false
                         filterRailExpanded = false
                     }
@@ -760,6 +786,8 @@ internal fun CatalogScreen(
     }
 }
 
+internal fun shouldLeaveFilterRailOnBack(expanded: Boolean, hasFocus: Boolean): Boolean = expanded || hasFocus
+
 private fun kindMatches(entry: MergedEntry, filter: KindFilter): Boolean = when (filter) {
     KindFilter.ALL -> true
     KindFilter.MOVIES -> entry.entry.kind == MediaKind.MOVIE
@@ -1037,7 +1065,7 @@ private fun FilterRail(
     expanded: Boolean,
     onExpand: () -> Unit,
     firstFocusRequester: FocusRequester,
-    contentFocusRequester: FocusRequester,
+    onLeave: () -> Unit,
     kindFilter: KindFilter,
     onKindSelect: (KindFilter) -> Unit,
     genres: List<String>,
@@ -1062,10 +1090,10 @@ private fun FilterRail(
             .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
             .background(SwarmSurface)
             .padding(horizontal = if (expanded) 10.dp else 4.dp, vertical = 8.dp)
-            .focusProperties { right = contentFocusRequester }
             .onPreviewKeyEvent { event ->
-                if (expanded && event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
-                    runCatching { contentFocusRequester.requestFocus() }.isSuccess
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
+                    onLeave()
+                    true
                 } else {
                     false
                 }
