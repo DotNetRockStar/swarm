@@ -9,7 +9,7 @@ foreground runner immediately invokes it again after each successful issue:
 3. Choose Claude when both its session and weekly windows have at least 5%
    remaining; otherwise choose Codex when all reported Codex windows do.
 4. Run the selected agent in the SWARM repository and require it to leave one
-   or more descendant commits on a clean `main` branch.
+   or more descendant commits on `main`.
 5. Ensure the commit message references the issue number.
 6. Comment on the GitHub issue with the AI tool, model, effort, commit, and the
    concise final AI summary.
@@ -21,7 +21,26 @@ run is still active. State and logs default to
 `~/.local/state/swarm-issue-worker`.
 An issue is recorded there after its notification succeeds, which prevents an
 open issue from being implemented again on the next tick. Failed AI runs are
-not recorded and are retried later. The worker never pushes or closes issues.
+not recorded as complete and are retried later. The worker never pushes or
+closes issues.
+
+Before starting an agent, the worker records the issue number and current base
+commit in `in-progress-issue.json`. If an agent exits before committing, the
+next run resumes that same issue and its existing work instead of rejecting the
+dirty worktree or selecting another issue. If the work is committed from
+another terminal, the next agent verifies the saved descendant commit and can
+complete the comment, label, email, and local bookkeeping without adding
+duplicate code. A recovered commit that has already been established is never
+amended merely to add the issue number; the GitHub completion comment provides
+the issue-to-commit link without rewriting history.
+
+Agent runs are non-interactive. The prompt directs Claude and Codex to resolve
+ambiguity from the issue and repository, make reasonable safe assumptions, and
+implement their recommended maintainable approach without asking the user for
+confirmation. Claude runs with `bypassPermissions`; Codex runs with approval,
+sandbox, and hook-trust prompts bypassed. This gives both tools broad access to
+the local machine and network, so run this worker only for repositories and
+assigned issues you trust.
 
 Quota checks run only after an eligible issue is found. Claude usage comes from
 Claude Code's non-interactive `/usage` command, allowing the CLI to refresh its
