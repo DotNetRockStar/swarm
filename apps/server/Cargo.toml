@@ -56,3 +56,4 @@ tauri-build = { version = "2", optional = true }
 [dev-dependencies]
 stun-server = { path = "../stun-server" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
+flate2 = { workspace = true }

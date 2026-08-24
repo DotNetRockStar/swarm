@@ -309,6 +309,10 @@ pub async fn start(
         .route("/stream/{session_id}/media", get(media_get))
         .route("/media/{entry_key}", get(media_get))
         .route("/hls/{session_id}/{rendition}/{file}", get(media_get))
+        .route("/catalog/thumbprint", get(media_get))
+        .route("/catalog/manifest", get(media_get))
+        .route("/catalog/manifest.gz", get(media_get))
+        .route("/art/{entry_key}/{kind}", get(media_get))
         .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
 
     let app = pairing_routes.merge(media_routes).with_state(state);
@@ -465,12 +469,17 @@ async fn play(
     resolve_and_respond(&state, &request, addr.ip()).await
 }
 
-/// Shared by every byte-serving route (`/stream/{id}/media`,
-/// `/media/{entry_key}`, `/hls/{id}/{rendition}/{file}`) — all three are
-/// just opaque path strings to `MediaService::resolve_for_network` already
-/// (see `crates/swarm-media/src/serve.rs`'s dispatch), so this reads the
-/// real request path via `OriginalUri` instead of extracting per-route path
-/// params it doesn't otherwise need.
+/// Shared by every non-`/play`, non-`/pair` route (`/stream/{id}/media`,
+/// `/media/{entry_key}`, `/hls/{id}/{rendition}/{file}`, `/catalog/*`,
+/// `/art/{entry_key}/{kind}`) — every one of these is just an opaque path
+/// string to `MediaService::resolve_for_network` already (see
+/// `crates/swarm-media/src/serve.rs`'s dispatch), so this reads the real
+/// request path via `OriginalUri` instead of extracting per-route path
+/// params it doesn't otherwise need. Uses `path_and_query`, not `path()`
+/// alone: `/art/*` encodes a thumbnail-width request as a query string
+/// (`?w=320`) that `swarm-media`'s `artwork_thumbnail_width` parses back out
+/// of the same `PeerRequest.path` field QUIC sends it in — dropping the
+/// query here would silently serve full-size artwork instead.
 async fn media_get(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -478,10 +487,18 @@ async fn media_get(
     headers: HeaderMap,
 ) -> Response {
     let range = headers.get(header::RANGE).and_then(parse_range_header);
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let path = uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string());
     let request = PeerRequest {
-        path: uri.path().to_string(),
+        path,
         range,
-        if_none_match: None,
+        if_none_match,
         playback: None,
         error_report: None,
         like: None,
@@ -530,6 +547,16 @@ async fn resolve_and_respond(state: &AppState, request: &PeerRequest, remote_ip:
         .parse()
         {
             response_headers.insert(header::CONTENT_RANGE, value);
+        }
+    }
+    // Artwork's 304 Not Modified path depends on this: media_get sends
+    // If-None-Match through as PeerRequest.if_none_match, and art() (see
+    // crates/swarm-media/src/serve.rs) only short-circuits to 304 when it
+    // matches the ETag it would have served — a client only gets that
+    // benefit if it can learn today's ETag from a 200 response first.
+    if let Some(etag) = &resolved.header.etag {
+        if let Ok(value) = etag.parse() {
+            response_headers.insert(header::ETAG, value);
         }
     }
 

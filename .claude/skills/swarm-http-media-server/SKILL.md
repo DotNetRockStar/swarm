@@ -162,13 +162,24 @@ needs peer IP).
 
 ## What's still QUIC-only after all of this
 
-Catalog manifest/thumbprint and artwork (`/catalog/*`, `/art/*`) are not
-mirrored here — a client that can only speak HTTP can pair and play a
-*known* `entry_key`, but still can't browse a library. This was a
-deliberate scope cut for the initial version, not an oversight; mirroring
-those routes the same way (`PeerRequest` → `resolve_for_network` →
-respond) is the natural next piece of this surface. Also still true: no
-TLS (plain HTTP only, matching `mcp.rs`'s own precedent), and no graceful
-shutdown for the listener (matches every other listener in this app —
-QUIC's `accept_loop`, `lan.rs`'s TCP accept loop, `mcp.rs` — none of
-which have one either).
+Catalog manifest/thumbprint and artwork (`/catalog/thumbprint`,
+`/catalog/manifest[.gz]`, `/art/{entry_key}/{kind}`) **are** mirrored here
+now, via the exact same `media_get` handler as the byte-serving routes —
+a paired HTTP-only client can browse a library end-to-end, not just play
+an already-known `entry_key`. Two things specifically needed fixing to
+make `/art/*` work correctly, both easy to miss if you're only looking at
+the byte-serving routes as a template: `media_get` must forward the full
+path **and query string** (`OriginalUri::path_and_query`, not `.path()`
+alone) since a thumbnail-width request rides in the query
+(`?w=320`, parsed back out of the same `PeerRequest.path` field by
+`swarm-media`'s `artwork_thumbnail_width`), and the `If-None-Match`
+request header / `ETag` response header must round-trip through
+`PeerRequest.if_none_match`/`PeerResponseHeader.etag` for artwork's `304`
+caching path to ever trigger. See
+`browse_catalog_and_fetch_artwork_over_real_http` in
+`apps/server/tests/http_media.rs` for the real-HTTP proof of both.
+
+Still true: no TLS (plain HTTP only, matching `mcp.rs`'s own precedent),
+and no graceful shutdown for the listener (matches every other listener
+in this app — QUIC's `accept_loop`, `lan.rs`'s TCP accept loop, `mcp.rs`
+— none of which have one either).
