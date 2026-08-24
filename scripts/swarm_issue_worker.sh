@@ -15,6 +15,7 @@ LOCK_DIR="$STATE_DIR/worker.lock"
 COMPLETED_ISSUES_FILE="$STATE_DIR/completed-issues"
 PENDING_EMAIL_FILE="$STATE_DIR/pending-email.json"
 AI_OUTPUT_FILE="$STATE_DIR/last-ai-output.log"
+AI_DIAGNOSTIC_FILE="$STATE_DIR/last-ai-diagnostic.log"
 GITHUB_COMMENT_FILE=""
 PENDING_STATE_TEMP=""
 COMMIT_MESSAGE_FILE=""
@@ -273,13 +274,13 @@ post_pending_github_comment() {
             printf -- '- Commit: `%s` — %s\n\n' \
                 "$commit_sha" \
                 "$("$JQ_BIN" -r '.commit_message' "$PENDING_EMAIL_FILE")"
-            printf '<details><summary>Exact AI output</summary>\n\n'
+            printf '<details><summary>AI completion summary</summary>\n\n'
             "$JQ_BIN" -r '.ai_output // "(No captured AI output was available.)"' "$PENDING_EMAIL_FILE" \
                 | sed 's/^/    /'
             printf '\n</details>\n'
         } > "$GITHUB_COMMENT_FILE"
 
-        log "Posting the exact AI response to GitHub issue #$issue_number."
+        log "Posting the AI completion summary to GitHub issue #$issue_number."
         "$GH_BIN" issue comment "$issue_number" \
             --repo "$GITHUB_REPOSITORY" \
             --body-file "$GITHUB_COMMENT_FILE"
@@ -414,6 +415,7 @@ printf '%s\n' \
     "${ISSUE_TAGS:-none}" \
     "" \
     "Implement this issue in $REPO_DIR. Follow the repository instructions, run relevant tests, and commit the completed work to main as one commit. Include #$ISSUE_NUMBER in the commit message. Do not push." \
+    "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, the solution, and verification in one to three short paragraphs or a brief list. Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
     > "$PROMPT_FILE"
 
 BEFORE_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
@@ -433,14 +435,21 @@ if [ "$SELECTED_AI" = "Claude" ]; then
 else
     # Current Codex uses these equivalents for the older --yolo and --effort
     # spellings, and '-' reads the prompt from stdin (where -p now means profile).
+    log "Codex is working. Detailed implementation output is hidden; its final summary will appear when finished."
     if ! "$CODEX_BIN" exec \
         -m "$CODEX_MODEL" \
         --dangerously-bypass-approvals-and-sandbox \
         -c "model_reasoning_effort=\"$SELECTED_EFFORT\"" \
         -C "$REPO_DIR" \
-        - < "$PROMPT_FILE" 2>&1 | tee "$AI_OUTPUT_FILE"; then
-        fail "Codex exited unsuccessfully. Its output is in $AI_OUTPUT_FILE."
+        --output-last-message "$AI_OUTPUT_FILE" \
+        - < "$PROMPT_FILE" > "$AI_DIAGNOSTIC_FILE" 2>&1; then
+        fail "Codex exited unsuccessfully. Diagnostic output is in $AI_DIAGNOSTIC_FILE."
     fi
+    if [ ! -s "$AI_OUTPUT_FILE" ]; then
+        fail "Codex finished without writing a final summary. Diagnostic output is in $AI_DIAGNOSTIC_FILE."
+    fi
+    printf '\n%s\n' '--- Codex completion summary ---'
+    sed -n '1,$p' "$AI_OUTPUT_FILE"
 fi
 
 AFTER_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"

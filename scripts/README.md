@@ -10,8 +10,8 @@
 4. Run the selected agent in the SWARM repository and require it to leave one
    or more descendant commits on a clean `main` branch.
 5. Ensure the commit message references the issue number.
-6. Comment on the GitHub issue with the AI tool, model, effort, commit, and exact
-   captured AI output.
+6. Comment on the GitHub issue with the AI tool, model, effort, commit, and the
+   concise final AI summary.
 7. Send the SMTP notification and record the issue number outside the repo.
 
 The worker uses an atomic PID lock, so a second invocation exits when an earlier
@@ -40,7 +40,9 @@ export SWARM_SMTP_CREDENTIALS_FILE=/path/to/smtp-settings
 The runner securely prompts for the SMTP password with input hidden. It keeps
 the password in memory only, removes it from the worker environment before an
 AI tool starts, and sends it to the mail helper over stdin. The foreground
-runner shows the exact AI output live and appends it to
+runner hides Codex's implementation transcript and shows only its final summary,
+while retaining full failure diagnostics in `last-ai-diagnostic.log`. Visible
+output is appended to
 `~/.local/state/swarm-issue-worker/cron.log`. Press Ctrl+C to stop it. It also
 removes the marked crontab block created by older versions. To remove only that
 legacy block without starting the runner, use `--remove`. Override the
