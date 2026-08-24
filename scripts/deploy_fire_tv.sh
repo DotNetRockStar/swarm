@@ -161,26 +161,52 @@ else
             echo "Usage: $0 <fire-tv-ip>   (find it: Settings -> My Fire TV -> About -> Network)" >&2
             "$ADB" devices >&2
             exit 1
-        elif [ "${#ips[@]}" -eq 1 ]; then
-            echo "==> Found one Fire TV on the LAN: ${names[0]} | ${ips[0]}"
-            SERIALS=("${ips[0]}:$ADB_PORT")
-        else
-            echo "Found ${#ips[@]} Fire TVs on the LAN:"
-            for i in "${!ips[@]}"; do
-                printf '  %d) %s | %s\n' "$((i + 1))" "${names[$i]}" "${ips[$i]}"
-            done
-            read -rp "Deploy to which one? [1-${#ips[@]}, or 'a' for all]: " choice
-            if [[ "$choice" =~ ^[Aa](ll)?$ ]]; then
-                for ip in "${ips[@]}"; do
-                    SERIALS+=("$ip:$ADB_PORT")
-                done
-            elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#ips[@]}" ]; then
-                SERIALS=("${ips[$((choice - 1))]}:$ADB_PORT")
-            else
-                echo "Invalid choice: $choice" >&2
-                exit 1
-            fi
         fi
+
+        # Always list and prompt (even for a single match) rather than
+        # silently picking one for you — this is the only place that would
+        # otherwise deploy without an explicit choice.
+        echo "Found ${#ips[@]} Fire TV(s) on the LAN:"
+        for i in "${!ips[@]}"; do
+            printf '  %d) %s | %s\n' "$((i + 1))" "${names[$i]}" "${ips[$i]}"
+        done
+        read -rp "Deploy to which one(s)? [1-${#ips[@]}, space/comma-separated for multiple, or 'a' for all]: " choice
+
+        # bash 3.2 has no associative arrays, so dedupe selections (e.g. "1,1")
+        # by linear-scanning SERIALS before appending.
+        add_serial() {
+            local candidate="$1" existing
+            # `${SERIALS[@]}` alone, under `set -u`, is a bash 3.2 bug
+            # (macOS's default /bin/bash) that raises "unbound variable" for
+            # a zero-length array even though SERIALS is legitimately
+            # declared — `${SERIALS[@]:-}` sidesteps it. See run_now.sh's
+            # cleanup() for the same issue.
+            for existing in "${SERIALS[@]:-}"; do
+                [ "$existing" = "$candidate" ] && return 0
+            done
+            SERIALS+=("$candidate")
+        }
+
+        if [[ "$choice" =~ ^[Aa](ll)?$ ]]; then
+            for ip in "${ips[@]}"; do
+                add_serial "$ip:$ADB_PORT"
+            done
+        else
+            for tok in ${choice//,/ }; do
+                if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#ips[@]}" ]; then
+                    add_serial "${ips[$((tok - 1))]}:$ADB_PORT"
+                else
+                    echo "Invalid choice: '$tok'" >&2
+                    exit 1
+                fi
+            done
+        fi
+
+        if [ "${#SERIALS[@]}" -eq 0 ]; then
+            echo "No device selected." >&2
+            exit 1
+        fi
+
         for serial in "${SERIALS[@]}"; do
             "$ADB" connect "$serial" >/dev/null
         done
