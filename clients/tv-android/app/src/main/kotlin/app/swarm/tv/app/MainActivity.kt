@@ -210,6 +210,7 @@ class MainActivity : ComponentActivity() {
                         backdropUrl = viewModel::backdropUrl,
                         onReportProblem = viewModel::reportAssetProblem,
                         onSavePlaybackPosition = viewModel::savePlaybackPosition,
+                        onRecoverExpiredPlaybackSession = viewModel::recoverExpiredPlaybackSession,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
                         onOpenSettings = viewModel::openSettings,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
@@ -295,6 +296,7 @@ private fun SwarmApp(
     backdropUrl: (MergedEntry) -> String?,
     onReportProblem: (MergedEntry) -> Unit,
     onSavePlaybackPosition: (entry: MergedEntry, positionSecs: Double, durationSecs: Double) -> Unit,
+    onRecoverExpiredPlaybackSession: (sessionId: String, positionSecs: Double, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onOpenSettings: () -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
@@ -674,6 +676,9 @@ private fun SwarmApp(
                         },
                         onContinue = onPlayNext,
                         onSeekOutsideBuffer = onSeekPlayback,
+                        onPlaybackSessionExpired = { positionSecs, context ->
+                            onRecoverExpiredPlaybackSession(state.sessionId, positionSecs, context)
+                        },
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
                     )
                 }

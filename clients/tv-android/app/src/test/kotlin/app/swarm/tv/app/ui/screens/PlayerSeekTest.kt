@@ -1,6 +1,7 @@
 package app.swarm.tv.app.ui.screens
 
 import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -24,5 +25,31 @@ class PlayerSeekTest {
     @Test
     fun `unknown HLS window duration uses session restart`() {
         assertTrue(shouldRestartHlsPlaybackForSeek(relativeTargetMs = 45_000L, availableDurationMs = C.TIME_UNSET))
+    }
+
+    @Test
+    fun `expired playback session 404 is recovered`() {
+        assertTrue(
+            shouldRecoverExpiredPlaybackSession(
+                errorCode = PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                responseCode = 404,
+            ),
+        )
+    }
+
+    @Test
+    fun `other HTTP failures are not treated as expired playback sessions`() {
+        assertFalse(
+            shouldRecoverExpiredPlaybackSession(
+                errorCode = PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                responseCode = 500,
+            ),
+        )
+        assertFalse(
+            shouldRecoverExpiredPlaybackSession(
+                errorCode = PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                responseCode = 404,
+            ),
+        )
     }
 }

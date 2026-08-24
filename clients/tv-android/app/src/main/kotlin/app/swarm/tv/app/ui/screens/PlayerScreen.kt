@@ -66,9 +66,11 @@ import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
@@ -109,6 +111,7 @@ fun PlayerScreen(
     onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
     onContinue: () -> Unit,
     onSeekOutsideBuffer: (positionSecs: Double) -> Unit,
+    onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -219,8 +222,7 @@ fun PlayerScreen(
             // drop mid-stream, a decoder/codec error) — distinct from, and
             // not caught by, the negotiation-failure path in SwarmViewModel.
             // Playback-triage-worthy either way, so it gets the same report.
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                isLoading = false
+            override fun onPlayerError(error: PlaybackException) {
                 val causes = generateSequence<Throwable>(error) { it.cause }
                     .take(6)
                     .joinToString(" -> ") { cause ->
@@ -237,6 +239,26 @@ fun PlayerScreen(
                     append("; play_when_ready=").append(player.playWhenReady)
                     append("; causes=").append(causes)
                 }
+
+                // Playback URLs name a server-side session that is removed
+                // after five idle minutes. A long pause therefore makes the
+                // next HLS segment/direct-play Range request return 404 even
+                // though the asset still exists. Preparing this same URL
+                // again can never heal it: negotiate a fresh session at the
+                // absolute playhead instead. Other 404s and all other player
+                // failures retain the normal reporting path below.
+                val responseCode = generateSequence<Throwable>(error) { it.cause }
+                    .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
+                    .firstOrNull()
+                    ?.responseCode
+                if (shouldRecoverExpiredPlaybackSession(error.errorCode, responseCode)) {
+                    isLoading = true
+                    val positionSecs = positionOffsetSecs + player.currentPosition.coerceAtLeast(0L) / 1000.0
+                    onPlaybackSessionExpired(positionSecs, context)
+                    return
+                }
+
+                isLoading = false
                 onPlaybackRuntimeError(
                     "${error.message ?: "Playback failed"} (${error.errorCodeName})",
                     context,
@@ -294,6 +316,12 @@ fun PlayerScreen(
         }
     }
 }
+
+/** Only a missing negotiated stream is self-healable. A 404 reported under
+ * another Media3 category, or a different bad HTTP status, needs the normal
+ * error path instead of an automatic replay loop. */
+internal fun shouldRecoverExpiredPlaybackSession(errorCode: Int, responseCode: Int?): Boolean =
+    errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && responseCode == 404
 
 /**
  * Gives Media3's stock TV controller an absolute, full-length timeline even

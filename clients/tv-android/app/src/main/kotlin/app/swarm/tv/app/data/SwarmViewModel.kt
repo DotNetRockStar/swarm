@@ -1715,6 +1715,40 @@ class SwarmViewModel(
     }
 
     /**
+     * Replaces a server-side playback session that expired while Media3 was
+     * paused. [sessionId] rejects a late callback from an already-disposed
+     * player, while [positionSecs] preserves the live playhead rather than
+     * falling back to the last position saved before playback began.
+     *
+     * This path is intentionally silent to the viewer: the 404 describes an
+     * expected stale session, not a failed asset. It is still reported to the
+     * server with the original Media3 context so repeated recovery can be
+     * diagnosed without showing a transient error notification on the TV.
+     */
+    fun recoverExpiredPlaybackSession(sessionId: String, positionSecs: Double, context: String? = null) {
+        val current = _state.value as? UiState.Player ?: return
+        if (current.sessionId != sessionId) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+        catalog.devices.find { it.deviceId == current.serverId }?.let { device ->
+            reportClientError(
+                device = device,
+                message = "Playback session expired after an extended pause; recovering automatically.",
+                entryKey = current.entry.entry.entryKey,
+                assetTitle = current.entry.entry.displayTitle(),
+                kind = current.entry.entry.kind.name.lowercase(),
+                context = context,
+            )
+        }
+        playEntry(
+            entry = current.entry,
+            catalog = catalog,
+            previousScreen = current.previous,
+            replaceSession = current,
+            startPositionSecsOverride = positionSecs,
+        )
+    }
+
+    /**
      * User-initiated, from a "Report a problem" button on an asset's detail
      * page — distinct from [reportPlaybackRuntimeError] (an automatic report
      * ExoPlayer's own error callback fires) in that this fires whether or
