@@ -100,11 +100,29 @@ private class RouteMemory {
     }
 }
 
-class CatalogSession(
+internal typealias DirectConnector = (
+    SwarmDevice,
+    X509Certificate,
+    PrivateKey,
+) -> PeerConnection?
+
+class CatalogSession internal constructor(
     private val proxy: PeerLoopbackProxy,
     private val catalogCache: CatalogCache? = null,
+    private val directConnector: DirectConnector,
 ) : AutoCloseable {
-    private val connections = ConcurrentHashMap<String, PeerQuicClient>()
+    constructor(
+        proxy: PeerLoopbackProxy,
+        catalogCache: CatalogCache? = null,
+    ) : this(
+        proxy,
+        catalogCache,
+        { device, clientCertificate, clientKey ->
+            connectToServer(device, clientCertificate, clientKey)
+        },
+    )
+
+    private val connections = ConcurrentHashMap<String, PeerConnection>()
     /** Prevent an artwork burst and a simultaneous catalog refresh from
      * opening several replacement QUIC connections to the same server. */
     private val connectionLocks = ConcurrentHashMap<String, Mutex>()
@@ -169,13 +187,13 @@ class CatalogSession(
 
     /** Drop a cached indirect route so the next connection uses a newly discovered LAN address first. */
     fun preferDirect(deviceId: String) {
-        connections.remove(deviceId)?.let { runCatching { it.close() } }
+        connections.remove(deviceId)?.let(::closeConnection)
         routeMemory.record(deviceId, ConnectionRoute.DIRECT)
     }
 
     /** Close this TV's connection to one server without changing any other device's swarm membership. */
     fun disconnect(deviceId: String) {
-        connections.remove(deviceId)?.let { runCatching { it.close() } }
+        connections.remove(deviceId)?.let(::closeConnection)
         connectionLocks.remove(deviceId)
         routeMemory.forget(deviceId)
         if (proxyRegisteredDevices.remove(deviceId)) proxy.unregister(deviceId)
@@ -246,7 +264,7 @@ class CatalogSession(
      */
     suspend fun stopPlayback(device: SwarmDevice, sessionId: String, clientCertificate: X509Certificate, clientKey: PrivateKey) {
         var connection = connectionFor(device, clientCertificate, clientKey) ?: return
-        fun stop(current: PeerQuicClient): Boolean = runCatching {
+        fun stop(current: PeerConnection): Boolean = runCatching {
             val response = current.request(path = "/stop/$sessionId")
             response.body.readBytes()
             response.header.status == 200
@@ -314,20 +332,22 @@ class CatalogSession(
 
         for (device in devices.filter { it.deviceType != DeviceType.CLIENT }) {
             val cached = cachedManifest(device.deviceId)
-            var connection = connectionFor(device, clientCertificate, clientKey)
-            var fetch = connection?.let { fetchCurrentManifest(device.deviceId, it, cached) }
-            var manifest = fetch?.getOrNull()
-            var failure = fetch?.exceptionOrNull()
-            if (manifest == null && connection != null) {
-                // fetchManifest already evicted the dead connection it was just
-                // handed (peer restarted, or — confirmed live — a QUIC connection
-                // that sat idle long enough to be dropped) — one retry gets a
-                // fresh one in the same refresh, instead of leaving the device
-                // "unreachable" until a second, separate Browse Library press.
-                connection = connectionFor(device, clientCertificate, clientKey)
-                fetch = connection?.let { fetchCurrentManifest(device.deviceId, it, cached) }
-                manifest = fetch?.getOrNull()
-                failure = fetch?.exceptionOrNull() ?: failure
+            var manifest: CatalogManifest? = null
+            var failure: Throwable? = null
+            // Retry both halves of catalog connection setup. Previously a
+            // request failure retried after evicting its connection, while
+            // an initial handshake failure did not. A TV whose first QUIC
+            // handshake landed during the LAN-pairing handoff therefore
+            // showed an error until the user selected the server again.
+            var attemptsRemaining = 2
+            while (manifest == null && attemptsRemaining > 0) {
+                attemptsRemaining -= 1
+                val connection = connectionFor(device, clientCertificate, clientKey)
+                if (connection != null) {
+                    val fetch = fetchCurrentManifest(device.deviceId, connection, cached)
+                    manifest = fetch.getOrNull()
+                    failure = fetch.exceptionOrNull() ?: failure
+                }
             }
             if (manifest == null) {
                 unreachable += device
@@ -375,23 +395,23 @@ class CatalogSession(
      * same self-healing without each of *those* call sites needing to know
      * anything about reconnection.
      */
-    private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? =
+    private suspend fun connectionFor(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerConnection? =
         connectionLocks.computeIfAbsent(device.deviceId) { Mutex() }.withLock {
             connectionForLocked(device, clientCertificate, clientKey)
         }
 
-    private suspend fun connectionForLocked(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerQuicClient? {
+    private suspend fun connectionForLocked(device: SwarmDevice, clientCertificate: X509Certificate, clientKey: PrivateKey): PeerConnection? {
         connections[device.deviceId]?.let { return it }
 
         // Failures here fail open (device just ends up in Result.unreachable)
         // by design, but that previously made a real bug — a NoSuchMethodError
         // from an API-33-only call — indistinguishable from an ordinary
         // network timeout. Logging beats a second silent-failure debugging session.
-        suspend fun tryDirect(): PeerQuicClient? =
-            runCatching { connectToServer(device, clientCertificate, clientKey) }
+        suspend fun tryDirect(): PeerConnection? =
+            runCatching { directConnector(device, clientCertificate, clientKey) }
                 .onFailure { it.printStackTrace() }
                 .getOrNull()
-        suspend fun tryPunch(): PeerQuicClient? = punchFallback?.let { fallback ->
+        suspend fun tryPunch(): PeerConnection? = punchFallback?.let { fallback ->
             runCatching {
                 initiatePunchConnection(
                     signaling = fallback.signaling,
@@ -483,7 +503,7 @@ class CatalogSession(
      */
     private suspend fun fetchCurrentManifest(
         serverId: String,
-        connection: PeerQuicClient,
+        connection: PeerConnection,
         cached: CatalogManifest?,
     ): kotlin.Result<CatalogManifest> {
         val result = runCatching {
@@ -528,9 +548,13 @@ class CatalogSession(
 
     /** Evict only the connection that actually failed. Another worker may
      * already have installed a healthy replacement for this server. */
-    private fun evictConnection(serverId: String, failed: PeerQuicClient) {
+    private fun evictConnection(serverId: String, failed: PeerConnection) {
         connections.remove(serverId, failed)
-        runCatching { failed.close() }
+        closeConnection(failed)
+    }
+
+    private fun closeConnection(connection: PeerConnection) {
+        (connection as? AutoCloseable)?.let { runCatching { it.close() } }
     }
 
     /** Decode directly from the bounded QUIC stream, avoiding byte[] and
@@ -548,7 +572,7 @@ class CatalogSession(
         // keep its wrapper registered with the proxy past this session's end.
         proxyRegisteredDevices.forEach(proxy::unregister)
         proxyRegisteredDevices.clear()
-        connections.values.forEach { runCatching { it.close() } }
+        connections.values.forEach(::closeConnection)
         connections.clear()
         connectionLocks.clear()
         manifests.clear()
