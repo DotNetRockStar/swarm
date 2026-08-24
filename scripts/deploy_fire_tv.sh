@@ -82,7 +82,7 @@ fi
 # the scan doesn't leave stray adb connections behind. Prints one
 # "name<TAB>ip" pair per line to stdout.
 scan_lan_for_fire_tvs() {
-    local iface subnet_ip prefix open_ips ip manufacturer name
+    local iface subnet_ip prefix live_ips open_ips ip manufacturer name
     subnet_ip=""
     for iface in en0 en1 eth0; do
         subnet_ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
@@ -94,12 +94,24 @@ scan_lan_for_fire_tvs() {
     fi
     prefix="${subnet_ip%.*}"
 
-    echo "==> Scanning $prefix.0/24 for Fire TVs (port $ADB_PORT) ..." >&2
-    # xargs exits non-zero here whenever at least one of the 254 probes finds
-    # a closed port — true on essentially every real LAN — which under
-    # `set -e` would otherwise kill the whole script via this assignment.
-    open_ips="$(seq 1 254 | xargs -P 64 -I{} bash -c \
-        'nc -z -w1 "$1.$2" '"$ADB_PORT"' 2>/dev/null && echo "$1.$2"' _ "$prefix" {} || true)"
+    echo "==> Pinging $prefix.0/24 to find live hosts ..." >&2
+    # A direct `nc -z -w1` port scan of all 254 addresses is unreliable as a
+    # first pass: macOS's connect() to an *unassigned* local address can stall
+    # well past nc's own -w timeout (ARP resolution, not the port, is what's
+    # slow), so most of a /24 — where the large majority of addresses have no
+    # host at all — takes far longer than the timeout implies (minutes, not
+    # seconds, observed firsthand). `ping -t1` bounds each probe reliably, so
+    # ping every address first and only nc-scan the handful that answer.
+    # xargs exits non-zero whenever at least one probe fails, which is
+    # expected here and would otherwise kill the script via this assignment
+    # under `set -e`.
+    live_ips="$(seq 1 254 | xargs -P 64 -I{} bash -c \
+        'ping -c1 -t1 -q "$1.$2" >/dev/null 2>&1 && echo "$1.$2"' _ "$prefix" {} || true)"
+    [ -n "$live_ips" ] || return 0
+
+    echo "==> Checking live hosts for adb (port $ADB_PORT) ..." >&2
+    open_ips="$(printf '%s\n' "$live_ips" | xargs -P 32 -I{} bash -c \
+        'nc -z -w1 "$1" '"$ADB_PORT"' 2>/dev/null && echo "$1"' _ {} || true)"
 
     [ -n "$open_ips" ] || return 0
     while IFS= read -r ip; do
