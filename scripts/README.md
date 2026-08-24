@@ -12,7 +12,8 @@
 5. Ensure the commit message references the issue number.
 6. Comment on the GitHub issue with the AI tool, model, effort, commit, and the
    concise final AI summary.
-7. Send the SMTP notification and record the issue number outside the repo.
+7. Add the `Ready For Testing` label to the completed GitHub issue.
+8. Send the SMTP notification and record the issue number outside the repo.
 
 The worker uses an atomic PID lock, so a second invocation exits when an earlier
 run is still active. State and logs default to
@@ -51,5 +52,6 @@ ten-minute interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`.
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
 `SWARM_GITHUB_ASSIGNEE`, `SWARM_MIN_REMAINING_PERCENT`, `SWARM_CLAUDE_MODEL`,
 `SWARM_CODEX_MODEL`, `SWARM_CLAUDE_EFFORT`, `SWARM_CODEX_EFFORT`,
-`SWARM_EMAIL_TO`, `SWARM_SMTP_CREDENTIALS_FILE`, and
+`SWARM_READY_FOR_TESTING_LABEL`, `SWARM_EMAIL_TO`,
+`SWARM_SMTP_CREDENTIALS_FILE`, and
 `SWARM_ISSUE_WORKER_STATE_DIR`.

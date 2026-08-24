@@ -23,6 +23,7 @@ UPDATED_COMMIT_MESSAGE_FILE=""
 
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 GITHUB_ASSIGNEE="${SWARM_GITHUB_ASSIGNEE:-DotNetRockStar}"
+READY_FOR_TESTING_LABEL="${SWARM_READY_FOR_TESTING_LABEL:-Ready For Testing}"
 MIN_REMAINING_PERCENT="${SWARM_MIN_REMAINING_PERCENT:-5}"
 CLAUDE_MODEL="${SWARM_CLAUDE_MODEL:-claude-sonnet-5}"
 CODEX_MODEL="${SWARM_CODEX_MODEL:-gpt-5.6-sol}"
@@ -296,6 +297,25 @@ post_pending_github_comment() {
     PENDING_STATE_TEMP=""
 }
 
+add_pending_ready_for_testing_label() {
+    local issue_number
+
+    if "$JQ_BIN" -e '.ready_for_testing_label_added // false' "$PENDING_EMAIL_FILE" >/dev/null; then
+        return 0
+    fi
+
+    issue_number="$("$JQ_BIN" -r '.issue_number' "$PENDING_EMAIL_FILE")"
+    log "Adding the '$READY_FOR_TESTING_LABEL' label to GitHub issue #$issue_number."
+    "$GH_BIN" issue edit "$issue_number" \
+        --repo "$GITHUB_REPOSITORY" \
+        --add-label "$READY_FOR_TESTING_LABEL"
+
+    PENDING_STATE_TEMP="$(mktemp "$STATE_DIR/pending-state.XXXXXX")"
+    "$JQ_BIN" '.ready_for_testing_label_added = true' "$PENDING_EMAIL_FILE" > "$PENDING_STATE_TEMP"
+    mv -- "$PENDING_STATE_TEMP" "$PENDING_EMAIL_FILE"
+    PENDING_STATE_TEMP=""
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -311,6 +331,7 @@ if [ -f "$PENDING_EMAIL_FILE" ]; then
         exit 0
     fi
     post_pending_github_comment
+    add_pending_ready_for_testing_label
     deliver_pending_email
 fi
 
@@ -506,12 +527,14 @@ PENDING_EMAIL_TEMP="$(mktemp "$STATE_DIR/pending-email.XXXXXX")"
             ai_output: $ai_output,
             commit_sha: $commit_sha,
             commit_message: $commit_message,
-            github_comment_posted: false
+            github_comment_posted: false,
+            ready_for_testing_label_added: false
         }
     ' > "$PENDING_EMAIL_TEMP"
 mv -- "$PENDING_EMAIL_TEMP" "$PENDING_EMAIL_FILE"
 PENDING_EMAIL_TEMP=""
 
 post_pending_github_comment
+add_pending_ready_for_testing_label
 deliver_pending_email
 log "Finished issue #$ISSUE_NUMBER with $SELECTED_AI: $COMMIT_MESSAGE ($AFTER_SHA)."
