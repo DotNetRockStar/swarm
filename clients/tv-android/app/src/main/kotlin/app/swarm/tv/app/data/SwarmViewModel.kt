@@ -83,6 +83,13 @@ sealed class UiState {
      * mode, instead of going through a separate landing page.
      */
     data object Loading : UiState()
+    /**
+     * A media session is being replaced (next episode, an out-of-buffer
+     * seek, or recovery after an extended pause). This is deliberately
+     * separate from [Loading]: the branded SWARM screen belongs only to app
+     * startup, while playback handoffs use the player's mascot loader.
+     */
+    data object PlaybackLoading : UiState()
     data object RequestingActivation : UiState()
     data class Activating(
         val code: String,
@@ -1591,12 +1598,13 @@ class SwarmViewModel(
         if (playbackNegotiationJob?.isActive == true) return
         if (replaceSession != null) {
             // Drop the client-side reader before doing any network cleanup.
-            // For a full-screen player, Loading occupies the brief handoff;
-            // for a minimized player, removing the mini-session disposes the
-            // same hoisted ExoPlayer immediately. No old song continues while
-            // `/stop` reconnects or the next `/play` is negotiated.
+            // For a full-screen player, the playback-specific mascot loader
+            // occupies the brief handoff; for a minimized player, removing
+            // the mini-session disposes the same hoisted ExoPlayer immediately.
+            // No old song continues while `/stop` reconnects or the next
+            // `/play` is negotiated.
             if ((_state.value as? UiState.Player)?.sessionId == replaceSession.sessionId) {
-                _state.value = UiState.Loading
+                _state.value = UiState.PlaybackLoading
             }
             if (_minimizedPlayer.value?.sessionId == replaceSession.sessionId) {
                 _minimizedPlayer.value = null

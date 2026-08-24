@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -464,7 +465,7 @@ private fun SwarmApp(
     )
 
     val config = LocalConfiguration.current
-    val contentModifier = if (state is UiState.Player) {
+    val contentModifier = if (state is UiState.Player || state is UiState.PlaybackLoading) {
         Modifier.fillMaxSize()
     } else {
         Modifier.fillMaxSize().padding(
@@ -477,6 +478,13 @@ private fun SwarmApp(
             is UiState.Loading ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
+                }
+            is UiState.PlaybackLoading ->
+                Box(
+                    Modifier.fillMaxSize().background(Color.Black),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    SwarmLoadingIndicator(onBlackBackground = true)
                 }
             is UiState.RequestingActivation ->
                 ActivationRequestScreen(onCancel = onCancelActivation)
