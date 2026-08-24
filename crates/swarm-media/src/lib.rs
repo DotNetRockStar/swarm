@@ -19,6 +19,7 @@
 //! - [`transcode`] — upload-budgeted direct/HLS playback sessions backed by
 //!   FFmpeg, with an adaptive H.264/AAC ladder and idle cleanup.
 
+pub mod bandwidth;
 pub mod classify;
 pub mod probe;
 pub mod range;

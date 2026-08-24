@@ -6,6 +6,7 @@
 //! from the library row (derived from the scanned relative path under the
 //! media root) — never from request input.
 
+use crate::bandwidth::BandwidthMeter;
 use crate::range::{content_type, resolve, ResolvedRange};
 use crate::roots::{RootResolver, SharedRootResolver};
 use crate::store::{ArtworkKind, Library};
@@ -30,6 +31,7 @@ pub struct MediaService {
     roots: SharedRootResolver,
     transcodes: Arc<TranscodeManager>,
     thumbnail_generation: tokio::sync::Mutex<()>,
+    bandwidth: Arc<BandwidthMeter>,
 }
 
 /// A resolved response: header plus a body source the transport streams out.
@@ -131,11 +133,16 @@ impl MediaService {
             roots,
             transcodes: TranscodeManager::new(config),
             thumbnail_generation: tokio::sync::Mutex::new(()),
+            bandwidth: BandwidthMeter::new(),
         }
     }
 
     pub fn transcode_manager(&self) -> &Arc<TranscodeManager> {
         &self.transcodes
+    }
+
+    pub fn bandwidth_meter(&self) -> &Arc<BandwidthMeter> {
+        &self.bandwidth
     }
 
     pub async fn resolve(&self, request: &PeerRequest) -> Resolved {
@@ -770,6 +777,7 @@ pub async fn handle_stream(
                         limiter.wait_for(got).await;
                     }
                     send.write_all(&buffer[..got]).await?;
+                    service.bandwidth.record(got as u64);
                     remaining -= got as u64;
                 }
             }

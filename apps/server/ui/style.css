@@ -193,6 +193,22 @@ td.mono {
 .transcription-progress-copy span:first-child { min-width: 0; }
 .transcription-progress-copy span:last-child { flex: 0 0 auto; text-align: right; }
 
+.bandwidth-chart-wrap { position: relative; margin-top: 10px; }
+.bandwidth-chart { width: 100%; height: 130px; display: block; }
+.bandwidth-chart-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: .82rem;
+}
+.bandwidth-chart-empty.d-none { display: none; }
+.bandwidth-tooltip.d-none { display: none; }
+.bandwidth-tooltip {
+  position: absolute; top: 4px; pointer-events: none; transform: translateX(-50%);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 9px; font-size: .76rem; white-space: nowrap; box-shadow: 0 5px 14px rgba(0, 0, 0, .25);
+}
+.bandwidth-tooltip strong { color: var(--text); }
+.bandwidth-tooltip span { color: var(--muted); margin-left: 5px; }
+
 /* Tab nav (Phase 3) */
 .tabnav { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
 .tabnav button {

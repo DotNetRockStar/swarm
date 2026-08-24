@@ -1,7 +1,7 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth()]);
 }
 
 async function refreshTmdbKeyField() {
@@ -134,6 +134,215 @@ async function refreshStatus() {
     showToast(String(err), "error");
   }
 }
+
+// ---- Streaming bandwidth: live graph + "now" panel --------------------
+
+/// Renders the whole chart from scratch every call (data update or hover
+/// frame alike) — the dataset is at most 720 points, so a full redraw stays
+/// cheap and avoids maintaining a separate cached-vs-crosshair layer.
+let bandwidthChartState = null;
+
+async function refreshBandwidth() {
+  try {
+    const samples = await invoke("get_bandwidth_history");
+    renderBandwidthStatus(samples);
+    drawBandwidthChart(samples, null);
+  } catch (err) {
+    // Best-effort background poll (every 5s) — a transient failure isn't
+    // worth a toast; the next tick tries again.
+  }
+}
+
+function renderBandwidthStatus(samples) {
+  const grid = document.getElementById("bandwidthStatusGrid");
+  const currentMbps = samples.length ? samples[samples.length - 1].bps / 1_000_000 : 0;
+  grid.innerHTML = stat("Current streaming bandwidth", formatMbps(currentMbps), false, "streaming-bandwidth");
+}
+
+function formatMbps(mbps) {
+  return `${mbps < 10 ? mbps.toFixed(1) : Math.round(mbps)} Mbps`;
+}
+
+function formatClock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Rounds a chart's max value up to a clean gridline (1/2/5/10/20/50…)
+// rather than an arbitrary "whatever the peak sample happened to be".
+function niceMax(value) {
+  if (!(value > 0)) return 1;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+  const normalized = value / magnitude;
+  const niceNormalized = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return niceNormalized * magnitude;
+}
+
+function hexToRgba(hex, alpha) {
+  const clean = hex.replace("#", "");
+  const value = parseInt(clean, 16);
+  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
+}
+
+function drawBandwidthChart(samples, hoverIndex) {
+  const canvas = document.getElementById("bandwidthChart");
+  document.getElementById("bandwidthChartEmpty").classList.toggle("d-none", samples.length > 0);
+  const ctx = canvas.getContext("2d");
+  if (!samples.length) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    bandwidthChartState = null;
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const height = canvas.clientHeight || 130;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const padding = { top: 10, right: 54, bottom: 20, left: 4 };
+  const plotW = Math.max(width - padding.left - padding.right, 1);
+  const plotH = Math.max(height - padding.top - padding.bottom, 1);
+  const minMs = samples[0].timestamp_ms;
+  const maxMs = samples[samples.length - 1].timestamp_ms;
+  const spanMs = Math.max(maxMs - minMs, 1);
+  const maxMbps = niceMax(Math.max(...samples.map((s) => s.bps)) / 1_000_000);
+
+  const x = (ms) => padding.left + ((ms - minMs) / spanMs) * plotW;
+  const y = (mbps) => padding.top + plotH - (mbps / maxMbps) * plotH;
+
+  const styles = getComputedStyle(document.documentElement);
+  const border = styles.getPropertyValue("--border").trim();
+  const muted = styles.getPropertyValue("--muted").trim();
+  const accent = styles.getPropertyValue("--accent").trim();
+  const surface = styles.getPropertyValue("--surface").trim();
+  const text = styles.getPropertyValue("--text").trim();
+
+  // Recessive gridlines + y-axis ticks at 0 / half / max.
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = muted;
+  [0, maxMbps / 2, maxMbps].forEach((value) => {
+    const yy = Math.round(y(value)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, yy);
+    ctx.lineTo(padding.left + plotW, yy);
+    ctx.stroke();
+    ctx.textAlign = "left";
+    ctx.fillText(formatMbps(value), padding.left + plotW + 6, yy);
+  });
+
+  const linePoints = samples.map((s) => [x(s.timestamp_ms), y(s.bps / 1_000_000)]);
+
+  // Area fill: series hue at ~10% opacity, never a saturated block.
+  ctx.beginPath();
+  linePoints.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+  ctx.lineTo(x(maxMs), padding.top + plotH);
+  ctx.lineTo(x(minMs), padding.top + plotH);
+  ctx.closePath();
+  ctx.fillStyle = hexToRgba(accent, 0.1);
+  ctx.fill();
+
+  // 2px line, round join/cap.
+  ctx.beginPath();
+  linePoints.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke();
+
+  // End marker (>=8px, surface ring) + direct end-label — the single
+  // series' identity is the chart title, so no legend box is needed.
+  const [lastPx, lastPy] = linePoints[linePoints.length - 1];
+  ctx.beginPath();
+  ctx.arc(lastPx, lastPy, 4, 0, Math.PI * 2);
+  ctx.fillStyle = surface;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = accent;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(lastPx, lastPy, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = accent;
+  ctx.fill();
+  ctx.fillStyle = text;
+  ctx.font = "700 11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(formatMbps(samples[samples.length - 1].bps / 1_000_000), lastPx + 8, lastPy);
+
+  // X-axis start/end clock labels.
+  ctx.fillStyle = muted;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(formatClock(minMs), padding.left, padding.top + plotH + 14);
+  ctx.textAlign = "right";
+  ctx.fillText(formatClock(maxMs), padding.left + plotW, padding.top + plotH + 14);
+
+  // Crosshair: a vertical hairline tracking the hovered/nearest sample.
+  if (hoverIndex != null && linePoints[hoverIndex]) {
+    const [px] = linePoints[hoverIndex];
+    ctx.beginPath();
+    ctx.moveTo(px, padding.top);
+    ctx.lineTo(px, padding.top + plotH);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  bandwidthChartState = { samples, padding, plotW, minMs, spanMs };
+}
+
+function bandwidthIndexForX(px) {
+  const { samples, padding, plotW, minMs, spanMs } = bandwidthChartState;
+  const ratio = Math.min(Math.max((px - padding.left) / plotW, 0), 1);
+  const targetMs = minMs + ratio * spanMs;
+  let closest = 0;
+  let closestDist = Infinity;
+  samples.forEach((s, i) => {
+    const dist = Math.abs(s.timestamp_ms - targetMs);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closest = i;
+    }
+  });
+  return closest;
+}
+
+const bandwidthCanvas = document.getElementById("bandwidthChart");
+const bandwidthTooltip = document.getElementById("bandwidthTooltip");
+
+bandwidthCanvas.addEventListener("mousemove", (event) => {
+  if (!bandwidthChartState) return;
+  const rect = bandwidthCanvas.getBoundingClientRect();
+  const index = bandwidthIndexForX(event.clientX - rect.left);
+  const sample = bandwidthChartState.samples[index];
+  drawBandwidthChart(bandwidthChartState.samples, index);
+  bandwidthTooltip.innerHTML = `<strong>${esc(formatMbps(sample.bps / 1_000_000))}</strong><span>${esc(formatClock(sample.timestamp_ms))}</span>`;
+  const px = bandwidthChartState.padding.left + ((sample.timestamp_ms - bandwidthChartState.minMs) / bandwidthChartState.spanMs) * bandwidthChartState.plotW;
+  bandwidthTooltip.style.left = `${px}px`;
+  bandwidthTooltip.classList.remove("d-none");
+});
+
+bandwidthCanvas.addEventListener("mouseleave", () => {
+  bandwidthTooltip.classList.add("d-none");
+  if (bandwidthChartState) drawBandwidthChart(bandwidthChartState.samples, null);
+});
+
+window.addEventListener("resize", () => {
+  if (bandwidthChartState) drawBandwidthChart(bandwidthChartState.samples, null);
+});
+
+// Every 5 seconds — matching the server's sample cadence — while the
+// Details tab is the one on screen; refreshDetails() covers the moment the
+// tab is first opened so there's no up-to-5s wait for the first paint.
+setInterval(() => {
+  const panel = document.getElementById("tabPanel-details");
+  if (panel && !panel.classList.contains("d-none")) refreshBandwidth();
+}, 5000);
 
 async function refreshMediaRoots() {
   const list = document.getElementById("mediaRootsList");

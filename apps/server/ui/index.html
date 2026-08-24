@@ -73,6 +73,19 @@
 
     <div class="card">
       <div class="card-head">
+        <h2 class="info-trigger" data-info="streaming-bandwidth" tabindex="0" role="button"><i class="bi bi-graph-up heading-icon"></i>Streaming bandwidth <i class="bi bi-info-circle info-affordance"></i></h2>
+      </div>
+      <div class="grid" id="bandwidthStatusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+      <div class="bandwidth-chart-wrap">
+        <canvas id="bandwidthChart" class="bandwidth-chart" aria-label="Total streaming bandwidth over the last 60 minutes"></canvas>
+        <div id="bandwidthChartEmpty" class="muted bandwidth-chart-empty d-none">No streaming activity in the last 60 minutes.</div>
+        <div id="bandwidthTooltip" class="bandwidth-tooltip d-none"></div>
+      </div>
+      <p class="muted compact-help">Bytes actually being sent to every connected client combined, sampled every 5 seconds.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2 class="info-trigger" data-info="local-subtitles" tabindex="0" role="button"><i class="bi bi-badge-cc-fill heading-icon"></i>Local subtitles <i class="bi bi-info-circle info-affordance"></i></h2>
         <label class="checkbox-label transcription-toggle"><input type="checkbox" id="localTranscriptionEnabledCheck"> <i class="bi bi-cpu"></i>Generate with Whisper</label>
       </div>

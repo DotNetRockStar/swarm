@@ -25,3 +25,4 @@ flate2 = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"
+tokio = { workspace = true, features = ["test-util"] }

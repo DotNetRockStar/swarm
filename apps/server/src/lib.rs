@@ -21,6 +21,7 @@ use swarm_core::rest::{
     ProvisionManagedSwarmRequest, SwarmDevicesResponse, SwarmSummary,
 };
 use swarm_core::signal::{SignalMessage, SignalPayload};
+use swarm_media::bandwidth::BandwidthSample;
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_roots, ScanProgressEvent, ScanReport};
 use swarm_media::scrape::{
@@ -435,6 +436,13 @@ impl ServerCore {
             active_playback_sessions: self.service.transcode_manager().active_sessions(),
             scanning: matches!(&*self.scan_status.borrow(), ScanState::Scanning),
         })
+    }
+
+    /// Up to the last 60 minutes of real streaming-bandwidth samples, one
+    /// per 5-second bucket — see `swarm_media::bandwidth` — for the Details
+    /// tab's live graph and "current" panel.
+    pub fn bandwidth_history(&self) -> Vec<BandwidthSample> {
+        self.service.bandwidth_meter().history()
     }
 
     /// Enables or pauses the durable local subtitle worker. Pausing is

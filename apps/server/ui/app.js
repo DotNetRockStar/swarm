@@ -77,6 +77,10 @@ const INFO_TOPICS = {
     icon: "bi-play-circle-fill", title: "Active playback sessions",
     body: "How many clients are streaming from this server right now.",
   },
+  "streaming-bandwidth": {
+    icon: "bi-graph-up", title: "Streaming bandwidth",
+    body: "Total data actually being sent to every connected client combined, sampled every 5 seconds. The graph keeps the last 60 minutes of history so you can see how usage changes as more clients join.",
+  },
   "device-fingerprint": {
     icon: "bi-fingerprint", title: "Device fingerprint",
     body: "A unique hash of a device's security certificate, used so two devices can verify they're really talking to each other and not an impostor.",

@@ -581,6 +581,14 @@ async fn get_status(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_bandwidth_history(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<swarm_media::bandwidth::BandwidthSample>, String> {
+    Ok(state.core(&app).await?.bandwidth_history())
+}
+
 #[derive(serde::Serialize)]
 struct RescanResult {
     added: u64,
@@ -1517,6 +1525,7 @@ fn main() {
             set_mcp_port,
             generate_mcp_access_token,
             get_status,
+            get_bandwidth_history,
             rescan,
             reclassify_library,
             list_entries,
