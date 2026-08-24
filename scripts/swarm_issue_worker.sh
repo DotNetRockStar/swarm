@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${SWARM_ISSUE_WORKER_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 REPO_DIR="${SWARM_REPO_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 USER_HOME_DIR="${HOME:?HOME must be set}"
 STATE_DIR="${SWARM_ISSUE_WORKER_STATE_DIR:-$USER_HOME_DIR/.local/state/swarm-issue-worker}"
@@ -34,6 +34,7 @@ SMTP_CREDENTIALS_FILE="${SWARM_SMTP_CREDENTIALS_FILE:-}"
 SMTP_PASSWORD_INPUT="${SWARM_SMTP_PASSWORD:-}"
 unset SWARM_SMTP_PASSWORD
 DRY_RUN="${SWARM_ISSUE_WORKER_DRY_RUN:-0}"
+ISSUE_COMPLETED_EXIT_CODE=10
 
 # cron starts with a deliberately small PATH on macOS.
 export PATH="$USER_HOME_DIR/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -538,3 +539,4 @@ post_pending_github_comment
 add_pending_ready_for_testing_label
 deliver_pending_email
 log "Finished issue #$ISSUE_NUMBER with $SELECTED_AI: $COMMIT_MESSAGE ($AFTER_SHA)."
+exit "$ISSUE_COMPLETED_EXIT_CODE"

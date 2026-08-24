@@ -1,6 +1,7 @@
 # Automated issue worker
 
-`swarm_issue_worker.sh` handles at most one issue per invocation:
+`swarm_issue_worker.sh` handles at most one issue per invocation, while the
+foreground runner immediately invokes it again after each successful issue:
 
 1. Retry any pending GitHub comment or completion email from a successful commit.
 2. Choose Claude when both its five-hour and weekly windows have at least 5%
@@ -30,8 +31,10 @@ SWARM_ISSUE_WORKER_DRY_RUN=1 ./scripts/swarm_issue_worker.sh
 
 Set `SWARM_SMTP_CREDENTIALS_FILE` to a settings file containing `EMAIL_FROM`,
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, and the TLS settings, but **not** an
-SMTP password. Then run the worker immediately and every ten minutes in the
-current terminal:
+SMTP password. Then run the worker in the current terminal. Queued issues are
+worked back to back; the ten-minute delay applies only when the queue is empty,
+neither AI has at least 5% remaining in every active quota window, or a run
+fails:
 
 ```bash
 export SWARM_SMTP_CREDENTIALS_FILE=/path/to/smtp-settings
@@ -46,8 +49,8 @@ while retaining full failure diagnostics in `last-ai-diagnostic.log`. Visible
 output is appended to
 `~/.local/state/swarm-issue-worker/cron.log`. Press Ctrl+C to stop it. It also
 removes the marked crontab block created by older versions. To remove only that
-legacy block without starting the runner, use `--remove`. Override the
-ten-minute interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`.
+legacy block without starting the runner, use `--remove`. Override the idle and
+error retry interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`.
 
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
 `SWARM_GITHUB_ASSIGNEE`, `SWARM_MIN_REMAINING_PERCENT`, `SWARM_CLAUDE_MODEL`,

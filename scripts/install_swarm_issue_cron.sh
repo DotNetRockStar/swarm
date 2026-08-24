@@ -10,7 +10,9 @@ WORKER_PATH="$SCRIPT_DIR/swarm_issue_worker.sh"
 USER_HOME_DIR="${HOME:?HOME must be set}"
 STATE_DIR="${SWARM_ISSUE_WORKER_STATE_DIR:-$USER_HOME_DIR/.local/state/swarm-issue-worker}"
 LOG_PATH="$STATE_DIR/cron.log"
+WORKER_SNAPSHOT_PATH="$STATE_DIR/swarm_issue_worker.snapshot.sh"
 INTERVAL_SECONDS="${SWARM_ISSUE_WORKER_INTERVAL_SECONDS:-600}"
+ISSUE_COMPLETED_EXIT_CODE=10
 CRONTAB_BIN="${CRONTAB_BIN:-$(command -v crontab || true)}"
 BEGIN_MARKER="# BEGIN SWARM ISSUE WORKER"
 END_MARKER="# END SWARM ISSUE WORKER"
@@ -86,20 +88,27 @@ if [ -z "$SWARM_SMTP_PASSWORD" ]; then
 fi
 export SWARM_SMTP_PASSWORD
 
-log "Running the SWARM issue worker in this terminal every $INTERVAL_SECONDS seconds."
+log "Running the SWARM issue worker in this terminal. Queued issues run back to back; idle checks occur every $INTERVAL_SECONDS seconds."
 log "Live output is also appended to $LOG_PATH. Press Ctrl+C to stop."
 
 while true; do
     log "Starting a worker run."
+    # Run an immutable snapshot so editing or updating the repository while a
+    # worker is active cannot change the script underneath Bash's read offset.
+    /bin/cp "$WORKER_PATH" "$WORKER_SNAPSHOT_PATH"
     set +e
-    "$WORKER_PATH" 2>&1 | tee -a "$LOG_PATH"
+    SWARM_ISSUE_WORKER_SCRIPT_DIR="$SCRIPT_DIR" \
+        /bin/bash "$WORKER_SNAPSHOT_PATH" 2>&1 | tee -a "$LOG_PATH"
     worker_status="${PIPESTATUS[0]}"
     set -e
 
-    if [ "$worker_status" -ne 0 ]; then
+    if [ "$worker_status" -eq "$ISSUE_COMPLETED_EXIT_CODE" ]; then
+        log "Issue completed successfully; checking the queue again immediately."
+        continue
+    elif [ "$worker_status" -ne 0 ]; then
         log "Worker exited with status $worker_status; it will retry after $INTERVAL_SECONDS seconds."
     else
-        log "Worker run finished; next run starts in $INTERVAL_SECONDS seconds."
+        log "No issue can be worked now; checking again in $INTERVAL_SECONDS seconds."
     fi
     sleep "$INTERVAL_SECONDS"
 done
