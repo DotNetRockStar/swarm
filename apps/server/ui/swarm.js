@@ -62,12 +62,8 @@ document.getElementById("approveTvBtn").addEventListener("click", async () => {
   }
   try {
     const pairing = await invoke("approve_lan_pairing", { code });
-    status.classList.remove("d-none");
-    status.innerHTML = `<div class="note">
-      <strong>${esc(pairing.name)}</strong> was approved. The TV will connect automatically.
-    </div>`;
     input.value = "";
-    showToast(`${pairing.name} was paired on the local network.`, "success");
+    showToast(`${pairing.name} was approved. The TV will connect automatically.`, "success");
     await loadLocalPeers();
     return;
   } catch (_lanErr) {

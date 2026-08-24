@@ -1110,9 +1110,25 @@ async fn approve_lan_pairing(
     code: String,
 ) -> Result<swarm_server::lan::LanPairingApproval, String> {
     let core = state.core(&app).await?;
-    core.approve_lan_pairing(&code)
+    let approval = core
+        .approve_lan_pairing(&code)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = core
+        .library
+        .record_server_notification(
+            "success",
+            "TV approved over LAN",
+            &format!(
+                "{} was approved. The TV will connect automatically.",
+                approval.name
+            ),
+        )
+        .await
+    {
+        tracing::warn!(%error, "could not save LAN pairing notification");
+    }
+    Ok(approval)
 }
 
 #[tauri::command]
