@@ -85,6 +85,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DecoderReuseEvaluation
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -226,6 +227,12 @@ internal fun isServerOfflineLoadError(error: IOException): Boolean =
         }
     }
 
+// Media3's own defaults (DEFAULT_BUFFER_FOR_PLAYBACK_MS = 2_500,
+// DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 5_000) size these for a
+// real internet path; see the loopback-source comment on createPlayer().
+private const val LOOPBACK_BUFFER_FOR_PLAYBACK_MS = 500
+private const val LOOPBACK_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 1_000
+
 /** Owns the active video player plus at most one paused, buffering successor.
  * The pool lives across UiState.Player-to-UiState.Player recompositions, which
  * lets [activate] promote the exact preloaded ExoPlayer instead of throwing
@@ -295,8 +302,23 @@ private class VideoPlayerPool(context: Context) {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
             .setInitialBitrateEstimate(initialBitrate)
             .build()
+        // Same reasoning as the bandwidth estimate above: Media3's default
+        // LoadControl targets a 2.5s buffer-for-playback because it assumes
+        // an internet-latency source. Against a same-device loopback proxy
+        // that's pure added time-to-first-frame, so start playback almost as
+        // soon as the first segment lands; min/max buffer stay at Media3's
+        // defaults since those bound steady-state memory use, not startup.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
+                LOOPBACK_BUFFER_FOR_PLAYBACK_MS,
+                LOOPBACK_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+            )
+            .build()
         return ExoPlayer.Builder(appContext)
             .setBandwidthMeter(bandwidthMeter)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(serverOfflineMediaSourceFactory(appContext))
             .build()
             .apply {

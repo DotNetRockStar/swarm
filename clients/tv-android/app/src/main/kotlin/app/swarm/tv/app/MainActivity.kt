@@ -90,8 +90,19 @@ import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
 import java.io.IOException
+import java.security.PrivateKey
+import java.security.cert.X509Certificate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.withContext
+
+/** Resolved off the main thread in onCreate's setContent — see the comment there. */
+private data class DeviceIdentity(
+    val fingerprint: String,
+    val certificate: X509Certificate,
+    val privateKey: PrivateKey,
+)
 
 class MainActivity : ComponentActivity() {
     private var frameJankMonitor: FrameJankMonitor? = null
@@ -132,35 +143,60 @@ class MainActivity : ComponentActivity() {
         val catalogCache = AndroidCatalogCache(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val defaultDeviceName = resolveDeviceName(applicationContext)
-        val certFingerprint = AndroidDeviceIdentity.ensureFingerprint()
-        val certificate = AndroidDeviceIdentity.certificate()
-        val privateKey = AndroidDeviceIdentity.privateKey()
-        val factory = object : ViewModelProvider.Factory {
-            @Suppress("UNCHECKED_CAST")
-            override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(
-                    tokenStore,
-                    machineId,
-                    certFingerprint,
-                    certificate,
-                    privateKey,
-                    watchStateStore,
-                    watchlistStore,
-                    connectionStore,
-                    likedEntriesStore,
-                    kidModeStore,
-                    lanDiscovery,
-                    lanConnectionStore,
-                    disconnectedServerStore,
-                    catalogCache,
-                    BuildConfig.SWARM_RENDEZVOUS_URL,
-                    AndroidProblemReportDiagnostics(applicationContext),
-                ) as T
-        }
 
         setContent {
             SwarmTvTheme {
                 Box(modifier = Modifier.fillMaxSize().background(SwarmBackground)) {
+                    // AndroidDeviceIdentity touches AndroidKeyStore and, on
+                    // first launch (or whenever the alias is missing),
+                    // synchronously generates an EC keypair in secure
+                    // hardware — slow enough on some real devices to
+                    // noticeably delay time-to-first-frame if resolved
+                    // before setContent() as this used to. Resolve it off
+                    // the main thread instead and hold the loading frame
+                    // (same one UiState.Loading already shows a moment
+                    // later) until it's ready.
+                    var identity by remember { mutableStateOf<DeviceIdentity?>(null) }
+                    LaunchedEffect(Unit) {
+                        identity = withContext(Dispatchers.IO) {
+                            DeviceIdentity(
+                                fingerprint = AndroidDeviceIdentity.ensureFingerprint(),
+                                certificate = AndroidDeviceIdentity.certificate(),
+                                privateKey = AndroidDeviceIdentity.privateKey(),
+                            )
+                        }
+                    }
+                    val resolvedIdentity = identity
+                    if (resolvedIdentity == null) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
+                        }
+                        return@Box
+                    }
+                    val factory = remember(resolvedIdentity) {
+                        object : ViewModelProvider.Factory {
+                            @Suppress("UNCHECKED_CAST")
+                            override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                                SwarmViewModel(
+                                    tokenStore,
+                                    machineId,
+                                    resolvedIdentity.fingerprint,
+                                    resolvedIdentity.certificate,
+                                    resolvedIdentity.privateKey,
+                                    watchStateStore,
+                                    watchlistStore,
+                                    connectionStore,
+                                    likedEntriesStore,
+                                    kidModeStore,
+                                    lanDiscovery,
+                                    lanConnectionStore,
+                                    disconnectedServerStore,
+                                    catalogCache,
+                                    BuildConfig.SWARM_RENDEZVOUS_URL,
+                                    AndroidProblemReportDiagnostics(applicationContext),
+                                ) as T
+                        }
+                    }
                     val viewModel: SwarmViewModel = viewModel(factory = factory)
                     val toastHostState = rememberClientToastHostState()
                     LaunchedEffect(viewModel) {
