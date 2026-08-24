@@ -4,8 +4,9 @@
 foreground runner immediately invokes it again after each successful issue:
 
 1. Retry any pending GitHub comment or completion email from a successful commit.
-2. Fetch open issues assigned to `DotNetRockStar`, then choose the oldest one
-   that has not already completed successfully.
+2. Fetch open issues assigned to `DotNetRockStar`. Rework a completed issue when
+   it has a new comment after the latest worker completion; otherwise choose the
+   oldest issue that has not completed successfully.
 3. Choose Claude when both its session and weekly windows have at least 5%
    remaining; otherwise choose Codex when all reported Codex windows do.
 4. Run the selected agent in the SWARM repository and require it to leave one
@@ -23,6 +24,17 @@ An issue is recorded there after its notification succeeds, which prevents an
 open issue from being implemented again on the next tick. Failed AI runs are
 not recorded as complete and are retried later. The worker never pushes or
 closes issues.
+
+Completion comments carry a hidden processed-comment watermark. Any later
+non-worker GitHub comment makes that open, assigned issue actionable again and
+takes priority over a new issue. The rework prompt includes the original issue
+title, description, and labels; the prior AI completion comment; the previous
+commit SHA, message, and changed-file summary; and every unprocessed follow-up
+comment in chronological order. The agent is also directed to inspect the full
+previous commit diff before creating a new issue-referencing refinement commit.
+Comments posted while a rework is running are beyond its saved watermark and
+therefore trigger another pass instead of being hidden by the new completion
+comment.
 
 Before starting an agent, the worker records the issue number and current base
 commit in `in-progress-issue.json`. If an agent exits before committing, the

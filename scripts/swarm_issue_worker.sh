@@ -23,6 +23,7 @@ COMMIT_MESSAGE_FILE=""
 UPDATED_COMMIT_MESSAGE_FILE=""
 AI_OUTPUT_TEMP=""
 IN_PROGRESS_TEMP=""
+COMMENTS_FILE=""
 
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 GITHUB_ASSIGNEE="${SWARM_GITHUB_ASSIGNEE:-DotNetRockStar}"
@@ -71,6 +72,7 @@ cleanup() {
     if [ -n "$UPDATED_COMMIT_MESSAGE_FILE" ]; then rm -f -- "$UPDATED_COMMIT_MESSAGE_FILE"; fi
     if [ -n "$AI_OUTPUT_TEMP" ]; then rm -f -- "$AI_OUTPUT_TEMP"; fi
     if [ -n "$IN_PROGRESS_TEMP" ]; then rm -f -- "$IN_PROGRESS_TEMP"; fi
+    if [ -n "$COMMENTS_FILE" ]; then rm -f -- "$COMMENTS_FILE"; fi
 
     if [ -f "$LOCK_DIR/pid" ] && [ "$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
         rm -f -- "$LOCK_DIR/pid"
@@ -134,12 +136,22 @@ save_in_progress_issue() {
         --arg issue_title "$issue_title" \
         --arg issue_url "$issue_url" \
         --arg base_sha "$base_sha" \
+        --arg work_type "$WORK_TYPE" \
+        --arg previous_commit_sha "$PREVIOUS_COMMIT_SHA" \
+        --arg previous_completion_comment "$PREVIOUS_COMPLETION_COMMENT_JSON" \
+        --arg followup_comments "$FOLLOWUP_COMMENTS_JSON" \
+        --argjson trigger_comment_id "$TRIGGER_COMMENT_ID_JSON" \
         --arg started_at "$(date '+%Y-%m-%dT%H:%M:%S%z')" '
             {
                 issue_number: $issue_number,
                 issue_title: $issue_title,
                 issue_url: $issue_url,
                 base_sha: $base_sha,
+                work_type: $work_type,
+                previous_commit_sha: $previous_commit_sha,
+                previous_completion_comment: ($previous_completion_comment | fromjson),
+                followup_comments: ($followup_comments | fromjson),
+                trigger_comment_id: $trigger_comment_id,
                 started_at: $started_at
             }
         ' > "$IN_PROGRESS_TEMP"
@@ -272,6 +284,8 @@ post_pending_github_comment() {
     local commit_sha
     local marker
     local already_posted
+    local trigger_comment_id
+    local completion_verb
 
     if "$JQ_BIN" -e '.github_comment_posted // false' "$PENDING_EMAIL_FILE" >/dev/null; then
         return 0
@@ -279,7 +293,12 @@ post_pending_github_comment() {
 
     issue_number="$("$JQ_BIN" -r '.issue_number' "$PENDING_EMAIL_FILE")"
     commit_sha="$("$JQ_BIN" -r '.commit_sha' "$PENDING_EMAIL_FILE")"
-    marker="<!-- swarm-issue-worker:commit:$commit_sha -->"
+    trigger_comment_id="$("$JQ_BIN" -r '.trigger_comment_id // 0' "$PENDING_EMAIL_FILE")"
+    marker="<!-- swarm-issue-worker:commit:$commit_sha"
+    if [[ "$trigger_comment_id" =~ ^[1-9][0-9]*$ ]]; then
+        marker="$marker;through-comment:$trigger_comment_id"
+    fi
+    marker="$marker -->"
     already_posted="$(
         "$GH_BIN" api --method GET --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/issues/$issue_number/comments" \
@@ -290,9 +309,13 @@ post_pending_github_comment() {
 
     if [ "$already_posted" -eq 0 ]; then
         GITHUB_COMMENT_FILE="$(mktemp "$STATE_DIR/github-comment.XXXXXX")"
+        completion_verb="Completed"
+        if [ "$("$JQ_BIN" -r '.work_type // "initial"' "$PENDING_EMAIL_FILE")" = "followup" ]; then
+            completion_verb="Reworked"
+        fi
         {
             printf '%s\n' "$marker"
-            printf 'Completed by **%s**.\n\n' "$("$JQ_BIN" -r '.ai_tool // .ai' "$PENDING_EMAIL_FILE")"
+            printf '%s by **%s**.\n\n' "$completion_verb" "$("$JQ_BIN" -r '.ai_tool // .ai' "$PENDING_EMAIL_FILE")"
             printf -- '- Model: `%s`\n' "$("$JQ_BIN" -r '.model // "unknown"' "$PENDING_EMAIL_FILE")"
             printf -- '- Effort: `%s`\n' "$("$JQ_BIN" -r '.effort // "unknown"' "$PENDING_EMAIL_FILE")"
             printf -- '- Commit: `%s` — %s\n\n' \
@@ -379,11 +402,21 @@ if [ -f "$IN_PROGRESS_FILE" ]; then
         (.issue_number | type) == "number"
         and (.base_sha | type) == "string"
         and (.base_sha | test("^[0-9a-f]{40}$"))
+        and ((.work_type // "initial") | IN("initial", "followup"))
+        and (if (.work_type // "initial") == "followup" then
+            (.previous_commit_sha | type) == "string"
+            and (.previous_commit_sha | test("^[0-9a-f]{40}$"))
+            and (.previous_completion_comment | type) == "object"
+            and (.followup_comments | type) == "array"
+            and (.trigger_comment_id | type) == "number"
+        else true end)
     ' "$IN_PROGRESS_FILE" >/dev/null 2>&1; then
         fail "The saved in-progress issue state is invalid: $IN_PROGRESS_FILE"
     fi
     IN_PROGRESS_ISSUE_NUMBER_JSON="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
-    if printf '%s' "$COMPLETED_JSON" | "$JQ_BIN" -e \
+    SAVED_WORK_TYPE="$("$JQ_BIN" -r '.work_type // "initial"' "$IN_PROGRESS_FILE")"
+    if [ "$SAVED_WORK_TYPE" = "initial" ] \
+        && printf '%s' "$COMPLETED_JSON" | "$JQ_BIN" -e \
         --argjson issue_number "$IN_PROGRESS_ISSUE_NUMBER_JSON" \
         'index($issue_number) != null' >/dev/null; then
         clear_in_progress_issue "$IN_PROGRESS_ISSUE_NUMBER_JSON"
@@ -391,26 +424,107 @@ if [ -f "$IN_PROGRESS_FILE" ]; then
     fi
 fi
 
-ISSUE_JSON="$("$JQ_BIN" -c \
+ASSIGNED_ISSUES_JSON="$("$JQ_BIN" -c \
     --arg assignee "$GITHUB_ASSIGNEE" \
-    --argjson completed "$COMPLETED_JSON" \
-    --argjson in_progress "$IN_PROGRESS_ISSUE_NUMBER_JSON" '
+    '
         (add // [])
         | map(select(.pull_request == null))
         | map(select(any(.assignees[]?; .login == $assignee)))
-        | map(select(.number as $number | ($completed | index($number)) == null))
         | sort_by(.created_at)
-        | if $in_progress == null
-          then .[0] // empty
-          else map(select(.number == $in_progress)) | .[0] // empty
-          end
     ' "$ISSUES_FILE")"
+
+ISSUE_JSON=""
+if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" != "null" ]; then
+    ISSUE_JSON="$(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
+        --argjson in_progress "$IN_PROGRESS_ISSUE_NUMBER_JSON" \
+        'map(select(.number == $in_progress)) | .[0] // empty')"
+else
+    FRESH_ISSUE_JSON="$(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
+        --argjson completed "$COMPLETED_JSON" '
+            map(select(.number as $number | ($completed | index($number)) == null))
+            | .[0] // empty
+        ')"
+    FOLLOWUP_ISSUE_JSON=""
+    FOLLOWUP_TRIGGER_CREATED_AT=""
+
+    while IFS= read -r completed_issue_json; do
+        completed_issue_number="$(printf '%s' "$completed_issue_json" | "$JQ_BIN" -r '.number')"
+        COMMENTS_FILE="$(mktemp "$STATE_DIR/github-comments.XXXXXX")"
+        if ! "$GH_BIN" api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$completed_issue_number/comments" \
+            -F per_page=100 > "$COMMENTS_FILE"; then
+            fail "GitHub comment query failed for completed issue #$completed_issue_number."
+        fi
+
+        FOLLOWUP_METADATA="$("$JQ_BIN" -c '
+            def is_worker_comment:
+                (.body // "") | contains("<!-- swarm-issue-worker:commit:");
+            (add // [] | sort_by(.id)) as $comments
+            | ($comments | map(select(is_worker_comment)) | last) as $completion
+            | if $completion == null then empty
+              else
+                (($completion.body
+                    | capture("swarm-issue-worker:commit:(?<sha>[0-9a-f]{40})")?
+                    | .sha) // "") as $previous_commit_sha
+                | (($completion.body
+                    | capture("through-comment:(?<id>[0-9]+)")?
+                    | .id
+                    | tonumber) // $completion.id) as $processed_through_id
+                | ($comments
+                    | map(select((is_worker_comment | not) and .id > $processed_through_id))) as $followups
+                | if ($followups | length) == 0 then empty
+                  else {
+                    previous_commit_sha: $previous_commit_sha,
+                    previous_completion_comment: {
+                        id: $completion.id,
+                        author: ($completion.user.login // "unknown"),
+                        created_at: $completion.created_at,
+                        body: ($completion.body // "")
+                    },
+                    followup_comments: ($followups | map({
+                        id,
+                        author: (.user.login // "unknown"),
+                        created_at,
+                        body: (.body // "")
+                    })),
+                    trigger_comment_id: ($followups | last | .id),
+                    trigger_created_at: ($followups | first | .created_at)
+                  }
+                end
+              end
+        ' "$COMMENTS_FILE")"
+        rm -f -- "$COMMENTS_FILE"
+        COMMENTS_FILE=""
+
+        if [ -n "$FOLLOWUP_METADATA" ]; then
+            if ! printf '%s' "$FOLLOWUP_METADATA" | "$JQ_BIN" -e \
+                '.previous_commit_sha | test("^[0-9a-f]{40}$")' >/dev/null; then
+                fail "The latest worker comment on issue #$completed_issue_number does not contain a valid completion commit."
+            fi
+            candidate_trigger_created_at="$(printf '%s' "$FOLLOWUP_METADATA" | "$JQ_BIN" -r '.trigger_created_at')"
+            if [ -z "$FOLLOWUP_ISSUE_JSON" ] \
+                || [[ "$candidate_trigger_created_at" < "$FOLLOWUP_TRIGGER_CREATED_AT" ]]; then
+                FOLLOWUP_TRIGGER_CREATED_AT="$candidate_trigger_created_at"
+                FOLLOWUP_ISSUE_JSON="$(printf '%s' "$completed_issue_json" | "$JQ_BIN" -c \
+                    --argjson followup "$FOLLOWUP_METADATA" '. + {_swarm_followup: $followup}')"
+            fi
+        fi
+    done < <(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
+        --argjson completed "$COMPLETED_JSON" \
+        '.[] | select(.number as $number | ($completed | index($number)) != null)')
+
+    if [ -n "$FOLLOWUP_ISSUE_JSON" ]; then
+        ISSUE_JSON="$FOLLOWUP_ISSUE_JSON"
+    else
+        ISSUE_JSON="$FRESH_ISSUE_JSON"
+    fi
+fi
 
 if [ -z "$ISSUE_JSON" ]; then
     if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" != "null" ]; then
         fail "Saved in-progress issue #$IN_PROGRESS_ISSUE_NUMBER_JSON is no longer open and assigned to $GITHUB_ASSIGNEE; review $IN_PROGRESS_FILE."
     fi
-    log "No unprocessed open issue assigned to $GITHUB_ASSIGNEE was found."
+    log "No new issue or follow-up comment assigned to $GITHUB_ASSIGNEE was found."
     exit 0
 fi
 
@@ -419,7 +533,31 @@ ISSUE_TITLE="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.title')"
 ISSUE_DESCRIPTION="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.body // ""')"
 ISSUE_TAGS="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '[.labels[].name] | join(", ")')"
 ISSUE_URL="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.html_url')"
-log "Selected oldest unprocessed assigned issue: #$ISSUE_NUMBER $ISSUE_TITLE"
+WORK_TYPE="initial"
+PREVIOUS_COMMIT_SHA=""
+PREVIOUS_COMPLETION_COMMENT_JSON="null"
+FOLLOWUP_COMMENTS_JSON="[]"
+TRIGGER_COMMENT_ID_JSON="null"
+
+if [ -f "$IN_PROGRESS_FILE" ]; then
+    WORK_TYPE="$("$JQ_BIN" -r '.work_type // "initial"' "$IN_PROGRESS_FILE")"
+    PREVIOUS_COMMIT_SHA="$("$JQ_BIN" -r '.previous_commit_sha // empty' "$IN_PROGRESS_FILE")"
+    PREVIOUS_COMPLETION_COMMENT_JSON="$("$JQ_BIN" -c '.previous_completion_comment // null' "$IN_PROGRESS_FILE")"
+    FOLLOWUP_COMMENTS_JSON="$("$JQ_BIN" -c '.followup_comments // []' "$IN_PROGRESS_FILE")"
+    TRIGGER_COMMENT_ID_JSON="$("$JQ_BIN" -c '.trigger_comment_id // null' "$IN_PROGRESS_FILE")"
+elif printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -e '._swarm_followup != null' >/dev/null; then
+    WORK_TYPE="followup"
+    PREVIOUS_COMMIT_SHA="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '._swarm_followup.previous_commit_sha')"
+    PREVIOUS_COMPLETION_COMMENT_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.previous_completion_comment')"
+    FOLLOWUP_COMMENTS_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.followup_comments')"
+    TRIGGER_COMMENT_ID_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.trigger_comment_id')"
+fi
+
+if [ "$WORK_TYPE" = "followup" ]; then
+    log "Selected issue #$ISSUE_NUMBER for rework after GitHub follow-up comment $TRIGGER_COMMENT_ID_JSON: $ISSUE_TITLE"
+else
+    log "Selected oldest unprocessed assigned issue: #$ISSUE_NUMBER $ISSUE_TITLE"
+fi
 
 SELECTED_AI=""
 SELECTED_MODEL=""
@@ -474,6 +612,15 @@ BASE_SHA="$RUN_START_SHA"
 RECOVERY_MODE=0
 RECOVERY_CANDIDATE_SHA=""
 RECOVERY_HAS_DIRTY_WORKTREE=0
+
+if [ "$WORK_TYPE" = "followup" ]; then
+    if ! git -C "$REPO_DIR" cat-file -e "$PREVIOUS_COMMIT_SHA^{commit}" 2>/dev/null; then
+        fail "The previous completion commit for issue #$ISSUE_NUMBER is not available locally: $PREVIOUS_COMMIT_SHA"
+    fi
+    if ! git -C "$REPO_DIR" merge-base --is-ancestor "$PREVIOUS_COMMIT_SHA" "$RUN_START_SHA"; then
+        fail "Main does not contain issue #$ISSUE_NUMBER's previous completion commit $PREVIOUS_COMMIT_SHA."
+    fi
+fi
 
 if [ -f "$IN_PROGRESS_FILE" ]; then
     SAVED_ISSUE_NUMBER="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
@@ -537,6 +684,24 @@ printf '%s\n' \
     "Implement this issue in $REPO_DIR. Follow the repository instructions, run relevant tests, and commit the completed work to main as one commit. Include #$ISSUE_NUMBER in the commit message. Do not push. Run verification commands in the foreground; do not return while tests or builds are still running." \
     "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, the solution, and verification in one to three short paragraphs or a brief list. Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
     > "$PROMPT_FILE"
+
+if [ "$WORK_TYPE" = "followup" ]; then
+    {
+        printf '\n%s\n' "Follow-up rework context:"
+        printf '%s\n' "This issue was previously worked, but one or more new GitHub comments indicate that it needs another pass. Treat the new comments as refinement or defect feedback. Reinspect the existing implementation, make the additional fix, verify it, and create a new commit on main that references #$ISSUE_NUMBER."
+        printf '\nPrevious completion commit and change summary:\n'
+        git -C "$REPO_DIR" show --no-ext-diff --format=fuller --stat --summary "$PREVIOUS_COMMIT_SHA"
+        printf '\nInspect the complete previous patch with: git show --no-ext-diff %s\n' "$PREVIOUS_COMMIT_SHA"
+        printf '\nPrevious worker completion comment:\n'
+        printf '%s' "$PREVIOUS_COMPLETION_COMMENT_JSON" | "$JQ_BIN" -r '
+            "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)"
+        '
+        printf '\nNew GitHub follow-up comments to address, in order:\n'
+        printf '%s' "$FOLLOWUP_COMMENTS_JSON" | "$JQ_BIN" -r '
+            .[] | "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)\n"
+        '
+    } >> "$PROMPT_FILE"
+fi
 
 if [ "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1 ]; then
     printf '%s\n' \
@@ -641,6 +806,8 @@ PENDING_EMAIL_TEMP="$(mktemp "$STATE_DIR/pending-email.XXXXXX")"
     --arg ai "$SELECTED_AI" \
     --arg model "$SELECTED_MODEL" \
     --arg effort "$SELECTED_EFFORT" \
+    --arg work_type "$WORK_TYPE" \
+    --argjson trigger_comment_id "$TRIGGER_COMMENT_ID_JSON" \
     --rawfile ai_output "$AI_OUTPUT_FILE" \
     --arg commit_sha "$COMPLETION_SHA" \
     --arg commit_message "$COMMIT_MESSAGE" '
@@ -652,6 +819,8 @@ PENDING_EMAIL_TEMP="$(mktemp "$STATE_DIR/pending-email.XXXXXX")"
             ai_tool: $ai,
             model: $model,
             effort: $effort,
+            work_type: $work_type,
+            trigger_comment_id: $trigger_comment_id,
             ai_output: $ai_output,
             commit_sha: $commit_sha,
             commit_message: $commit_message,
