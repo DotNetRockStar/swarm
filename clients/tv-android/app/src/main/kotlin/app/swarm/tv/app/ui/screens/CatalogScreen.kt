@@ -246,17 +246,17 @@ internal fun CatalogScreen(
     BackHandler(enabled = filterRailExpanded) { filterRailExpanded = false }
     BackHandler(enabled = !filterRailExpanded, onBack = onBack)
     val anyFilterActive = kindFilter != KindFilter.ALL || genreFilter != null || ratingFilter != null || likedOnly
-    // The controls are the first item in the same lazy catalog so they scroll
-    // away with the shelves. Every possible layout still attaches this
-    // requester to its first active card; the controls' DOWN handler has one
-    // deterministic way into content even when lazy children are not yet
-    // candidates for geometric focus search.
+    // Keep navigation from the controls separate from initial/restored focus.
+    // A restored requester can remain attached to a card far down the catalog;
+    // once that lazy item is disposed it cannot be used to leave the search
+    // field. This requester is always attached to the first active card.
     val catalogEntryFocusRequester = remember { FocusRequester() }
+    val initialCatalogFocusRequester = remember { FocusRequester() }
     val filterRailFocusRequester = remember { FocusRequester() }
     val watchlistRowFocusRequester = remember { FocusRequester() }
     val catalogListState = rememberLazyListState()
     val focusNavigationScope = rememberCoroutineScope()
-    val catalogControls: @Composable () -> Unit = {
+    val catalogControls: @Composable ((() -> Unit)?) -> Unit = { onNavigateDown ->
         CatalogControls(
             searchText = searchText,
             onSearchTextChange = { searchText = it },
@@ -273,7 +273,7 @@ internal fun CatalogScreen(
             onOpenSwarm = onOpenSwarm,
             unreachable = unreachable,
             playbackError = playbackError,
-            catalogEntryFocusRequester = catalogEntryFocusRequester,
+            onNavigateDown = onNavigateDown,
             filterRailFocusRequester = filterRailFocusRequester,
         )
     }
@@ -344,11 +344,11 @@ internal fun CatalogScreen(
                 // sometimes-noticeable network wait too, and there's no
                 // reason it should feel less alive than the player's.
                 loading -> Column(Modifier.fillMaxSize()) {
-                    catalogControls()
+                    catalogControls(null)
                     Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { SwarmLoadingIndicator() }
                 }
                 entries.isEmpty() -> Column {
-                    catalogControls()
+                    catalogControls(null)
                     Text("Nothing in the catalog yet.", color = SwarmMuted, fontSize = 14.sp)
                 }
                 else -> {
@@ -498,7 +498,7 @@ internal fun CatalogScreen(
 
                     if (movies.isEmpty() && shows.isEmpty() && artists.isEmpty()) {
                         Column {
-                            catalogControls()
+                            catalogControls(null)
                             Text("No matches for the current search/filter.", color = SwarmMuted, fontSize = 14.sp)
                         }
                     } else {
@@ -586,7 +586,8 @@ internal fun CatalogScreen(
                                 onOpenShow,
                                 onOpenArtist,
                                 isLiked,
-                                firstFocusRequester = catalogEntryFocusRequester,
+                                firstFocusRequester = initialCatalogFocusRequester,
+                                firstEntryFocusRequester = catalogEntryFocusRequester,
                                 requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
                                 initialFocusMovieKey = initialFocusMovieKey,
                                 initialFocusShowKey = initialFocusShowKey,
@@ -594,12 +595,27 @@ internal fun CatalogScreen(
                                 header = catalogControls,
                             )
                         } else {
+                            val navigateToFirstCatalogEntry = {
+                                automaticInitialFocusEnabled = false
+                                focusNavigationScope.launch {
+                                    // Item 0 is the controls. Scrolling item 1
+                                    // into composition before requesting focus
+                                    // prevents the read-only text field from
+                                    // swallowing DOWN when the row was disposed.
+                                    runCatching { catalogListState.scrollToItem(1) }
+                                    withFrameNanos {}
+                                    runCatching { catalogEntryFocusRequester.requestFocus() }
+                                }
+                                Unit
+                            }
                             LazyColumn(
                                 state = catalogListState,
                                 modifier = Modifier.fillMaxSize(),
                                 verticalArrangement = Arrangement.spacedBy(28.dp),
                             ) {
-                                item(key = "catalog-controls", contentType = "controls") { catalogControls() }
+                                item(key = "catalog-controls", contentType = "controls") {
+                                    catalogControls(navigateToFirstCatalogEntry)
+                                }
                                 if (continueWatching.isNotEmpty()) {
                                     item(key = "continue-watching", contentType = "quick-access") {
                                         QuickAccessRow(
@@ -609,8 +625,8 @@ internal fun CatalogScreen(
                                             onClick = { item -> onPlay(item.representative) },
                                             isLiked = isLiked,
                                             isDefaultFocusRow = firstSection == "continue",
-                                            defaultFocusRequester = catalogEntryFocusRequester.takeIf { !restoringSelection && firstSection == "continue" },
-                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { !restoringSelection && firstSection == "continue" },
+                                            defaultFocusRequester = initialCatalogFocusRequester.takeIf { !restoringSelection && firstSection == "continue" },
+                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "continue" },
                                             onNavigateDown = watchlistSectionIndex?.let { sectionIndex ->
                                                 {
                                                     automaticInitialFocusEnabled = false
@@ -637,11 +653,9 @@ internal fun CatalogScreen(
                                             },
                                             isLiked = isLiked,
                                             isDefaultFocusRow = firstSection == "watchlist",
-                                            defaultFocusRequester = catalogEntryFocusRequester.takeIf { !restoringSelection && firstSection == "watchlist" },
-                                            firstCardFocusRequester = when {
-                                                !restoringSelection && firstSection == "watchlist" -> catalogEntryFocusRequester
-                                                else -> watchlistRowFocusRequester
-                                            },
+                                            defaultFocusRequester = initialCatalogFocusRequester.takeIf { !restoringSelection && firstSection == "watchlist" },
+                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "watchlist" }
+                                                ?: watchlistRowFocusRequester,
                                             requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
                                         )
                                     }
@@ -652,9 +666,10 @@ internal fun CatalogScreen(
                                             "Movies", movies, artworkUrl, onOpenMovie, onOpenMovieShelf, movieRestoreIndex,
                                             isDefaultFocusRow = firstSection == "movies",
                                             isLiked = isLiked,
-                                            defaultFocusRequester = catalogEntryFocusRequester.takeIf {
+                                            defaultFocusRequester = initialCatalogFocusRequester.takeIf {
                                                 movieRestoreIndex != null || (!restoringSelection && firstSection == "movies")
                                             },
+                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "movies" },
                                             requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
                                             preview = preview,
                                             expandedPreviewEntryKey = expandedPreviewEntryKey,
@@ -684,9 +699,10 @@ internal fun CatalogScreen(
                                         ShowShelfRow(
                                             "Shows", shows, artworkUrl, onOpenShowShelf, onOpenShow, showRestoreIndex,
                                             isDefaultFocusRow = firstSection == "shows",
-                                            defaultFocusRequester = catalogEntryFocusRequester.takeIf {
+                                            defaultFocusRequester = initialCatalogFocusRequester.takeIf {
                                                 showRestoreIndex != null || (!restoringSelection && firstSection == "shows")
                                             },
+                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "shows" },
                                             requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
                                             preview = preview,
                                             expandedPreviewEntryKey = expandedPreviewEntryKey,
@@ -715,9 +731,10 @@ internal fun CatalogScreen(
                                         ArtistShelfRow(
                                             "Music", artists, artworkUrl, artistPhotoUrl, onOpenArtistShelf, onOpenArtist, artistRestoreIndex,
                                             isDefaultFocusRow = firstSection == "music",
-                                            defaultFocusRequester = catalogEntryFocusRequester.takeIf {
+                                            defaultFocusRequester = initialCatalogFocusRequester.takeIf {
                                                 artistRestoreIndex != null || (!restoringSelection && firstSection == "music")
                                             },
+                                            firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "music" },
                                             requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
                                         )
                                     }
@@ -760,7 +777,7 @@ private fun CatalogControls(
     onOpenSwarm: () -> Unit,
     unreachable: List<SwarmDevice>,
     playbackError: String?,
-    catalogEntryFocusRequester: FocusRequester,
+    onNavigateDown: (() -> Unit)?,
     filterRailFocusRequester: FocusRequester,
 ) {
     Column {
@@ -768,8 +785,9 @@ private fun CatalogControls(
             modifier = Modifier.fillMaxWidth()
                 .focusProperties { left = filterRailFocusRequester }
                 .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                        runCatching { catalogEntryFocusRequester.requestFocus() }.isSuccess
+                    if (onNavigateDown != null && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                        onNavigateDown()
+                        true
                     } else {
                         false
                     }
@@ -867,13 +885,15 @@ private fun GenreFilteredGrid(
     onOpenArtist: (ArtistGroup) -> Unit,
     isLiked: (MergedEntry) -> Boolean,
     firstFocusRequester: FocusRequester,
+    firstEntryFocusRequester: FocusRequester,
     requestInitialFocus: Boolean,
     initialFocusMovieKey: String?,
     initialFocusShowKey: String?,
     initialFocusArtistKey: String?,
-    header: @Composable () -> Unit,
+    header: @Composable ((() -> Unit)?) -> Unit,
 ) {
     val gridState = rememberLazyGridState()
+    val focusNavigationScope = rememberCoroutineScope()
     val firstSection = when {
         movies.isNotEmpty() -> "movies"
         shows.isNotEmpty() -> "shows"
@@ -908,6 +928,16 @@ private fun GenreFilteredGrid(
             runCatching { firstFocusRequester.requestFocus() }
         }
     }
+    val navigateToFirstEntry = {
+        focusNavigationScope.launch {
+            // Item 0 is the controls and item 1 is the first full-width
+            // section header, so item 2 is the first focusable card.
+            runCatching { gridState.scrollToItem(2) }
+            withFrameNanos {}
+            runCatching { firstEntryFocusRequester.requestFocus() }
+        }
+        Unit
+    }
 
     LazyVerticalGrid(
         state = gridState,
@@ -922,7 +952,9 @@ private fun GenreFilteredGrid(
         // button.
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
     ) {
-        item(key = "catalog-controls", span = { GridItemSpan(maxLineSpan) }, contentType = "controls") { header() }
+        item(key = "catalog-controls", span = { GridItemSpan(maxLineSpan) }, contentType = "controls") {
+            header(navigateToFirstEntry)
+        }
         if (movies.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) { GridSectionHeader("Movies") }
             gridItemsIndexed(
@@ -938,6 +970,7 @@ private fun GenreFilteredGrid(
                         entry.entry.entryKey == initialFocusMovieKey ||
                         (restoreGridIndex == null && firstSection == "movies" && index == 0)
                     ) firstFocusRequester else null,
+                    additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "movies" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
                     isLiked = isLiked(entry),
                 )
@@ -960,6 +993,7 @@ private fun GenreFilteredGrid(
                         show.show == initialFocusShowKey ||
                         (restoreGridIndex == null && firstSection == "shows" && index == 0)
                     ) firstFocusRequester else null,
+                    additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "shows" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -985,6 +1019,7 @@ private fun GenreFilteredGrid(
                         artist.artist == initialFocusArtistKey ||
                         (restoreGridIndex == null && firstSection == "music" && index == 0)
                     ) firstFocusRequester else null,
+                    additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "music" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -1284,11 +1319,8 @@ private fun QuickAccessRow(
                     merged = item.representative,
                     artworkUrl = artworkUrls[index],
                     onClick = { onClick(item) },
-                    focusRequester = when {
-                        index == 0 && firstCardFocusRequester != null -> firstCardFocusRequester
-                        index == targetIndex -> focusRequester
-                        else -> null
-                    },
+                    focusRequester = focusRequester.takeIf { index == targetIndex },
+                    additionalFocusRequester = firstCardFocusRequester.takeIf { index == 0 },
                     onNavigateDown = onNavigateDown,
                     isLiked = isLiked(item.representative),
                     titleOverride = item.title,
@@ -1312,6 +1344,7 @@ private fun MovieRow(
     isDefaultFocusRow: Boolean,
     isLiked: (MergedEntry) -> Boolean,
     defaultFocusRequester: FocusRequester? = null,
+    firstCardFocusRequester: FocusRequester? = null,
     requestInitialFocus: Boolean = true,
     preview: BrowsePreview?,
     expandedPreviewEntryKey: String?,
@@ -1351,6 +1384,7 @@ private fun MovieRow(
                     artworkUrls[index],
                     onClick = { onOpenMovie(entry) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
+                    additionalFocusRequester = firstCardFocusRequester.takeIf { index == 0 },
                     isLiked = isLiked(entry),
                     preview = preview,
                     expandedPreviewEntryKey = expandedPreviewEntryKey,
@@ -1372,6 +1406,7 @@ private fun ShowShelfRow(
     restoreFocusIndex: Int?,
     isDefaultFocusRow: Boolean,
     defaultFocusRequester: FocusRequester? = null,
+    firstCardFocusRequester: FocusRequester? = null,
     requestInitialFocus: Boolean = true,
     preview: BrowsePreview?,
     expandedPreviewEntryKey: String?,
@@ -1415,6 +1450,7 @@ private fun ShowShelfRow(
                     artworkUrl = artworkUrls[index],
                     onClick = { onOpenShow(show) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
+                    additionalFocusRequester = firstCardFocusRequester.takeIf { index == 0 },
                     previewEntry = previewEntries[index],
                     preview = preview,
                     expandedPreviewEntryKey = expandedPreviewEntryKey,
@@ -1437,6 +1473,7 @@ private fun ArtistShelfRow(
     restoreFocusIndex: Int?,
     isDefaultFocusRow: Boolean,
     defaultFocusRequester: FocusRequester? = null,
+    firstCardFocusRequester: FocusRequester? = null,
     requestInitialFocus: Boolean = true,
 ) {
     val isTopLevel = onOpenArtistShelf != null
@@ -1473,6 +1510,7 @@ private fun ArtistShelfRow(
                     placeholderType = "Artist",
                     onClick = { onOpenArtist(artist) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
+                    additionalFocusRequester = firstCardFocusRequester.takeIf { index == 0 },
                 )
             }
         }
@@ -1493,6 +1531,7 @@ private fun CatalogCard(
     artworkUrl: String?,
     onClick: () -> Unit,
     focusRequester: FocusRequester?,
+    additionalFocusRequester: FocusRequester? = null,
     widthModifier: Modifier = Modifier.width(CARD_WIDTH),
     isLiked: Boolean = false,
     preview: BrowsePreview? = null,
@@ -1525,6 +1564,7 @@ private fun CatalogCard(
             },
         )
         .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+        .then(if (additionalFocusRequester != null) Modifier.focusRequester(additionalFocusRequester) else Modifier)
     val resolvedWidth = if (onPreviewFocusChanged != null) Modifier.width(animatedWidth) else widthModifier
     val showCardText = merged.entry.kind == MediaKind.TRACK || artworkUrl == null
     Card(
@@ -1611,6 +1651,7 @@ private fun GroupCard(
     artworkUrl: String?,
     onClick: () -> Unit,
     focusRequester: FocusRequester?,
+    additionalFocusRequester: FocusRequester? = null,
     widthModifier: Modifier = Modifier.width(CARD_WIDTH),
     fallbackArtworkUrl: String? = null,
     artworkAspectRatio: Float = 2f / 3f,
@@ -1626,7 +1667,9 @@ private fun GroupCard(
     val isPreviewExpanded = isFocused && previewEntry?.entry?.entryKey == expandedPreviewEntryKey
     val animatedWidth by animateDpAsState(if (isPreviewExpanded) PREVIEW_CARD_WIDTH else CARD_WIDTH)
     val previewAlpha by animateFloatAsState(if (isPreviewExpanded) 1f else 0f, label = "show-preview-alpha")
-    val focusModifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
+    val focusModifier = Modifier
+        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+        .then(if (additionalFocusRequester != null) Modifier.focusRequester(additionalFocusRequester) else Modifier)
     val resolvedWidth = if (previewEnabled) Modifier.width(animatedWidth) else widthModifier
     val showCardText = placeholderType == "Artist" || (artworkUrl == null && fallbackArtworkUrl == null)
     Card(
