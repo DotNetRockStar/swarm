@@ -39,6 +39,17 @@ pub struct LocalPeerRecord {
     pub paired_at: i64,
 }
 
+/// An HTTP-only paired device (no cert/mTLS — Roku-class clients, see
+/// `http_media.rs`). `token_hash` mirrors `local_peer.fingerprint`'s role as
+/// primary key/lookup credential; only the hash is ever stored, matching
+/// this module's "no bearer secrets" invariant.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HttpMediaDeviceRecord {
+    pub token_hash: String,
+    pub name: String,
+    pub paired_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedSwarmIdentity {
     pub base_url: String,
@@ -91,6 +102,12 @@ impl StateDb {
                 paired_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_local_peer_paired_at ON local_peer(paired_at DESC);
+            CREATE TABLE IF NOT EXISTS http_media_device (
+                token_hash TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                paired_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_http_media_device_paired_at ON http_media_device(paired_at DESC);
             CREATE TABLE IF NOT EXISTS managed_swarm_identity (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 base_url TEXT NOT NULL,
@@ -209,6 +226,57 @@ impl StateDb {
     pub async fn remove_local_peer(&self, fingerprint: &str) -> sqlx::Result<()> {
         sqlx::query("DELETE FROM local_peer WHERE fingerprint = ?")
             .bind(fingerprint)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn save_http_media_device(&self, token_hash: &str, name: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO http_media_device (token_hash, name, paired_at) VALUES (?, ?, ?) \
+             ON CONFLICT(token_hash) DO UPDATE SET name = excluded.name, paired_at = excluded.paired_at",
+        )
+        .bind(token_hash)
+        .bind(name)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Bearer-auth check for the HTTP media surface (`http_media.rs`):
+    /// exists at all == authorized, matching `local_peer`'s hard-delete
+    /// revocation model rather than the STUN server's separate
+    /// soft-`revoked_at` one — this table has no other service depending on
+    /// distinguishing "revoked" from "never existed."
+    pub async fn http_media_device_name(&self, token_hash: &str) -> sqlx::Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT name FROM http_media_device WHERE token_hash = ?")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(name,)| name))
+    }
+
+    pub async fn http_media_devices(&self) -> sqlx::Result<Vec<HttpMediaDeviceRecord>> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT token_hash, name, paired_at FROM http_media_device ORDER BY paired_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(token_hash, name, paired_at)| HttpMediaDeviceRecord {
+                token_hash,
+                name,
+                paired_at,
+            })
+            .collect())
+    }
+
+    pub async fn remove_http_media_device(&self, token_hash: &str) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM http_media_device WHERE token_hash = ?")
+            .bind(token_hash)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -351,6 +419,34 @@ mod tests {
 
         db.remove_local_peer(&fingerprint).await.unwrap();
         assert!(db.local_peers().await.unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn http_media_devices_persist_authorize_and_can_be_revoked() {
+        let dir = std::env::temp_dir()
+            .join(format!("swarm-state-db-http-device-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = StateDb::open(&dir).await.unwrap();
+        let token_hash = "cd".repeat(32);
+
+        assert_eq!(db.http_media_device_name(&token_hash).await.unwrap(), None);
+
+        db.save_http_media_device(&token_hash, "Living Room Roku")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.http_media_device_name(&token_hash).await.unwrap(),
+            Some("Living Room Roku".to_string())
+        );
+        let devices = db.http_media_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].token_hash, token_hash);
+        assert_eq!(devices[0].name, "Living Room Roku");
+
+        db.remove_http_media_device(&token_hash).await.unwrap();
+        assert_eq!(db.http_media_device_name(&token_hash).await.unwrap(), None);
+        assert!(db.http_media_devices().await.unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

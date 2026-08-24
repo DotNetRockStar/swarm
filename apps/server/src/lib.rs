@@ -4,6 +4,7 @@
 //! this core for its entire process lifetime, including while hidden to tray.
 
 mod bandwidth;
+mod http_media;
 pub mod lan;
 pub mod punch_connect;
 mod state_db;
@@ -40,7 +41,7 @@ use tokio::sync::Mutex;
 use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
 use crate::transcription::{TranscriptionManager, TranscriptionStatus};
 
-pub use state_db::{LocalPeerRecord, ManagedSwarmIdentity, StunLinkRecord};
+pub use state_db::{HttpMediaDeviceRecord, LocalPeerRecord, ManagedSwarmIdentity, StunLinkRecord};
 
 /// How often a linked server re-fetches its swarms' rosters. Not push-based
 /// yet (that lands with WSS presence in Phase 4) — polling is the Phase 2/3
@@ -71,6 +72,11 @@ pub struct ServerConfig {
     pub media_roots: Vec<MediaRoot>,
     pub data_dir: PathBuf,
     pub bind: SocketAddr,
+    /// The plain-HTTP(S) pairing + media-playback surface (`http_media.rs`)
+    /// for clients that can't speak the QUIC peer protocol — Roku-class
+    /// devices. Runs unconditionally once the core starts, the same as
+    /// `bind`'s QUIC listener, not gated behind a settings toggle.
+    pub http_media_bind: SocketAddr,
     /// Fingerprints allowed to connect regardless of STUN membership — for
     /// running without a STUN server at all (local testing, air-gapped use).
     /// A registered STUN link's roster is added on top of this set, never
@@ -114,11 +120,13 @@ pub struct ServerCore {
     pub media_roots: SharedRootResolver,
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
+    pub http_media_addr: SocketAddr,
     service: Arc<MediaService>,
     transcription: Arc<TranscriptionManager>,
     data_dir: PathBuf,
     state_db: Arc<state_db::StateDb>,
     lan_service: lan::LanService,
+    http_media: http_media::HttpMediaService,
     /// Fingerprints from `ServerConfig::allowed_fingerprints` — kept
     /// separate so a roster sync can rebuild `allowed` as
     /// `static_fingerprints ∪ swarm_roster` without losing the static set.
@@ -256,6 +264,12 @@ impl ServerCore {
             Arc::clone(service.transcode_manager()),
             bandwidth::interval_from_env(),
         ));
+        // Always on, like the QUIC listener above — not gated behind a
+        // settings toggle the way MCP is. See http_media.rs's module doc
+        // comment for why it gets its own port rather than sharing bind's.
+        let http_media =
+            http_media::start(Arc::clone(&service), Arc::clone(&state_db), config.http_media_bind)
+                .await?;
         let transcription = TranscriptionManager::start(
             Arc::clone(&library),
             media_roots.clone(),
@@ -271,11 +285,13 @@ impl ServerCore {
             media_roots,
             allowed,
             listen_addr,
+            http_media_addr: http_media.local_addr,
             service,
             transcription,
             data_dir: config.data_dir,
             state_db,
             lan_service,
+            http_media,
             static_fingerprints,
             token_store_mode: config.token_store_mode,
             stun: Mutex::new(None),
@@ -812,6 +828,33 @@ impl ServerCore {
     pub async fn revoke_local_peer(&self, fingerprint: &str) -> Result<(), ServerError> {
         self.state_db.remove_local_peer(fingerprint).await?;
         self.sync_roster().await?;
+        Ok(())
+    }
+
+    /// The same `MediaService`/`TranscodeManager` instance the QUIC accept
+    /// loop drives — used by `http_media.rs` so an HTTP-served session
+    /// shares one accounting system with QUIC-served ones, not a duplicate.
+    pub fn media_service(&self) -> &Arc<MediaService> {
+        &self.service
+    }
+
+    /// Approves the short-lived code displayed by an HTTP-only (Roku-class)
+    /// device — see `http_media.rs`'s module doc comment for how this
+    /// differs from `approve_lan_pairing`'s cert-based flow. Owner-only,
+    /// never called from the network.
+    pub async fn approve_http_media_pairing(
+        &self,
+        code: &str,
+    ) -> Result<(String, String), &'static str> {
+        self.http_media.approve(code).await
+    }
+
+    pub async fn http_media_devices(&self) -> Result<Vec<HttpMediaDeviceRecord>, ServerError> {
+        Ok(self.state_db.http_media_devices().await?)
+    }
+
+    pub async fn revoke_http_media_device(&self, token_hash: &str) -> Result<(), ServerError> {
+        self.state_db.remove_http_media_device(token_hash).await?;
         Ok(())
     }
 

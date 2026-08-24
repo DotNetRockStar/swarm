@@ -63,6 +63,7 @@ async fn update_media_roots_takes_effect_live_for_both_scanning_and_serving() {
         }],
         data_dir: base.join("server-data"),
         bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![client_identity.fingerprint.clone()],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,

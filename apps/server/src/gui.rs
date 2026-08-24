@@ -112,6 +112,16 @@ impl AppState {
                         .unwrap_or_else(|_| "0.0.0.0:8543".into())
                         .parse()
                         .expect("SWARM_PEER_BIND must be host:port"),
+                    // Same override convention as SWARM_PEER_BIND above.
+                    // Always on (see http_media.rs), so — unlike mcp_port —
+                    // this deliberately has no Settings/UI field yet: an env
+                    // var is enough for the one real need (port conflicts on
+                    // a dev machine) without exposing a toggle for a surface
+                    // that isn't optional.
+                    http_media_bind: std::env::var("SWARM_HTTP_MEDIA_BIND")
+                        .unwrap_or_else(|_| "0.0.0.0:8546".into())
+                        .parse()
+                        .expect("SWARM_HTTP_MEDIA_BIND must be host:port"),
                     allowed_fingerprints: vec![],
                     // Real bug, found live: with PreferKeyring, a token saved
                     // successfully via the OS keychain has no file backup —
@@ -1160,6 +1170,59 @@ async fn revoke_local_peer(
         .map_err(|e| e.to_string())
 }
 
+/// Accepts the short-lived code displayed by an HTTP-only (Roku-class)
+/// device — the plain-HTTP counterpart of `approve_lan_pairing` above, see
+/// `http_media.rs`'s module doc comment for how the two flows differ.
+#[tauri::command]
+async fn approve_http_media_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<String, String> {
+    let core = state.core(&app).await?;
+    let (name, _token) = core
+        .approve_http_media_pairing(&code)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = core
+        .library
+        .record_server_notification(
+            "success",
+            "Device approved",
+            &format!("{name} was approved. It will connect automatically."),
+        )
+        .await
+    {
+        tracing::warn!(%error, "could not save HTTP media pairing notification");
+    }
+    // The raw token is handed to the device itself via its next /pair/poll
+    // (see http_media.rs) — this command deliberately returns only the
+    // name, not the token, since nothing in the desktop UI needs to display
+    // or retype it.
+    Ok(name)
+}
+
+#[tauri::command]
+async fn list_http_media_devices(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<swarm_server::HttpMediaDeviceRecord>, String> {
+    let core = state.core(&app).await?;
+    core.http_media_devices().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn revoke_http_media_device(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    token_hash: String,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    core.revoke_http_media_device(&token_hash)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn lookup_tv_activation(
     app: tauri::AppHandle,
@@ -1542,6 +1605,9 @@ fn main() {
             approve_lan_pairing,
             list_local_peers,
             revoke_local_peer,
+            approve_http_media_pairing,
+            list_http_media_devices,
+            revoke_http_media_device,
             lookup_tv_activation,
             approve_tv_activation,
             resync_swarm,

@@ -24,6 +24,7 @@ fn config(data_dir: std::path::PathBuf, media_root: std::path::PathBuf) -> Serve
         }],
         data_dir,
         bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_bind: "127.0.0.1:0".parse().unwrap(),
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
