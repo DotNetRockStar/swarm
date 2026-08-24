@@ -27,6 +27,7 @@ COMMENTS_FILE=""
 
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 GITHUB_ASSIGNEE="${SWARM_GITHUB_ASSIGNEE:-DotNetRockStar}"
+TRUSTED_FOLLOWUP_AUTHOR="${SWARM_TRUSTED_FOLLOWUP_AUTHOR:-$GITHUB_ASSIGNEE}"
 READY_FOR_TESTING_LABEL="${SWARM_READY_FOR_TESTING_LABEL:-Ready For Testing}"
 MIN_REMAINING_PERCENT="${SWARM_MIN_REMAINING_PERCENT:-5}"
 CLAUDE_MODEL="${SWARM_CLAUDE_MODEL:-claude-sonnet-5}"
@@ -456,7 +457,8 @@ else
             fail "GitHub comment query failed for completed issue #$completed_issue_number."
         fi
 
-        FOLLOWUP_METADATA="$("$JQ_BIN" -c '
+        FOLLOWUP_METADATA="$("$JQ_BIN" -c \
+            --arg trusted_author "$TRUSTED_FOLLOWUP_AUTHOR" '
             def is_worker_comment:
                 (.body // "") | contains("<!-- swarm-issue-worker:commit:");
             (add // [] | sort_by(.id)) as $comments
@@ -471,7 +473,11 @@ else
                     | .id
                     | tonumber) // $completion.id) as $processed_through_id
                 | ($comments
-                    | map(select((is_worker_comment | not) and .id > $processed_through_id))) as $followups
+                    | map(select(
+                        (is_worker_comment | not)
+                        and .id > $processed_through_id
+                        and (.user.login // "") == $trusted_author
+                    ))) as $followups
                 | if ($followups | length) == 0 then empty
                   else {
                     previous_commit_sha: $previous_commit_sha,

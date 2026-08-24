@@ -25,16 +25,18 @@ open issue from being implemented again on the next tick. Failed AI runs are
 not recorded as complete and are retried later. The worker never pushes or
 closes issues.
 
-Completion comments carry a hidden processed-comment watermark. Any later
-non-worker GitHub comment makes that open, assigned issue actionable again and
-takes priority over a new issue. The rework prompt includes the original issue
-title, description, and labels; the prior AI completion comment; the previous
-commit SHA, message, and changed-file summary; and every unprocessed follow-up
-comment in chronological order. The agent is also directed to inspect the full
-previous commit diff before creating a new issue-referencing refinement commit.
-Comments posted while a rework is running are beyond its saved watermark and
-therefore trigger another pass instead of being hidden by the new completion
-comment.
+Completion comments carry a hidden processed-comment watermark. A later
+non-worker GitHub comment makes that open, assigned issue actionable again only
+when its author is `DotNetRockStar` (or `SWARM_TRUSTED_FOLLOWUP_AUTHOR` when
+overridden); comments from every other account are ignored and never inserted
+into the AI prompt. Trusted follow-up work takes priority over a new issue. The
+rework prompt includes the original issue title, description, and labels; the
+prior AI completion comment; the previous commit SHA, message, and changed-file
+summary; and every unprocessed trusted follow-up comment in chronological order.
+The agent is also directed to inspect the full previous commit diff before
+creating a new issue-referencing refinement commit. Trusted comments posted
+while a rework is running are beyond its saved watermark and therefore trigger
+another pass instead of being hidden by the new completion comment.
 
 Before starting an agent, the worker records the issue number and current base
 commit in `in-progress-issue.json`. If an agent exits before committing, the
@@ -91,7 +93,8 @@ legacy block without starting the runner, use `--remove`. Override the idle and
 error retry interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`.
 
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
-`SWARM_GITHUB_ASSIGNEE`, `SWARM_MIN_REMAINING_PERCENT`, `SWARM_CLAUDE_MODEL`,
+`SWARM_GITHUB_ASSIGNEE`, `SWARM_TRUSTED_FOLLOWUP_AUTHOR`,
+`SWARM_MIN_REMAINING_PERCENT`, `SWARM_CLAUDE_MODEL`,
 `SWARM_CODEX_MODEL`, `SWARM_CLAUDE_EFFORT`, `SWARM_CODEX_EFFORT`,
 `SWARM_READY_FOR_TESTING_LABEL`, `SWARM_EMAIL_TO`,
 `SWARM_SMTP_CREDENTIALS_FILE`, and
