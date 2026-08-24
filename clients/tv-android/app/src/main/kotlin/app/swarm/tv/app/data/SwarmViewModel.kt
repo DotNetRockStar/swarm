@@ -224,6 +224,7 @@ class SwarmViewModel(
     private val disconnectedServerStore: AndroidDisconnectedServerStore,
     private val catalogCache: AndroidCatalogCache,
     private val rendezvousUrl: String,
+    private val problemReportDiagnostics: ProblemReportDiagnostics,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState>(UiState.Loading)
     private val logTag = "SwarmViewModel"
@@ -1759,15 +1760,44 @@ class SwarmViewModel(
      * panel — since triage doesn't care which path found the problem.
      */
     fun reportAssetProblem(entry: MergedEntry) {
-        val catalog = _state.value.embeddedCatalog() ?: return
+        val current = _state.value
+        val catalog = current.embeddedCatalog() ?: return
         val device = catalog.devices.find { it.deviceId == entry.sources.first() } ?: return
-        reportClientError(
-            device = device,
-            message = "User reported a problem with this asset from its detail page.",
-            entryKey = entry.entry.entryKey,
+        Log.i(logTag, "user reported asset problem for ${entry.entry.entryKey}")
+        viewModelScope.launch {
+            val runtimeDiagnostics = withContext(Dispatchers.IO) {
+                runCatching(problemReportDiagnostics::collect)
+                    .getOrElse { "Client runtime\ndiagnostics=unavailable (${it.javaClass.simpleName})" }
+            }
+            val context = buildAssetProblemContext(
+                entry = entry,
+                device = device,
+                screen = current.javaClass.simpleName,
+                connectionMode = if (localSession) "lan" else "swarm",
+                clientDeviceId = deviceId,
+                clientMachineId = machineId,
+                clientCertFingerprint = certFingerprint,
+                swarmId = swarmId,
+                catalogEntryCount = catalog.entries.size,
+                catalogServerCount = catalog.devices.size,
+                unreachableServerIds = catalog.unreachable.map(SwarmDevice::deviceId),
+                playbackError = catalog.playbackError,
+                pendingReportCount = pendingClientErrors.size,
+                kidModeEnabled = _kidModeSettings.value != null,
+                shuffleEnabled = _shuffleEnabled.value,
+                minimizedTitle = _minimizedPlayer.value?.title,
+                previewEntryKey = _browsePreview.value?.entryKey,
+                runtimeDiagnostics = runtimeDiagnostics,
+            )
+            reportClientError(
+                device = device,
+                message = "User reported a problem with this asset from its detail page.",
+                entryKey = entry.entry.entryKey,
                 assetTitle = entry.entry.displayTitle(),
-            kind = entry.entry.kind.name.lowercase(),
-        )
+                kind = entry.entry.kind.name.lowercase(),
+                context = context,
+            )
+        }
         notify("Problem report sent.", ClientNotificationKind.SUCCESS)
     }
 

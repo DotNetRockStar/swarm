@@ -40,6 +40,7 @@ import app.swarm.tv.app.data.AndroidDisconnectedServerStore
 import app.swarm.tv.app.data.AndroidKidModeStore
 import app.swarm.tv.app.data.AndroidLanConnectionStore
 import app.swarm.tv.app.data.AndroidLikedEntriesStore
+import app.swarm.tv.app.data.AndroidProblemReportDiagnostics
 import app.swarm.tv.app.data.AndroidTokenStore
 import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.LanDiscoveryManager
@@ -130,7 +131,24 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SwarmViewModel(tokenStore, machineId, certFingerprint, certificate, privateKey, watchStateStore, watchlistStore, connectionStore, likedEntriesStore, kidModeStore, lanDiscovery, lanConnectionStore, disconnectedServerStore, catalogCache, BuildConfig.SWARM_RENDEZVOUS_URL) as T
+                SwarmViewModel(
+                    tokenStore,
+                    machineId,
+                    certFingerprint,
+                    certificate,
+                    privateKey,
+                    watchStateStore,
+                    watchlistStore,
+                    connectionStore,
+                    likedEntriesStore,
+                    kidModeStore,
+                    lanDiscovery,
+                    lanConnectionStore,
+                    disconnectedServerStore,
+                    catalogCache,
+                    BuildConfig.SWARM_RENDEZVOUS_URL,
+                    AndroidProblemReportDiagnostics(applicationContext),
+                ) as T
         }
 
         setContent {
