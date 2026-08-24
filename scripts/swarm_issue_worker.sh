@@ -127,10 +127,10 @@ claude_has_capacity() {
     usage_result="$("$JQ_BIN" -r '.result // empty' "$usage_file" 2>/dev/null || true)"
     rm -f -- "$usage_file"
     session_used="$(printf '%s\n' "$usage_result" \
-        | sed -nE 's/^Current session: ([0-9]+([.][0-9]+)?)% used$/\1/p' \
+        | sed -nE 's/^Current session:[[:space:]]*([0-9]+([.][0-9]+)?)% used.*$/\1/p' \
         | sed -n '1p')"
     week_used="$(printf '%s\n' "$usage_result" \
-        | sed -nE 's/^Current week( \([^)]*\))?: ([0-9]+([.][0-9]+)?)% used$/\2/p' \
+        | sed -nE 's/^Current week( \([^)]*\))?:[[:space:]]*([0-9]+([.][0-9]+)?)% used.*$/\2/p' \
         | sed -n '1p')"
 
     if [ -z "$session_used" ] || [ -z "$week_used" ]; then
