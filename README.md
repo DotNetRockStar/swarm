@@ -8,7 +8,7 @@ Everything runs on this one machine; the Fire TV just needs to be on the same Wi
 
 **1. Start everything:**
 ```bash
-./run_now.sh
+./scripts/run_now.sh
 ```
 Builds and runs two real processes together: the hosted-style SWARM service and the desktop media-server app (a window should open). The desktop app is the media server; there is no second headless server. Closing its window hides it to the system tray so streaming continues, and the app asks the operating system to keep the computer awake until **Quit SWARM** is selected in the tray menu. `Ctrl+C` stops both development processes together. Some laptops restrict blocking lid-close sleep (for example, based on power or external-display state), so the operating system's hardware policy still applies in those configurations.
 
@@ -17,7 +17,8 @@ In the window `run_now.sh` opened, choose a media folder. With the development S
 
 **3. Install the TV client:**
 ```bash
-./deploy_tv.sh 192.168.0.148    # your Fire TV's IP — Settings -> My Fire TV -> About -> Network
+./scripts/deploy_fire_tv.sh    # scans the LAN for Fire TVs and prompts which to deploy to
+./scripts/deploy_fire_tv.sh 192.168.0.148    # or target an IP directly — Settings -> My Fire TV -> About -> Network
 ```
 First time only: enable Developer Options on the Fire TV (**Settings → My Fire TV → About**, click the device name row ~7 times), then turn on **ADB debugging** under the new Developer Options entry, and accept the "Allow USB debugging?" prompt on the TV.
 
@@ -28,7 +29,7 @@ Open the desktop app's **Swarm** page, enter the activation code, verify the TV 
 
 **5. Test it:** on the Fire TV, browse the merged catalog and play something. Both the GUI and the Fire TV should now show up as devices in that swarm on the STUN web UI.
 
-Already have something running from a previous session? `./run_now.sh` now self-heals — it kills anything still holding its ports before starting, so you never need to manually hunt down stale processes first.
+Already have something running from a previous session? `./scripts/run_now.sh` now self-heals — it kills anything still holding its ports before starting, so you never need to manually hunt down stale processes first.
 
 Full details, env vars, and troubleshooting: [Manual end-to-end testing](#manual-end-to-end-testing-stun--server--real-fire-tv) below.
 
@@ -118,14 +119,14 @@ cd clients/tv-android
 
 ## Manual end-to-end testing (STUN + server + real Fire TV)
 
-Two repo-root scripts drive the full stack for hands-on testing — no
+Two scripts in `scripts/` drive the full stack for hands-on testing — no
 mocks, the same real binaries every automated test spawns as subprocesses
 (see `.claude/skills/swarm-interop-test/`), just left running so you can
 point a browser or a real device at them.
 
 **1. Start the STUN server + media server(s):**
 ```bash
-./run_now.sh
+./scripts/run_now.sh
 ```
 Builds and runs two real processes together: `swarm-stun-server` and the
 Tauri desktop media server (`swarm-server-app`). The desktop process owns
@@ -146,22 +147,26 @@ existing dashboard if that flow is cancelled or the code request fails.
 
 **2. Install the TV client on a real Fire TV:**
 ```bash
-./deploy_tv.sh 192.168.0.148   # your Fire TV's IP — Settings -> My Fire TV -> About -> Network
+./scripts/deploy_fire_tv.sh                  # scans the LAN for Fire TVs and prompts which to deploy to
+./scripts/deploy_fire_tv.sh 192.168.0.148    # or target an IP directly — Settings -> My Fire TV -> About -> Network
 ```
 First time: enable Developer Options on the TV (**Settings → My Fire TV →
 About**, click the device name row ~7 times), then turn on **ADB
 debugging** under the new **Developer Options** entry, and accept the
 one-time "Allow USB debugging?" prompt on the TV screen when it appears.
 
-`deploy_tv.sh` rebuilds the debug APK, installs it via adb, force-stops
-any previous run, launches it, and polls for up to 16s to verify it
-actually stayed up (checks for `FATAL EXCEPTION` in logcat and confirms
-the process is still alive) rather than just trusting a successful
-install — this is what caught a real launch crash on first real-hardware
-use (see `.claude/skills/swarm-real-device-debugging/` for the full
-story). Add `-f` to tail logcat afterward. Approve the TV's activation code in
-the desktop app; the service URL is supplied by the debug build rather than
-typed with a remote.
+With no IP argument and no single device already in `adb devices`,
+`deploy_fire_tv.sh` scans this Mac's LAN for hosts with adb's port open and
+manufacturer `Amazon`, lists each as `name | ip`, and prompts for which one
+(or all of them) to deploy to. It then rebuilds the debug APK, installs it
+via adb, force-stops any previous run, launches it, and polls for up to 16s
+per device to verify it actually stayed up (checks for `FATAL EXCEPTION` in
+logcat and confirms the process is still alive) rather than just trusting a
+successful install — this is what caught a real launch crash on first
+real-hardware use (see `.claude/skills/swarm-real-device-debugging/` for the
+full story). Add `-f` to tail logcat afterward (single target only). Approve
+each TV's activation code in the desktop app; the service URL is supplied by
+the debug build rather than typed with a remote.
 
 Building against a real device specifically needs the **debug** build —
 the release manifest intentionally disables cleartext HTTP/WS traffic for

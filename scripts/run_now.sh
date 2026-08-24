@@ -24,7 +24,7 @@
 #   RUST_LOG             default "info"
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if [ -d "$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin" ]; then
     export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"

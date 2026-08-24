@@ -1,11 +1,11 @@
 ---
 name: swarm-local-testing
-description: Use when manually testing SWARM end to end in the desktop media-server GUI and a real Fire TV. Covers run_now.sh, GUI-owned server lifecycle, managed activation and LAN pairing flows, deploy_tv.sh/logs, LAN URL and VPN pitfalls, persisted state, and debug-only cleartext networking.
+description: Use when manually testing SWARM end to end in the desktop media-server GUI and a real Fire TV. Covers run_now.sh, GUI-owned server lifecycle, managed activation and LAN pairing flows, deploy_fire_tv.sh/logs, LAN URL and VPN pitfalls, persisted state, and debug-only cleartext networking.
 ---
 
 # Running SWARM locally on a real TV
 
-Use repo-root `./run_now.sh`. It builds and starts exactly two products:
+Use `./scripts/run_now.sh`. It builds and starts exactly two products:
 
 - the internet-style SWARM rendezvous service locally; and
 - one native media-server GUI, whose `ServerCore` is the media server.
@@ -16,7 +16,7 @@ Closing the GUI window hides it to the tray; **Quit SWARM** stops it. Ctrl+C in
 the `run_now.sh` terminal stops both processes and frees their TCP/UDP ports.
 
 ```bash
-./run_now.sh
+./scripts/run_now.sh
 ```
 
 The script passes `SWARM_RENDEZVOUS_URL` to the GUI. The media server creates
@@ -58,10 +58,13 @@ curl -s -o /dev/null -w "%{http_code}\n" http://<LAN_IP>:8080/health
 
 ## Real Fire TV deployment and logs
 
-Use `./deploy_tv.sh [ip] [-f]` to build, install the correct ABI split,
-force-stop the old app, launch the fully qualified activity, and poll for a
-delayed crash. Use `./tv_logs.sh [ip]` for a live filtered log or `-d` for a
-one-time dump. The TV needs ADB debugging enabled and its one-time authorization
+Use `./scripts/deploy_fire_tv.sh [ip] [-f]` to build, install the correct ABI
+split, force-stop the old app, launch the fully qualified activity, and poll
+for a delayed crash. With no `ip` and no single device already in
+`adb devices`, it scans the LAN for Amazon Fire TVs (port 5555), lists each
+as `name | ip`, and prompts for which one (or all) to deploy to. Use
+`./scripts/tv_logs.sh [ip]` for a live filtered log or `-d` for a one-time
+dump. The TV needs ADB debugging enabled and its one-time authorization
 prompt accepted.
 
 Sideload debug builds for local HTTP/WSS testing. The debug source set permits

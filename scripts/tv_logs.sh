@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Real Fire TV logcat, filtered to the SWARM app — for seeing what it's
 # doing (or why it crashed) without rebuilding or reinstalling anything.
-# Complements deploy_tv.sh, which already prints the crash excerpt
+# Complements deploy_fire_tv.sh, which already prints the crash excerpt
 # automatically when ITS OWN launch fails; reach for this instead when you
 # launched the app by hand on the TV (tapped the icon on the home screen)
 # and want to see what happened.
 #
 # Usage:
-#   ./tv_logs.sh                  # clears the log, waits for you to act on the TV, live-tails
-#   ./tv_logs.sh -d                # dumps whatever's already in the buffer and exits (no waiting)
-#   ./tv_logs.sh 192.168.0.148     # connects to this IP first
-#   ./tv_logs.sh 192.168.0.148 -d  # both together, in either order
+#   ./scripts/tv_logs.sh                  # clears the log, waits for you to act on the TV, live-tails
+#   ./scripts/tv_logs.sh -d                # dumps whatever's already in the buffer and exits (no waiting)
+#   ./scripts/tv_logs.sh 192.168.0.148     # connects to this IP first
+#   ./scripts/tv_logs.sh 192.168.0.148 -d  # both together, in either order
 #
 # Env vars:
 #   SWARM_TV_IP    default target IP if none is passed as an argument

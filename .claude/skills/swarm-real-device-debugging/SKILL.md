@@ -9,7 +9,7 @@ Real hardware finds bugs nothing else in this repo can: no emulator is
 set up, and every automated test either runs in a JVM (`:core:test`) or
 against real *Rust* subprocesses (`:core:interopTest`) — neither touches
 Android's actual classloader, PackageManager, or a real OEM ART build.
-The first real-device run this project ever did (`deploy_tv.sh` against
+The first real-device run this project ever did (`deploy_fire_tv.sh` against
 a real Amazon Fire TV 4-Series, Fire OS 7 / API 28) immediately crashed
 on launch, and chasing it down took a long detour before finding the
 real, tiny cause. Read this before spending time on a similar crash.
@@ -35,7 +35,7 @@ most likely a **namespace/package mismatch**, not a dex-sharding problem
 **Fix**: use the fully-qualified class name, not a relative one, anywhere
 an Activity/Application/Service is referenced by name — in
 `AndroidManifest.xml` and in any `adb shell am start -n`/`-a` invocation
-(`deploy_tv.sh`'s `ACTIVITY` variable does this correctly; copy its
+(`deploy_fire_tv.sh`'s `ACTIVITY` variable does this correctly; copy its
 pattern, don't reintroduce a relative name). This one fix resolved a
 crash that looked, for a long time, like a multidex/dex-placement issue.
 
@@ -323,7 +323,7 @@ for _ in $(seq 1 8); do
     [ -n "$CRASH" ] && break
 done
 ```
-`deploy_tv.sh` already does this (16s total, 8×2s). Don't shorten it back
+`deploy_fire_tv.sh` already does this (16s total, 8×2s). Don't shorten it back
 down without re-confirming the timing on real hardware first.
 
 ## Useful commands for this class of bug
@@ -361,8 +361,8 @@ for f in */transformed/*/AndroidManifest.xml; do
 done | sort -u
 ```
 
-**Watch a crash happen live, with no rebuild** — `tv_logs.sh` (repo
-root); see `swarm-local-testing` skill.
+**Watch a crash happen live, with no rebuild** — `scripts/tv_logs.sh`;
+see `swarm-local-testing` skill.
 
 ## General lesson for next time
 
