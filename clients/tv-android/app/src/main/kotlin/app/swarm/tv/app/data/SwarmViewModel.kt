@@ -714,7 +714,13 @@ class SwarmViewModel(
             )
         }
         val swarm = SwarmSummary("lan", "Local network")
-        val result = withTimeoutOrNull(15_000) {
+        // CatalogSession.refresh() now allows up to 3 connection attempts
+        // (#47) for a server this TV has never dialed before — worst case
+        // that's 3 connect timeouts plus the backoff between them, so this
+        // budget must stay comfortably above that or a slow-but-recovering
+        // first pairing gets cut off by this timeout before its own retries
+        // finish.
+        val result = withTimeoutOrNull(25_000) {
             withContext(Dispatchers.IO) {
                 catalogSession.refresh(listOf(device), clientCertificate, clientKey)
             }

@@ -63,6 +63,50 @@ class CatalogSessionTest {
         proxy.close()
     }
 
+    @Test
+    fun `refresh survives two consecutive connection failures on a server that just approved LAN pairing`() = runBlocking {
+        // Regression coverage for #47: two rapid, back-to-back retries were
+        // not enough on a real device — a server that has just approved a
+        // new LAN pairing can flake on this TV's first couple of connection
+        // attempts before it recovers. refresh() now allows a third attempt.
+        val manifest = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(
+                CatalogEntry(
+                    entryKey = "movie-1",
+                    fingerprint = "media-fingerprint",
+                    kind = MediaKind.MOVIE,
+                    title = "First Connection",
+                    size = 1_024,
+                ),
+            ),
+        )
+        val connection = CatalogConnection(manifest)
+        var connectionAttempts = 0
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+
+        CatalogSession(proxy, directConnector = { _, _, _ ->
+            connectionAttempts += 1
+            if (connectionAttempts <= 2) null else connection
+        }).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            assertEquals(3, connectionAttempts)
+            assertTrue(result.unreachable.isEmpty())
+            assertEquals(listOf("First Connection"), result.entries.map { it.entry.title })
+        }
+        proxy.close()
+    }
+
     private class CatalogConnection(private val manifest: CatalogManifest) : PeerConnection {
         override fun request(
             path: String,

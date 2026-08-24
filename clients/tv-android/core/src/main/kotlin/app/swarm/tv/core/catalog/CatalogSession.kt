@@ -42,6 +42,7 @@ import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -339,9 +340,20 @@ class CatalogSession internal constructor(
             // an initial handshake failure did not. A TV whose first QUIC
             // handshake landed during the LAN-pairing handoff therefore
             // showed an error until the user selected the server again.
-            var attemptsRemaining = 2
+            //
+            // Two back-to-back attempts (confirmed live, #47) still weren't
+            // enough on a real device: a server that has *just* approved a
+            // LAN pairing can flake on this TV's next couple of connection
+            // attempts (route/ARP still settling for a peer this device has
+            // never dialed before) faster than it recovers, so two attempts
+            // fired with no gap between them can both land in that window.
+            // A third attempt with a short backoff gives that a beat to
+            // clear without materially slowing down the common case where
+            // the very first attempt already succeeds.
+            var attemptsRemaining = 3
             while (manifest == null && attemptsRemaining > 0) {
                 attemptsRemaining -= 1
+                if (attemptsRemaining < 2) delay(500)
                 val connection = connectionFor(device, clientCertificate, clientKey)
                 if (connection != null) {
                     val fetch = fetchCurrentManifest(device.deviceId, connection, cached)
