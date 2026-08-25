@@ -4,6 +4,7 @@
 //! client. The sum of reservations can never exceed the configured usable
 //! upload budget, so independent players cannot each consume the full uplink.
 
+use crate::probe::AudioStreamOption;
 use crate::store::EntryRecord;
 use rand::RngCore;
 use std::collections::HashMap;
@@ -99,6 +100,77 @@ impl Rendition {
     fn peak_total(self) -> u64 {
         self.peak_video_bps + self.audio_bps
     }
+}
+
+/// One audio track ffmpeg will transcode into its own HLS rendition, shared
+/// across every video rendition via a common `agroup` — see the "6 audio
+/// tracks" follow-up on #55, where mapping only the single server-picked
+/// track meant there was nothing for the client to actually switch between.
+/// `name` is filesystem/URL-safe (used for both the output directory and the
+/// HLS `NAME` attribute) and disambiguated when more than one track shares a
+/// language; `language` is the raw ffprobe tag, kept separate so duplicate
+/// tracks in the same language still report that same `LANGUAGE` attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioMapEntry {
+    source_map: String,
+    name: String,
+    language: Option<String>,
+    is_default: bool,
+}
+
+fn sanitize_audio_tag(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Builds one [AudioMapEntry] per probed audio track, falling back to
+/// ffmpeg's own `0:a:0` default-track selection when the probe found nothing
+/// (ffprobe missing/failed, or a container ffprobe can't read). Always
+/// returns at least one entry with `is_default` set, even on that fallback.
+fn audio_map_entries(options: Vec<AudioStreamOption>) -> Vec<AudioMapEntry> {
+    if options.is_empty() {
+        return vec![AudioMapEntry {
+            source_map: "0:a:0".to_string(),
+            name: "und".to_string(),
+            language: None,
+            is_default: true,
+        }];
+    }
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    let mut entries: Vec<AudioMapEntry> = options
+        .into_iter()
+        .map(|option| {
+            let base = option
+                .language
+                .as_deref()
+                .and_then(sanitize_audio_tag)
+                .unwrap_or_else(|| "und".to_string());
+            let count = seen.entry(base.clone()).or_insert(0);
+            let name = if *count == 0 {
+                base.clone()
+            } else {
+                format!("{base}{count}")
+            };
+            *count += 1;
+            AudioMapEntry {
+                source_map: format!("0:{}", option.index),
+                name,
+                language: option.language,
+                is_default: option.is_preferred,
+            }
+        })
+        .collect();
+    if !entries.iter().any(|entry| entry.is_default) {
+        if let Some(first) = entries.first_mut() {
+            first.is_default = true;
+        }
+    }
+    entries
 }
 
 const LADDER: [Rendition; 4] = [
@@ -749,32 +821,49 @@ impl TranscodeManager {
 
         let has_audio = entry.audio.is_some();
         // Audio language is routing metadata, not part of the codec summary
-        // retained at scan time. Resolve it when an HLS session is created so
-        // both normal transcodes and previews map English when the container
-        // advertises one. A failed/missing ffprobe safely retains the historic
-        // first-audio-track behavior. Bound this metadata read tightly because
-        // a slow network share must not hold a hover preview in negotiation.
-        let audio_map = if has_audio && entry.kind != MediaKind::Track {
-            tokio::time::timeout(
+        // retained at scan time. Resolve every embedded audio stream (not
+        // just one) when an HLS session is created, so both normal
+        // transcodes and previews can offer the viewer every track the
+        // container actually has — mapping only a single server-picked
+        // track (the historic behavior) left nothing for the pause/playback
+        // screen to switch between even when the source had six (#55). A
+        // failed/missing ffprobe, or a Track (music) entry, safely retains
+        // the original single 0:a:0-mapped stream. Bound this metadata read
+        // tightly because a slow network share must not hold a hover
+        // preview in negotiation.
+        let audio_tracks: Vec<AudioMapEntry> = if !has_audio {
+            Vec::new()
+        } else if entry.kind == MediaKind::Track {
+            vec![AudioMapEntry {
+                source_map: "0:a:0".to_string(),
+                name: "audio".to_string(),
+                language: None,
+                is_default: true,
+            }]
+        } else {
+            let options = tokio::time::timeout(
                 AUDIO_PROBE_TIMEOUT,
-                crate::probe::preferred_audio_stream_index(&self.config.ffmpeg_path, media_path),
+                crate::probe::list_audio_streams(&self.config.ffmpeg_path, media_path),
             )
             .await
             .ok()
-            .flatten()
-            .map(|index| format!("0:{index}"))
-            .unwrap_or_else(|| "0:a:0".to_string())
-        } else {
-            "0:a:0".to_string()
+            .unwrap_or_default();
+            audio_map_entries(options)
         };
         let output_pattern = directory.join("v%v/index.m3u8");
         let segment_pattern = directory.join("v%v/segment_%06d.m4s");
 
         if variants.is_empty() {
+            let audio = audio_tracks.first().cloned().unwrap_or(AudioMapEntry {
+                source_map: "0:a:0".to_string(),
+                name: "audio".to_string(),
+                language: None,
+                is_default: true,
+            });
             command
                 .arg("-vn")
                 .arg("-map")
-                .arg(&audio_map)
+                .arg(&audio.source_map)
                 .arg("-c:a:0")
                 .arg("aac")
                 .arg("-b:a:0")
@@ -784,6 +873,14 @@ impl TranscodeManager {
                 .arg("-ar:a:0")
                 .arg("48000");
         } else {
+            // Each track's own subdirectory must exist before ffmpeg starts
+            // writing into it, same as the per-rendition video directories
+            // created by the caller (start_hls) — ffmpeg's hls muxer does
+            // not create intermediate directories itself.
+            for audio in &audio_tracks {
+                std::fs::create_dir_all(directory.join(format!("v{}", audio.name)))
+                    .map_err(TranscodeError::Workspace)?;
+            }
             let split_labels = (0..variants.len())
                 .map(|index| format!("[split{index}]"))
                 .collect::<String>();
@@ -798,9 +895,6 @@ impl TranscodeManager {
             command.arg("-filter_complex").arg(filter);
             for (index, rendition) in variants.iter().enumerate() {
                 command.arg("-map").arg(format!("[v{index}]"));
-                if has_audio {
-                    command.arg("-map").arg(&audio_map);
-                }
                 command
                     .arg(format!("-c:v:{index}"))
                     .arg("libx264")
@@ -830,12 +924,25 @@ impl TranscodeManager {
                     } else {
                         "expr:gte(t,n_forced*2)"
                     });
-                if has_audio {
+            }
+            // Every embedded audio track is transcoded exactly once and
+            // shared across all video renditions through a common `agroup`
+            // below, instead of the old one-audio-encode-per-video-rendition
+            // scheme — that duplication only ever carried the single
+            // server-picked track anyway, so a viewer could never choose a
+            // different one (#55). The top rung's audio bitrate covers every
+            // track since HLS only ever streams whichever one is currently
+            // selected, never all of them at once.
+            if has_audio {
+                let audio_bps = variants[0].audio_bps;
+                for (index, audio) in audio_tracks.iter().enumerate() {
                     command
+                        .arg("-map")
+                        .arg(&audio.source_map)
                         .arg(format!("-c:a:{index}"))
                         .arg("aac")
                         .arg(format!("-b:a:{index}"))
-                        .arg(rendition.audio_bps.to_string())
+                        .arg(audio_bps.to_string())
                         .arg(format!("-ac:a:{index}"))
                         .arg("2")
                         .arg(format!("-ar:a:{index}"))
@@ -847,18 +954,30 @@ impl TranscodeManager {
         let stream_map = if variants.is_empty() {
             "a:0,name:audio".to_string()
         } else {
-            variants
+            let mut entries: Vec<String> = variants
                 .iter()
                 .enumerate()
                 .map(|(index, rendition)| {
                     if has_audio {
-                        format!("v:{index},a:{index},name:{}", rendition.name)
+                        format!("v:{index},agroup:aud,name:{}", rendition.name)
                     } else {
                         format!("v:{index},name:{}", rendition.name)
                     }
                 })
-                .collect::<Vec<_>>()
-                .join(" ")
+                .collect();
+            for (index, audio) in audio_tracks.iter().enumerate() {
+                let mut audio_entry = format!("a:{index},agroup:aud,name:{}", audio.name);
+                if let Some(language) = audio.language.as_deref().and_then(sanitize_audio_tag) {
+                    audio_entry.push_str(&format!(",language:{language}"));
+                }
+                audio_entry.push_str(if audio.is_default {
+                    ",default:yes"
+                } else {
+                    ",default:no"
+                });
+                entries.push(audio_entry);
+            }
+            entries.join(" ")
         };
 
         command
@@ -1427,6 +1546,132 @@ mod tests {
         assert!(preview_master.contains("preview-540p/index.m3u8"));
         assert_eq!(preview_master.matches("#EXT-X-STREAM-INF").count(), 1);
         manager.finish_use(preview_session);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression coverage for the #55 follow-up ("6 audio tracks and 4
+    /// subtitle tracks, but the player only offers Auto/Unknown") — the
+    /// single-audio-stream smoke test above can't catch a `var_stream_map`
+    /// syntax mistake or a missing per-track output directory, since ffmpeg
+    /// is happy either way when there is only one track to map. This drives
+    /// spawn_ffmpeg with a source that actually has two, so a real ffmpeg
+    /// binary has to accept the multi-track command and produce a
+    /// selectable rendition per language.
+    #[tokio::test]
+    async fn ffmpeg_hls_master_playlist_exposes_every_embedded_audio_track() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swarm-hls-multi-audio-{}", session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-shortest",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .await
+            .unwrap();
+        if !generated.success() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let config = TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 10_000_000,
+            reserve_percent: 30,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+        };
+        let manager = TranscodeManager::new(config);
+        let mut source_entry = entry();
+        source_entry.relative_path = "source.mp4".into();
+        source_entry.size = source.metadata().unwrap().len();
+        source_entry.duration_secs = Some(2.0);
+        source_entry.video.as_mut().unwrap().width = 640;
+        source_entry.video.as_mut().unwrap().height = 360;
+        source_entry.video.as_mut().unwrap().bitrate = Some(900_000);
+        source_entry.audio.as_mut().unwrap().bitrate = Some(96_000);
+        let mut prefs = preferences();
+        prefs.prefer_direct = false;
+
+        let plan = manager
+            .plan(&source_entry, &source, &prefs, false)
+            .await
+            .unwrap();
+        assert_eq!(plan.mode, PlaybackMode::Hls);
+        let relative = plan.path.splitn(4, '/').nth(3).unwrap();
+        let session = plan.path.split('/').nth(2).unwrap();
+        let file = manager.open_hls(session, relative).unwrap();
+        let master = std::fs::read_to_string(&file.path).unwrap();
+
+        assert_eq!(master.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 2);
+        let eng_line = master
+            .lines()
+            .find(|line| line.contains("LANGUAGE=\"eng\""))
+            .expect("English audio rendition missing from master playlist");
+        assert!(
+            eng_line.contains("DEFAULT=YES"),
+            "English should win the same preferred-track tie-break used for direct play/single-track HLS: {eng_line}"
+        );
+        let jpn_line = master
+            .lines()
+            .find(|line| line.contains("LANGUAGE=\"jpn\""))
+            .expect("Japanese audio rendition missing from master playlist");
+        assert!(jpn_line.contains("DEFAULT=NO"), "{jpn_line}");
+
+        // Prove ffmpeg actually produced a real, independently selectable
+        // rendition for each track, not just a playlist that references one.
+        let session_dir = root.join("sessions").join(session);
+        assert!(session_dir.join("veng").join("index.m3u8").is_file());
+        assert!(session_dir.join("vjpn").join("index.m3u8").is_file());
+
+        manager.finish_use(session);
         drop(manager);
         let _ = std::fs::remove_dir_all(&root);
     }

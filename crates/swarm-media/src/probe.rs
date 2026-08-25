@@ -111,12 +111,22 @@ pub async fn probe(path: &Path) -> Option<MediaInfo> {
     Some(info)
 }
 
-/// Returns the file-global stream index ffmpeg should map for video audio.
-/// English wins when the container has a usable language tag; otherwise the
-/// container's default audio track wins, then its first audio track. Failure
-/// is intentionally `None` so playback can retain ffmpeg's `0:a:0` fallback.
-pub async fn preferred_audio_stream_index(ffmpeg_path: &Path, media_path: &Path) -> Option<usize> {
-    let output = tokio::process::Command::new(ffprobe_path_for(ffmpeg_path))
+/// One embedded audio stream, as ffmpeg can map it (`0:{index}`) into an HLS
+/// output. `is_preferred` marks the single track [select_preferred_audio_stream]
+/// would pick, so the caller can flag it `default:yes` in the HLS audio group
+/// without re-deriving the same English/container-default/first-track rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioStreamOption {
+    pub index: usize,
+    pub language: Option<String>,
+    pub is_preferred: bool,
+}
+
+/// Every embedded audio stream ffmpeg can map, in container order. Empty on
+/// any probe failure so playback can fall back to ffmpeg's own `0:a:0`
+/// selection rather than mapping nothing.
+pub async fn list_audio_streams(ffmpeg_path: &Path, media_path: &Path) -> Vec<AudioStreamOption> {
+    let Ok(output) = tokio::process::Command::new(ffprobe_path_for(ffmpeg_path))
         .args([
             "-v",
             "quiet",
@@ -130,12 +140,29 @@ pub async fn preferred_audio_stream_index(ffmpeg_path: &Path, media_path: &Path)
         .arg(media_path)
         .output()
         .await
-        .ok()?;
+    else {
+        return Vec::new();
+    };
     if !output.status.success() {
-        return None;
+        return Vec::new();
     }
-    let parsed: FfprobeOutput = serde_json::from_slice(&output.stdout).ok()?;
-    select_preferred_audio_stream(&parsed.streams)
+    let Ok(parsed) = serde_json::from_slice::<FfprobeOutput>(&output.stdout) else {
+        return Vec::new();
+    };
+    let preferred = select_preferred_audio_stream(&parsed.streams);
+    parsed
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .filter_map(|stream| {
+            let index = stream.index?;
+            Some(AudioStreamOption {
+                index,
+                language: stream.tags.language.clone(),
+                is_preferred: Some(index) == preferred,
+            })
+        })
+        .collect()
 }
 
 fn ffprobe_path_for(ffmpeg_path: &Path) -> PathBuf {
