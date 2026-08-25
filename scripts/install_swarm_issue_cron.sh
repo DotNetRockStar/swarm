@@ -13,6 +13,7 @@ LOG_PATH="$STATE_DIR/cron.log"
 WORKER_SNAPSHOT_PATH="$STATE_DIR/swarm_issue_worker.snapshot.sh"
 INTERVAL_SECONDS="${SWARM_ISSUE_WORKER_INTERVAL_SECONDS:-600}"
 ISSUE_COMPLETED_EXIT_CODE=10
+QUOTA_PAUSED_EXIT_CODE=11
 CRONTAB_BIN="${CRONTAB_BIN:-$(command -v crontab || true)}"
 BEGIN_MARKER="# BEGIN SWARM ISSUE WORKER"
 END_MARKER="# END SWARM ISSUE WORKER"
@@ -105,6 +106,8 @@ while true; do
     if [ "$worker_status" -eq "$ISSUE_COMPLETED_EXIT_CODE" ]; then
         log "Issue completed successfully; checking the queue again immediately."
         continue
+    elif [ "$worker_status" -eq "$QUOTA_PAUSED_EXIT_CODE" ]; then
+        log "The active AI session is paused for usage; checking that same provider again in $INTERVAL_SECONDS seconds."
     elif [ "$worker_status" -ne 0 ]; then
         log "Worker exited with status $worker_status; it will retry after $INTERVAL_SECONDS seconds."
     else

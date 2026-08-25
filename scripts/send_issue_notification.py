@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send an issue-completion email using settings plus a password on stdin."""
+"""Send an issue-worker email using settings plus a password on stdin."""
 
 from __future__ import annotations
 
@@ -34,8 +34,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--issue-title", required=True)
     parser.add_argument("--issue-url", required=True)
     parser.add_argument("--ai", required=True)
-    parser.add_argument("--commit-sha", required=True)
-    parser.add_argument("--commit-message", required=True)
+    parser.add_argument(
+        "--notification-type",
+        choices=("completed", "quota-paused"),
+        default="completed",
+    )
+    parser.add_argument("--model", default="")
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--commit-sha", default="")
+    parser.add_argument("--commit-message", default="")
     return parser.parse_args()
 
 
@@ -103,21 +110,40 @@ def main() -> int:
         display_name = safe_header(settings.get("EMAIL_FROM_DISPLAY_NAME", ""))
         message["From"] = formataddr((display_name, sender)) if display_name else sender
         message["To"] = safe_header(args.to)
-        message["Subject"] = (
-            f"SWARM issue #{safe_header(args.issue_number)} worked by "
-            f"{safe_header(args.ai)}"
-        )
-        message.set_content(
-            "\n".join(
-                [
-                    f"Issue: #{args.issue_number} {args.issue_title}",
-                    f"URL: {args.issue_url}",
-                    f"AI: {args.ai}",
-                    f"Commit: {args.commit_sha}",
-                    f"Commit message: {args.commit_message}",
-                ]
+        if args.notification_type == "quota-paused":
+            message["Subject"] = (
+                f"SWARM issue #{safe_header(args.issue_number)} paused: "
+                f"{safe_header(args.ai)} usage exhausted"
             )
-        )
+            message.set_content(
+                "\n".join(
+                    [
+                        f"Issue: #{args.issue_number} {args.issue_title}",
+                        f"URL: {args.issue_url}",
+                        f"AI: {args.ai}",
+                        f"Model: {args.model}",
+                        f"Session: {args.session_id}",
+                        "Status: Paused because the selected AI no longer has sufficient usage.",
+                        "The worker saved this session and will resume it automatically when that same AI has usage available again.",
+                    ]
+                )
+            )
+        else:
+            message["Subject"] = (
+                f"SWARM issue #{safe_header(args.issue_number)} worked by "
+                f"{safe_header(args.ai)}"
+            )
+            message.set_content(
+                "\n".join(
+                    [
+                        f"Issue: #{args.issue_number} {args.issue_title}",
+                        f"URL: {args.issue_url}",
+                        f"AI: {args.ai}",
+                        f"Commit: {args.commit_sha}",
+                        f"Commit message: {args.commit_message}",
+                    ]
+                )
+            )
 
         context = ssl.create_default_context()
         if use_ssl:

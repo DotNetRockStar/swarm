@@ -24,12 +24,13 @@ UPDATED_COMMIT_MESSAGE_FILE=""
 AI_OUTPUT_TEMP=""
 IN_PROGRESS_TEMP=""
 COMMENTS_FILE=""
+QUOTA_COMMENT_FILE=""
 
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 GITHUB_ASSIGNEE="${SWARM_GITHUB_ASSIGNEE:-DotNetRockStar}"
 TRUSTED_FOLLOWUP_AUTHOR="${SWARM_TRUSTED_FOLLOWUP_AUTHOR:-$GITHUB_ASSIGNEE}"
 READY_FOR_TESTING_LABEL="${SWARM_READY_FOR_TESTING_LABEL:-Ready For Testing}"
-MIN_REMAINING_PERCENT="${SWARM_MIN_REMAINING_PERCENT:-5}"
+MIN_REMAINING_PERCENT="${SWARM_MIN_REMAINING_PERCENT:-10}"
 CLAUDE_MODEL="${SWARM_CLAUDE_MODEL:-claude-sonnet-5}"
 CODEX_MODEL="${SWARM_CODEX_MODEL:-gpt-5.6-sol}"
 CLAUDE_EFFORT="${SWARM_CLAUDE_EFFORT:-high}"
@@ -40,6 +41,7 @@ SMTP_PASSWORD_INPUT="${SWARM_SMTP_PASSWORD:-}"
 unset SWARM_SMTP_PASSWORD
 DRY_RUN="${SWARM_ISSUE_WORKER_DRY_RUN:-0}"
 ISSUE_COMPLETED_EXIT_CODE=10
+QUOTA_PAUSED_EXIT_CODE=11
 
 # cron starts with a deliberately small PATH on macOS.
 export PATH="$USER_HOME_DIR/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -53,6 +55,15 @@ CODEX_BIN="${CODEX_BIN:-$(command -v codex || true)}"
 ISSUES_FILE=""
 PROMPT_FILE=""
 PENDING_EMAIL_TEMP=""
+SELECTED_AI=""
+SELECTED_MODEL=""
+SELECTED_EFFORT=""
+AI_SESSION_ID=""
+SESSION_IS_RESUME=0
+SESSION_COMMENT_ID=0
+RESUME_COMMENTS_JSON="[]"
+RESUME_COMMENT_ID=0
+QUOTA_RESUME_READY=0
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$*" >&2
@@ -74,6 +85,7 @@ cleanup() {
     if [ -n "$AI_OUTPUT_TEMP" ]; then rm -f -- "$AI_OUTPUT_TEMP"; fi
     if [ -n "$IN_PROGRESS_TEMP" ]; then rm -f -- "$IN_PROGRESS_TEMP"; fi
     if [ -n "$COMMENTS_FILE" ]; then rm -f -- "$COMMENTS_FILE"; fi
+    if [ -n "$QUOTA_COMMENT_FILE" ]; then rm -f -- "$QUOTA_COMMENT_FILE"; fi
 
     if [ -f "$LOCK_DIR/pid" ] && [ "$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
         rm -f -- "$LOCK_DIR/pid"
@@ -142,6 +154,11 @@ save_in_progress_issue() {
         --arg previous_completion_comment "$PREVIOUS_COMPLETION_COMMENT_JSON" \
         --arg followup_comments "$FOLLOWUP_COMMENTS_JSON" \
         --argjson trigger_comment_id "$TRIGGER_COMMENT_ID_JSON" \
+        --arg ai_tool "$SELECTED_AI" \
+        --arg model "$SELECTED_MODEL" \
+        --arg effort "$SELECTED_EFFORT" \
+        --arg session_id "$AI_SESSION_ID" \
+        --argjson session_comment_id "$SESSION_COMMENT_ID" \
         --arg started_at "$(date '+%Y-%m-%dT%H:%M:%S%z')" '
             {
                 issue_number: $issue_number,
@@ -153,6 +170,13 @@ save_in_progress_issue() {
                 previous_completion_comment: ($previous_completion_comment | fromjson),
                 followup_comments: ($followup_comments | fromjson),
                 trigger_comment_id: $trigger_comment_id,
+                ai_tool: $ai_tool,
+                model: $model,
+                effort: $effort,
+                session_id: $session_id,
+                session_comment_id: $session_comment_id,
+                status: "active",
+                quota_pause_count: 0,
                 started_at: $started_at
             }
         ' > "$IN_PROGRESS_TEMP"
@@ -249,6 +273,197 @@ codex_has_capacity() {
 
     rm -f -- "$usage_file"
     return 1
+}
+
+selected_ai_has_capacity() {
+    case "$1" in
+        Claude)
+            if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
+                log "Claude quota unavailable: claude was not found in PATH."
+                return 1
+            fi
+            claude_has_capacity
+            ;;
+        Codex)
+            codex_has_capacity
+            ;;
+        *)
+            fail "The saved AI provider is invalid: $1"
+            ;;
+    esac
+}
+
+update_in_progress() {
+    local filter="$1"
+
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" "$filter" "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+}
+
+save_codex_session_id() {
+    local session_id="$1"
+
+    [ -n "$session_id" ] || return 0
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --arg session_id "$session_id" \
+        '.session_id = $session_id' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+    AI_SESSION_ID="$session_id"
+}
+
+mark_quota_paused() {
+    local paused_at
+
+    if "$JQ_BIN" -e '.status == "quota_paused"' "$IN_PROGRESS_FILE" >/dev/null; then
+        return 0
+    fi
+    paused_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --arg paused_at "$paused_at" '
+        .status = "quota_paused"
+        | .quota_paused_at = $paused_at
+        | .quota_pause_count = ((.quota_pause_count // 0) + 1)
+        | .quota_comment_posted = false
+        | .quota_email_sent = false
+    ' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+    log "Paused issue #$ISSUE_NUMBER because $SELECTED_AI usage is unavailable; session $AI_SESSION_ID was preserved."
+}
+
+post_quota_pause_comment() {
+    local issue_number
+    local pause_count
+    local marker
+    local already_posted
+
+    if "$JQ_BIN" -e '.quota_comment_posted // false' "$IN_PROGRESS_FILE" >/dev/null; then
+        return 0
+    fi
+    issue_number="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
+    pause_count="$("$JQ_BIN" -r '.quota_pause_count // 1' "$IN_PROGRESS_FILE")"
+    marker="<!-- swarm-issue-worker:quota-paused:issue:$issue_number;pause:$pause_count;session:$AI_SESSION_ID -->"
+    already_posted="$(
+        "$GH_BIN" api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$issue_number/comments" \
+            -F per_page=100 \
+        | "$JQ_BIN" -r --arg marker "$marker" \
+            '[add // [] | .[] | select((.body // "") | contains($marker))] | length'
+    )"
+    if [ "$already_posted" -eq 0 ]; then
+        QUOTA_COMMENT_FILE="$(mktemp "$STATE_DIR/quota-comment.XXXXXX")"
+        {
+            printf '%s\n' "$marker"
+            printf 'Work paused because **%s** no longer has sufficient usage available.\n\n' "$SELECTED_AI"
+            printf -- '- Model: `%s`\n' "$SELECTED_MODEL"
+            printf -- '- Session: `%s`\n' "$AI_SESSION_ID"
+            printf '%s\n' '- The current work and AI session were saved.'
+            printf '%s\n' "- The worker will wait for $SELECTED_AI specifically, include any new trusted issue comments, and resume this same session automatically."
+        } > "$QUOTA_COMMENT_FILE"
+        log "Posting the one-time quota pause notice to GitHub issue #$issue_number."
+        "$GH_BIN" issue comment "$issue_number" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file "$QUOTA_COMMENT_FILE"
+        rm -f -- "$QUOTA_COMMENT_FILE"
+        QUOTA_COMMENT_FILE=""
+    fi
+    update_in_progress '.quota_comment_posted = true'
+}
+
+send_quota_pause_email() {
+    local issue_number
+
+    if "$JQ_BIN" -e '.quota_email_sent // false' "$IN_PROGRESS_FILE" >/dev/null; then
+        return 0
+    fi
+    [ -n "$SMTP_CREDENTIALS_FILE" ] || fail "Set SWARM_SMTP_CREDENTIALS_FILE to send the quota pause notification."
+    [ -f "$SMTP_CREDENTIALS_FILE" ] || fail "SMTP settings file was not found: $SMTP_CREDENTIALS_FILE"
+    [ -n "$SMTP_PASSWORD_INPUT" ] || fail "The SMTP password must be entered through the foreground runner."
+    issue_number="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
+    log "Sending the one-time quota pause notification for issue #$issue_number."
+    printf '%s\n' "$SMTP_PASSWORD_INPUT" | "$PYTHON_BIN" "$SCRIPT_DIR/send_issue_notification.py" \
+        --credentials "$SMTP_CREDENTIALS_FILE" \
+        --password-stdin \
+        --to "$EMAIL_TO" \
+        --notification-type quota-paused \
+        --issue-number "$issue_number" \
+        --issue-title "$("$JQ_BIN" -r '.issue_title' "$IN_PROGRESS_FILE")" \
+        --issue-url "$("$JQ_BIN" -r '.issue_url' "$IN_PROGRESS_FILE")" \
+        --ai "$SELECTED_AI" \
+        --model "$SELECTED_MODEL" \
+        --session-id "$AI_SESSION_ID"
+    update_in_progress '.quota_email_sent = true'
+}
+
+deliver_quota_pause_notifications() {
+    post_quota_pause_comment
+    send_quota_pause_email
+}
+
+mark_quota_resumed() {
+    local resumed_at
+
+    resumed_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --arg resumed_at "$resumed_at" '
+        .status = "active"
+        | .quota_resumed_at = $resumed_at
+    ' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+}
+
+ai_output_indicates_quota() {
+    grep -Eqi \
+        'usage limit|rate[ _-]?limit|quota|credits? (are )?(exhausted|unavailable)|limit (has been )?reached|hit your .*limit|resets? at|insufficient_quota' \
+        "$AI_OUTPUT_FILE" "$AI_DIAGNOSTIC_FILE" 2>/dev/null
+}
+
+load_resume_comments() {
+    COMMENTS_FILE="$(mktemp "$STATE_DIR/github-comments.XXXXXX")"
+    if ! "$GH_BIN" api --method GET --paginate --slurp \
+        "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
+        -F per_page=100 > "$COMMENTS_FILE"; then
+        fail "GitHub comment query failed while preparing to resume issue #$ISSUE_NUMBER."
+    fi
+    RESUME_COMMENTS_JSON="$("$JQ_BIN" -c \
+        --arg trusted_author "$TRUSTED_FOLLOWUP_AUTHOR" \
+        --argjson after_id "$SESSION_COMMENT_ID" '
+            def is_worker_comment:
+                (.body // "") | contains("<!-- swarm-issue-worker:");
+            add // []
+            | sort_by(.id)
+            | map(select(
+                .id > $after_id
+                and (is_worker_comment | not)
+                and (.user.login // "") == $trusted_author
+            ))
+            | map({
+                id,
+                author: (.user.login // "unknown"),
+                created_at,
+                body: (.body // "")
+            })
+        ' "$COMMENTS_FILE")"
+    rm -f -- "$COMMENTS_FILE"
+    COMMENTS_FILE=""
+    RESUME_COMMENT_ID="$(printf '%s' "$RESUME_COMMENTS_JSON" | "$JQ_BIN" -r \
+        --argjson fallback "$SESSION_COMMENT_ID" \
+        'if length > 0 then (last.id) else $fallback end')"
+}
+
+save_session_comment_watermark() {
+    local comment_id="$1"
+
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --argjson comment_id "$comment_id" \
+        '.session_comment_id = $comment_id' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+    SESSION_COMMENT_ID="$comment_id"
 }
 
 deliver_pending_email() {
@@ -379,6 +594,40 @@ if [ -f "$PENDING_EMAIL_FILE" ]; then
     post_pending_github_comment
     add_pending_ready_for_testing_label
     deliver_pending_email
+fi
+
+# A quota-paused run does not reselect or re-read the issue on every tick. It
+# completes any missing one-time notification, checks only the pinned provider,
+# and leaves the saved session untouched until that provider has capacity.
+if [ -f "$IN_PROGRESS_FILE" ] \
+    && "$JQ_BIN" -e '.status == "quota_paused"' "$IN_PROGRESS_FILE" >/dev/null 2>&1; then
+    if ! "$JQ_BIN" -e '
+        (.issue_number | type) == "number"
+        and (.issue_title | type) == "string"
+        and (.issue_url | type) == "string"
+        and (.ai_tool | IN("Claude", "Codex"))
+        and (.model | type) == "string" and (.model | length) > 0
+        and (.effort | type) == "string" and (.effort | length) > 0
+        and (.session_id | type) == "string" and (.session_id | length) > 0
+    ' "$IN_PROGRESS_FILE" >/dev/null 2>&1; then
+        fail "The saved quota-paused session is invalid: $IN_PROGRESS_FILE"
+    fi
+    ISSUE_NUMBER="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
+    ISSUE_TITLE="$("$JQ_BIN" -r '.issue_title' "$IN_PROGRESS_FILE")"
+    ISSUE_URL="$("$JQ_BIN" -r '.issue_url' "$IN_PROGRESS_FILE")"
+    SELECTED_AI="$("$JQ_BIN" -r '.ai_tool' "$IN_PROGRESS_FILE")"
+    SELECTED_MODEL="$("$JQ_BIN" -r '.model' "$IN_PROGRESS_FILE")"
+    SELECTED_EFFORT="$("$JQ_BIN" -r '.effort' "$IN_PROGRESS_FILE")"
+    AI_SESSION_ID="$("$JQ_BIN" -r '.session_id' "$IN_PROGRESS_FILE")"
+    deliver_quota_pause_notifications
+    if ! selected_ai_has_capacity "$SELECTED_AI"; then
+        log "Issue #$ISSUE_NUMBER remains paused; waiting for $SELECTED_AI session $AI_SESSION_ID to regain usage."
+        exit "$QUOTA_PAUSED_EXIT_CODE"
+    fi
+    mark_quota_resumed
+    QUOTA_RESUME_READY=1
+    SESSION_IS_RESUME=1
+    log "$SELECTED_AI usage is available again; preparing to resume session $AI_SESSION_ID for issue #$ISSUE_NUMBER."
 fi
 
 ISSUES_FILE="$(mktemp "$STATE_DIR/github-issues.XXXXXX")"
@@ -565,36 +814,65 @@ else
     log "Selected oldest unprocessed assigned issue: #$ISSUE_NUMBER $ISSUE_TITLE"
 fi
 
-SELECTED_AI=""
-SELECTED_MODEL=""
-SELECTED_EFFORT=""
 CLAUDE_AVAILABLE=0
 CODEX_AVAILABLE=0
+PINNED_AI=""
+if [ -f "$IN_PROGRESS_FILE" ]; then
+    PINNED_AI="$("$JQ_BIN" -r '.ai_tool // empty' "$IN_PROGRESS_FILE")"
+fi
 
-if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
-    if claude_has_capacity; then
-        CLAUDE_AVAILABLE=1
+if [ -n "$PINNED_AI" ]; then
+    SELECTED_AI="$PINNED_AI"
+    SELECTED_MODEL="$("$JQ_BIN" -r '.model' "$IN_PROGRESS_FILE")"
+    SELECTED_EFFORT="$("$JQ_BIN" -r '.effort' "$IN_PROGRESS_FILE")"
+    AI_SESSION_ID="$("$JQ_BIN" -r '.session_id // empty' "$IN_PROGRESS_FILE")"
+    SESSION_COMMENT_ID="$("$JQ_BIN" -r '.session_comment_id // 0' "$IN_PROGRESS_FILE")"
+    if [ -n "$AI_SESSION_ID" ]; then
+        SESSION_IS_RESUME=1
+    fi
+    if [ "$QUOTA_RESUME_READY" -ne 1 ] && ! selected_ai_has_capacity "$SELECTED_AI"; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log "Dry run: pinned $SELECTED_AI session $AI_SESSION_ID is waiting for usage."
+            exit 0
+        fi
+        if [ -z "$AI_SESSION_ID" ]; then
+            fail "The pinned $SELECTED_AI attempt has no resumable session ID."
+        fi
+        mark_quota_paused
+        deliver_quota_pause_notifications
+        exit "$QUOTA_PAUSED_EXIT_CODE"
     fi
 else
-    log "Claude remaining quota — unavailable (claude was not found in PATH)."
-fi
-if codex_has_capacity; then
-    CODEX_AVAILABLE=1
-fi
+    if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
+        if claude_has_capacity; then
+            CLAUDE_AVAILABLE=1
+        fi
+    else
+        log "Claude remaining quota — unavailable (claude was not found in PATH)."
+    fi
+    if codex_has_capacity; then
+        CODEX_AVAILABLE=1
+    fi
 
-if [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
-    SELECTED_AI="Claude"
-    SELECTED_MODEL="$CLAUDE_MODEL"
-    SELECTED_EFFORT="$CLAUDE_EFFORT"
-elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
-    SELECTED_AI="Codex"
-    SELECTED_MODEL="$CODEX_MODEL"
-    SELECTED_EFFORT="$CODEX_EFFORT"
-else
-    log "Neither Claude nor Codex has at least $MIN_REMAINING_PERCENT% remaining in every active quota window; stopping."
-    exit 0
+    if [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Claude"
+        SELECTED_MODEL="$CLAUDE_MODEL"
+        SELECTED_EFFORT="$CLAUDE_EFFORT"
+        AI_SESSION_ID="$("$PYTHON_BIN" -c 'import uuid; print(uuid.uuid4())')"
+    elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Codex"
+        SELECTED_MODEL="$CODEX_MODEL"
+        SELECTED_EFFORT="$CODEX_EFFORT"
+    else
+        log "Neither Claude nor Codex has at least $MIN_REMAINING_PERCENT% remaining in every active quota window; stopping."
+        exit 0
+    fi
 fi
-log "Selected $SELECTED_AI model $SELECTED_MODEL with effort $SELECTED_EFFORT for this run."
+if [ "$SESSION_IS_RESUME" -eq 1 ]; then
+    log "Pinned $SELECTED_AI model $SELECTED_MODEL session $AI_SESSION_ID with effort $SELECTED_EFFORT for this continuation."
+else
+    log "Selected $SELECTED_AI model $SELECTED_MODEL with effort $SELECTED_EFFORT for this run."
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
     log "Dry run complete: would run $SELECTED_AI for $ISSUE_URL."
@@ -650,6 +928,31 @@ if [ -f "$IN_PROGRESS_FILE" ]; then
     fi
     RECOVERY_MODE=1
 
+    if [ -z "$PINNED_AI" ]; then
+        SESSION_COMMENT_ID=0
+        if [[ "$TRIGGER_COMMENT_ID_JSON" =~ ^[0-9]+$ ]]; then
+            SESSION_COMMENT_ID="$TRIGGER_COMMENT_ID_JSON"
+        fi
+        IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+        "$JQ_BIN" \
+            --arg ai_tool "$SELECTED_AI" \
+            --arg model "$SELECTED_MODEL" \
+            --arg effort "$SELECTED_EFFORT" \
+            --arg session_id "$AI_SESSION_ID" \
+            --argjson session_comment_id "$SESSION_COMMENT_ID" '
+                .ai_tool = $ai_tool
+                | .model = $model
+                | .effort = $effort
+                | .session_id = $session_id
+                | .session_comment_id = $session_comment_id
+                | .status = "active"
+                | .quota_pause_count = (.quota_pause_count // 0)
+            ' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+        mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+        IN_PROGRESS_TEMP=""
+        log "Attached the legacy recovery attempt to a persistent $SELECTED_AI session."
+    fi
+
     if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
         RECOVERY_HAS_DIRTY_WORKTREE=1
         log "Resuming the uncommitted work left by the previous issue #$ISSUE_NUMBER attempt."
@@ -670,43 +973,67 @@ else
     if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
         fail "The repository has uncommitted changes unrelated to a saved worker attempt; refusing to mix them into an unattended commit."
     fi
+    SESSION_COMMENT_ID=0
+    if [[ "$TRIGGER_COMMENT_ID_JSON" =~ ^[0-9]+$ ]]; then
+        SESSION_COMMENT_ID="$TRIGGER_COMMENT_ID_JSON"
+    fi
     save_in_progress_issue "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_URL" "$BASE_SHA"
 fi
 
 PROMPT_FILE="$(mktemp "$STATE_DIR/issue-prompt.XXXXXX")"
-printf '%s\n' \
-    "Issue title:" \
-    "$ISSUE_TITLE" \
-    "Issue number:" \
-    "#$ISSUE_NUMBER" \
-    "" \
-    "Issue description:" \
-    "$ISSUE_DESCRIPTION" \
-    "" \
-    "Issue tags:" \
-    "${ISSUE_TAGS:-none}" \
-    "" \
-    "This is an unattended autopilot run. Do not ask the user questions, request confirmation, or pause for interactive input. Resolve ambiguity from the issue and repository, make reasonable safe assumptions, and implement the approach you recommend. If several valid approaches exist, choose the best maintainable option yourself. Only report a blocker when required credentials, authority, or external information are genuinely unavailable." \
-    "Implement this issue in $REPO_DIR. Follow the repository instructions, run relevant tests, and commit the completed work to main as one commit. Include #$ISSUE_NUMBER in the commit message. Do not push. Run verification commands in the foreground; do not return while tests or builds are still running." \
-    "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, the solution, and verification in one to three short paragraphs or a brief list. Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
-    > "$PROMPT_FILE"
+if [ "$SESSION_IS_RESUME" -eq 1 ]; then
+    load_resume_comments
+    printf '%s\n' \
+        "Continue the existing unattended session for GitHub issue #$ISSUE_NUMBER ($ISSUE_TITLE) from exactly where the previous turn stopped when usage became unavailable." \
+        "Inspect and preserve the work already present in the repository, finish the implementation and foreground verification, and commit the completed work to main as one commit referencing #$ISSUE_NUMBER. Do not push or ask for interactive input." \
+        "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, solution, and verification without code snippets, diffs, file contents, command transcripts, or step-by-step output." \
+        > "$PROMPT_FILE"
+    if [ "$(printf '%s' "$RESUME_COMMENTS_JSON" | "$JQ_BIN" -r 'length')" -gt 0 ]; then
+        {
+            printf '\nTrusted GitHub comments added since this session last received issue context:\n'
+            printf '%s' "$RESUME_COMMENTS_JSON" | "$JQ_BIN" -r '
+                .[] | "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)\n"
+            '
+            printf '%s\n' "Treat these comments as additional requirements or corrections for the work you are continuing."
+        } >> "$PROMPT_FILE"
+        log "Adding trusted issue comments through comment $RESUME_COMMENT_ID to the resumed session."
+    fi
+    save_session_comment_watermark "$RESUME_COMMENT_ID"
+else
+    printf '%s\n' \
+        "Issue title:" \
+        "$ISSUE_TITLE" \
+        "Issue number:" \
+        "#$ISSUE_NUMBER" \
+        "" \
+        "Issue description:" \
+        "$ISSUE_DESCRIPTION" \
+        "" \
+        "Issue tags:" \
+        "${ISSUE_TAGS:-none}" \
+        "" \
+        "This is an unattended autopilot run. Do not ask the user questions, request confirmation, or pause for interactive input. Resolve ambiguity from the issue and repository, make reasonable safe assumptions, and implement the approach you recommend. If several valid approaches exist, choose the best maintainable option yourself. Only report a blocker when required credentials, authority, or external information are genuinely unavailable." \
+        "Implement this issue in $REPO_DIR. Follow the repository instructions, run relevant tests, and commit the completed work to main as one commit. Include #$ISSUE_NUMBER in the commit message. Do not push. Run verification commands in the foreground; do not return while tests or builds are still running." \
+        "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, the solution, and verification in one to three short paragraphs or a brief list. Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
+        > "$PROMPT_FILE"
 
-if [ "$WORK_TYPE" = "followup" ]; then
-    {
-        printf '\n%s\n' "Follow-up rework context:"
-        printf '%s\n' "This issue was previously worked, but one or more new GitHub comments indicate that it needs another pass. Treat the new comments as refinement or defect feedback. Reinspect the existing implementation, make the additional fix, verify it, and create a new commit on main that references #$ISSUE_NUMBER."
-        printf '\nPrevious completion commit and change summary:\n'
-        git -C "$REPO_DIR" show --no-ext-diff --format=fuller --stat --summary "$PREVIOUS_COMMIT_SHA"
-        printf '\nInspect the complete previous patch with: git show --no-ext-diff %s\n' "$PREVIOUS_COMMIT_SHA"
-        printf '\nPrevious worker completion comment:\n'
-        printf '%s' "$PREVIOUS_COMPLETION_COMMENT_JSON" | "$JQ_BIN" -r '
-            "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)"
-        '
-        printf '\nNew GitHub follow-up comments to address, in order:\n'
-        printf '%s' "$FOLLOWUP_COMMENTS_JSON" | "$JQ_BIN" -r '
-            .[] | "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)\n"
-        '
-    } >> "$PROMPT_FILE"
+    if [ "$WORK_TYPE" = "followup" ]; then
+        {
+            printf '\n%s\n' "Follow-up rework context:"
+            printf '%s\n' "This issue was previously worked, but one or more new GitHub comments indicate that it needs another pass. Treat the new comments as refinement or defect feedback. Reinspect the existing implementation, make the additional fix, verify it, and create a new commit on main that references #$ISSUE_NUMBER."
+            printf '\nPrevious completion commit and change summary:\n'
+            git -C "$REPO_DIR" show --no-ext-diff --format=fuller --stat --summary "$PREVIOUS_COMMIT_SHA"
+            printf '\nInspect the complete previous patch with: git show --no-ext-diff %s\n' "$PREVIOUS_COMMIT_SHA"
+            printf '\nPrevious worker completion comment:\n'
+            printf '%s' "$PREVIOUS_COMPLETION_COMMENT_JSON" | "$JQ_BIN" -r '
+                "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)"
+            '
+            printf '\nNew GitHub follow-up comments to address, in order:\n'
+            printf '%s' "$FOLLOWUP_COMMENTS_JSON" | "$JQ_BIN" -r '
+                .[] | "Comment #\(.id) by @\(.author) at \(.created_at):\n\(.body)\n"
+            '
+        } >> "$PROMPT_FILE"
+    fi
 fi
 
 if [ "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1 ]; then
@@ -720,35 +1047,92 @@ elif [ "$RECOVERY_MODE" -eq 1 ] && [ -n "$RECOVERY_CANDIDATE_SHA" ]; then
 fi
 
 : > "$AI_OUTPUT_FILE"
+: > "$AI_DIAGNOSTIC_FILE"
+AI_STATUS=0
 
 if [ "$SELECTED_AI" = "Claude" ]; then
-    if ! (
-        cd -- "$REPO_DIR"
-        "$CLAUDE_BIN" \
-            --model "$CLAUDE_MODEL" \
-            --effort "$SELECTED_EFFORT" \
-            --permission-mode bypassPermissions \
-            -p - < "$PROMPT_FILE"
-    ) 2>&1 | tee "$AI_OUTPUT_FILE"; then
-        fail "Claude exited unsuccessfully. Its output is in $AI_OUTPUT_FILE."
+    CLAUDE_ARGS=(
+        --model "$SELECTED_MODEL"
+        --effort "$SELECTED_EFFORT"
+        --permission-mode bypassPermissions
+    )
+    if [ "$SESSION_IS_RESUME" -eq 1 ]; then
+        CLAUDE_ARGS+=(--resume "$AI_SESSION_ID")
+    else
+        CLAUDE_ARGS+=(--session-id "$AI_SESSION_ID")
     fi
+    set +e
+    (
+        cd -- "$REPO_DIR"
+        "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+            -p - < "$PROMPT_FILE"
+    ) 2>&1 | tee "$AI_OUTPUT_FILE"
+    AI_STATUS="${PIPESTATUS[0]}"
+    set -e
 else
     # Current Codex uses these equivalents for the older --yolo and --effort
     # spellings, and '-' reads the prompt from stdin (where -p now means profile).
     log "Codex is working. Detailed implementation output is hidden; its final summary will appear when finished."
-    if ! "$CODEX_BIN" exec \
-        -m "$CODEX_MODEL" \
-        --dangerously-bypass-approvals-and-sandbox \
-        --dangerously-bypass-hook-trust \
-        -c "model_reasoning_effort=\"$SELECTED_EFFORT\"" \
-        -C "$REPO_DIR" \
-        --output-last-message "$AI_OUTPUT_FILE" \
-        - < "$PROMPT_FILE" > "$AI_DIAGNOSTIC_FILE" 2>&1; then
-        fail "Codex exited unsuccessfully. Diagnostic output is in $AI_DIAGNOSTIC_FILE."
+    set +e
+    if [ "$SESSION_IS_RESUME" -eq 1 ]; then
+        (
+            cd -- "$REPO_DIR"
+            "$CODEX_BIN" exec resume \
+                -m "$SELECTED_MODEL" \
+                --dangerously-bypass-approvals-and-sandbox \
+                --dangerously-bypass-hook-trust \
+                -c "model_reasoning_effort=\"$SELECTED_EFFORT\"" \
+                --json \
+                --output-last-message "$AI_OUTPUT_FILE" \
+                "$AI_SESSION_ID" \
+                - < "$PROMPT_FILE"
+        ) > "$AI_DIAGNOSTIC_FILE" 2>&1
+        AI_STATUS="$?"
+    else
+        "$CODEX_BIN" exec \
+            -m "$SELECTED_MODEL" \
+            --dangerously-bypass-approvals-and-sandbox \
+            --dangerously-bypass-hook-trust \
+            -c "model_reasoning_effort=\"$SELECTED_EFFORT\"" \
+            -C "$REPO_DIR" \
+            --json \
+            --output-last-message "$AI_OUTPUT_FILE" \
+            - < "$PROMPT_FILE" > "$AI_DIAGNOSTIC_FILE" 2>&1
+        AI_STATUS="$?"
     fi
-    if [ ! -s "$AI_OUTPUT_FILE" ]; then
-        fail "Codex finished without writing a final summary. Diagnostic output is in $AI_DIAGNOSTIC_FILE."
+    set -e
+    CAPTURED_CODEX_SESSION_ID="$("$JQ_BIN" -Rr '
+        fromjson?
+        | select(.type == "thread.started")
+        | .thread_id // empty
+    ' "$AI_DIAGNOSTIC_FILE" | sed -n '1p')"
+    if [ -n "$CAPTURED_CODEX_SESSION_ID" ]; then
+        save_codex_session_id "$CAPTURED_CODEX_SESSION_ID"
     fi
+fi
+
+if [ "$AI_STATUS" -ne 0 ] || [ ! -s "$AI_OUTPUT_FILE" ]; then
+    QUOTA_FAILURE=0
+    if ai_output_indicates_quota; then
+        QUOTA_FAILURE=1
+    elif ! selected_ai_has_capacity "$SELECTED_AI"; then
+        QUOTA_FAILURE=1
+    fi
+    if [ "$QUOTA_FAILURE" -eq 1 ]; then
+        if [ -z "$AI_SESSION_ID" ]; then
+            fail "$SELECTED_AI exhausted usage before returning a resumable session ID. Its worktree state was preserved, but the session cannot be resumed automatically."
+        fi
+        mark_quota_paused
+        deliver_quota_pause_notifications
+        exit "$QUOTA_PAUSED_EXIT_CODE"
+    fi
+    if [ "$AI_STATUS" -ne 0 ]; then
+        fail "$SELECTED_AI exited unsuccessfully. Its session and repository state were preserved; output is in $AI_OUTPUT_FILE and $AI_DIAGNOSTIC_FILE."
+    fi
+    fail "$SELECTED_AI finished without writing a final summary. Its session and repository state were preserved; diagnostics are in $AI_DIAGNOSTIC_FILE."
+fi
+
+if [ "$SELECTED_AI" = "Codex" ]; then
     printf '\n%s\n' '--- Codex completion summary ---'
     sed -n '1,$p' "$AI_OUTPUT_FILE"
 fi
