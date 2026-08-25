@@ -24,45 +24,84 @@ import coil.intercept.Interceptor
 import coil.request.CachePolicy
 import coil.request.ImageResult
 import coil.request.SuccessResult
+import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class ArtworkCache(context: Context) : Interceptor {
     private val lastFetchedAt = ConcurrentHashMap<String, Long>()
+    private val refreshLocks = Array(64) { Mutex() }
     private val persistedFetchTimes = context.applicationContext.getSharedPreferences("swarm_artwork_fetch_times", Context.MODE_PRIVATE)
 
     override suspend fun intercept(chain: Interceptor.Chain): ImageResult {
-        val key = chain.request.data.toString()
+        val key = artworkRequestCacheKey(chain.request.data)
+        val keyedRequest = chain.request.newBuilder()
+            .diskCacheKey(key)
+            .build()
         val now = System.currentTimeMillis()
         val ttlMillis = DEFAULT_ARTWORK_CACHE_MINUTES * 60_000L
         val timestampKey = key.sha256()
-        val lastFetch = lastFetchedAt[key] ?: persistedFetchTimes.getLong(timestampKey, 0L).also {
-            if (it > 0L) lastFetchedAt[key] = it
+        if (!isStale(key, timestampKey, now, ttlMillis)) {
+            return chain.proceed(keyedRequest)
         }
-        val stale = lastFetch == 0L || now - lastFetch >= ttlMillis
 
-        val request = if (stale) {
-            chain.request.newBuilder()
+        // Prefetch and the newly visible card can request the same URL at the
+        // same time. Serialize only that cache key so one request fetches the
+        // bytes and every waiter then reads the completed Coil cache entry.
+        val refreshLock = refreshLocks[Math.floorMod(key.hashCode(), refreshLocks.size)]
+        return refreshLock.withLock {
+            val refreshNow = System.currentTimeMillis()
+            if (!isStale(key, timestampKey, refreshNow, ttlMillis)) {
+                return@withLock chain.proceed(keyedRequest)
+            }
+            val refreshRequest = keyedRequest.newBuilder()
                 .memoryCachePolicy(CachePolicy.WRITE_ONLY)
                 .diskCachePolicy(CachePolicy.WRITE_ONLY)
                 .build()
-        } else {
-            chain.request
+            val result = chain.proceed(refreshRequest)
+            // Persist only a successful forced refresh. Cache hits must not
+            // turn this into a sliding expiration, and failed requests must
+            // remain retryable.
+            if (result is SuccessResult) {
+                val fetchedAt = System.currentTimeMillis()
+                lastFetchedAt[key] = fetchedAt
+                persistedFetchTimes.edit().putLong(timestampKey, fetchedAt).apply()
+            }
+            result
         }
-        val result = chain.proceed(request)
-        // Persist only a successful forced refresh. Cache hits must not turn
-        // this into a sliding expiration, and failed requests must remain
-        // retryable. Persisting the timestamp fixes the former cold-start
-        // behavior where every image skipped an otherwise-valid disk entry
-        // once per process launch.
-        if (stale && result is SuccessResult) {
-            lastFetchedAt[key] = now
-            persistedFetchTimes.edit().putLong(timestampKey, now).apply()
+    }
+
+    private fun isStale(key: String, timestampKey: String, now: Long, ttlMillis: Long): Boolean {
+        val lastFetch = lastFetchedAt[key] ?: persistedFetchTimes.getLong(timestampKey, 0L).also {
+            if (it > 0L) lastFetchedAt[key] = it
         }
-        return result
+        return lastFetch == 0L || now - lastFetch >= ttlMillis
     }
 
     private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
         .digest(toByteArray())
         .joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * Coil normally keys an HTTP image by its complete URL. SWARM's host is a
+ * loopback proxy on a random port, so that default discards every disk-cache
+ * entry after an app restart even though server, artwork path, version, and
+ * requested width are unchanged. Strip only the transient loopback authority;
+ * the server id remains in the path and version/size remain in the query.
+ */
+internal fun artworkRequestCacheKey(data: Any): String {
+    val raw = data.toString()
+    val uri = runCatching { URI(raw) }.getOrNull() ?: return raw
+    val path = uri.rawPath ?: return raw
+    if (uri.scheme != "http" || uri.host !in setOf("127.0.0.1", "localhost") || "/art/" !in path) {
+        return raw
+    }
+    return buildString {
+        append("swarm-artwork:")
+        append(path)
+        uri.rawQuery?.let { append('?').append(it) }
+    }
 }

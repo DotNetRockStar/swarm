@@ -71,6 +71,11 @@ class SwarmApplication : Application(), ImageLoaderFactory {
                     .maxSizeBytes(200L * 1024 * 1024)
                     .build()
             }
+            // Artwork URLs are versioned and ArtworkCache owns the 30-day
+            // freshness policy. The loopback proxy deliberately has no HTTP
+            // Cache-Control header; letting Coil interpret that absence
+            // causes a disk entry to be revalidated over QUIC on reuse.
+            .respectCacheHeaders(false)
             // TV sticks have few fast cores and a relatively small app
             // heap. Bound fetch/decode work so a newly composed shelf
             // cannot turn into a burst that competes with focus and frame
