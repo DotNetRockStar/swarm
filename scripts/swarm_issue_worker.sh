@@ -758,6 +758,59 @@ ai_output_indicates_quota() {
         "$AI_OUTPUT_FILE" "$AI_DIAGNOSTIC_FILE" 2>/dev/null
 }
 
+extract_followup_metadata() {
+    local comments_file="$1"
+
+    "$JQ_BIN" -c \
+        --arg trusted_author "$TRUSTED_FOLLOWUP_AUTHOR" '
+        def is_worker_generated_comment:
+            (.body // "") | contains("<!-- swarm-issue-worker:");
+        def is_completion_comment:
+            (.body // "") | contains("<!-- swarm-issue-worker:commit:");
+        (add // [] | sort_by(.id)) as $comments
+        | ($comments | map(select(is_completion_comment)) | last) as $completion
+        | if $completion == null then empty
+          else
+            (($completion.body
+                | capture("swarm-issue-worker:commit:(?<sha>[0-9a-f]{40})")?
+                | .sha) // "") as $previous_commit_sha
+            | (($completion.body
+                | capture("(?:Completed|Reworked) by \\*\\*(?<ai>Claude|Codex)\\*\\*")?
+                | .ai) // "") as $previous_ai
+            | (($completion.body
+                | capture("through-comment:(?<id>[0-9]+)")?
+                | .id
+                | tonumber) // $completion.id) as $processed_through_id
+            | ($comments
+                | map(select(
+                    (is_worker_generated_comment | not)
+                    and .id > $processed_through_id
+                    and (.user.login // "") == $trusted_author
+                ))) as $followups
+            | if ($followups | length) == 0 then empty
+              else {
+                previous_commit_sha: $previous_commit_sha,
+                previous_ai: $previous_ai,
+                previous_completion_comment: {
+                    id: $completion.id,
+                    author: ($completion.user.login // "unknown"),
+                    created_at: $completion.created_at,
+                    body: ($completion.body // "")
+                },
+                followup_comments: ($followups | map({
+                    id,
+                    author: (.user.login // "unknown"),
+                    created_at,
+                    body: (.body // "")
+                })),
+                trigger_comment_id: ($followups | last | .id),
+                trigger_created_at: ($followups | first | .created_at)
+              }
+            end
+          end
+    ' "$comments_file"
+}
+
 load_resume_comments() {
     COMMENTS_FILE="$(mktemp "$STATE_DIR/github-comments.XXXXXX")"
     if ! "$GH_BIN" api --method GET --paginate --slurp \
@@ -1115,52 +1168,7 @@ else
             fail "GitHub comment query failed for completed issue #$completed_issue_number."
         fi
 
-        FOLLOWUP_METADATA="$("$JQ_BIN" -c \
-            --arg trusted_author "$TRUSTED_FOLLOWUP_AUTHOR" '
-            def is_worker_comment:
-                (.body // "") | contains("<!-- swarm-issue-worker:commit:");
-            (add // [] | sort_by(.id)) as $comments
-            | ($comments | map(select(is_worker_comment)) | last) as $completion
-            | if $completion == null then empty
-              else
-                (($completion.body
-                    | capture("swarm-issue-worker:commit:(?<sha>[0-9a-f]{40})")?
-                    | .sha) // "") as $previous_commit_sha
-                | (($completion.body
-                    | capture("(?:Completed|Reworked) by \\*\\*(?<ai>Claude|Codex)\\*\\*")?
-                    | .ai) // "") as $previous_ai
-                | (($completion.body
-                    | capture("through-comment:(?<id>[0-9]+)")?
-                    | .id
-                    | tonumber) // $completion.id) as $processed_through_id
-                | ($comments
-                    | map(select(
-                        (is_worker_comment | not)
-                        and .id > $processed_through_id
-                        and (.user.login // "") == $trusted_author
-                    ))) as $followups
-                | if ($followups | length) == 0 then empty
-                  else {
-                    previous_commit_sha: $previous_commit_sha,
-                    previous_ai: $previous_ai,
-                    previous_completion_comment: {
-                        id: $completion.id,
-                        author: ($completion.user.login // "unknown"),
-                        created_at: $completion.created_at,
-                        body: ($completion.body // "")
-                    },
-                    followup_comments: ($followups | map({
-                        id,
-                        author: (.user.login // "unknown"),
-                        created_at,
-                        body: (.body // "")
-                    })),
-                    trigger_comment_id: ($followups | last | .id),
-                    trigger_created_at: ($followups | first | .created_at)
-                  }
-                end
-              end
-        ' "$COMMENTS_FILE")"
+        FOLLOWUP_METADATA="$(extract_followup_metadata "$COMMENTS_FILE")"
         rm -f -- "$COMMENTS_FILE"
         COMMENTS_FILE=""
 

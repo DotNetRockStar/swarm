@@ -28,6 +28,41 @@ export SWARM_ISSUE_WORKER_STATE_DIR="$TEST_STATE"
 source "$SCRIPT_DIR/swarm_issue_worker.sh"
 mkdir -p -- "$STATE_DIR"
 
+# Worker-generated quota/status comments are authored by the trusted account,
+# but must never be mistaken for human follow-up requirements.
+COMMENTS_FIXTURE="$TEST_STATE/comments.json"
+"$JQ_BIN" -n '[[
+    {
+        id: 100,
+        created_at: "2026-08-25T10:00:00Z",
+        user: {login: "DotNetRockStar"},
+        body: "<!-- swarm-issue-worker:commit:1111111111111111111111111111111111111111 -->\nCompleted by **Codex**."
+    },
+    {
+        id: 101,
+        created_at: "2026-08-25T10:01:00Z",
+        user: {login: "DotNetRockStar"},
+        body: "<!-- swarm-issue-worker:quota-paused:issue:71;pause:1;session:test -->\nWork paused."
+    },
+    {
+        id: 102,
+        created_at: "2026-08-25T10:02:00Z",
+        user: {login: "DotNetRockStar"},
+        body: "Please add a disk-usage graph."
+    },
+    {
+        id: 103,
+        created_at: "2026-08-25T10:03:00Z",
+        user: {login: "someone-else"},
+        body: "Untrusted request."
+    }
+]]' > "$COMMENTS_FIXTURE"
+TRUSTED_FOLLOWUP_AUTHOR="DotNetRockStar"
+FOLLOWUP_FIXTURE="$(extract_followup_metadata "$COMMENTS_FIXTURE")"
+test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.trigger_comment_id')" = "102"
+test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.followup_comments | length')" = "1"
+test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.followup_comments[0].body')" = "Please add a disk-usage graph."
+
 WORK_TYPE="followup"
 PREVIOUS_AI="Claude"
 CLAUDE_AVAILABLE=1
