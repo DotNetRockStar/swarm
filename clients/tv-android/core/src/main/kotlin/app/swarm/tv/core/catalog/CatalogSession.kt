@@ -488,15 +488,31 @@ class CatalogSession internal constructor(
     ) : PeerConnection {
         override fun request(path: String, range: ByteRange?, ifNoneMatch: String?, playback: PlaybackPreferences?, errorReport: ClientErrorReport?, like: LikeToggle?): PeerResponse {
             val current = connections[device.deviceId]
-                ?: runBlocking { connectionFor(device, clientCertificate, clientKey) }
+                ?: connectionForBlocking()
                 ?: throw IOException("server is no longer connected")
             return try {
                 current.request(path, range, ifNoneMatch, playback, errorReport, like)
             } catch (e: IOException) {
                 evictConnection(device.deviceId, current)
-                val fresh = runBlocking { connectionFor(device, clientCertificate, clientKey) } ?: throw e
+                val fresh = connectionForBlocking() ?: throw e
                 fresh.request(path, range, ifNoneMatch, playback, errorReport, like)
             }
+        }
+
+        /**
+         * `runBlocking` is interruptible. A closed QUIC connection can leave
+         * the proxy worker interrupted just as it enters this reconnect; if
+         * the resulting checked [InterruptedException] escapes an
+         * [java.util.concurrent.ExecutorService] task, Android's executor
+         * wraps it in [Error] and terminates the process. Preserve the
+         * interrupt while normalizing it to the transport contract the
+         * loopback proxy already contains as a recoverable 503.
+         */
+        private fun connectionForBlocking(): PeerConnection? = try {
+            runBlocking { connectionFor(device, clientCertificate, clientKey) }
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IOException("server reconnect interrupted", error)
         }
     }
 

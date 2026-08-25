@@ -114,6 +114,13 @@ class PeerLoopbackProxy private constructor(
                 val requestLine = readLine(input, MAX_REQUEST_LINE_BYTES) ?: return
                 val headers = readHeaders(input)
                 serve(requestLine, headers, output)
+            } catch (e: InterruptedException) {
+                // Defensive last boundary for PeerConnection implementations:
+                // a checked interruption escaping an ExecutorService worker
+                // is wrapped in Error by ThreadPoolExecutor and is fatal on
+                // Android. ReconnectingConnection normally converts this to
+                // IOException first, but no transport may take down the app.
+                Thread.currentThread().interrupt()
             } catch (e: IOException) {
                 // Peer went away mid-request (player seeked/aborted) — nothing to respond to.
             } catch (e: RuntimeException) {

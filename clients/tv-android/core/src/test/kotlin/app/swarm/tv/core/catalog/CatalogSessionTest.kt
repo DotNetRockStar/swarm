@@ -16,8 +16,11 @@ import app.swarm.tv.core.transport.PeerConnection
 import app.swarm.tv.core.transport.PeerResponse
 import app.swarm.tv.core.transport.TestIdentity
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -107,6 +110,40 @@ class CatalogSessionTest {
         proxy.close()
     }
 
+    @Test
+    fun `interrupted playback reconnect becomes a recoverable 503`() = runBlocking {
+        val manifest = CatalogManifest(thumbprint = "catalog-v1", entries = emptyList())
+        val connection = InterruptingCatalogConnection(manifest)
+        var connectionAttempts = 0
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+
+        CatalogSession(proxy, directConnector = { _, _, _ ->
+            connectionAttempts += 1
+            if (connectionAttempts == 1) connection else null
+        }).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+            assertTrue(result.unreachable.isEmpty())
+
+            // Mirrors the Fire TV crash: kwik reported the dead connection
+            // and left the proxy worker interrupted immediately before its
+            // runBlocking reconnect attempt.
+            connection.interruptOnRequest = true
+            OkHttpClient().newCall(
+                Request.Builder().url(proxy.urlFor(device.deviceId, "/media/song")).build(),
+            ).execute().use { response -> assertEquals(503, response.code) }
+        }
+        proxy.close()
+    }
+
     private class CatalogConnection(private val manifest: CatalogManifest) : PeerConnection {
         override fun request(
             path: String,
@@ -129,5 +166,36 @@ class CatalogSessionTest {
             PeerResponseHeader(status = status, len = body.size.toLong()),
             ByteArrayInputStream(body),
         )
+    }
+
+    private class InterruptingCatalogConnection(private val manifest: CatalogManifest) : PeerConnection {
+        var interruptOnRequest = false
+
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            if (interruptOnRequest) {
+                Thread.currentThread().interrupt()
+                throw IOException("connection closed")
+            }
+            val body = when (path) {
+                "/catalog/thumbprint" -> """{"thumbprint":"${manifest.thumbprint}","entry_count":${manifest.entries.size}}"""
+                "/catalog/manifest.gz" -> return PeerResponse(
+                    PeerResponseHeader(status = 404, len = 0),
+                    ByteArrayInputStream(ByteArray(0)),
+                )
+                "/catalog/manifest" -> SwarmJson.encodeToString(manifest)
+                else -> error("unexpected catalog request: $path")
+            }.toByteArray()
+            return PeerResponse(
+                PeerResponseHeader(status = 200, len = body.size.toLong()),
+                ByteArrayInputStream(body),
+            )
+        }
     }
 }
