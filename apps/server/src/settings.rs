@@ -4,8 +4,11 @@
 //! deliberately has no environment-only media-root configuration path.
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRootSetting {
@@ -18,9 +21,9 @@ pub struct MediaRootSetting {
     pub reconnect_url: Option<String>,
 }
 
-/// A lightweight accessibility check used by the desktop UI. Opening the
-/// directory (rather than merely checking `Path::exists`) also catches a
-/// mounted network share that is present but no longer readable.
+/// A bounded accessibility check used by the desktop UI and recovery loop.
+/// It performs real directory, metadata, and representative file I/O so a
+/// stale SMB mount cannot pass merely because its `/Volumes` entry exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MediaRootHealth {
     pub label: String,
@@ -28,28 +31,93 @@ pub struct MediaRootHealth {
     pub available: bool,
     pub error: Option<String>,
     pub auto_reconnect: bool,
+    pub network_protocol: Option<String>,
 }
 
 pub fn media_root_health(roots: &[MediaRootSetting]) -> Vec<MediaRootHealth> {
     roots
         .iter()
-        .map(|root| match std::fs::read_dir(&root.path) {
+        .map(|root| match media_root_readable(root) {
             Ok(_) => MediaRootHealth {
                 label: root.label.clone(),
                 path: root.path.clone(),
                 available: true,
                 error: None,
-                auto_reconnect: root.reconnect_url.is_some(),
+                auto_reconnect: root
+                    .reconnect_url
+                    .as_deref()
+                    .is_some_and(automatically_reconnectable),
+                network_protocol: root.reconnect_url.as_deref().and_then(network_protocol),
             },
             Err(error) => MediaRootHealth {
                 label: root.label.clone(),
                 path: root.path.clone(),
                 available: false,
                 error: Some(error.to_string()),
-                auto_reconnect: root.reconnect_url.is_some(),
+                auto_reconnect: root
+                    .reconnect_url
+                    .as_deref()
+                    .is_some_and(automatically_reconnectable),
+                network_protocol: root.reconnect_url.as_deref().and_then(network_protocol),
             },
         })
         .collect()
+}
+
+fn media_root_readable(root: &MediaRootSetting) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if root
+        .reconnect_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("smb://"))
+        && !smb_root_is_mounted(root)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "SMB share is not mounted",
+        ));
+    }
+    probe_media_root(Path::new(&root.path))
+}
+
+fn probe_media_root(path: &Path) -> std::io::Result<()> {
+    const MAX_ENTRIES: usize = 32;
+    const MAX_DEPTH: usize = 2;
+
+    let mut directories = vec![(path.to_path_buf(), 0usize)];
+    let mut inspected = 0usize;
+    while let Some((directory, depth)) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            inspected += 1;
+            if metadata.is_file() {
+                let mut file = std::fs::File::open(entry.path())?;
+                let mut byte = [0u8; 1];
+                let _ = file.read(&mut byte)?;
+                return Ok(());
+            }
+            if metadata.is_dir() && depth < MAX_DEPTH {
+                directories.push((entry.path(), depth + 1));
+            }
+            if inspected >= MAX_ENTRIES {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn automatically_reconnectable(url: &str) -> bool {
+    url.starts_with("smb://") || url.starts_with("afp://")
+}
+
+fn network_protocol(url: &str) -> Option<String> {
+    if url.starts_with("smb://") {
+        Some("SMB".to_string())
+    } else {
+        None
+    }
 }
 
 /// Fill in reconnect URLs for currently mounted macOS SMB shares. Returns
@@ -105,6 +173,102 @@ pub fn reconnect_network_root(root: &MediaRootSetting) -> std::io::Result<bool> 
     }
 }
 
+/// Explicit recovery for a stale SMB mount. Unlike the background retry,
+/// this user-triggered operation may force-unmount the exact affected volume
+/// before reopening its saved password-free URL through macOS/Keychain.
+pub fn repair_smb_root(root: &MediaRootSetting) -> Result<(), String> {
+    let url = root
+        .reconnect_url
+        .as_deref()
+        .filter(|url| url.starts_with("smb://"))
+        .ok_or_else(|| "this media root does not have a saved SMB connection".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/sbin/mount")
+            .output()
+            .map_err(|error| format!("could not inspect mounted volumes: {error}"))?;
+        let mounts = String::from_utf8_lossy(&output.stdout);
+        if let Some(mount_point) = smb_mount_point_for_path(&root.path, &mounts) {
+            if !safe_smb_mount_point(&mount_point) {
+                return Err(format!(
+                    "refusing to force-unmount unexpected SMB path {mount_point}"
+                ));
+            }
+            let status = Command::new("/usr/sbin/diskutil")
+                .args(["unmount", "force", &mount_point])
+                .status()
+                .map_err(|error| format!("could not unmount stale SMB volume: {error}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "macOS could not unmount stale SMB volume {mount_point}"
+                ));
+            }
+        }
+
+        let status = Command::new("/usr/bin/open")
+            .args(["-g", url])
+            .status()
+            .map_err(|error| format!("could not reopen SMB connection: {error}"))?;
+        if !status.success() {
+            return Err("macOS could not reopen the SMB connection".to_string());
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if media_root_readable(root).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        return Err(format!(
+            "SMB reopened but {} did not become readable within 60 seconds; complete any macOS credential prompt, then retry",
+            root.path
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url;
+        Err("automatic SMB repair is currently available on macOS only".to_string())
+    }
+}
+
+fn smb_mount_point_for_path(path: &str, output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (source, remainder) = line.split_once(" on ")?;
+            if !source.starts_with("//") {
+                return None;
+            }
+            let (mount_point, _) = remainder.rsplit_once(" (")?;
+            let mount_point = mount_point.replace("\\040", " ");
+            let matches = path == mount_point
+                || path
+                    .strip_prefix(&mount_point)
+                    .is_some_and(|rest| rest.starts_with('/'));
+            matches.then_some((mount_point.len(), mount_point))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, mount_point)| mount_point)
+}
+
+#[cfg(target_os = "macos")]
+fn smb_root_is_mounted(root: &MediaRootSetting) -> bool {
+    Command::new("/sbin/mount")
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            smb_mount_point_for_path(&root.path, &String::from_utf8_lossy(&output.stdout)).is_some()
+        })
+}
+
+fn safe_smb_mount_point(path: &str) -> bool {
+    let path = Path::new(path);
+    path.parent() == Some(Path::new("/Volumes"))
+        && path.file_name().is_some_and(|name| !name.is_empty())
+}
+
 fn reconnect_url_from_mount_output(path: &str, output: &str) -> Option<String> {
     output
         .lines()
@@ -119,11 +283,9 @@ fn reconnect_url_from_mount_output(path: &str, output: &str) -> Option<String> {
             if !root_matches {
                 return None;
             }
-            let scheme = if source.starts_with("//") {
-                "smb"
-            } else {
+            if !source.starts_with("//") {
                 return None;
-            };
+            }
             let authority_and_path = source.trim_start_matches('/');
             let sanitized = if let Some((userinfo, host_path)) = authority_and_path.split_once('@')
             {
@@ -136,10 +298,163 @@ fn reconnect_url_from_mount_output(path: &str, output: &str) -> Option<String> {
             } else {
                 authority_and_path.to_string()
             };
-            Some((mount_point.len(), format!("{scheme}://{sanitized}")))
+            Some((mount_point.len(), format!("smb://{sanitized}")))
         })
         .max_by_key(|(mount_len, _)| *mount_len)
         .map(|(_, url)| url)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountedNetworkShare {
+    pub path: String,
+    pub reconnect_url: String,
+}
+
+/// Mount an SMB share selected in the desktop UI. SWARM never receives or
+/// stores its password: macOS owns the prompt and its Keychain entry.
+pub fn connect_smb_share(
+    label: &str,
+    server: &str,
+    share: &str,
+    username: Option<&str>,
+) -> Result<MountedNetworkShare, String> {
+    validate_network_share(label, server, share)?;
+    if username.is_some_and(|value| {
+        value.len() > 255
+            || value
+                .chars()
+                .any(|character| matches!(character, '\0' | '\n' | '\r'))
+    }) {
+        return Err("enter a valid SMB username".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = label;
+        mount_smb_macos(server, share, username)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (label, server, share, username);
+        Err("connecting SMB shares from SWARM is currently available on macOS; mount the SMB share with your operating system, then add its local folder path".to_string())
+    }
+}
+
+fn validate_network_share(label: &str, server: &str, share: &str) -> Result<(), String> {
+    if label.is_empty()
+        || label.len() > 64
+        || !label
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err("network-share labels may contain only letters, numbers, hyphens, underscores, and periods".to_string());
+    }
+    if server.is_empty()
+        || server.len() > 255
+        || !server
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_:[]%".contains(character))
+    {
+        return Err("enter a valid NAS hostname or IP address".to_string());
+    }
+    if share.trim_matches('/').is_empty()
+        || share.len() > 1024
+        || share
+            .chars()
+            .any(|character| character == '\0' || character == '\n' || character == '\r')
+    {
+        return Err("enter a valid SMB share name".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mount_smb_macos(
+    server: &str,
+    share: &str,
+    username: Option<&str>,
+) -> Result<MountedNetworkShare, String> {
+    let share = share.trim_matches('/');
+    let url = smb_url(server, share, username);
+    if let Some(path) = discover_smb_mount(server, share) {
+        return Ok(MountedNetworkShare {
+            path,
+            reconnect_url: url,
+        });
+    }
+    let status = Command::new("/usr/bin/open")
+        .args(["-g", &url])
+        .status()
+        .map_err(|error| format!("could not open the SMB connection: {error}"))?;
+    if !status.success() {
+        return Err("macOS could not open the SMB connection".to_string());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if let Some(path) = discover_smb_mount(server, share) {
+            return Ok(MountedNetworkShare {
+                path,
+                reconnect_url: url,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err("SMB did not become available within 60 seconds; finish or retry the macOS credential prompt".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn discover_smb_mount(server: &str, share: &str) -> Option<String> {
+    let output = Command::new("/sbin/mount").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    smb_mount_point_from_output(server, share, &text)
+}
+
+fn smb_mount_point_from_output(server: &str, share: &str, output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (source, remainder) = line.split_once(" on ")?;
+        let (mount_point, _) = remainder.rsplit_once(" (")?;
+        if !source.starts_with("//") {
+            return None;
+        }
+        let decoded_source = source.replace("\\040", " ");
+        let host_path = decoded_source
+            .trim_start_matches('/')
+            .rsplit_once('@')
+            .map_or(decoded_source.trim_start_matches('/'), |(_, value)| value);
+        let (mounted_server, mounted_share) = host_path.split_once('/')?;
+        (mounted_server.eq_ignore_ascii_case(server)
+            && mounted_share
+                .trim_matches('/')
+                .eq_ignore_ascii_case(share.trim_matches('/')))
+        .then(|| mount_point.replace("\\040", " "))
+    })
+}
+
+fn smb_url(server: &str, share: &str, username: Option<&str>) -> String {
+    let userinfo = username
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{}@", percent_encode_url_component(value)))
+        .unwrap_or_default();
+    let encoded_share = share
+        .split('/')
+        .map(percent_encode_url_component)
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("smb://{userinfo}{server}/{encoded_share}")
+}
+
+fn percent_encode_url_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +616,20 @@ mod tests {
         assert!(!health[1].available);
         assert!(health[1].error.is_some());
         assert!(health[1].auto_reconnect);
+        assert_eq!(health[1].network_protocol.as_deref(), Some("SMB"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn media_root_probe_reads_a_nested_representative_file() {
+        let dir =
+            std::env::temp_dir().join(format!("swarm-root-probe-test-{}", rand::random::<u64>()));
+        let nested = dir.join("movies").join("Example Movie");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("movie.mkv"), b"media").unwrap();
+
+        assert!(probe_media_root(&dir).is_ok());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -312,5 +641,41 @@ mod tests {
             reconnect_url_from_mount_output("/Volumes/share/movies", mounts).as_deref(),
             Some("smb://guest@nas.local/share")
         );
+    }
+
+    #[test]
+    fn smb_mount_matching_ignores_username_and_decodes_mount_point_spaces() {
+        let mounts = "//jerrod@NAS.local/Media on /Volumes/NAS\\040Media (smbfs, nodev)";
+        assert_eq!(
+            smb_mount_point_from_output("nas.local", "media", mounts).as_deref(),
+            Some("/Volumes/NAS Media")
+        );
+    }
+
+    #[test]
+    fn smb_repair_resolves_only_the_containing_mounted_volume() {
+        let mounts = "//user@nas.local/media on /Volumes/media (smbfs, nodev)\n//user@nas.local/media2 on /Volumes/media2 (smbfs, nodev)\n/dev/disk3s1 on /Volumes/local (apfs)";
+        assert_eq!(
+            smb_mount_point_for_path("/Volumes/media/movies", mounts).as_deref(),
+            Some("/Volumes/media")
+        );
+        assert!(safe_smb_mount_point("/Volumes/media"));
+        assert!(!safe_smb_mount_point("/"));
+        assert!(!safe_smb_mount_point("/Volumes"));
+        assert!(!safe_smb_mount_point("/Users/example/media"));
+    }
+
+    #[test]
+    fn smb_url_encodes_user_and_share_without_accepting_a_password() {
+        assert_eq!(
+            smb_url("nas.local", "Family Media/Movies", Some("media user")),
+            "smb://media%20user@nas.local/Family%20Media/Movies"
+        );
+    }
+
+    #[test]
+    fn network_share_validation_rejects_shell_metacharacters_in_server() {
+        assert!(validate_network_share("movies", "nas.local;touch bad", "/media").is_err());
+        assert!(validate_network_share("movies", "nas.local", "/media").is_ok());
     }
 }

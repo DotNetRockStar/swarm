@@ -78,6 +78,8 @@ impl ScanProgress {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
+    #[error("at least one media root is required")]
+    NoMediaRoots,
     #[error("io error under media root: {0}")]
     Io(#[from] std::io::Error),
     #[error("library store error: {0}")]
@@ -119,10 +121,27 @@ pub async fn scan_roots(
     roots: &[MediaRoot],
     progress_tx: Option<UnboundedSender<ScanProgressEvent>>,
 ) -> Result<ScanReport, ScanError> {
+    scan_roots_scoped(library, roots, roots.len() > 1, progress_tx).await
+}
+
+/// Reconcile only `roots` while preserving the path namespace of the full
+/// configured root set. When `multi_root_namespace` is true, paths retain
+/// their `{label}/` prefix and deletion reconciliation is restricted to the
+/// supplied labels. This is used after one network root recovers so unrelated
+/// local or network roots do not have to be walked again.
+pub async fn scan_roots_scoped(
+    library: &Library,
+    roots: &[MediaRoot],
+    multi_root_namespace: bool,
+    progress_tx: Option<UnboundedSender<ScanProgressEvent>>,
+) -> Result<ScanReport, ScanError> {
+    if roots.is_empty() {
+        return Err(ScanError::NoMediaRoots);
+    }
     let mut report = ScanReport::default();
     let known = library.snapshot().await?;
     let mut seen: HashMap<String, ()> = HashMap::new();
-    let multi = roots.len() > 1;
+    let mut artwork_cache = HashMap::<PathBuf, Vec<(String, ArtworkKind)>>::new();
 
     let progress = progress_tx.map(ScanProgress::new);
 
@@ -130,13 +149,17 @@ pub async fn scan_roots(
     // is known before the per-file processing phase's progress starts —
     // see [`ScanProgress`]'s doc comment for why the walk itself is now
     // also instrumented (`Discovering`), not just this second pass.
-    let mut all_files: Vec<(&MediaRoot, PathBuf, String)> = Vec::new();
+    let mut all_files: Vec<(&MediaRoot, DiscoveredMediaFile)> = Vec::new();
     for root in roots {
-        for (absolute, relative_under_root) in collect_media_files(&root.path, progress.as_ref())? {
-            all_files.push((root, absolute, relative_under_root));
+        for file in collect_media_files(&root.path, progress.as_ref())? {
+            all_files.push((root, file));
         }
     }
     let total = all_files.len() as u64;
+    let known_in_scope = known
+        .keys()
+        .filter(|path| path_belongs_to_roots(path, roots, multi_root_namespace))
+        .count();
 
     // Belt-and-suspenders alongside `collect_media_files`'s own root-read
     // error: even a *successful* but suspiciously-empty listing (a network
@@ -145,30 +168,21 @@ pub async fn scan_roots(
     // never be allowed to reach the removal-reconciliation loop below,
     // which would otherwise read "found nothing" as "the user deleted
     // every file" and wipe the whole known library.
-    if total == 0 && !known.is_empty() {
-        return Err(ScanError::SuspiciousEmptyScan(known.len()));
+    if total == 0 && known_in_scope > 0 {
+        return Err(ScanError::SuspiciousEmptyScan(known_in_scope));
     }
 
-    for (root, absolute, relative_under_root) in all_files {
-        let relative = if multi {
-            format!("{}/{relative_under_root}", root.label)
+    for (root, file) in all_files {
+        let relative = if multi_root_namespace {
+            format!("{}/{}", root.label, file.relative_under_root)
         } else {
-            relative_under_root.clone()
+            file.relative_under_root.clone()
         };
         if let Some(p) = &progress {
             p.tick_processing(total);
         }
-        let metadata = match std::fs::metadata(&absolute) {
-            Ok(meta) => meta,
-            Err(_) => continue, // vanished mid-scan
-        };
-        let size = metadata.len();
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let size = file.size;
+        let mtime = file.modified_time;
         seen.insert(relative.clone(), ());
 
         if let Some(known_entry) = known.get(&relative) {
@@ -178,14 +192,15 @@ pub async fn scan_roots(
                     // Cheap, pure, no I/O — just enough to know `kind` for
                     // the recovery check below, without paying for a real
                     // fingerprint/probe pass on a file that hasn't changed.
-                    if let Some(classified) = classify::classify(&relative_under_root) {
+                    if let Some(classified) = classify::classify(&file.relative_under_root) {
                         let entry_key = entry_key::entry_key(&relative);
                         recover_existing_artwork(
                             library,
-                            &absolute,
+                            &file.absolute,
                             &entry_key,
                             &relative,
                             classified.kind,
+                            &mut artwork_cache,
                         )
                         .await?;
                     }
@@ -200,16 +215,16 @@ pub async fn scan_roots(
         // multi-root case that top folder would otherwise be this
         // root's own arbitrary label (e.g. "nas-music"), not a real
         // artist name.
-        let Some(classified) = classify::classify(&relative_under_root) else {
+        let Some(classified) = classify::classify(&file.relative_under_root) else {
             continue;
         };
-        let Ok(fp) = fingerprint::fingerprint_file(&absolute) else {
+        let Ok(fp) = fingerprint::fingerprint_file(&file.absolute) else {
             continue;
         };
         // Embedded tags override the path-derived *display* fields when
         // present; grouping keys stay path-derived upstream of this.
-        let tag = tags::read_tags(&absolute);
-        let media = probe::probe(&absolute).await;
+        let tag = tags::read_tags(&file.absolute);
+        let media = probe::probe(&file.absolute).await;
         let entry_key = entry_key::entry_key(&relative);
         let mut record = EntryRecord {
             entry_key: entry_key.clone(),
@@ -295,22 +310,33 @@ pub async fn scan_roots(
         if !already_had_artwork {
             recover_existing_artwork(
                 library,
-                &absolute,
+                &file.absolute,
                 &record.entry_key,
                 &record.relative_path,
                 record.kind,
+                &mut artwork_cache,
             )
             .await?;
         }
     }
 
     for path in known.keys() {
-        if !seen.contains_key(path) {
+        if path_belongs_to_roots(path, roots, multi_root_namespace) && !seen.contains_key(path) {
             library.remove_by_path(path).await?;
             report.removed += 1;
         }
     }
     Ok(report)
+}
+
+fn path_belongs_to_roots(path: &str, roots: &[MediaRoot], multi_root_namespace: bool) -> bool {
+    if !multi_root_namespace {
+        return true;
+    }
+    roots.iter().any(|root| {
+        path.strip_prefix(&root.label)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 /// Classifies an `images/` sibling file by the exact, small set of
@@ -365,13 +391,28 @@ async fn recover_existing_artwork(
     entry_key: &str,
     relative_path: &str,
     kind: MediaKind,
+    artwork_cache: &mut HashMap<PathBuf, Vec<(String, ArtworkKind)>>,
 ) -> sqlx::Result<()> {
     let Some(parent) = absolute.parent() else {
         return Ok(());
     };
-    let Ok(entries) = std::fs::read_dir(parent.join("images")) else {
-        return Ok(());
-    };
+    let images_dir = parent.join("images");
+    let candidates = artwork_cache
+        .entry(images_dir.clone())
+        .or_insert_with(|| {
+            std::fs::read_dir(&images_dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|entry| {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            recovered_artwork_kind(&name).map(|kind| (name, kind))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone();
 
     let relevant = |k: ArtworkKind| match kind {
         MediaKind::Movie | MediaKind::Episode => {
@@ -408,12 +449,7 @@ async fn recover_existing_artwork(
         artwork::sanitize_stem(artwork::file_stem(relative_path)).to_lowercase()
     );
 
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(found_kind) = recovered_artwork_kind(&name) else {
-            continue;
-        };
+    for (name, found_kind) in candidates {
         if !relevant(found_kind) {
             continue;
         }
@@ -436,41 +472,36 @@ async fn recover_existing_artwork(
 }
 
 /// Recursive allowlist walk. Skips symlinks, hidden entries, and anything
-/// without a known media extension. Paths come back as (absolute,
-/// forward-slash relative).
+/// without a known media extension. Size and modification time are captured
+/// while each entry is already hot in the filesystem client cache, avoiding
+/// a second metadata pass after the complete SMB directory walk.
+struct DiscoveredMediaFile {
+    absolute: PathBuf,
+    relative_under_root: String,
+    size: u64,
+    modified_time: i64,
+}
+
 fn collect_media_files(
     root: &Path,
     progress: Option<&ScanProgress>,
-) -> std::io::Result<Vec<(PathBuf, String)>> {
+) -> std::io::Result<Vec<DiscoveredMediaFile>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
-    let mut first = true;
     while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            // The root itself failing to even list is a hard error — real
-            // bug, found live: a network mount (SMB) that dropped mid-scan
-            // made this look identical to "the root is just empty now",
-            // and scan_roots' own reconciliation then deleted every
-            // already-known entry under it, wiping the whole local library
-            // even though the real files were untouched on the still-alive
-            // remote share. A nested subdirectory failing (permissions, a
-            // broken symlink target) is still just skipped — only the walk's
-            // very first directory (the root itself) gets this treatment.
-            Err(e) if first => return Err(e),
-            Err(_) => continue, // unreadable subdir: skip, don't fail the scan
-        };
-        first = false;
-        for entry in entries.flatten() {
+        // Discovery finishes for every root before any SQLite mutation. If
+        // any listing is incomplete, abort now and retain the last known good
+        // catalog rather than interpreting an SMB error as file deletion.
+        let entries = std::fs::read_dir(&dir)?;
+        for entry in entries {
+            let entry = entry?;
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with('.') {
                 continue;
             }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
+            let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 continue;
             }
@@ -487,10 +518,22 @@ fn collect_media_files(
                 .collect::<Vec<_>>()
                 .join("/");
             if classify::media_extension(&relative).is_some() {
+                let metadata = entry.metadata()?;
+                let modified_time = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or(0);
                 if let Some(p) = progress {
                     p.tick_discovering();
                 }
-                out.push((path, relative));
+                out.push(DiscoveredMediaFile {
+                    absolute: path,
+                    relative_under_root: relative,
+                    size: metadata.len(),
+                    modified_time,
+                });
             }
         }
     }

@@ -81,6 +81,12 @@ The fingerprint tests pin byte-for-byte compatibility with the original Python `
 
 The desktop app persists media, scraper, streaming, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, and `SWARM_TRANSCODING_DISABLED`.
 
+On macOS, media roots can connect directly to a NAS from either first-run
+onboarding or **Details → Media roots**. Enter the SMB server, share name, and
+optional username. Passwords stay in the macOS connection prompt/Keychain and
+are never passed to or stored by SWARM. On Linux and Windows, mount the SMB
+share with the operating system, then add its local mount path as a media root.
+
 TV builds receive the public service address at build time, keeping it out of the living-room UI: `SWARM_RENDEZVOUS_URL=https://swarm.example.com ./gradlew :app:assembleDebug` (or Gradle property `-PswarmRendezvousUrl=...`). On first connection the TV displays an eight-digit, ten-minute activation code; enter that code on the media server's **Swarm** page and approve the device shown. Existing account-created swarms and join codes remain available as a compatibility fallback.
 
 Streaming bandwidth is a server-wide reservation pool. `SWARM_MAX_UPLOAD_MBPS`

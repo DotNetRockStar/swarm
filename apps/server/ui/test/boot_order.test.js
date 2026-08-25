@@ -34,6 +34,7 @@ const UI_DIR = path.join(__dirname, "..");
 const invokeCalls = [];
 let testLibraryEntries = [];
 let testRootHealth = [{ label: "test", path: "/tmp/swarm-boot-order-test", available: true, error: null }];
+let testMediaRoots = [];
 let testServerNotifications = [];
 let copiedText = null;
 
@@ -90,6 +91,7 @@ function invokeStub(command, args) {
     case "list_entries":
       return testLibraryEntries;
     case "list_media_roots":
+      return testMediaRoots;
     case "list_categories":
     case "list_client_errors":
       return [];
@@ -224,12 +226,55 @@ async function main() {
   if (!document.getElementById("mediaRootWarning").classList.contains("d-none")) {
     failures.push("Expected the storage warning to clear automatically after the root recovers.");
   }
+  testMediaRoots = [{ label: "nas", path: "/Volumes/share/movies", reconnect_url: "smb://batocera.local/share" }];
+  testRootHealth = [{
+    label: "nas",
+    path: "/Volumes/share/movies",
+    available: false,
+    error: "stale file handle",
+    auto_reconnect: true,
+    network_protocol: "SMB",
+  }];
+  await dom.window.refreshMediaRoots();
+  const repairSmbButton = document.querySelector('[data-repair-smb="nas"]');
+  if (!repairSmbButton) {
+    failures.push("Expected an unavailable SMB root to offer an explicit Repair SMB action.");
+  } else {
+    repairSmbButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const repairCall = invokeCalls.find((call) => call.command === "repair_smb_root");
+    if (!repairCall || repairCall.args.label !== "nas") {
+      failures.push("Expected Repair SMB to invoke repair_smb_root for the affected media root.");
+    }
+  }
+  testMediaRoots = [];
   document.querySelector('[data-info="try-asking"]').click();
   if (document.getElementById("infoModalBackdrop").classList.contains("d-none")) {
     failures.push("Expected clicking Try asking to open its information modal.");
   }
   if (document.querySelectorAll("#infoModalLinks a").length !== 2) {
     failures.push("Expected Try asking help to offer both Codex and Claude links.");
+  }
+
+  document.getElementById("connectNetworkRootBtn").click();
+  if (document.getElementById("networkRootModalBackdrop").classList.contains("d-none")) {
+    failures.push("Expected Connect SMB share to open the SMB dialog.");
+  }
+  if (document.getElementById("networkRootProtocol")) {
+    failures.push("Expected the SMB dialog not to expose a protocol selector.");
+  }
+  document.getElementById("networkRootLabel").value = "nas-movies";
+  document.getElementById("networkRootServer").value = "nas.local";
+  document.getElementById("networkRootShare").value = "Media";
+  document.getElementById("networkRootUsername").value = "media-user";
+  document.getElementById("networkRootConnectBtn").click();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const networkConnectCall = invokeCalls.find((call) => call.command === "connect_smb_root");
+  if (!networkConnectCall || networkConnectCall.args.share !== "Media") {
+    failures.push("Expected the SMB dialog to invoke connect_smb_root with the selected settings.");
+  }
+  if (document.querySelector("#networkRootModalBackdrop input[type='password']")) {
+    failures.push("Expected SMB passwords to stay in the macOS prompt instead of entering the SWARM webview.");
   }
 
   testServerNotifications = [{
