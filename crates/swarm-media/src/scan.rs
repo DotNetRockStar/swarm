@@ -9,6 +9,7 @@ use crate::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, ScanMa
 use crate::{classify, probe, tags};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use swarm_core::peer::MediaKind;
 use swarm_core::{entry_key, fingerprint};
 use tokio::sync::mpsc::Sender;
@@ -163,7 +164,10 @@ async fn scan_roots_scoped_inner(
 ) -> Result<ScanReport, ScanError> {
     let mut report = ScanReport::default();
     let mut artwork_cache = ArtworkCache::default();
-    let progress = progress_tx.map(ScanProgress::new);
+    // Arc, not a bare ScanProgress: discover_media_files below hands a clone
+    // across a spawn_blocking boundary, which needs 'static + Send ownership,
+    // not a borrow tied to this function's stack frame.
+    let progress = progress_tx.map(|tx| Arc::new(ScanProgress::new(tx)));
 
     // Finish every root walk before catalog mutation, but stage the results
     // in local SQLite rather than growing an in-memory Vec with the library.
@@ -247,10 +251,25 @@ async fn scan_roots_scoped_inner(
             let Some(classified) = classify::classify(&file.relative_under_root) else {
                 continue;
             };
-            let Ok(fp) = fingerprint::fingerprint_file(&absolute) else {
+            // fingerprint_file/read_tags are synchronous std::fs I/O — each a
+            // potential SMB/NFS round trip — and this task shares its tokio
+            // worker thread with QUIC/HTTP request handling; spawn_blocking
+            // keeps a slow network mount from stalling every other request
+            // on the server for as long as this file takes. Only new/changed
+            // files reach this line at all (the unchanged fast path above
+            // already `continue`d), so this cost is paid exactly where it's
+            // unavoidable, not on every file in a routine rescan.
+            let fp_path = absolute.clone();
+            let Ok(fp) = tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&fp_path))
+                .await
+                .expect("fingerprint task panicked")
+            else {
                 continue;
             };
-            let tag = tags::read_tags(&absolute);
+            let tags_path = absolute.clone();
+            let tag = tokio::task::spawn_blocking(move || tags::read_tags(&tags_path))
+                .await
+                .expect("tag-read task panicked");
             let media = probe::probe(&absolute).await;
             let entry_key = entry_key::entry_key(&relative);
             let mut record = EntryRecord {
@@ -423,7 +442,7 @@ async fn recover_existing_artwork(
         return Ok(());
     };
     let images_dir = parent.join("images");
-    let candidates = artwork_cache.candidates(&images_dir);
+    let candidates = artwork_cache.candidates(&images_dir).await;
 
     let relevant = |k: ArtworkKind| match kind {
         MediaKind::Movie | MediaKind::Episode => {
@@ -492,20 +511,31 @@ struct ArtworkCache {
 }
 
 impl ArtworkCache {
-    fn candidates(&mut self, directory: &Path) -> Vec<(String, ArtworkKind)> {
+    /// Async, not a plain fn, specifically so the cache-miss path's
+    /// `std::fs::read_dir` (a real SMB/NFS round trip, same reasoning as
+    /// `discover_media_files`'s doc comment) can run via `spawn_blocking`
+    /// instead of inline on this shared runtime. The cache-hit path (the
+    /// common case — sibling media in the same directory) does no I/O at
+    /// all and returns immediately.
+    async fn candidates(&mut self, directory: &Path) -> Vec<(String, ArtworkKind)> {
         if self.directory.as_deref() != Some(directory) {
             self.directory = Some(directory.to_path_buf());
-            self.entries = std::fs::read_dir(directory)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter_map(|entry| {
-                            let name = entry.file_name().to_string_lossy().into_owned();
-                            recovered_artwork_kind(&name).map(|kind| (name, kind))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let directory = directory.to_path_buf();
+            self.entries = tokio::task::spawn_blocking(move || {
+                std::fs::read_dir(&directory)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter_map(|entry| {
+                                let name = entry.file_name().to_string_lossy().into_owned();
+                                recovered_artwork_kind(&name).map(|kind| (name, kind))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
         }
         self.entries.clone()
     }
@@ -514,16 +544,66 @@ impl ArtworkCache {
 /// Recursive allowlist walk, staged into SQLite in fixed-size batches. Size
 /// and modification time are captured while each entry is hot in the SMB
 /// client cache, avoiding a second network metadata round trip.
+///
+/// The walk itself (`walk_media_files`, below) runs entirely inside
+/// `spawn_blocking` — never inline on this `async fn`'s own task. Real
+/// incident: this task's tokio worker thread is shared with every QUIC/HTTP
+/// request this server handles, and `std::fs::read_dir`/`metadata` against a
+/// flaky or slow network mount (SMB over a VPN'd link, in the case that
+/// found this) can each cost a real round trip with no yield point in
+/// between — a single scan blocked every other request on the server for as
+/// long as the walk ran, surfacing as artwork/playback requests stalling or
+/// timing out client-side, not as a scan-specific symptom. A bounded
+/// channel bridges the walk's synchronous batches back to this function's
+/// async DB writes; its capacity also bounds how far the walk can run ahead
+/// of persistence, the same "bound scan memory" goal the batching itself
+/// already serves.
 async fn discover_media_files(
     library: &Library,
     scan_id: &str,
     root: &MediaRoot,
     multi_root_namespace: bool,
-    progress: Option<&ScanProgress>,
+    progress: Option<&Arc<ScanProgress>>,
 ) -> Result<(), ScanError> {
     const BATCH_SIZE: usize = 256;
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
-    let mut stack = vec![root.path.clone()];
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ScanManifestEntry>>(2);
+    let root_path = root.path.clone();
+    let label = root.label.clone();
+    let progress = progress.cloned();
+    let walk = tokio::task::spawn_blocking(move || {
+        walk_media_files(
+            &root_path,
+            &label,
+            multi_root_namespace,
+            progress.as_deref(),
+            BATCH_SIZE,
+            tx,
+        )
+    });
+
+    while let Some(batch) = rx.recv().await {
+        library.append_scan_manifest(scan_id, &batch).await?;
+    }
+    walk.await.expect("media walk task panicked")?;
+    Ok(())
+}
+
+/// Pure synchronous directory walk — see [`discover_media_files`]'s doc
+/// comment for why this must only ever run via `spawn_blocking`, never
+/// inline on the shared async runtime. Sends completed batches through `tx`
+/// as it goes; `Sender::blocking_send` blocks *this* (already-blocking-pool)
+/// thread, not any async worker thread, when the channel is full, which is
+/// exactly the backpressure a bounded channel is for.
+fn walk_media_files(
+    root_path: &Path,
+    label: &str,
+    multi_root_namespace: bool,
+    progress: Option<&ScanProgress>,
+    batch_size: usize,
+    tx: Sender<Vec<ScanManifestEntry>>,
+) -> std::io::Result<()> {
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut stack = vec![root_path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
@@ -542,7 +622,7 @@ async fn discover_media_files(
                 stack.push(path);
                 continue;
             }
-            let Ok(relative) = path.strip_prefix(&root.path) else {
+            let Ok(relative) = path.strip_prefix(root_path) else {
                 continue;
             };
             let relative_under_root = relative
@@ -562,7 +642,7 @@ async fn discover_media_files(
                     p.tick_discovering();
                 }
                 let relative_path = if multi_root_namespace {
-                    format!("{}/{}", root.label, relative_under_root)
+                    format!("{label}/{relative_under_root}")
                 } else {
                     relative_under_root.clone()
                 };
@@ -573,15 +653,21 @@ async fn discover_media_files(
                     size: metadata.len(),
                     modified_time,
                 });
-                if batch.len() == BATCH_SIZE {
-                    library.append_scan_manifest(scan_id, &batch).await?;
-                    batch.clear();
+                if batch.len() == batch_size {
+                    let full_batch = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
+                    // Receiver gone means discover_media_files already
+                    // failed on an earlier DB write — nothing left to hand
+                    // batches to, so stop walking rather than keep working
+                    // toward a result no one will read.
+                    if tx.blocking_send(full_batch).is_err() {
+                        return Ok(());
+                    }
                 }
             }
         }
     }
     if !batch.is_empty() {
-        library.append_scan_manifest(scan_id, &batch).await?;
+        let _ = tx.blocking_send(batch);
     }
     Ok(())
 }

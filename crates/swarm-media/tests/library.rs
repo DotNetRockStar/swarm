@@ -1526,3 +1526,54 @@ async fn explicitly_cleared_metadata_does_not_restore_after_a_move() {
     assert_eq!(moved.scraped_title, None);
     assert!(moved.genres.is_empty());
 }
+
+/// `discover_media_files`'s directory walk now runs off the async runtime
+/// entirely (`spawn_blocking`, bridged back via a bounded channel — see that
+/// function's doc comment for the incident that motivated it) and flushes
+/// to SQLite in fixed 256-entry batches. A library at or below 256 files
+/// never exercises more than one batch or one channel round trip; this
+/// proves the walk-and-flush loop is actually correct across a real batch
+/// boundary, not just within a single one — every file found, none
+/// duplicated, and a second scan of the same unchanged tree reports zero
+/// spurious adds/removals (which a batching bug — e.g. losing or
+/// double-sending a boundary batch — would show up as).
+#[tokio::test]
+async fn scan_finds_every_file_across_a_batch_boundary() {
+    let fx = fixture("batch-boundary").await;
+    const FILE_COUNT: usize = 300; // > the 256-entry batch size in scan.rs
+
+    for i in 0..FILE_COUNT {
+        // split_track_number (classify.rs) only recognizes a 1-3 digit
+        // leading run as a track number — {i:03} keeps every value (0..300)
+        // within that, {i:04} would silently parse as no track number at all.
+        write(
+            &fx.root,
+            &format!("music/Artist/Album/{i:03} - Track.flac"),
+            format!("fake flac bytes {i}").as_bytes(),
+        );
+    }
+
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, FILE_COUNT as u64);
+    assert_eq!(report.removed, 0);
+
+    let entries = fx.library.list().await.unwrap();
+    assert_eq!(entries.len(), FILE_COUNT);
+    let mut track_numbers: Vec<_> = entries.iter().filter_map(|e| e.track_number).collect();
+    track_numbers.sort_unstable();
+    track_numbers.dedup();
+    assert_eq!(
+        track_numbers.len(),
+        FILE_COUNT,
+        "every track number 0..FILE_COUNT must appear exactly once — a lost or \
+         duplicated batch at the 256-entry boundary would show up here as a gap or a dupe"
+    );
+
+    // Rescanning the same, unchanged tree must be a clean no-op — proves
+    // the batched walk's output is stable/deterministic across runs, not
+    // just correct once.
+    let second = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(second.added, 0);
+    assert_eq!(second.removed, 0);
+    assert_eq!(second.unchanged, FILE_COUNT as u64);
+}
