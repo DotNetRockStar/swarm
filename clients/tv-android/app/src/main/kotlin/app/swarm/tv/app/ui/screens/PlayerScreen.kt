@@ -96,6 +96,8 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
@@ -284,6 +286,14 @@ internal fun playbackErrorContext(error: PlaybackException, player: Player): Str
 private const val LOOPBACK_BUFFER_FOR_PLAYBACK_MS = 500
 private const val LOOPBACK_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 1_000
 
+// Media3's own default (AdaptiveTrackSelection.DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS
+// = 10_000) let quality bounce back up after only ten seconds of recovered
+// bandwidth, which was spamming onPlaybackQualityChanged (#67) whenever the
+// estimate hovered near a rendition boundary. Widening the hold to 30s only
+// gates *increases* — a further downgrade is never delayed, since that path
+// reacts to the current bandwidth estimate rather than this cooldown.
+private const val QUALITY_INCREASE_HOLD_MS = 30_000
+
 /** Owns the active video player plus at most one paused, buffering successor.
  * The pool lives across UiState.Player-to-UiState.Player recompositions, which
  * lets [activate] promote the exact preloaded ExoPlayer instead of throwing
@@ -353,6 +363,19 @@ private class VideoPlayerPool(context: Context) {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
             .setInitialBitrateEstimate(initialBitrate)
             .build()
+        // Widen the quality-increase hold from Media3's 10s default to 30s
+        // (see QUALITY_INCREASE_HOLD_MS) so a downgraded rendition sticks
+        // for at least that long before ExoPlayer switches back up. Further
+        // downgrades on continued/worsening bandwidth are unaffected.
+        val trackSelector = DefaultTrackSelector(
+            appContext,
+            AdaptiveTrackSelection.Factory(
+                QUALITY_INCREASE_HOLD_MS,
+                AdaptiveTrackSelection.DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
+                AdaptiveTrackSelection.DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
+                AdaptiveTrackSelection.DEFAULT_BANDWIDTH_FRACTION,
+            ),
+        )
         // Same reasoning as the bandwidth estimate above: Media3's default
         // LoadControl targets a 2.5s buffer-for-playback because it assumes
         // an internet-latency source. Against a same-device loopback proxy
@@ -369,6 +392,7 @@ private class VideoPlayerPool(context: Context) {
             .build()
         return ExoPlayer.Builder(appContext)
             .setBandwidthMeter(bandwidthMeter)
+            .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
             .setMediaSourceFactory(serverOfflineMediaSourceFactory(appContext))
             .build()
