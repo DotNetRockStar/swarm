@@ -48,12 +48,12 @@ object AndroidDeviceIdentity {
      */
     fun privateKey(): PrivateKey = keyStore().getKey(KEY_ALIAS, null) as PrivateKey
 
-    private fun keyStore(): KeyStore {
+    private fun keyStore(): KeyStore = retryTransientKeystoreFailure {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         if (!keyStore.containsAlias(KEY_ALIAS)) {
             generateKeyPair()
         }
-        return keyStore
+        keyStore
     }
 
     private fun generateKeyPair() {
