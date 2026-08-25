@@ -10,13 +10,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,6 +33,9 @@ import app.swarm.tv.core.catalog.AlbumGroup
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 internal data class ArtistArtworkUrls(
     val artistPhoto: String?,
@@ -56,6 +62,9 @@ internal fun ArtistGroup.artworkUrls(
     return ArtistArtworkUrls(artistPhoto, covers.getOrNull(fallbackIndex))
 }
 
+private const val MAX_ARTWORK_RETRIES = 3
+private const val ARTWORK_RETRY_BASE_DELAY_MS = 700L
+
 /** Artwork with a network-error fallback and a branded placeholder that is always present underneath. */
 @Composable
 internal fun ArtworkImage(
@@ -66,9 +75,17 @@ internal fun ArtworkImage(
     modifier: Modifier = Modifier,
 ) {
     var useFallback by remember(primaryUrl, fallbackUrl) { mutableStateOf(primaryUrl == null) }
+    var retryCount by remember(primaryUrl, fallbackUrl) { mutableIntStateOf(0) }
     val resolvedFallback = fallbackUrl?.takeUnless { it == primaryUrl }
-    val model = if (useFallback) resolvedFallback else primaryUrl
+    val url = if (useFallback) resolvedFallback else primaryUrl
     val placeholderLabel = if (placeholderType == "Movie" || placeholderType == "Show") label else placeholderType
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // Coil dedupes by request identity, not URL equality: re-passing the same URL string
+    // after a transient failure (a proxy hiccup, a queued request timing out) never
+    // retries and leaves the card permanently blank. Building a fresh ImageRequest per
+    // retry attempt forces Coil to actually re-execute it.
+    val model = remember(context, url, retryCount) { url?.let { ImageRequest.Builder(context).data(it).build() } }
 
     Box(
         modifier = modifier.background(
@@ -98,7 +115,17 @@ internal fun ArtworkImage(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
                 onError = {
-                    if (!useFallback && resolvedFallback != null) useFallback = true
+                    when {
+                        retryCount < MAX_ARTWORK_RETRIES -> {
+                            val attempt = retryCount + 1
+                            scope.launch {
+                                delay(ARTWORK_RETRY_BASE_DELAY_MS * attempt)
+                                retryCount = attempt
+                            }
+                        }
+                        !useFallback && resolvedFallback != null -> useFallback = true
+                        else -> Unit
+                    }
                 },
             )
         }
