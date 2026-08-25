@@ -133,7 +133,27 @@ pub struct ServerCore {
     /// resurrect/delete entries incorrectly. A later caller simply waits its
     /// turn rather than being rejected.
     scan_lock: tokio::sync::Mutex<()>,
+    scan_active: Arc<AtomicBool>,
     scan_status: tokio::sync::watch::Sender<ScanState>,
+}
+
+struct ScanActivityGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl ScanActivityGuard {
+    fn start(active: &Arc<AtomicBool>) -> Self {
+        active.store(true, Ordering::Release);
+        Self {
+            active: Arc::clone(active),
+        }
+    }
+}
+
+impl Drop for ScanActivityGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
 }
 
 /// The current/last outcome of `ServerCore`'s background or on-demand
@@ -258,10 +278,15 @@ impl ServerCore {
             Arc::clone(service.transcode_manager()),
             bandwidth::interval_from_env(),
         ));
+        // Startup always schedules an initial scan below. Start in the active
+        // state so the transcription task cannot win the spawn race and load
+        // Whisper before that scan has acquired its serialization lock.
+        let scan_active = Arc::new(AtomicBool::new(true));
         let transcription = TranscriptionManager::start(
             Arc::clone(&library),
             media_roots.clone(),
             Arc::clone(service.transcode_manager()),
+            Arc::clone(&scan_active),
             &config.data_dir,
             ffmpeg_path,
         )
@@ -283,6 +308,7 @@ impl ServerCore {
             stun: Mutex::new(None),
             scraping: AtomicBool::new(false),
             scan_lock: tokio::sync::Mutex::new(()),
+            scan_active,
             scan_status: tokio::sync::watch::Sender::new(ScanState::NotStarted),
         });
         // A configured or previously-created managed swarm takes precedence
@@ -343,9 +369,10 @@ impl ServerCore {
     async fn run_scan(
         &self,
         roots: &[MediaRoot],
-        progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>,
+        progress_tx: Option<mpsc::Sender<ScanProgressEvent>>,
     ) -> Result<ScanReport, ServerError> {
         let _guard = self.scan_lock.lock().await;
+        let _scan_activity = ScanActivityGuard::start(&self.scan_active);
         self.scan_status.send_modify(|s| *s = ScanState::Scanning);
         match scan_roots(&self.library, roots, progress_tx).await {
             Ok(report) => {
@@ -386,6 +413,7 @@ impl ServerCore {
         }
 
         let _guard = self.scan_lock.lock().await;
+        let _scan_activity = ScanActivityGuard::start(&self.scan_active);
         self.scan_status
             .send_modify(|state| *state = ScanState::Scanning);
         match scan_roots_scoped(&self.library, &selected, all_roots.len() > 1, None).await {
@@ -428,7 +456,7 @@ impl ServerCore {
 
     pub async fn rescan(
         &self,
-        progress_tx: Option<mpsc::UnboundedSender<ScanProgressEvent>>,
+        progress_tx: Option<mpsc::Sender<ScanProgressEvent>>,
     ) -> Result<ScanReport, ServerError> {
         let roots = self.media_roots.roots();
         self.run_scan(&roots, progress_tx).await

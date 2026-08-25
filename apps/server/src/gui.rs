@@ -791,8 +791,9 @@ struct RescanResult {
     unchanged: u64,
 }
 
-/// `scan-progress` event name emitted to the webview during [`rescan`] — one
-/// per discovered file, payload shape is `swarm_media::scan::ScanProgressEvent`.
+/// `scan-progress` event name emitted to the webview during [`rescan`] —
+/// best-effort bounded updates with payload shape
+/// `swarm_media::scan::ScanProgressEvent`.
 /// Same forwarding-task pattern as [`run_scrape`]'s `scrape-progress` — real
 /// bug this fixes: a rescan over a slow network mount gave no indication
 /// anything was happening until it finished, confirmed live against a real
@@ -805,7 +806,7 @@ async fn rescan(
     state: tauri::State<'_, AppState>,
 ) -> Result<RescanResult, String> {
     let core = state.core(&app).await?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let emitter = app.clone();
     let forward = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {

@@ -5,14 +5,15 @@
 
 use crate::roots::MediaRoot;
 use crate::scrape::artwork;
-use crate::store::{ArtworkKind, EntryRecord, Library};
+use crate::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, ScanManifestEntry};
 use crate::{classify, probe, tags};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use swarm_core::peer::MediaKind;
 use swarm_core::{entry_key, fingerprint};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+
+const MISSING_CONFIRMATION_GRACE_MS: i64 = 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -40,18 +41,18 @@ pub enum ScanProgressEvent {
 }
 
 /// Optional live progress side-channel for [`scan_roots`], mirroring
-/// `scrape::runner::ScrapeProgress` — a plain `mpsc` sender, not a Tauri
+/// `scrape::runner::ScrapeProgress` — a bounded `mpsc` sender, not a Tauri
 /// type, so this crate stays usable by the headless daemon with zero UI
-/// dependency; the GUI layer turns received events into `app.emit(...)`
-/// calls.
+/// dependency. Intermediate frames may be dropped when the UI falls behind;
+/// progress reporting must never grow memory or stall the scan itself.
 struct ScanProgress {
-    sender: UnboundedSender<ScanProgressEvent>,
+    sender: Sender<ScanProgressEvent>,
     found: AtomicU64,
     processed: AtomicU64,
 }
 
 impl ScanProgress {
-    fn new(sender: UnboundedSender<ScanProgressEvent>) -> Self {
+    fn new(sender: Sender<ScanProgressEvent>) -> Self {
         Self {
             sender,
             found: AtomicU64::new(0),
@@ -63,7 +64,11 @@ impl ScanProgress {
     /// total is known.
     fn tick_discovering(&self) {
         let found = self.found.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = self.sender.send(ScanProgressEvent::Discovering { found });
+        // Progress is advisory. Never let a slow webview accumulate one
+        // queued allocation per file or stall the filesystem walk.
+        let _ = self
+            .sender
+            .try_send(ScanProgressEvent::Discovering { found });
     }
 
     /// Called once per file as the second pass (fingerprint/probe/store)
@@ -72,7 +77,7 @@ impl ScanProgress {
         let processed = self.processed.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self
             .sender
-            .send(ScanProgressEvent::Processing { processed, total });
+            .try_send(ScanProgressEvent::Processing { processed, total });
     }
 }
 
@@ -113,13 +118,13 @@ pub async fn scan_root(library: &Library, root: &Path) -> Result<ScanReport, Sca
 /// `{label}/`-prefixed `relative_path` (see `crate::roots::RootResolver`) so
 /// two roots containing the same sub-path don't collide on `entry_key`; with
 /// exactly one root, no prefix is applied and behavior is byte-identical to
-/// [`scan_root`]. `progress_tx`, when given, receives one [`ScanProgressEvent`]
-/// per file at each of the two phases (directory walk, then per-file
-/// fingerprint/probe) — see [`ScanProgress`]'s doc comment.
+/// [`scan_root`]. `progress_tx`, when given, receives best-effort
+/// [`ScanProgressEvent`] updates during both phases (directory walk, then
+/// per-file fingerprint/probe) — see [`ScanProgress`]'s doc comment.
 pub async fn scan_roots(
     library: &Library,
     roots: &[MediaRoot],
-    progress_tx: Option<UnboundedSender<ScanProgressEvent>>,
+    progress_tx: Option<Sender<ScanProgressEvent>>,
 ) -> Result<ScanReport, ScanError> {
     scan_roots_scoped(library, roots, roots.len() > 1, progress_tx).await
 }
@@ -133,210 +138,231 @@ pub async fn scan_roots_scoped(
     library: &Library,
     roots: &[MediaRoot],
     multi_root_namespace: bool,
-    progress_tx: Option<UnboundedSender<ScanProgressEvent>>,
+    progress_tx: Option<Sender<ScanProgressEvent>>,
 ) -> Result<ScanReport, ScanError> {
     if roots.is_empty() {
         return Err(ScanError::NoMediaRoots);
     }
-    let mut report = ScanReport::default();
-    let known = library.snapshot().await?;
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    let mut artwork_cache = HashMap::<PathBuf, Vec<(String, ArtworkKind)>>::new();
+    let scan_id = library.begin_scan_manifest().await?;
+    let result =
+        scan_roots_scoped_inner(library, roots, multi_root_namespace, progress_tx, &scan_id).await;
+    let cleanup = library.clear_scan_manifest(&scan_id).await;
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(report), Ok(())) => Ok(report),
+    }
+}
 
+async fn scan_roots_scoped_inner(
+    library: &Library,
+    roots: &[MediaRoot],
+    multi_root_namespace: bool,
+    progress_tx: Option<Sender<ScanProgressEvent>>,
+    scan_id: &str,
+) -> Result<ScanReport, ScanError> {
+    let mut report = ScanReport::default();
+    let mut artwork_cache = ArtworkCache::default();
     let progress = progress_tx.map(ScanProgress::new);
 
-    // Every root's directory walk happens up front so the total file count
-    // is known before the per-file processing phase's progress starts —
-    // see [`ScanProgress`]'s doc comment for why the walk itself is now
-    // also instrumented (`Discovering`), not just this second pass.
-    let mut all_files: Vec<(&MediaRoot, DiscoveredMediaFile)> = Vec::new();
+    // Finish every root walk before catalog mutation, but stage the results
+    // in local SQLite rather than growing an in-memory Vec with the library.
     for root in roots {
-        for file in collect_media_files(&root.path, progress.as_ref())? {
-            all_files.push((root, file));
-        }
+        discover_media_files(
+            library,
+            scan_id,
+            root,
+            multi_root_namespace,
+            progress.as_ref(),
+        )
+        .await?;
     }
-    let total = all_files.len() as u64;
-    let known_in_scope = known
-        .keys()
-        .filter(|path| path_belongs_to_roots(path, roots, multi_root_namespace))
-        .count();
+    let total = library.scan_manifest_count(scan_id).await?;
+    let known_in_scope = if multi_root_namespace {
+        let mut count = 0usize;
+        for root in roots {
+            count = count.saturating_add(
+                library
+                    .entry_count_with_prefix(Some(&format!("{}/", root.label)))
+                    .await?,
+            );
+        }
+        count
+    } else {
+        library.entry_count_with_prefix(None).await?
+    };
 
-    // Belt-and-suspenders alongside `collect_media_files`'s own root-read
-    // error: even a *successful* but suspiciously-empty listing (a network
-    // share that's connected but returns a transient empty directory, or
-    // any other root-level glitch that isn't a hard filesystem error) must
-    // never be allowed to reach the removal-reconciliation loop below,
-    // which would otherwise read "found nothing" as "the user deleted
-    // every file" and wipe the whole known library.
     if total == 0 && known_in_scope > 0 {
         return Err(ScanError::SuspiciousEmptyScan(known_in_scope));
     }
 
-    for (root, file) in all_files {
-        let relative = if multi_root_namespace {
-            format!("{}/{}", root.label, file.relative_under_root)
-        } else {
-            file.relative_under_root.clone()
-        };
-        if let Some(p) = &progress {
-            p.tick_processing(total);
-        }
-        let size = file.size;
-        let mtime = file.modified_time;
-        seen.insert(relative.clone(), ());
+    let prefixes = if multi_root_namespace {
+        roots
+            .iter()
+            .map(|root| Some(format!("{}/", root.label)))
+            .collect::<Vec<_>>()
+    } else {
+        vec![None]
+    };
 
-        if let Some(known_entry) = known.get(&relative) {
-            if known_entry.size == size && known_entry.modified_time == mtime {
-                report.unchanged += 1;
-                if !known_entry.has_artwork {
-                    // Cheap, pure, no I/O — just enough to know `kind` for
-                    // the recovery check below, without paying for a real
-                    // fingerprint/probe pass on a file that hasn't changed.
-                    if let Some(classified) = classify::classify(&file.relative_under_root) {
-                        let entry_key = entry_key::entry_key(&relative);
-                        recover_existing_artwork(
-                            library,
-                            &file.absolute,
-                            &entry_key,
-                            &relative,
-                            classified.kind,
-                            &mut artwork_cache,
-                        )
-                        .await?;
+    let mut cursor = String::new();
+    loop {
+        let files = library.scan_manifest_page(scan_id, &cursor, 256).await?;
+        if files.is_empty() {
+            break;
+        }
+        for file in files {
+            cursor.clone_from(&file.relative_path);
+            let relative = file.relative_path.clone();
+            let absolute = PathBuf::from(&file.absolute_path);
+            if let Some(progress) = &progress {
+                progress.tick_processing(total);
+            }
+            let known = library.known_entry_by_path(&relative).await?;
+            if let Some(known_entry) = known.as_ref() {
+                if known_entry.size == file.size && known_entry.modified_time == file.modified_time
+                {
+                    if known_entry.available {
+                        report.unchanged += 1;
+                    } else if library.restore_available_by_path(&relative).await? {
+                        report.added += 1;
                     }
+                    if !known_entry.has_artwork {
+                        if let Some(classified) = classify::classify(&file.relative_under_root) {
+                            recover_existing_artwork(
+                                library,
+                                &absolute,
+                                &entry_key::entry_key(&relative),
+                                &relative,
+                                classified.kind,
+                                &mut artwork_cache,
+                            )
+                            .await?;
+                        }
+                    }
+                    continue;
                 }
+            }
+
+            let Some(classified) = classify::classify(&file.relative_under_root) else {
                 continue;
+            };
+            let Ok(fp) = fingerprint::fingerprint_file(&absolute) else {
+                continue;
+            };
+            let tag = tags::read_tags(&absolute);
+            let media = probe::probe(&absolute).await;
+            let entry_key = entry_key::entry_key(&relative);
+            let mut record = EntryRecord {
+                entry_key: entry_key.clone(),
+                relative_path: relative,
+                kind: classified.kind,
+                title: tag
+                    .as_ref()
+                    .and_then(|tag| tag.title.clone())
+                    .unwrap_or(classified.title),
+                size: file.size,
+                modified_time: file.modified_time,
+                fingerprint: fp,
+                artist: tag
+                    .as_ref()
+                    .and_then(|tag| tag.artist.clone())
+                    .or(classified.artist),
+                album: tag
+                    .as_ref()
+                    .and_then(|tag| tag.album.clone())
+                    .or(classified.album),
+                track_number: tag
+                    .as_ref()
+                    .and_then(|tag| tag.track_number)
+                    .or(classified.track_number),
+                show_title: classified.show_title,
+                season: classified.season,
+                episode: classified.episode,
+                year: classified.year,
+                duration_secs: media.as_ref().and_then(|media| media.duration_secs),
+                video: media.as_ref().and_then(|media| media.video.clone()),
+                audio: media.as_ref().and_then(|media| media.audio.clone()),
+                scraped_title: None,
+                episode_title: None,
+                genres: Vec::new(),
+                artwork_version: 0,
+                cast: Vec::new(),
+                overview: None,
+                rating: None,
+                community_rating: None,
+                community_rating_votes: None,
+            };
+            if known.as_ref().is_some_and(|entry| entry.kind_overridden) {
+                if let Ok(Some(existing)) = library.get(&entry_key).await {
+                    record.kind = existing.kind;
+                    record.title = existing.title;
+                    record.artist = existing.artist;
+                    record.album = existing.album;
+                    record.track_number = existing.track_number;
+                    record.show_title = existing.show_title;
+                    record.season = existing.season;
+                    record.episode = existing.episode;
+                }
             }
-        }
-
-        // Classified purely from the path *under this root* — never the
-        // `{label}/`-prefixed stored form. classify()'s audio branch
-        // anchors artist/album from the top-most folder; in the
-        // multi-root case that top folder would otherwise be this
-        // root's own arbitrary label (e.g. "nas-music"), not a real
-        // artist name.
-        let Some(classified) = classify::classify(&file.relative_under_root) else {
-            continue;
-        };
-        let Ok(fp) = fingerprint::fingerprint_file(&file.absolute) else {
-            continue;
-        };
-        // Embedded tags override the path-derived *display* fields when
-        // present; grouping keys stay path-derived upstream of this.
-        let tag = tags::read_tags(&file.absolute);
-        let media = probe::probe(&file.absolute).await;
-        let entry_key = entry_key::entry_key(&relative);
-        let mut record = EntryRecord {
-            entry_key: entry_key.clone(),
-            relative_path: relative,
-            kind: classified.kind,
-            title: tag
-                .as_ref()
-                .and_then(|t| t.title.clone())
-                .unwrap_or(classified.title),
-            size,
-            modified_time: mtime,
-            fingerprint: fp,
-            artist: tag
-                .as_ref()
-                .and_then(|t| t.artist.clone())
-                .or(classified.artist),
-            album: tag
-                .as_ref()
-                .and_then(|t| t.album.clone())
-                .or(classified.album),
-            track_number: tag
-                .as_ref()
-                .and_then(|t| t.track_number)
-                .or(classified.track_number),
-            show_title: classified.show_title,
-            season: classified.season,
-            episode: classified.episode,
-            year: classified.year,
-            duration_secs: media.as_ref().and_then(|m| m.duration_secs),
-            video: media.as_ref().and_then(|m| m.video.clone()),
-            audio: media.as_ref().and_then(|m| m.audio.clone()),
-            // Scraper/artwork fields are not written by `upsert` (a rescan
-            // must never clobber existing scrape results), so these values
-            // are unused placeholders on the write path.
-            scraped_title: None,
-            episode_title: None,
-            genres: Vec::new(),
-            artwork_version: 0,
-            cast: Vec::new(),
-            overview: None,
-            rating: None,
-            community_rating: None,
-            community_rating_votes: None,
-        };
-        // A manually reclassified file (see `Library::set_manual_kind`) that
-        // changed on disk (re-encoded, replaced) would otherwise have its
-        // kind/grouping silently reverted here by the fresh path-derived
-        // `classified` above — the *file content* changing is real and
-        // still needs a fresh fingerprint/probe pass, but the human's
-        // classification of *what it is* takes precedence over the path
-        // heuristic that got it wrong in the first place.
-        if known
-            .get(&record.relative_path)
-            .is_some_and(|k| k.kind_overridden)
-        {
-            if let Ok(Some(existing)) = library.get(&entry_key).await {
-                record.kind = existing.kind;
-                record.title = existing.title;
-                record.artist = existing.artist;
-                record.album = existing.album;
-                record.track_number = existing.track_number;
-                record.show_title = existing.show_title;
-                record.season = existing.season;
-                record.episode = existing.episode;
+            library.upsert(&record).await?;
+            if known.is_none() {
+                library
+                    .restore_archived_metadata(
+                        &record.entry_key,
+                        &record.fingerprint,
+                        record.size,
+                        &record.relative_path,
+                    )
+                    .await?;
             }
-        }
-        library.upsert(&record).await?;
-        let already_had_artwork = known
-            .get(&record.relative_path)
-            .is_some_and(|k| k.has_artwork);
-        if known.contains_key(&record.relative_path) {
-            report.updated += 1;
-        } else {
-            report.added += 1;
-        }
-        // A brand-new row never has artwork columns set, since `upsert`
-        // deliberately never writes them. An existing row whose content
-        // actually changed (`upsert` took the `updated` path) might
-        // already have artwork from a prior scrape — only bother checking
-        // disk when it doesn't, so an already-linked entry is never
-        // touched. See the recovery function's own doc comment for why
-        // either case (added or updated-but-still-unscraped) is worth it.
-        if !already_had_artwork {
-            recover_existing_artwork(
-                library,
-                &file.absolute,
-                &record.entry_key,
-                &record.relative_path,
-                record.kind,
-                &mut artwork_cache,
-            )
-            .await?;
+            let already_had_artwork = known.as_ref().is_some_and(|entry| entry.has_artwork);
+            if known.as_ref().is_some_and(|entry| entry.available) {
+                report.updated += 1;
+            } else {
+                report.added += 1;
+            }
+            if !already_had_artwork {
+                recover_existing_artwork(
+                    library,
+                    &absolute,
+                    &record.entry_key,
+                    &record.relative_path,
+                    record.kind,
+                    &mut artwork_cache,
+                )
+                .await?;
+            }
         }
     }
 
-    for path in known.keys() {
-        if path_belongs_to_roots(path, roots, multi_root_namespace) && !seen.contains_key(path) {
-            library.remove_by_path(path).await?;
-            report.removed += 1;
+    // Only a fully processed manifest may change availability. Missing rows
+    // remain as durable tombstones; the active list/catalog hides them while
+    // later successful scans advance their confirmation counter.
+    for prefix in &prefixes {
+        let mut missing_cursor = String::new();
+        loop {
+            let missing = library
+                .paths_missing_from_scan(scan_id, prefix.as_deref(), &missing_cursor, 256)
+                .await?;
+            if missing.is_empty() {
+                break;
+            }
+            for path in missing {
+                missing_cursor.clone_from(&path);
+                if matches!(
+                    library
+                        .mark_missing_by_path(&path, MISSING_CONFIRMATION_GRACE_MS)
+                        .await?,
+                    Some(MissingDisposition::NewlyMissing)
+                ) {
+                    report.removed += 1;
+                }
+            }
         }
     }
+
     Ok(report)
-}
-
-fn path_belongs_to_roots(path: &str, roots: &[MediaRoot], multi_root_namespace: bool) -> bool {
-    if !multi_root_namespace {
-        return true;
-    }
-    roots.iter().any(|root| {
-        path.strip_prefix(&root.label)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    })
 }
 
 /// Classifies an `images/` sibling file by the exact, small set of
@@ -391,28 +417,13 @@ async fn recover_existing_artwork(
     entry_key: &str,
     relative_path: &str,
     kind: MediaKind,
-    artwork_cache: &mut HashMap<PathBuf, Vec<(String, ArtworkKind)>>,
+    artwork_cache: &mut ArtworkCache,
 ) -> sqlx::Result<()> {
     let Some(parent) = absolute.parent() else {
         return Ok(());
     };
     let images_dir = parent.join("images");
-    let candidates = artwork_cache
-        .entry(images_dir.clone())
-        .or_insert_with(|| {
-            std::fs::read_dir(&images_dir)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter_map(|entry| {
-                            let name = entry.file_name().to_string_lossy().into_owned();
-                            recovered_artwork_kind(&name).map(|kind| (name, kind))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .clone();
+    let candidates = artwork_cache.candidates(&images_dir);
 
     let relevant = |k: ArtworkKind| match kind {
         MediaKind::Movie | MediaKind::Episode => {
@@ -471,27 +482,49 @@ async fn recover_existing_artwork(
     Ok(())
 }
 
-/// Recursive allowlist walk. Skips symlinks, hidden entries, and anything
-/// without a known media extension. Size and modification time are captured
-/// while each entry is already hot in the filesystem client cache, avoiding
-/// a second metadata pass after the complete SMB directory walk.
-struct DiscoveredMediaFile {
-    absolute: PathBuf,
-    relative_under_root: String,
-    size: u64,
-    modified_time: i64,
+/// Path-ordered manifest pages keep sibling media together, so caching just
+/// the current artwork directory avoids repeated SMB listings without an
+/// unbounded directory-to-files map.
+#[derive(Default)]
+struct ArtworkCache {
+    directory: Option<PathBuf>,
+    entries: Vec<(String, ArtworkKind)>,
 }
 
-fn collect_media_files(
-    root: &Path,
+impl ArtworkCache {
+    fn candidates(&mut self, directory: &Path) -> Vec<(String, ArtworkKind)> {
+        if self.directory.as_deref() != Some(directory) {
+            self.directory = Some(directory.to_path_buf());
+            self.entries = std::fs::read_dir(directory)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|entry| {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            recovered_artwork_kind(&name).map(|kind| (name, kind))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        self.entries.clone()
+    }
+}
+
+/// Recursive allowlist walk, staged into SQLite in fixed-size batches. Size
+/// and modification time are captured while each entry is hot in the SMB
+/// client cache, avoiding a second network metadata round trip.
+async fn discover_media_files(
+    library: &Library,
+    scan_id: &str,
+    root: &MediaRoot,
+    multi_root_namespace: bool,
     progress: Option<&ScanProgress>,
-) -> std::io::Result<Vec<DiscoveredMediaFile>> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+) -> Result<(), ScanError> {
+    const BATCH_SIZE: usize = 256;
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut stack = vec![root.path.clone()];
     while let Some(dir) = stack.pop() {
-        // Discovery finishes for every root before any SQLite mutation. If
-        // any listing is incomplete, abort now and retain the last known good
-        // catalog rather than interpreting an SMB error as file deletion.
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
             let entry = entry?;
@@ -509,15 +542,15 @@ fn collect_media_files(
                 stack.push(path);
                 continue;
             }
-            let Ok(relative) = path.strip_prefix(root) else {
+            let Ok(relative) = path.strip_prefix(&root.path) else {
                 continue;
             };
-            let relative = relative
+            let relative_under_root = relative
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            if classify::media_extension(&relative).is_some() {
+            if classify::media_extension(&relative_under_root).is_some() {
                 let metadata = entry.metadata()?;
                 let modified_time = metadata
                     .modified()
@@ -528,14 +561,27 @@ fn collect_media_files(
                 if let Some(p) = progress {
                     p.tick_discovering();
                 }
-                out.push(DiscoveredMediaFile {
-                    absolute: path,
-                    relative_under_root: relative,
+                let relative_path = if multi_root_namespace {
+                    format!("{}/{}", root.label, relative_under_root)
+                } else {
+                    relative_under_root.clone()
+                };
+                batch.push(ScanManifestEntry {
+                    relative_path,
+                    absolute_path: path.to_string_lossy().into_owned(),
+                    relative_under_root,
                     size: metadata.len(),
                     modified_time,
                 });
+                if batch.len() == BATCH_SIZE {
+                    library.append_scan_manifest(scan_id, &batch).await?;
+                    batch.clear();
+                }
             }
         }
     }
-    Ok(out)
+    if !batch.is_empty() {
+        library.append_scan_manifest(scan_id, &batch).await?;
+    }
+    Ok(())
 }

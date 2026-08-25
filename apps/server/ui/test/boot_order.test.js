@@ -74,7 +74,7 @@ function invokeStub(command, args) {
         enabled: false,
         phase: "disabled",
         message: "Local subtitle generation is disabled.",
-        model_name: "small.en",
+        model_name: "base.en",
         model_installed: false,
         downloaded_bytes: 0,
         download_total_bytes: 0,

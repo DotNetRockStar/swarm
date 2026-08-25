@@ -14,13 +14,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, RwLock};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const MODEL_NAME: &str = "small.en";
-const MODEL_FILENAME: &str = "ggml-small.en.bin";
+const MODEL_NAME: &str = "base.en";
+const MODEL_FILENAME: &str = "ggml-base.en.bin";
 const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin";
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 // Official whisper.cpp model digest is SHA-1. The download is still written
 // to a .part file and accepted only after that published digest matches.
-const MODEL_SHA1: &str = "db8a495a91d927739e50b3fc1cc4c6b8f6c2d022";
+const MODEL_SHA1: &str = "137c40403d78fd54d454da0f9bd998f78703390c";
 const SEGMENT_DURATION_SECS: u64 = 600;
 const MEDIA_ROOT_UNAVAILABLE_PREFIX: &str = "media root unavailable:";
 
@@ -82,6 +82,7 @@ pub struct TranscriptionManager {
     transcodes: Arc<TranscodeManager>,
     enabled: Arc<AtomicBool>,
     pause_while_streaming: Arc<AtomicBool>,
+    scan_active: Arc<AtomicBool>,
     segment_progress: Arc<AtomicU32>,
     notify: Notify,
     runtime: RwLock<RuntimeStatus>,
@@ -95,6 +96,7 @@ impl TranscriptionManager {
         library: Arc<Library>,
         roots: SharedRootResolver,
         transcodes: Arc<TranscodeManager>,
+        scan_active: Arc<AtomicBool>,
         data_dir: &Path,
         ffmpeg_path: PathBuf,
     ) -> Result<Arc<Self>, sqlx::Error> {
@@ -105,6 +107,7 @@ impl TranscriptionManager {
             transcodes,
             enabled: Arc::new(AtomicBool::new(false)),
             pause_while_streaming: Arc::new(AtomicBool::new(true)),
+            scan_active,
             segment_progress: Arc::new(AtomicU32::new(0)),
             notify: Notify::new(),
             runtime: RwLock::new(RuntimeStatus::default()),
@@ -129,6 +132,10 @@ impl TranscriptionManager {
 
     fn should_pause_for_streaming(&self) -> bool {
         self.pause_while_streaming.load(Ordering::Acquire) && self.transcodes.active_sessions() > 0
+    }
+
+    fn should_pause_for_scan(&self) -> bool {
+        self.scan_active.load(Ordering::Acquire)
     }
 
     pub async fn status(&self) -> Result<TranscriptionStatus, sqlx::Error> {
@@ -177,6 +184,17 @@ impl TranscriptionManager {
                 continue;
             }
 
+            if self.should_pause_for_scan() {
+                self.update_runtime(|status| {
+                    status.phase = "waiting_for_scan".into();
+                    status.message = "Paused while the media library is being scanned.".into();
+                    status.current_title = None;
+                })
+                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+
             if let Err(error) = self.ensure_model().await {
                 if !self.enabled.load(Ordering::Acquire) {
                     continue;
@@ -208,6 +226,17 @@ impl TranscriptionManager {
                 self.update_runtime(|status| {
                     status.phase = "waiting_for_streams".into();
                     status.message = "Paused while clients are streaming.".into();
+                    status.current_title = None;
+                })
+                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+
+            if self.should_pause_for_scan() {
+                self.update_runtime(|status| {
+                    status.phase = "waiting_for_scan".into();
+                    status.message = "Paused while the media library is being scanned.".into();
                     status.current_title = None;
                 })
                 .await;
@@ -282,7 +311,7 @@ impl TranscriptionManager {
             .unwrap_or(0);
         self.update_runtime(|status| {
             status.phase = "downloading_model".into();
-            status.message = "Downloading the Balanced English Whisper model. This happens once and is about 466 MB.".into();
+            status.message = "Downloading the compact English Whisper model. This happens once and is about 142 MB.".into();
             status.downloaded_bytes = existing;
         })
         .await;
@@ -369,7 +398,10 @@ impl TranscriptionManager {
         let (root_path, _) = self.roots.split(&entry.relative_path);
         let media_path = self.roots.resolve(&entry.relative_path);
         for segment_index in job.completed_segments..job.total_segments {
-            if !self.enabled.load(Ordering::Acquire) || self.should_pause_for_streaming() {
+            if !self.enabled.load(Ordering::Acquire)
+                || self.should_pause_for_streaming()
+                || self.should_pause_for_scan()
+            {
                 return Err("interrupted".into());
             }
             ensure_media_root_available(&root_path)?;
@@ -388,6 +420,7 @@ impl TranscriptionManager {
                 &media_path,
                 start_secs,
                 SEGMENT_DURATION_SECS,
+                Arc::clone(&self.scan_active),
             )
             .await
             {
@@ -401,15 +434,22 @@ impl TranscriptionManager {
                     return Err(error);
                 }
             };
+            // A scan may have started while ffmpeg was reading this segment.
+            // Drop the buffer before loading Whisper's model/state.
+            if self.should_pause_for_scan() {
+                return Err("interrupted".into());
+            }
             let model_path = self.model_path();
             let abort_requested = Arc::new(AtomicBool::new(false));
             let monitor_abort = Arc::clone(&abort_requested);
             let monitor_enabled = Arc::clone(&self.enabled);
             let monitor_pause_while_streaming = Arc::clone(&self.pause_while_streaming);
             let monitor_transcodes = Arc::clone(&self.transcodes);
+            let monitor_scan_active = Arc::clone(&self.scan_active);
             let abort_monitor = tokio::spawn(async move {
                 loop {
                     if !monitor_enabled.load(Ordering::Acquire)
+                        || monitor_scan_active.load(Ordering::Acquire)
                         || (monitor_pause_while_streaming.load(Ordering::Acquire)
                             && monitor_transcodes.active_sessions() > 0)
                     {
@@ -502,32 +542,94 @@ async fn extract_audio(
     media: &Path,
     start_secs: u64,
     duration_secs: u64,
-) -> Result<Vec<i16>, String> {
+    scan_active: Arc<AtomicBool>,
+) -> Result<Vec<f32>, String> {
+    use std::process::Stdio;
+
     let start = start_secs.to_string();
     let duration = duration_secs.to_string();
-    let output = tokio::process::Command::new(ffmpeg)
+    let mut child = tokio::process::Command::new(ffmpeg)
         .args(["-v", "error", "-ss", &start, "-t", &duration, "-i"])
         .arg(media)
         .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"])
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|error| format!("could not start ffmpeg: {error}"))?;
-    if !output.status.success() {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "could not capture ffmpeg audio".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "could not capture ffmpeg errors".to_string())?;
+    let stderr_reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let result = stderr.read_to_end(&mut bytes).await;
+        (result, bytes)
+    });
+
+    let expected_samples = duration_secs.saturating_mul(16_000).min(usize::MAX as u64) as usize;
+    let mut audio = Vec::with_capacity(expected_samples);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut carry = None;
+    loop {
+        let read = tokio::select! {
+            read = stdout.read(&mut buffer) => read,
+            _ = wait_for_scan(&scan_active) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = stderr_reader.await;
+                return Err("interrupted".into());
+            }
+        }
+        .map_err(|error| format!("could not read ffmpeg audio: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let mut index = 0;
+        if let Some(low) = carry.take() {
+            let sample = i16::from_le_bytes([low, buffer[0]]);
+            audio.push(f32::from(sample) / 32_768.0);
+            index = 1;
+        }
+        while index + 1 < read {
+            let sample = i16::from_le_bytes([buffer[index], buffer[index + 1]]);
+            audio.push(f32::from(sample) / 32_768.0);
+            index += 2;
+        }
+        if index < read {
+            carry = Some(buffer[index]);
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("could not wait for ffmpeg: {error}"))?;
+    let (stderr_result, stderr_bytes) = stderr_reader
+        .await
+        .map_err(|error| format!("could not join ffmpeg error reader: {error}"))?;
+    stderr_result.map_err(|error| format!("could not read ffmpeg errors: {error}"))?;
+    if !status.success() {
         return Err(format!(
             "ffmpeg audio extraction failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr_bytes).trim()
         ));
     }
-    Ok(output
-        .stdout
-        .chunks_exact(2)
-        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
-        .collect())
+    Ok(audio)
+}
+
+async fn wait_for_scan(scan_active: &AtomicBool) {
+    while !scan_active.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 fn transcribe_segment(
     model_path: &Path,
-    audio_i16: Vec<i16>,
+    audio: Vec<f32>,
     offset_ms: u64,
     language: &str,
     abort_requested: Arc<AtomicBool>,
@@ -539,9 +641,6 @@ fn transcribe_segment(
     )
     .map_err(|error| error.to_string())?;
     let mut state = context.create_state().map_err(|error| error.to_string())?;
-    let mut audio = vec![0.0f32; audio_i16.len()];
-    whisper_rs::convert_integer_to_float_audio(&audio_i16, &mut audio)
-        .map_err(|error| error.to_string())?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let threads = std::thread::available_parallelism()
         .map(|count| count.get().div_ceil(2).clamp(1, 8) as i32)

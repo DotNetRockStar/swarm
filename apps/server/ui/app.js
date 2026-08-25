@@ -101,7 +101,7 @@ const INFO_TOPICS = {
   },
   "local-subtitles": {
     icon: "bi-badge-cc-fill", title: "Local subtitle generation",
-    body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a model of about 466 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU. By default SWARM pauses this work while anyone is streaming, but that protection can be disabled on the Details page when the server has enough CPU for both workloads. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
+    body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a compact model of about 142 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU. SWARM always pauses this work during library scans, and by default also pauses while anyone is streaming. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Video files and generated subtitles stay on this media server.",
     link: "https://github.com/ggerganov/whisper.cpp", linkLabel: "Learn about Whisper.cpp",
   },
   "opensubtitles-downloads": {

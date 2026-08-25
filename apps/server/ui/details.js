@@ -31,7 +31,7 @@ async function refreshTranscriptionSetting() {
     if (!settings.local_transcription_enabled) {
       statusEl.textContent = status.model_installed
         ? "Paused. The installed model and completed work are preserved."
-        : "Off. The ~466 MB Whisper model will download automatically the first time this is enabled.";
+        : "Off. The ~142 MB Whisper model will download automatically the first time this is enabled.";
     } else {
       statusEl.textContent = status.message;
     }

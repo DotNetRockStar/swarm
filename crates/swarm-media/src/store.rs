@@ -145,6 +145,26 @@ pub struct KnownEntry {
     /// alone via `classify()`, silently reverting the override. `scan_roots`
     /// checks this flag specifically for that case.
     pub kind_overridden: bool,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingDisposition {
+    NewlyMissing,
+    StillMissing,
+    ConfirmedMissing,
+}
+
+/// One filesystem result staged by a library scan. Keeping the complete
+/// manifest in SQLite lets the scanner reconcile deletions safely without
+/// retaining every path and metadata record in process memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanManifestEntry {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub relative_under_root: String,
+    pub size: u64,
+    pub modified_time: i64,
 }
 
 /// A stored [`swarm_core::peer::ClientErrorReport`] — `received_at_ms` is the
@@ -346,6 +366,38 @@ impl Library {
                 liked_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (entry_key, device_id)
             );
+            CREATE TABLE IF NOT EXISTS scan_manifest (
+                scan_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                absolute_path TEXT NOT NULL,
+                relative_under_root TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                modified_time INTEGER NOT NULL,
+                PRIMARY KEY (scan_id, relative_path)
+            );
+            CREATE TABLE IF NOT EXISTS asset_metadata_history (
+                fingerprint TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                source_relative_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                scraped_title TEXT,
+                episode_title TEXT,
+                genres_json TEXT,
+                cast_json TEXT,
+                overview TEXT,
+                rating TEXT,
+                community_rating REAL,
+                community_rating_votes INTEGER,
+                poster_relative_path TEXT,
+                season_poster_relative_path TEXT,
+                backdrop_relative_path TEXT,
+                cover_relative_path TEXT,
+                artist_art_relative_path TEXT,
+                scrape_version INTEGER NOT NULL DEFAULT 0,
+                restore_automatically INTEGER NOT NULL DEFAULT 1 CHECK (restore_automatically IN (0, 1)),
+                archived_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (fingerprint, size, restore_automatically)
+            );
             "#,
         )
         .execute(&pool)
@@ -370,10 +422,222 @@ impl Library {
             ("community_rating_votes", "INTEGER"),
             ("scrape_version", "INTEGER NOT NULL DEFAULT 0"),
             ("episode_title", "TEXT"),
+            ("available", "INTEGER NOT NULL DEFAULT 1"),
+            ("missing_scan_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("missing_since_ms", "INTEGER"),
+            ("missing_confirmed", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(&pool, "library_entries", column, ddl_type).await?;
         }
         Ok(Self { pool })
+    }
+
+    pub async fn begin_scan_manifest(&self) -> sqlx::Result<String> {
+        let scan_id = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            unix_time_ms(),
+            rand::random::<u64>()
+        );
+        // A prior process may have exited mid-scan. Those rows can never be
+        // used again because scan IDs are unique, so reclaim them here.
+        sqlx::query("DELETE FROM scan_manifest")
+            .execute(&self.pool)
+            .await?;
+        Ok(scan_id)
+    }
+
+    pub async fn append_scan_manifest(
+        &self,
+        scan_id: &str,
+        entries: &[ScanManifestEntry],
+    ) -> sqlx::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        for entry in entries {
+            sqlx::query(
+                "INSERT OR REPLACE INTO scan_manifest \
+                 (scan_id, relative_path, absolute_path, relative_under_root, size, modified_time) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(scan_id)
+            .bind(&entry.relative_path)
+            .bind(&entry.absolute_path)
+            .bind(&entry.relative_under_root)
+            .bind(entry.size as i64)
+            .bind(entry.modified_time)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await
+    }
+
+    pub async fn scan_manifest_count(&self, scan_id: &str) -> sqlx::Result<u64> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM scan_manifest WHERE scan_id = ?")
+                .bind(scan_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Returns the next bounded page in path order. `after` is an exclusive
+    /// keyset cursor, avoiding OFFSET work as the manifest grows.
+    pub async fn scan_manifest_page(
+        &self,
+        scan_id: &str,
+        after: &str,
+        limit: u32,
+    ) -> sqlx::Result<Vec<ScanManifestEntry>> {
+        type Row = (String, String, String, i64, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT relative_path, absolute_path, relative_under_root, size, modified_time \
+             FROM scan_manifest WHERE scan_id = ? AND relative_path > ? \
+             ORDER BY relative_path LIMIT ?",
+        )
+        .bind(scan_id)
+        .bind(after)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(relative_path, absolute_path, relative_under_root, size, modified_time)| {
+                    ScanManifestEntry {
+                        relative_path,
+                        absolute_path,
+                        relative_under_root,
+                        size: size.max(0) as u64,
+                        modified_time,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    pub async fn known_entry_by_path(
+        &self,
+        relative_path: &str,
+    ) -> sqlx::Result<Option<KnownEntry>> {
+        type Row = (
+            i64,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+        );
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT size, modified_time, fingerprint, poster_relative_path, \
+             season_poster_relative_path, backdrop_relative_path, cover_relative_path, \
+             artist_art_relative_path, kind_overridden, available FROM library_entries \
+             WHERE relative_path = ?",
+        )
+        .bind(relative_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(
+                size,
+                modified_time,
+                fingerprint,
+                poster,
+                season_poster,
+                backdrop,
+                cover,
+                artist,
+                kind_overridden,
+                available,
+            )| {
+                KnownEntry {
+                    size: size.max(0) as u64,
+                    modified_time,
+                    fingerprint,
+                    has_artwork: poster.is_some()
+                        || season_poster.is_some()
+                        || backdrop.is_some()
+                        || cover.is_some()
+                        || artist.is_some(),
+                    kind_overridden: kind_overridden != 0,
+                    available: available != 0,
+                }
+            },
+        ))
+    }
+
+    pub async fn entry_count_with_prefix(&self, prefix: Option<&str>) -> sqlx::Result<usize> {
+        let count: (i64,) = if let Some(prefix) = prefix {
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM library_entries \
+                 WHERE substr(relative_path, 1, ?) = ?",
+            )
+            .bind(prefix.chars().count() as i64)
+            .bind(prefix)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as("SELECT COUNT(*) FROM library_entries")
+                .fetch_one(&self.pool)
+                .await?
+        };
+        Ok(count.0.max(0) as usize)
+    }
+
+    /// Finds a keyset page of stored paths absent from this scan manifest.
+    /// This includes already-unavailable tombstones so each later successful
+    /// scan can advance confirmation without loading them all into memory.
+    pub async fn paths_missing_from_scan(
+        &self,
+        scan_id: &str,
+        prefix: Option<&str>,
+        after: &str,
+        limit: u32,
+    ) -> sqlx::Result<Vec<String>> {
+        let rows: Vec<(String,)> = if let Some(prefix) = prefix {
+            sqlx::query_as(
+                "SELECT entries.relative_path FROM library_entries entries \
+                 LEFT JOIN scan_manifest manifest ON manifest.scan_id = ? \
+                    AND manifest.relative_path = entries.relative_path \
+                 WHERE manifest.relative_path IS NULL \
+                    AND substr(entries.relative_path, 1, ?) = ? \
+                    AND entries.relative_path > ? \
+                 ORDER BY entries.relative_path LIMIT ?",
+            )
+            .bind(scan_id)
+            .bind(prefix.chars().count() as i64)
+            .bind(prefix)
+            .bind(after)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT entries.relative_path FROM library_entries entries \
+                 LEFT JOIN scan_manifest manifest ON manifest.scan_id = ? \
+                    AND manifest.relative_path = entries.relative_path \
+                 WHERE manifest.relative_path IS NULL \
+                    AND entries.relative_path > ? \
+                 ORDER BY entries.relative_path LIMIT ?",
+            )
+            .bind(scan_id)
+            .bind(after)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(|row| row.0).collect())
+    }
+
+    pub async fn clear_scan_manifest(&self, scan_id: &str) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM scan_manifest WHERE scan_id = ?")
+            .bind(scan_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// [`KnownEntry`] per relative path — the scanner's change-detection
@@ -390,12 +654,13 @@ impl Library {
             Option<String>,
             Option<String>,
             i64,
+            i64,
         );
         let rows: Vec<Row> =
             sqlx::query_as(
                 "SELECT relative_path, size, modified_time, fingerprint, \
                  poster_relative_path, season_poster_relative_path, backdrop_relative_path, cover_relative_path, artist_art_relative_path, \
-                 kind_overridden \
+                 kind_overridden, available \
                  FROM library_entries",
             )
             .fetch_all(&self.pool)
@@ -414,6 +679,7 @@ impl Library {
                     cover,
                     artist,
                     kind_overridden,
+                    available,
                 )| {
                     let has_artwork = poster.is_some()
                         || season_poster.is_some()
@@ -428,6 +694,7 @@ impl Library {
                             fingerprint,
                             has_artwork,
                             kind_overridden: kind_overridden != 0,
+                            available: available != 0,
                         },
                     )
                 },
@@ -449,7 +716,8 @@ impl Library {
                 artist = excluded.artist, album = excluded.album, track_number = excluded.track_number,
                 show_title = excluded.show_title, season = excluded.season, episode = excluded.episode,
                 duration_secs = excluded.duration_secs, video_json = excluded.video_json,
-                audio_json = excluded.audio_json, year = excluded.year
+                audio_json = excluded.audio_json, year = excluded.year,
+                available = 1, missing_scan_count = 0, missing_since_ms = NULL, missing_confirmed = 0
             "#,
         )
         .bind(&record.entry_key)
@@ -486,19 +754,266 @@ impl Library {
         Ok(())
     }
 
-    pub async fn remove_by_path(&self, relative_path: &str) -> sqlx::Result<()> {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT entry_key, fingerprint FROM library_entries WHERE relative_path = ?",
+    pub async fn archive_metadata(
+        &self,
+        entry_key: &str,
+        restore_automatically: bool,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO asset_metadata_history (\
+                fingerprint, size, source_relative_path, kind, scraped_title, episode_title, \
+                genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
+                poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
+                cover_relative_path, artist_art_relative_path, scrape_version, \
+                restore_automatically, archived_at_ms) \
+             SELECT fingerprint, size, relative_path, kind, scraped_title, episode_title, \
+                genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
+                poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
+                cover_relative_path, artist_art_relative_path, scrape_version, ?, ? \
+             FROM library_entries WHERE entry_key = ? \
+             ON CONFLICT(fingerprint, size, restore_automatically) DO UPDATE SET \
+                source_relative_path = excluded.source_relative_path, kind = excluded.kind, \
+                scraped_title = excluded.scraped_title, episode_title = excluded.episode_title, \
+                genres_json = excluded.genres_json, cast_json = excluded.cast_json, \
+                overview = excluded.overview, rating = excluded.rating, \
+                community_rating = excluded.community_rating, \
+                community_rating_votes = excluded.community_rating_votes, \
+                poster_relative_path = excluded.poster_relative_path, \
+                season_poster_relative_path = excluded.season_poster_relative_path, \
+                backdrop_relative_path = excluded.backdrop_relative_path, \
+                cover_relative_path = excluded.cover_relative_path, \
+                artist_art_relative_path = excluded.artist_art_relative_path, \
+                scrape_version = excluded.scrape_version, \
+                restore_automatically = excluded.restore_automatically, \
+                archived_at_ms = excluded.archived_at_ms",
+        )
+        .bind(i64::from(restore_automatically))
+        .bind(unix_time_ms())
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_missing_by_path(
+        &self,
+        relative_path: &str,
+        confirmation_grace_ms: i64,
+    ) -> sqlx::Result<Option<MissingDisposition>> {
+        type Row = (String, String, i64, i64, i64, Option<i64>);
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT entry_key, fingerprint, size, available, missing_scan_count, missing_since_ms \
+             FROM library_entries WHERE relative_path = ?",
         )
         .bind(relative_path)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((entry_key, fingerprint)) = row else {
+        let Some((entry_key, fingerprint, _size, available, missing_count, missing_since)) = row
+        else {
+            return Ok(None);
+        };
+        let now = unix_time_ms();
+        if available != 0 {
+            self.archive_metadata(&entry_key, true).await?;
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query(
+                "UPDATE library_entries SET available = 0, missing_scan_count = 1, \
+                 missing_since_ms = ?, missing_confirmed = 0 WHERE entry_key = ?",
+            )
+            .bind(now)
+            .bind(&entry_key)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO deleted_library_entries \
+                 (entry_key, relative_path, fingerprint, deleted_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&entry_key)
+            .bind(relative_path)
+            .bind(&fingerprint)
+            .bind(now / 1_000)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO library_changes (entry_key, operation) VALUES (?, 'delete') \
+                 ON CONFLICT(entry_key) DO UPDATE SET operation = 'delete'",
+            )
+            .bind(&entry_key)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(Some(MissingDisposition::NewlyMissing));
+        }
+
+        let next_count = missing_count.saturating_add(1);
+        let confirmed = next_count >= 2
+            && missing_since
+                .is_some_and(|since| now.saturating_sub(since) >= confirmation_grace_ms);
+        sqlx::query(
+            "UPDATE library_entries SET missing_scan_count = ?, missing_confirmed = ? \
+             WHERE entry_key = ?",
+        )
+        .bind(next_count)
+        .bind(i64::from(confirmed))
+        .bind(&entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(Some(if confirmed {
+            MissingDisposition::ConfirmedMissing
+        } else {
+            MissingDisposition::StillMissing
+        }))
+    }
+
+    pub async fn restore_available_by_path(&self, relative_path: &str) -> sqlx::Result<bool> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT entry_key FROM library_entries WHERE relative_path = ? AND available = 0",
+        )
+        .bind(relative_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((entry_key,)) = row else {
+            return Ok(false);
+        };
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE library_entries SET available = 1, missing_scan_count = 0, \
+             missing_since_ms = NULL, missing_confirmed = 0 WHERE entry_key = ?",
+        )
+        .bind(&entry_key)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM deleted_library_entries WHERE entry_key = ?")
+            .bind(&entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO library_changes (entry_key, operation) VALUES (?, 'upsert') \
+             ON CONFLICT(entry_key) DO UPDATE SET operation = 'upsert'",
+        )
+        .bind(&entry_key)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn restore_archived_metadata(
+        &self,
+        entry_key: &str,
+        fingerprint: &str,
+        size: u64,
+        new_relative_path: &str,
+    ) -> sqlx::Result<bool> {
+        let archived = sqlx::query_as::<_, MetadataHistoryRow>(
+            "SELECT source_relative_path, kind, scraped_title, episode_title, genres_json, cast_json, \
+             overview, rating, community_rating, community_rating_votes, poster_relative_path, \
+             season_poster_relative_path, backdrop_relative_path, cover_relative_path, \
+             artist_art_relative_path, scrape_version FROM asset_metadata_history \
+             WHERE fingerprint = ? AND size = ? AND restore_automatically = 1 \
+               AND kind = (SELECT kind FROM library_entries WHERE entry_key = ?)",
+        )
+        .bind(fingerprint)
+        .bind(size as i64)
+        .bind(entry_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        // During a rename's first scan, the old path is still an active row
+        // until the complete manifest has processed successfully. It is a
+        // safe bounded fallback source and avoids a write-heavy pre-archive
+        // pass solely to make rename restoration possible.
+        let history = match archived {
+            Some(history) => Some(history),
+            None => sqlx::query_as::<_, MetadataHistoryRow>(
+                "SELECT relative_path AS source_relative_path, kind, scraped_title, episode_title, \
+                 genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
+                 poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
+                 cover_relative_path, artist_art_relative_path, scrape_version \
+                 FROM library_entries WHERE fingerprint = ? AND size = ? AND entry_key != ? \
+                   AND kind = (SELECT kind FROM library_entries WHERE entry_key = ?) \
+                 ORDER BY available DESC LIMIT 1",
+            )
+            .bind(fingerprint)
+            .bind(size as i64)
+            .bind(entry_key)
+            .bind(entry_key)
+            .fetch_optional(&self.pool)
+            .await?,
+        };
+        let Some(history) = history else {
+            return Ok(false);
+        };
+        let remap = |path: Option<String>| {
+            path.map(|path| {
+                remap_archived_artwork_path(&path, &history.source_relative_path, new_relative_path)
+            })
+        };
+        sqlx::query(
+            "UPDATE library_entries SET scraped_title = ?, episode_title = ?, genres_json = ?, \
+             cast_json = ?, overview = ?, rating = ?, community_rating = ?, \
+             community_rating_votes = ?, poster_relative_path = ?, season_poster_relative_path = ?, \
+             backdrop_relative_path = ?, cover_relative_path = ?, artist_art_relative_path = ?, \
+             scrape_version = ?, artwork_version = artwork_version + 1 WHERE entry_key = ?",
+        )
+        .bind(history.scraped_title)
+        .bind(history.episode_title)
+        .bind(history.genres_json)
+        .bind(history.cast_json)
+        .bind(history.overview)
+        .bind(history.rating)
+        .bind(history.community_rating)
+        .bind(history.community_rating_votes)
+        .bind(remap(history.poster_relative_path))
+        .bind(remap(history.season_poster_relative_path))
+        .bind(remap(history.backdrop_relative_path))
+        .bind(remap(history.cover_relative_path))
+        .bind(remap(history.artist_art_relative_path))
+        .bind(history.scrape_version)
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
+    }
+
+    pub async fn has_archived_metadata(
+        &self,
+        fingerprint: &str,
+        size: u64,
+        restore_automatically: bool,
+    ) -> sqlx::Result<bool> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM asset_metadata_history \
+             WHERE fingerprint = ? AND size = ? AND restore_automatically = ?",
+        )
+        .bind(fingerprint)
+        .bind(size as i64)
+        .bind(i64::from(restore_automatically))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    /// Permanently forgets an asset and its archived metadata. Automatic
+    /// scans use `mark_missing_by_path` instead.
+    pub async fn remove_by_path(&self, relative_path: &str) -> sqlx::Result<()> {
+        let row: Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT entry_key, fingerprint, size FROM library_entries WHERE relative_path = ?",
+        )
+        .bind(relative_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((entry_key, fingerprint, size)) = row else {
             return Ok(());
         };
+        let mut transaction = self.pool.begin().await?;
         sqlx::query("DELETE FROM library_entries WHERE entry_key = ?")
             .bind(&entry_key)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM asset_metadata_history WHERE fingerprint = ? AND size = ?")
+            .bind(&fingerprint)
+            .bind(size)
+            .execute(&mut *transaction)
             .await?;
         sqlx::query(
             "INSERT OR REPLACE INTO deleted_library_entries (entry_key, relative_path, fingerprint, deleted_at) \
@@ -507,30 +1022,35 @@ impl Library {
         .bind(&entry_key)
         .bind(relative_path)
         .bind(&fingerprint)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         sqlx::query(
             "INSERT INTO library_changes (entry_key, operation) VALUES (?, 'delete') \
              ON CONFLICT(entry_key) DO UPDATE SET operation = 'delete'",
         )
         .bind(&entry_key)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
     pub async fn get(&self, entry_key: &str) -> sqlx::Result<Option<EntryRecord>> {
-        let row = sqlx::query_as::<_, EntryRow>(&format!("{ENTRY_SELECT} WHERE entry_key = ?"))
-            .bind(entry_key)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE entry_key = ? AND available = 1"
+        ))
+        .bind(entry_key)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(EntryRecord::from))
     }
 
     pub async fn list(&self) -> sqlx::Result<Vec<EntryRecord>> {
-        let rows = sqlx::query_as::<_, EntryRow>(&format!("{ENTRY_SELECT} ORDER BY relative_path"))
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query_as::<_, EntryRow>(&format!(
+            "{ENTRY_SELECT} WHERE available = 1 ORDER BY relative_path"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(EntryRecord::from).collect())
     }
 
@@ -543,65 +1063,79 @@ impl Library {
         language: &str,
         segment_duration_secs: u64,
     ) -> sqlx::Result<u64> {
-        let entries = self.list().await?;
-        let existing_rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT entry_key, fingerprint, model, language FROM transcription_jobs",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let existing: HashMap<String, (String, String, String)> = existing_rows
-            .into_iter()
-            .map(|(entry_key, fingerprint, model, language)| {
-                (entry_key, (fingerprint, model, language))
-            })
-            .collect();
         let now_ms = unix_time_ms();
-        let mut queued = 0;
-        for entry in entries.into_iter().filter(|entry| {
-            matches!(entry.kind, MediaKind::Movie | MediaKind::Episode)
-                && entry.audio.is_some()
-                && entry.duration_secs.is_some_and(|duration| duration > 0.0)
-        }) {
-            let total_segments = ((entry.duration_secs.unwrap_or(1.0)
-                / segment_duration_secs.max(1) as f64)
-                .ceil() as i64)
-                .max(1);
-            if existing.get(&entry.entry_key).is_some_and(
-                |(fingerprint, old_model, old_language)| {
-                    fingerprint == &entry.fingerprint
-                        && old_model == model
-                        && old_language == language
-                },
-            ) {
-                continue;
-            }
-            let mut transaction = self.pool.begin().await?;
-            sqlx::query("DELETE FROM subtitle_tracks WHERE entry_key = ? AND source = 'whisper'")
-                .bind(&entry.entry_key)
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query("DELETE FROM transcription_jobs WHERE entry_key = ?")
-                .bind(&entry.entry_key)
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query(
-                "INSERT INTO transcription_jobs \
-                 (entry_key, fingerprint, model, language, status, total_segments, completed_segments, created_at_ms, updated_at_ms) \
-                 VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?)",
-            )
-            .bind(&entry.entry_key)
-            .bind(&entry.fingerprint)
+        let segment_secs = segment_duration_secs.max(1) as f64;
+        let needs_queue = "entries.available = 1 AND entries.kind IN ('movie', 'episode') \
+            AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
+            AND (jobs.entry_key IS NULL OR jobs.fingerprint != entries.fingerprint \
+                 OR jobs.model != ? OR jobs.language != ?)";
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM library_entries entries \
+             LEFT JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
+             WHERE {needs_queue}"
+        );
+        let (queued,): (i64,) = sqlx::query_as(&count_sql)
             .bind(model)
             .bind(language)
-            .bind(total_segments)
-            .bind(now_ms)
-            .bind(now_ms)
+            .fetch_one(&self.pool)
+            .await?;
+
+        let mut transaction = self.pool.begin().await?;
+        let delete_subtitles_sql = format!(
+            "DELETE FROM subtitle_tracks WHERE source = 'whisper' AND entry_key IN (\
+                SELECT entries.entry_key FROM library_entries entries \
+                LEFT JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
+                WHERE {needs_queue}\
+             )"
+        );
+        sqlx::query(&delete_subtitles_sql)
+            .bind(model)
+            .bind(language)
             .execute(&mut *transaction)
             .await?;
-            transaction.commit().await?;
-            queued += 1;
-        }
-        Ok(queued)
+
+        // Deleting a stale job cascades its old segment rows. New/missing
+        // jobs have no row to delete and are inserted by the next statement.
+        sqlx::query(
+            "DELETE FROM transcription_jobs WHERE entry_key IN (\
+                SELECT entries.entry_key FROM library_entries entries \
+                JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
+                WHERE entries.available = 1 AND entries.kind IN ('movie', 'episode') \
+                  AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
+                  AND (jobs.fingerprint != entries.fingerprint OR jobs.model != ? OR jobs.language != ?)\
+             )",
+        )
+        .bind(model)
+        .bind(language)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO transcription_jobs \
+                (entry_key, fingerprint, model, language, status, total_segments, \
+                 completed_segments, created_at_ms, updated_at_ms) \
+             SELECT entries.entry_key, entries.fingerprint, ?, ?, 'queued', \
+                CAST(entries.duration_secs / ? AS INTEGER) + \
+                  CASE WHEN entries.duration_secs > CAST(entries.duration_secs / ? AS INTEGER) * ? \
+                       THEN 1 ELSE 0 END, \
+                0, ?, ? \
+             FROM library_entries entries \
+             LEFT JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
+             WHERE entries.available = 1 AND entries.kind IN ('movie', 'episode') \
+               AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
+               AND jobs.entry_key IS NULL",
+        )
+        .bind(model)
+        .bind(language)
+        .bind(segment_secs)
+        .bind(segment_secs)
+        .bind(segment_secs)
+        .bind(now_ms)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(queued.max(0) as u64)
     }
 
     /// A process exit can leave a claimed job marked transcribing/finalizing.
@@ -622,8 +1156,12 @@ impl Library {
         let mut transaction = self.pool.begin().await?;
         type Row = (String, String, String, String, i64, i64);
         let row: Option<Row> = sqlx::query_as(
-            "SELECT entry_key, fingerprint, model, language, total_segments, completed_segments \
-             FROM transcription_jobs WHERE status = 'queued' ORDER BY created_at_ms, entry_key LIMIT 1",
+            "SELECT jobs.entry_key, jobs.fingerprint, jobs.model, jobs.language, \
+                    jobs.total_segments, jobs.completed_segments \
+             FROM transcription_jobs jobs \
+             JOIN library_entries entries ON entries.entry_key = jobs.entry_key \
+             WHERE jobs.status = 'queued' AND entries.available = 1 \
+             ORDER BY jobs.created_at_ms, jobs.entry_key LIMIT 1",
         )
         .fetch_optional(&mut *transaction)
         .await?;
@@ -825,11 +1363,13 @@ impl Library {
         type Row = (i64, i64, i64, i64, i64);
         let (queued, completed, failed, total_segments, completed_segments): Row = sqlx::query_as(
             "SELECT \
-                COALESCE(SUM(CASE WHEN status IN ('queued','transcribing','finalizing') THEN 1 ELSE 0 END), 0), \
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0), \
-                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0), \
-                COALESCE(SUM(total_segments), 0), COALESCE(SUM(completed_segments), 0) \
-             FROM transcription_jobs",
+                COALESCE(SUM(CASE WHEN jobs.status IN ('queued','transcribing','finalizing') THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN jobs.status = 'completed' THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN jobs.status = 'failed' THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(jobs.total_segments), 0), COALESCE(SUM(jobs.completed_segments), 0) \
+             FROM transcription_jobs jobs \
+             JOIN library_entries entries ON entries.entry_key = jobs.entry_key \
+             WHERE entries.available = 1",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -851,7 +1391,7 @@ impl Library {
         album: &str,
     ) -> sqlx::Result<Vec<EntryRecord>> {
         let rows = sqlx::query_as::<_, EntryRow>(&format!(
-            "{ENTRY_SELECT} WHERE artist = ? AND album = ? ORDER BY relative_path"
+            "{ENTRY_SELECT} WHERE available = 1 AND artist = ? AND album = ? ORDER BY relative_path"
         ))
         .bind(artist)
         .bind(album)
@@ -917,9 +1457,10 @@ impl Library {
     }
 
     pub async fn entry_count(&self) -> sqlx::Result<u64> {
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM library_entries")
-            .fetch_one(&self.pool)
-            .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM library_entries WHERE available = 1")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count as u64)
     }
 
@@ -928,7 +1469,7 @@ impl Library {
     /// added after an existing library was already scraped.
     pub async fn missing_scrape(&self) -> sqlx::Result<Vec<EntryRecord>> {
         let rows = sqlx::query_as::<_, EntryRow>(&format!(
-            "{ENTRY_SELECT} WHERE scraped_title IS NULL OR scrape_version < ? ORDER BY relative_path"
+            "{ENTRY_SELECT} WHERE available = 1 AND (scraped_title IS NULL OR scrape_version < ?) ORDER BY relative_path"
         ))
             .bind(CURRENT_SCRAPE_VERSION)
             .fetch_all(&self.pool)
@@ -944,7 +1485,7 @@ impl Library {
     /// option.
     pub async fn incomplete_scrape(&self) -> sqlx::Result<Vec<EntryRecord>> {
         let rows = sqlx::query_as::<_, EntryRow>(&format!(
-            "{ENTRY_SELECT} WHERE scrape_version < ? \
+            "{ENTRY_SELECT} WHERE available = 1 AND (scrape_version < ? \
              OR (kind IN ('movie', 'episode') AND (\
                  scraped_title IS NULL OR TRIM(scraped_title) = '' \
                  OR genres_json IS NULL OR genres_json IN ('', '[]', 'null') \
@@ -955,7 +1496,7 @@ impl Library {
                  OR poster_relative_path IS NULL OR TRIM(poster_relative_path) = '' \
                  OR backdrop_relative_path IS NULL OR TRIM(backdrop_relative_path) = '' \
                  OR (kind = 'episode' AND (season_poster_relative_path IS NULL OR TRIM(season_poster_relative_path) = ''))\
-             )) \
+             ))) \
              OR (kind = 'track' AND (\
                  genres_json IS NULL OR genres_json IN ('', '[]', 'null') \
                  OR community_rating IS NULL \
@@ -981,7 +1522,7 @@ impl Library {
             .unwrap_or(0);
         let not_found_cutoff_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000);
         let rows = sqlx::query_as::<_, EntryRow>(&format!(
-            "{ENTRY_SELECT} WHERE kind = 'track' AND duration_secs IS NOT NULL \
+            "{ENTRY_SELECT} WHERE available = 1 AND kind = 'track' AND duration_secs IS NOT NULL \
              AND artist IS NOT NULL AND artist <> '' AND album IS NOT NULL AND album <> '' \
              AND NOT EXISTS (SELECT 1 FROM track_lyrics \
                  WHERE track_lyrics.entry_key = library_entries.entry_key \
@@ -1250,7 +1791,7 @@ impl Library {
     /// the picker, not on any hot path.
     pub async fn distinct_genres(&self) -> sqlx::Result<Vec<String>> {
         let rows: Vec<(Option<String>,)> = sqlx::query_as(
-            "SELECT DISTINCT genres_json FROM library_entries WHERE genres_json IS NOT NULL",
+            "SELECT DISTINCT genres_json FROM library_entries WHERE available = 1 AND genres_json IS NOT NULL",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1318,6 +1859,9 @@ impl Library {
     /// Returns the artwork relative paths that were cleared, if any, so the
     /// caller can best-effort delete the now-orphaned files on disk.
     pub async fn clear_scrape_result(&self, entry_key: &str) -> sqlx::Result<Vec<String>> {
+        // Preserve a rollback copy, but do not let a deliberately cleared or
+        // classification-invalidated result silently restore itself later.
+        self.archive_metadata(entry_key, false).await?;
         let mut transaction = self.pool.begin().await?;
         type ArtworkPathRow = (
             Option<String>,
@@ -1396,7 +1940,7 @@ impl Library {
         let mut report = ReclassifyReport::default();
         let rows: Vec<ReclassifyRow> = sqlx::query_as(
             "SELECT entry_key, relative_path, kind, show_title, season, episode, artist, album, track_number, kind_overridden \
-             FROM library_entries",
+             FROM library_entries WHERE available = 1",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1756,6 +2300,47 @@ struct EntryRow {
     rating: Option<String>,
     community_rating: Option<f64>,
     community_rating_votes: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct MetadataHistoryRow {
+    source_relative_path: String,
+    #[allow(dead_code)]
+    kind: String,
+    scraped_title: Option<String>,
+    episode_title: Option<String>,
+    genres_json: Option<String>,
+    cast_json: Option<String>,
+    overview: Option<String>,
+    rating: Option<String>,
+    community_rating: Option<f64>,
+    community_rating_votes: Option<i64>,
+    poster_relative_path: Option<String>,
+    season_poster_relative_path: Option<String>,
+    backdrop_relative_path: Option<String>,
+    cover_relative_path: Option<String>,
+    artist_art_relative_path: Option<String>,
+    scrape_version: i64,
+}
+
+fn remap_archived_artwork_path(
+    artwork_path: &str,
+    old_media_path: &str,
+    new_media_path: &str,
+) -> String {
+    let old_parent = old_media_path.rsplit_once('/').map(|(parent, _)| parent);
+    let new_parent = new_media_path.rsplit_once('/').map(|(parent, _)| parent);
+    match (old_parent, new_parent) {
+        (Some(old_parent), Some(new_parent)) if artwork_path == old_parent => {
+            new_parent.to_string()
+        }
+        (Some(old_parent), Some(new_parent)) => artwork_path
+            .strip_prefix(old_parent)
+            .filter(|suffix| suffix.starts_with('/'))
+            .map(|suffix| format!("{new_parent}{suffix}"))
+            .unwrap_or_else(|| artwork_path.to_string()),
+        _ => artwork_path.to_string(),
+    }
 }
 
 impl From<EntryRow> for EntryRecord {
