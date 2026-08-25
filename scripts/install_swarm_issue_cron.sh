@@ -11,6 +11,7 @@ USER_HOME_DIR="${HOME:?HOME must be set}"
 STATE_DIR="${SWARM_ISSUE_WORKER_STATE_DIR:-$USER_HOME_DIR/.local/state/swarm-issue-worker}"
 LOG_PATH="$STATE_DIR/cron.log"
 WORKER_SNAPSHOT_PATH="$STATE_DIR/swarm_issue_worker.snapshot.sh"
+RUNNER_LOCK_DIR="$STATE_DIR/runner.lock"
 INTERVAL_SECONDS="${SWARM_ISSUE_WORKER_INTERVAL_SECONDS:-600}"
 CARGO_TARGET_MAX_GIB="${SWARM_CARGO_TARGET_MAX_GIB:-1}"
 ISSUE_COMPLETED_EXIT_CODE=10
@@ -101,8 +102,40 @@ prune_cargo_target_if_needed() {
     fi
 }
 
+cleanup_runner_lock() {
+    if [ -f "$RUNNER_LOCK_DIR/pid" ] \
+        && [ "$(sed -n '1p' "$RUNNER_LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+        rm -f -- "$RUNNER_LOCK_DIR/pid"
+        rmdir -- "$RUNNER_LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+acquire_runner_lock() {
+    local owner_pid
+
+    if mkdir -- "$RUNNER_LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$RUNNER_LOCK_DIR/pid"
+        return 0
+    fi
+    owner_pid="$(sed -n '1p' "$RUNNER_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+        log "Another foreground SWARM issue runner is already active as pid $owner_pid; exiting."
+        exit 0
+    fi
+
+    rm -f -- "$RUNNER_LOCK_DIR/pid" 2>/dev/null || true
+    rmdir -- "$RUNNER_LOCK_DIR" 2>/dev/null || true
+    if ! mkdir -- "$RUNNER_LOCK_DIR" 2>/dev/null; then
+        log "Another foreground runner acquired the lock during stale-lock recovery; exiting."
+        exit 0
+    fi
+    printf '%s\n' "$$" > "$RUNNER_LOCK_DIR/pid"
+}
+
 mkdir -p -- "$STATE_DIR"
 remove_legacy_cron
+acquire_runner_lock
+trap cleanup_runner_lock EXIT
 
 on_interrupt() {
     log "Ctrl+C received; stopped the SWARM issue worker."

@@ -207,7 +207,7 @@ claude_has_capacity() {
         --no-session-persistence > "$usage_file" 2>&1; then
         rm -f -- "$usage_file"
         log "Claude quota unavailable: Claude Code's /usage command failed. Run 'claude auth login' if this persists."
-        return 1
+        return 2
     fi
 
     usage_result="$("$JQ_BIN" -r '.result // empty' "$usage_file" 2>/dev/null || true)"
@@ -221,7 +221,7 @@ claude_has_capacity() {
 
     if [ -z "$session_used" ] || [ -z "$week_used" ]; then
         log "Claude quota unavailable: Claude Code returned an unrecognized /usage format."
-        return 1
+        return 2
     fi
 
     session_remaining="$("$JQ_BIN" -nr --arg used "$session_used" '100 - ($used | tonumber)')"
@@ -243,7 +243,7 @@ codex_has_capacity() {
 
     if [ -z "$CODEX_BIN" ] || [ ! -x "$CODEX_BIN" ]; then
         log "Codex quota unavailable: codex was not found in PATH."
-        return 1
+        return 2
     fi
 
     usage_file="$(mktemp "$STATE_DIR/codex-usage.XXXXXX")"
@@ -251,7 +251,18 @@ codex_has_capacity() {
         --codex-bin "$CODEX_BIN" > "$usage_file"; then
         rm -f -- "$usage_file"
         log "Codex quota unavailable: the local rate-limit request failed."
-        return 1
+        return 2
+    fi
+
+    if ! "$JQ_BIN" -e '
+        type == "object"
+        and ([.primary, .secondary] | map(select(. != null))) as $windows
+        | ($windows | length) > 0
+          and all($windows[]; (.usedPercent | type) == "number")
+    ' "$usage_file" >/dev/null 2>&1; then
+        rm -f -- "$usage_file"
+        log "Codex quota unavailable: the local rate-limit response was invalid."
+        return 2
     fi
 
     summary="$("$JQ_BIN" -r '
@@ -288,7 +299,7 @@ selected_ai_has_capacity() {
         Claude)
             if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
                 log "Claude quota unavailable: claude was not found in PATH."
-                return 1
+                return 2
             fi
             claude_has_capacity
             ;;
@@ -756,6 +767,23 @@ ai_output_indicates_quota() {
     grep -Eqi \
         'usage limit|rate[ _-]?limit|quota|credits? (are )?(exhausted|unavailable)|limit (has been )?reached|hit your .*limit|resets? at|insufficient_quota' \
         "$AI_OUTPUT_FILE" "$AI_DIAGNOSTIC_FILE" 2>/dev/null
+}
+
+ai_failure_is_quota() {
+    local capacity_status
+
+    if ai_output_indicates_quota; then
+        return 0
+    fi
+    if selected_ai_has_capacity "$SELECTED_AI"; then
+        return 1
+    else
+        capacity_status="$?"
+    fi
+    # Status 1 is a successful quota query that confirmed insufficient
+    # capacity. Status 2 means the query itself failed and must not be turned
+    # into a false quota pause/resume cycle.
+    [ "$capacity_status" -eq 1 ]
 }
 
 extract_followup_metadata() {
@@ -1262,18 +1290,29 @@ if [ -n "$PINNED_AI" ]; then
     if [ -n "$AI_SESSION_ID" ]; then
         SESSION_IS_RESUME=1
     fi
-    if [ "$QUOTA_RESUME_READY" -ne 1 ] && ! selected_ai_has_capacity "$SELECTED_AI"; then
-        if [ "$DRY_RUN" = "1" ]; then
-            log "Dry run: pinned $SELECTED_AI session $AI_SESSION_ID is waiting for usage."
+    if [ "$QUOTA_RESUME_READY" -ne 1 ]; then
+        PINNED_CAPACITY_STATUS=0
+        if selected_ai_has_capacity "$SELECTED_AI"; then
+            PINNED_CAPACITY_STATUS=0
+        else
+            PINNED_CAPACITY_STATUS="$?"
+        fi
+        if [ "$PINNED_CAPACITY_STATUS" -eq 2 ]; then
+            log "Could not verify $SELECTED_AI usage for pinned issue #$ISSUE_NUMBER; leaving its state active and retrying later."
             exit 0
+        elif [ "$PINNED_CAPACITY_STATUS" -eq 1 ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                log "Dry run: pinned $SELECTED_AI session $AI_SESSION_ID is waiting for usage."
+                exit 0
+            fi
+            if [ -z "$AI_SESSION_ID" ]; then
+                fail "The pinned $SELECTED_AI attempt has no resumable session ID."
+            fi
+            mark_quota_paused
+            deliver_quota_pause_notifications
+            suspend_quota_paused_issue
+            exit "$QUOTA_PAUSED_EXIT_CODE"
         fi
-        if [ -z "$AI_SESSION_ID" ]; then
-            fail "The pinned $SELECTED_AI attempt has no resumable session ID."
-        fi
-        mark_quota_paused
-        deliver_quota_pause_notifications
-        suspend_quota_paused_issue
-        exit "$QUOTA_PAUSED_EXIT_CODE"
     fi
 else
     if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
@@ -1531,9 +1570,7 @@ fi
 
 if [ "$AI_STATUS" -ne 0 ] || [ ! -s "$AI_OUTPUT_FILE" ]; then
     QUOTA_FAILURE=0
-    if ai_output_indicates_quota; then
-        QUOTA_FAILURE=1
-    elif ! selected_ai_has_capacity "$SELECTED_AI"; then
+    if ai_failure_is_quota; then
         QUOTA_FAILURE=1
     fi
     if [ "$QUOTA_FAILURE" -eq 1 ]; then

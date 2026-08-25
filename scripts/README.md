@@ -117,6 +117,10 @@ and test builds use compact line-table debug information with incremental
 compilation disabled. After each worker run, the runner also uses `cargo clean`
 when the shared `target` directory exceeds 1 GiB and no Cargo or Rust compiler
 process is active; override that limit with `SWARM_CARGO_TARGET_MAX_GIB`.
+Only one foreground runner may be active for a state directory; a second
+invocation exits without starting another polling loop. Temporary failures of
+an AI provider's usage-check command are treated as unknown availability, not
+as quota exhaustion, so they do not create pause/resume comments or loops.
 
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
 `SWARM_GITHUB_ASSIGNEE`, `SWARM_TRUSTED_FOLLOWUP_AUTHOR`,

@@ -228,4 +228,35 @@ test "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1
 preserve_dirty_worktree_after_completion
 test -f "$RECOVERY_REPO/unrelated.txt"
 
+# A failed quota query is availability-unknown (status 2), not proof that an
+# AI exhausted quota. Only a successful below-threshold query (status 1) or
+# explicit quota text should pause a session.
+AI_OUTPUT_FILE="$TEST_STATE/quota-output.log"
+AI_DIAGNOSTIC_FILE="$TEST_STATE/quota-diagnostic.log"
+: > "$AI_OUTPUT_FILE"
+: > "$AI_DIAGNOSTIC_FILE"
+SELECTED_AI="Codex"
+selected_ai_has_capacity() { return 2; }
+if ai_failure_is_quota; then
+    printf 'unknown quota status was misclassified as exhausted\n' >&2
+    exit 1
+fi
+selected_ai_has_capacity() { return 1; }
+ai_failure_is_quota
+selected_ai_has_capacity() { return 2; }
+printf 'usage limit reached\n' > "$AI_DIAGNOSTIC_FILE"
+ai_failure_is_quota
+
+# The lifetime runner lock prevents a second foreground polling loop from
+# starting even though per-invocation worker locking also exists.
+RUNNER_STATE="$TEST_DIR/runner-state"
+mkdir -p -- "$RUNNER_STATE/runner.lock"
+printf '%s\n' "$$" > "$RUNNER_STATE/runner.lock/pid"
+RUNNER_OUTPUT="$(
+    SWARM_ISSUE_WORKER_STATE_DIR="$RUNNER_STATE" \
+    CRONTAB_BIN="/does/not/exist" \
+        bash "$SCRIPT_DIR/install_swarm_issue_cron.sh" 2>&1
+)"
+printf '%s' "$RUNNER_OUTPUT" | grep -Fq 'Another foreground SWARM issue runner is already active'
+
 printf 'swarm issue worker state tests passed\n'
