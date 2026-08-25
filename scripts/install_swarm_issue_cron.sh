@@ -12,6 +12,7 @@ STATE_DIR="${SWARM_ISSUE_WORKER_STATE_DIR:-$USER_HOME_DIR/.local/state/swarm-iss
 LOG_PATH="$STATE_DIR/cron.log"
 WORKER_SNAPSHOT_PATH="$STATE_DIR/swarm_issue_worker.snapshot.sh"
 INTERVAL_SECONDS="${SWARM_ISSUE_WORKER_INTERVAL_SECONDS:-600}"
+CARGO_TARGET_MAX_GIB="${SWARM_CARGO_TARGET_MAX_GIB:-1}"
 ISSUE_COMPLETED_EXIT_CODE=10
 QUOTA_PAUSED_EXIT_CODE=11
 CRONTAB_BIN="${CRONTAB_BIN:-$(command -v crontab || true)}"
@@ -66,6 +67,39 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     printf 'SWARM_ISSUE_WORKER_INTERVAL_SECONDS must be a positive integer.\n' >&2
     exit 2
 fi
+if ! [[ "$CARGO_TARGET_MAX_GIB" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'SWARM_CARGO_TARGET_MAX_GIB must be a positive integer.\n' >&2
+    exit 2
+fi
+
+prune_cargo_target_if_needed() {
+    local target_dir="$SCRIPT_DIR/../target"
+    local target_kib
+    local maximum_kib=$((CARGO_TARGET_MAX_GIB * 1024 * 1024))
+
+    [ -d "$target_dir" ] || return 0
+    target_kib="$(du -sk "$target_dir" 2>/dev/null | awk '{ print $1 }')"
+    [[ "$target_kib" =~ ^[0-9]+$ ]] || return 0
+    [ "$target_kib" -gt "$maximum_kib" ] || return 0
+
+    # Never remove artifacts from underneath a manual or unattended build.
+    # A later idle worker cycle will retry the size check.
+    if pgrep -x cargo >/dev/null 2>&1 || pgrep -x rustc >/dev/null 2>&1; then
+        log "Cargo target exceeds ${CARGO_TARGET_MAX_GIB} GiB, but a Rust build is active; cleanup deferred."
+        return 0
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        log "Cargo target exceeds ${CARGO_TARGET_MAX_GIB} GiB, but cargo is unavailable; cleanup deferred."
+        return 0
+    fi
+
+    log "Cargo target exceeds ${CARGO_TARGET_MAX_GIB} GiB; removing generated build artifacts."
+    if (cd -- "$SCRIPT_DIR/.." && cargo clean); then
+        log "Cargo build-artifact cleanup completed."
+    else
+        log "Warning: Cargo build-artifact cleanup failed; it will be retried later."
+    fi
+}
 
 mkdir -p -- "$STATE_DIR"
 remove_legacy_cron
@@ -102,6 +136,7 @@ while true; do
         /bin/bash "$WORKER_SNAPSHOT_PATH" 2>&1 | tee -a "$LOG_PATH"
     worker_status="${PIPESTATUS[0]}"
     set -e
+    prune_cargo_target_if_needed
 
     if [ "$worker_status" -eq "$ISSUE_COMPLETED_EXIT_CODE" ]; then
         log "Issue completed successfully; checking the queue again immediately."

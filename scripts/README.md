@@ -112,7 +112,11 @@ output is appended to
 `~/.local/state/swarm-issue-worker/cron.log`. Press Ctrl+C to stop it. It also
 removes the marked crontab block created by older versions. To remove only that
 legacy block without starting the runner, use `--remove`. Override the idle and
-error retry interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`.
+error retry interval with `SWARM_ISSUE_WORKER_INTERVAL_SECONDS`. Rust development
+and test builds use compact line-table debug information with incremental
+compilation disabled. After each worker run, the runner also uses `cargo clean`
+when the shared `target` directory exceeds 1 GiB and no Cargo or Rust compiler
+process is active; override that limit with `SWARM_CARGO_TARGET_MAX_GIB`.
 
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
 `SWARM_GITHUB_ASSIGNEE`, `SWARM_TRUSTED_FOLLOWUP_AUTHOR`,
