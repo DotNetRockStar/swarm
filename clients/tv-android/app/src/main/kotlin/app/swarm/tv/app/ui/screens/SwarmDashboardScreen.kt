@@ -65,6 +65,7 @@ fun SwarmDashboardScreen(
     swarm: SwarmSummary,
     devices: List<SwarmDevice>,
     lanServers: List<LanServer>,
+    pairedLanServers: List<LanServer>,
     pairedLanFingerprints: Set<String>,
     disconnectedServerFingerprints: Set<String>,
     lanPairingBusy: Boolean,
@@ -104,12 +105,13 @@ fun SwarmDashboardScreen(
     val swarmFingerprints = serversInSwarm.mapTo(mutableSetOf()) { normalized(it.certFingerprint) }
     val paired = pairedLanFingerprints.mapTo(mutableSetOf(), ::normalized)
     val disconnected = disconnectedServerFingerprints.mapTo(mutableSetOf(), ::normalized)
+    val lanServerRows = knownLanServerRows(lanServers, pairedLanServers)
     val hasConnectedServer = devices.any {
         (it.deviceType == DeviceType.SERVER || it.deviceType == DeviceType.BOTH) &&
             it.online &&
             normalized(it.certFingerprint) !in disconnected
     }
-    val hasServerRows = serversInSwarm.isNotEmpty() || lanServers.isNotEmpty()
+    val hasServerRows = serversInSwarm.isNotEmpty() || lanServerRows.isNotEmpty()
     val downToFirstServer = if (hasServerRows) {
         Modifier.focusProperties { down = firstServerFocusRequester }
     } else {
@@ -218,12 +220,12 @@ fun SwarmDashboardScreen(
                     item { Spacer(Modifier.height(14.dp)) }
                 }
                 item {
-                    Text("Servers on LAN (${lanServers.size})", color = SwarmMuted, fontSize = 14.sp)
+                    Text("Servers on LAN (${lanServerRows.size})", color = SwarmMuted, fontSize = 14.sp)
                 }
                 if (lanError != null && selectedLanServer == null) {
                     item { Text(lanError, color = SwarmError, fontSize = 12.sp) }
                 }
-                if (lanServers.isEmpty()) {
+                if (lanServerRows.isEmpty()) {
                     item {
                         Text(
                             "No media servers found on this network.",
@@ -232,7 +234,8 @@ fun SwarmDashboardScreen(
                         )
                     }
                 } else {
-                    itemsIndexed(lanServers, key = { _, server -> "lan-${server.certFingerprint}" }) { index, server ->
+                    itemsIndexed(lanServerRows, key = { _, row -> "lan-${row.server.certFingerprint}" }) { index, row ->
+                        val server = row.server
                         val fingerprint = normalized(server.certFingerprint)
                         val inSwarm = fingerprint in swarmFingerprints
                         val isPaired = fingerprint in paired
@@ -247,6 +250,7 @@ fun SwarmDashboardScreen(
                             inSwarm = inSwarm,
                             paired = isPaired,
                             disconnected = isDisconnected,
+                            online = row.online,
                             busy = lanPairingBusy,
                             onClick = {
                                 if (inSwarm || isPaired) {
@@ -346,7 +350,7 @@ private fun ServerRow(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (onLan) Badge("LAN", SwarmAccent)
                 Badge(
-                    text = if (disconnected) "disconnected" else if (device.online) "online" else "offline",
+                    text = connectionStatusLabel(device.online, disconnected),
                     color = if (disconnected || !device.online) SwarmMuted else SwarmGreen,
                 )
             }
@@ -361,6 +365,7 @@ private fun LanServerRow(
     inSwarm: Boolean,
     paired: Boolean,
     disconnected: Boolean,
+    online: Boolean,
     busy: Boolean,
     onClick: () -> Unit,
 ) {
@@ -398,9 +403,44 @@ private fun LanServerRow(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Badge("LAN", SwarmAccent)
                 if (inSwarm) Badge("in SWARM", SwarmGreen) else if (paired) Badge("paired", SwarmGreen)
+                if (inSwarm || paired || disconnected) {
+                    Badge(
+                        text = connectionStatusLabel(online, disconnected),
+                        color = if (online && !disconnected) SwarmGreen else SwarmMuted,
+                    )
+                }
             }
         }
     }
+}
+
+internal data class LanServerRowState(val server: LanServer, val online: Boolean)
+
+/** Keeps paired servers visible after their mDNS advertisement disappears,
+ * while preferring the current address and ports for servers still online. */
+internal fun knownLanServerRows(
+    discovered: List<LanServer>,
+    paired: List<LanServer>,
+): List<LanServerRowState> {
+    val seen = mutableSetOf<String>()
+    return buildList {
+        discovered.forEach { server ->
+            if (seen.add(server.certFingerprint.trim().lowercase())) {
+                add(LanServerRowState(server, online = true))
+            }
+        }
+        paired.forEach { server ->
+            if (seen.add(server.certFingerprint.trim().lowercase())) {
+                add(LanServerRowState(server, online = false))
+            }
+        }
+    }
+}
+
+internal fun connectionStatusLabel(online: Boolean, disconnected: Boolean): String = when {
+    disconnected -> "disconnected"
+    online -> "connected"
+    else -> "offline"
 }
 
 @Composable

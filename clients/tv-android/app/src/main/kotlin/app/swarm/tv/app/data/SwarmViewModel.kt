@@ -282,6 +282,8 @@ class SwarmViewModel(
     val lanError: StateFlow<String?> = _lanError.asStateFlow()
     private val _pairedLanFingerprints = MutableStateFlow<Set<String>>(emptySet())
     val pairedLanFingerprints: StateFlow<Set<String>> = _pairedLanFingerprints.asStateFlow()
+    private val _pairedLanServers = MutableStateFlow<List<LanServer>>(emptyList())
+    val pairedLanServers: StateFlow<List<LanServer>> = _pairedLanServers.asStateFlow()
     private val _disconnectedServerFingerprints = MutableStateFlow<Set<String>>(emptySet())
     val disconnectedServerFingerprints: StateFlow<Set<String>> = _disconnectedServerFingerprints.asStateFlow()
 
@@ -387,7 +389,7 @@ class SwarmViewModel(
             }
         }
         viewModelScope.launch {
-            _pairedLanFingerprints.value = lanConnectionStore.all().mapTo(mutableSetOf()) { normalizeFingerprint(it.server.certFingerprint) }
+            lanConnectionStore.all().asReversed().forEach { rememberPairedLanServer(it.server) }
             refreshDashboardLanRoutes()
         }
         viewModelScope.launch { _likedFingerprints.value = likedEntriesStore.loadAll() }
@@ -458,7 +460,7 @@ class SwarmViewModel(
             // that may never arrive. Trust remains anchored to the exact same
             // certificate fingerprint, so no new pairing is needed.
             val currentServer = preferDiscoveredLanServer(local.server, latestLanServers)
-            if (currentServer != local.server) lanConnectionStore.save(currentServer, local.deviceName)
+            if (currentServer != local.server) saveLanConnection(currentServer, local.deviceName)
             val localDashboard = buildLocalDashboard(currentServer, local.deviceName)
             val localDevice = currentServer.asSwarmDevice()
             val reachable = try {
@@ -674,8 +676,7 @@ class SwarmViewModel(
             // Approval and catalog loading are separate operations. Persist
             // trust immediately so a slow first QUIC connection never asks
             // the user to repeat an activation that already succeeded.
-            lanConnectionStore.save(server, trimmedName)
-            _pairedLanFingerprints.value = _pairedLanFingerprints.value + normalizeFingerprint(server.certFingerprint)
+            saveLanConnection(server, trimmedName)
             _lanPairingActivation.value = null
             notify("${server.name} approved this TV.", ClientNotificationKind.SUCCESS)
             connectLanServerNow(server, trimmedName)
@@ -735,9 +736,8 @@ class SwarmViewModel(
         deviceId = deviceId ?: "lan-client-${certFingerprint.take(16)}"
         deviceName = name
         lastKnownGenres = result.entries.flatMap { it.entry.genres }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
-        lanConnectionStore.save(server, name)
+        saveLanConnection(server, name)
         val fingerprint = normalizeFingerprint(server.certFingerprint)
-        _pairedLanFingerprints.value = _pairedLanFingerprints.value + fingerprint
         if (swarmDashboard != null) {
             localSession = false
             activeLocalServer = null
@@ -838,6 +838,19 @@ class SwarmViewModel(
 
     private fun normalizeFingerprint(fingerprint: String): String = fingerprint.trim().lowercase()
 
+    private fun rememberPairedLanServer(server: LanServer) {
+        val fingerprint = normalizeFingerprint(server.certFingerprint)
+        _pairedLanFingerprints.value = _pairedLanFingerprints.value + fingerprint
+        _pairedLanServers.value = listOf(server) + _pairedLanServers.value.filterNot {
+            normalizeFingerprint(it.certFingerprint) == fingerprint
+        }
+    }
+
+    private suspend fun saveLanConnection(server: LanServer, clientName: String) {
+        lanConnectionStore.save(server, clientName)
+        rememberPairedLanServer(server)
+    }
+
     private fun buildLocalDashboard(server: LanServer, clientName: String): UiState.Dashboard {
         localSession = true
         activeLocalServer = server
@@ -869,7 +882,7 @@ class SwarmViewModel(
                 _state.value = updated
             }
         }
-        viewModelScope.launch { lanConnectionStore.save(refreshed, deviceName ?: "Fire TV") }
+        viewModelScope.launch { saveLanConnection(refreshed, deviceName ?: "Fire TV") }
     }
 
     fun resync() {
@@ -1117,7 +1130,7 @@ class SwarmViewModel(
             val routedServer = savedServer?.let { preferDiscoveredLanServer(it, latestLanServers) }
             if (routedServer != null && routedServer != savedServer) {
                 activeLocalServer = routedServer
-                viewModelScope.launch { lanConnectionStore.save(routedServer, deviceName ?: "Fire TV") }
+                viewModelScope.launch { saveLanConnection(routedServer, deviceName ?: "Fire TV") }
             }
             routedServer?.let { listOf(it.asSwarmDevice()) } ?: current.devices
         } else {

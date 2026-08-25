@@ -215,6 +215,7 @@ class MainActivity : ComponentActivity() {
                     val lanPairingActivation by viewModel.lanPairingActivation.collectAsState()
                     val lanError by viewModel.lanError.collectAsState()
                     val pairedLanFingerprints by viewModel.pairedLanFingerprints.collectAsState()
+                    val pairedLanServers by viewModel.pairedLanServers.collectAsState()
                     val disconnectedServerFingerprints by viewModel.disconnectedServerFingerprints.collectAsState()
                     val isLikedCallback: (MergedEntry) -> Boolean = remember(likedFingerprints) {
                         { entry -> entry.entry.fingerprint in likedFingerprints }
@@ -227,6 +228,7 @@ class MainActivity : ComponentActivity() {
                         lanPairingActivation = lanPairingActivation,
                         lanError = lanError,
                         pairedLanFingerprints = pairedLanFingerprints,
+                        pairedLanServers = pairedLanServers,
                         disconnectedServerFingerprints = disconnectedServerFingerprints,
                         onConnectLan = viewModel::connectLanServer,
                         onStartLanPairing = viewModel::startLanPairing,
@@ -317,6 +319,7 @@ private fun SwarmApp(
     lanPairingActivation: LanPairingActivation?,
     lanError: String?,
     pairedLanFingerprints: Set<String>,
+    pairedLanServers: List<LanServer>,
     disconnectedServerFingerprints: Set<String>,
     onConnectLan: (server: LanServer, deviceName: String) -> Unit,
     onStartLanPairing: (server: LanServer, deviceName: String) -> Unit,
@@ -588,6 +591,7 @@ private fun SwarmApp(
                     swarm = state.swarm,
                     devices = state.devices,
                     lanServers = lanServers,
+                    pairedLanServers = pairedLanServers,
                     pairedLanFingerprints = pairedLanFingerprints,
                     disconnectedServerFingerprints = disconnectedServerFingerprints,
                     lanPairingBusy = lanPairingBusy,
