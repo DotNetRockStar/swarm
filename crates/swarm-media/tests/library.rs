@@ -7,7 +7,7 @@ use swarm_core::entry_key::entry_key;
 use swarm_core::peer::{AudioStreamInfo, MediaKind, TrackLyrics};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_root, scan_roots, scan_roots_scoped};
-use swarm_media::store::{ArtworkKind, EntryRecord, Library, SubtitleRecord};
+use swarm_media::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, SubtitleRecord};
 
 struct Fixture {
     root: PathBuf,
@@ -1341,4 +1341,188 @@ async fn reclassify_all_repairs_a_track_whose_only_wrong_fields_are_artist_and_a
         fixed.scraped_title, None,
         "stale wrong scrape data must be cleared, not just relabeled"
     );
+    assert!(
+        fx.library
+            .has_archived_metadata(&wrong_entry.fingerprint, wrong_entry.size, false)
+            .await
+            .unwrap(),
+        "reclassification must retain a detached rollback copy of invalidated metadata"
+    );
+}
+
+#[tokio::test]
+async fn moved_media_restores_archived_metadata_and_quarantines_the_old_path() {
+    let fx = fixture("metadata-survives-move").await;
+    let old_relative = "movies/Old Folder/Heat.1995.mkv";
+    let new_relative = "movies/New Folder/Heat.1995.mkv";
+    write(&fx.root, old_relative, &[7u8; 8_192]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let old_entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    fx.library
+        .set_scrape_result(
+            &old_entry.entry_key,
+            Some("Heat"),
+            &["Crime".into(), "Drama".into()],
+            &[],
+            Some("R"),
+            Some(8.2),
+            Some(12_345),
+        )
+        .await
+        .unwrap();
+    fx.library
+        .set_overview(
+            &old_entry.entry_key,
+            "A meticulous detective pursues a master thief.",
+        )
+        .await
+        .unwrap();
+    fx.library
+        .set_artwork(
+            &old_entry.entry_key,
+            ArtworkKind::Poster,
+            "movies/Old Folder/images/Heat.1995-tmdb-poster.jpg",
+        )
+        .await
+        .unwrap();
+
+    std::fs::create_dir_all(fx.root.join("movies/New Folder")).unwrap();
+    std::fs::rename(fx.root.join(old_relative), fx.root.join(new_relative)).unwrap();
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!((report.added, report.removed), (1, 1));
+    assert!(fx
+        .library
+        .get(&old_entry.entry_key)
+        .await
+        .unwrap()
+        .is_none());
+
+    let restored = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(restored.relative_path, new_relative);
+    assert_eq!(restored.scraped_title.as_deref(), Some("Heat"));
+    assert_eq!(restored.genres, vec!["Crime", "Drama"]);
+    assert_eq!(
+        restored.overview.as_deref(),
+        Some("A meticulous detective pursues a master thief.")
+    );
+    assert_eq!(restored.rating.as_deref(), Some("R"));
+    assert_eq!(restored.community_rating, Some(8.2));
+    assert_eq!(restored.community_rating_votes, Some(12_345));
+    assert_eq!(
+        fx.library
+            .artwork(&restored.entry_key, ArtworkKind::Poster)
+            .await
+            .unwrap()
+            .map(|(path, _)| path),
+        Some("movies/New Folder/images/Heat.1995-tmdb-poster.jpg".into())
+    );
+
+    assert_eq!(
+        fx.library
+            .mark_missing_by_path(old_relative, 0)
+            .await
+            .unwrap(),
+        Some(MissingDisposition::ConfirmedMissing),
+        "a later successful scan can confirm the quarantined old path without deleting its history"
+    );
+}
+
+#[tokio::test]
+async fn returned_media_reactivates_the_same_row_with_metadata_intact() {
+    let fx = fixture("metadata-survives-return").await;
+    let relative = "movies/Heat.1995.mkv";
+    let bytes = vec![9u8; 8_192];
+    write(&fx.root, relative, &bytes);
+    write(&fx.root, "movies/Still Here.2000.mkv", &[1u8; 8_192]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx
+        .library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.relative_path == relative)
+        .unwrap();
+    fx.library
+        .set_scrape_result(
+            &entry.entry_key,
+            Some("Heat"),
+            &["Crime".into()],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    std::fs::remove_file(fx.root.join(relative)).unwrap();
+    let missing = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(missing.removed, 1);
+    assert_eq!(fx.library.list().await.unwrap().len(), 1);
+    assert_eq!(fx.library.catalog_snapshot().await.unwrap().1.len(), 1);
+    assert!(fx
+        .library
+        .pending_changes()
+        .await
+        .unwrap()
+        .iter()
+        .any(|change| change.entry_key == entry.entry_key && change.operation == "delete"));
+
+    fx.library.clear_pending_changes().await.unwrap();
+    write(&fx.root, relative, &bytes);
+    let returned = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(returned.added, 1);
+    let restored = fx
+        .library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.relative_path == relative)
+        .unwrap();
+    assert_eq!(restored.entry_key, entry.entry_key);
+    assert_eq!(restored.scraped_title.as_deref(), Some("Heat"));
+    assert_eq!(restored.genres, vec!["Crime"]);
+    assert!(fx
+        .library
+        .pending_changes()
+        .await
+        .unwrap()
+        .iter()
+        .any(|change| change.entry_key == entry.entry_key && change.operation == "upsert"));
+}
+
+#[tokio::test]
+async fn explicitly_cleared_metadata_does_not_restore_after_a_move() {
+    let fx = fixture("cleared-metadata-stays-cleared").await;
+    let old_relative = "movies/Old/Heat.1995.mkv";
+    let new_relative = "movies/New/Heat.1995.mkv";
+    write(&fx.root, old_relative, &[3u8; 8_192]);
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let entry = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    fx.library
+        .set_scrape_result(
+            &entry.entry_key,
+            Some("Heat"),
+            &["Crime".into()],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    fx.library
+        .clear_scrape_result(&entry.entry_key)
+        .await
+        .unwrap();
+
+    std::fs::create_dir_all(fx.root.join("movies/New")).unwrap();
+    std::fs::rename(fx.root.join(old_relative), fx.root.join(new_relative)).unwrap();
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    let moved = fx.library.list().await.unwrap().into_iter().next().unwrap();
+    assert_eq!(moved.relative_path, new_relative);
+    assert_eq!(moved.scraped_title, None);
+    assert!(moved.genres.is_empty());
 }
