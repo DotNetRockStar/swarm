@@ -812,6 +812,37 @@ save_attempt_start_sha() {
     IN_PROGRESS_TEMP=""
 }
 
+prepare_recovery_repository_state() {
+    RECOVERY_HAS_DIRTY_WORKTREE=0
+
+    # A previous attempt can have both produced its issue commit and left (or
+    # raced with) unrelated worktree changes. Record the commit independently
+    # so dirtiness does not hide a completed implementation during recovery.
+    if [ "$RUN_START_SHA" != "$BASE_SHA" ]; then
+        if [ -z "$RECOVERY_CANDIDATE_SHA" ]; then
+            RECOVERY_CANDIDATE_SHA="$RUN_START_SHA"
+            IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+            "$JQ_BIN" --arg candidate_sha "$RECOVERY_CANDIDATE_SHA" \
+                '.candidate_sha = $candidate_sha' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+            mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+            IN_PROGRESS_TEMP=""
+        fi
+        log "Verifying commit $RECOVERY_CANDIDATE_SHA as the recovered implementation for issue #$ISSUE_NUMBER."
+    fi
+    if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+        RECOVERY_HAS_DIRTY_WORKTREE=1
+        log "Preserving uncommitted work while recovering issue #$ISSUE_NUMBER."
+    elif [ -z "$RECOVERY_CANDIDATE_SHA" ]; then
+        log "Retrying issue #$ISSUE_NUMBER from its original clean base commit."
+    fi
+}
+
+preserve_dirty_worktree_after_completion() {
+    if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+        log "Warning: preserving uncommitted work after accepting issue #$ISSUE_NUMBER's commit; new issues will wait for a clean tree."
+    fi
+}
+
 deliver_pending_email() {
     local issue_number
 
@@ -1340,25 +1371,11 @@ if [ -f "$IN_PROGRESS_FILE" ]; then
         log "Attached the legacy recovery attempt to a persistent $SELECTED_AI session."
     fi
 
-    if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
-        RECOVERY_HAS_DIRTY_WORKTREE=1
-        log "Resuming the uncommitted work left by the previous issue #$ISSUE_NUMBER attempt."
-    elif [ "$RUN_START_SHA" != "$BASE_SHA" ]; then
-        if [ -z "$RECOVERY_CANDIDATE_SHA" ]; then
-            RECOVERY_CANDIDATE_SHA="$RUN_START_SHA"
-            IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
-            "$JQ_BIN" --arg candidate_sha "$RECOVERY_CANDIDATE_SHA" \
-                '.candidate_sha = $candidate_sha' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
-            mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
-            IN_PROGRESS_TEMP=""
-        fi
-        log "Verifying commit $RECOVERY_CANDIDATE_SHA as the recovered implementation for issue #$ISSUE_NUMBER."
-    else
-        log "Retrying issue #$ISSUE_NUMBER from its original clean base commit."
-    fi
+    prepare_recovery_repository_state
 else
     if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
-        fail "The repository has uncommitted changes unrelated to a saved worker attempt; refusing to mix them into an unattended commit."
+        log "Repository has uncommitted changes unrelated to a saved worker attempt; deferring new issue work until the tree is clean."
+        exit 0
     fi
     SESSION_COMMENT_ID=0
     if [[ "$TRIGGER_COMMENT_ID_JSON" =~ ^[0-9]+$ ]]; then
@@ -1430,9 +1447,10 @@ fi
 
 if [ "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1 ]; then
     printf '%s\n' \
-        "This is a recovery run for the same issue. A previous AI attempt left the current uncommitted changes. Inspect and preserve correct work, finish the implementation and foreground verification, then commit it. Do not discard the existing work merely because the worktree is not clean." \
+        "The worktree also contains uncommitted changes. Inspect them, but do not assume they belong to this issue: preserve unrelated changes exactly as they are. If any are unfinished work for this issue, finish and commit only that issue work." \
         >> "$PROMPT_FILE"
-elif [ "$RECOVERY_MODE" -eq 1 ] && [ -n "$RECOVERY_CANDIDATE_SHA" ]; then
+fi
+if [ "$RECOVERY_MODE" -eq 1 ] && [ -n "$RECOVERY_CANDIDATE_SHA" ]; then
     printf '%s\n' \
         "This is a recovery verification run. Commit $RECOVERY_CANDIDATE_SHA was created after the original attempt began and may already implement this issue. Verify the implementation and tests. If it is complete, do not create duplicate code or rewrite history; put SWARM_RECOVERY_COMPLETE on its own final line after your concise summary. If it is incomplete, finish it and create the required commit." \
         >> "$PROMPT_FILE"
@@ -1554,9 +1572,7 @@ fi
 if ! git -C "$REPO_DIR" merge-base --is-ancestor "$BASE_SHA" "$AFTER_SHA"; then
     fail "$SELECTED_AI rewrote main instead of adding a descendant commit."
 fi
-if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
-    fail "$SELECTED_AI left uncommitted changes after committing. Review $REPO_DIR manually."
-fi
+preserve_dirty_worktree_after_completion
 
 if ! git -C "$REPO_DIR" log -1 --format=%B "$COMPLETION_SHA" | grep -Eq "(^|[^0-9])#$ISSUE_NUMBER([^0-9]|$)"; then
     if [ "$RECOVERED_EXISTING_COMMIT" -eq 1 ]; then

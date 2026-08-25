@@ -162,4 +162,35 @@ PAUSED_ISSUES_DIR="$STATE_DIR/quota-paused-issues"
 suspend_quota_paused_issue
 test "$("$JQ_BIN" -r '.candidate_sha' "$PAUSED_ISSUES_DIR/202.json")" = "$LEGACY_CANDIDATE_SHA"
 
+# A completed issue commit and unrelated dirty work can coexist when another
+# process edits the shared repository during an AI run. Recovery must retain
+# both facts instead of repeatedly demanding another issue commit.
+RECOVERY_REPO="$TEST_DIR/recovery-repo"
+RECOVERY_STATE="$TEST_DIR/recovery-state"
+mkdir -p -- "$RECOVERY_REPO" "$RECOVERY_STATE"
+git -C "$RECOVERY_REPO" init -q -b main
+git -C "$RECOVERY_REPO" config user.name "SWARM worker test"
+git -C "$RECOVERY_REPO" config user.email "worker-test@example.invalid"
+printf 'base\n' > "$RECOVERY_REPO/issue.txt"
+git -C "$RECOVERY_REPO" add issue.txt
+git -C "$RECOVERY_REPO" commit -q -m "base"
+BASE_SHA="$(git -C "$RECOVERY_REPO" rev-parse HEAD)"
+printf 'fixed\n' >> "$RECOVERY_REPO/issue.txt"
+git -C "$RECOVERY_REPO" add issue.txt
+git -C "$RECOVERY_REPO" commit -q -m "complete issue #303"
+RUN_START_SHA="$(git -C "$RECOVERY_REPO" rev-parse HEAD)"
+printf 'unrelated\n' > "$RECOVERY_REPO/unrelated.txt"
+REPO_DIR="$RECOVERY_REPO"
+STATE_DIR="$RECOVERY_STATE"
+IN_PROGRESS_FILE="$STATE_DIR/in-progress-issue.json"
+ISSUE_NUMBER=303
+RECOVERY_CANDIDATE_SHA=""
+printf '{"issue_number":303}\n' > "$IN_PROGRESS_FILE"
+prepare_recovery_repository_state
+test "$RECOVERY_CANDIDATE_SHA" = "$RUN_START_SHA"
+test "$("$JQ_BIN" -r '.candidate_sha' "$IN_PROGRESS_FILE")" = "$RUN_START_SHA"
+test "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1
+preserve_dirty_worktree_after_completion
+test -f "$RECOVERY_REPO/unrelated.txt"
+
 printf 'swarm issue worker state tests passed\n'
