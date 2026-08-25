@@ -426,6 +426,21 @@
   </div>
 </div>
 
+<div id="deleteAssetModalBackdrop" class="modal-backdrop d-none">
+  <div class="modal-box delete-asset-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="deleteAssetModalTitle" aria-describedby="deleteAssetModalBody">
+    <button id="deleteAssetModalClose" class="modal-close" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    <div class="modal-icon modal-icon-danger"><i class="bi bi-trash3-fill"></i></div>
+    <h2 id="deleteAssetModalTitle">Delete asset?</h2>
+    <p id="deleteAssetModalBody" class="muted"></p>
+    <p id="deleteAssetModalPath" class="mono muted delete-asset-modal-path"></p>
+    <p class="delete-asset-warning"><i class="bi bi-exclamation-triangle-fill"></i>This cannot be undone.</p>
+    <div class="delete-asset-modal-actions">
+      <button id="deleteAssetModalCancel" class="secondary">Cancel</button>
+      <button id="deleteAssetModalConfirm" class="danger"><i class="bi bi-trash3"></i>Delete permanently</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 <script src="details.js"></script>
 <script src="swarm.js"></script>

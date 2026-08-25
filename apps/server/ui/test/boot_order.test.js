@@ -92,6 +92,8 @@ function invokeStub(command, args) {
       };
     case "list_entries":
       return testLibraryEntries;
+    case "delete_asset":
+      return { removed_files: 1, cleanup_warnings: [] };
     case "list_media_roots":
       return testMediaRoots;
     case "list_categories":
@@ -338,6 +340,36 @@ async function main() {
   const seasonKeys = invokeCalls.filter(call => call.command === "rescrape_entry").map(call => call.args.entryKey);
   if (JSON.stringify(seasonKeys) !== JSON.stringify(["s1e1", "s1e2"])) {
     failures.push(`Expected season re-scrape to process only that season, got ${seasonKeys.join(", ")}.`);
+  }
+
+  // Permanent deletion must be gated behind the real modal: opening the
+  // Manage panel and clicking Delete does no destructive work until the
+  // explicit confirmation button is clicked.
+  testLibraryEntries = [{
+    entry_key: "delete-me", kind: "movie", title: "Delete Me", relative_path: "Movies/Delete Me.mkv",
+    size: 1024, genres: [], cast: [], has_artwork: false, like_count: 0,
+  }];
+  dom.window.eval(`libraryEntries = ${JSON.stringify(testLibraryEntries)}; mediaSection = "table"; openManageKey = null; renderMediaTab();`);
+  document.querySelector('[data-manage="delete-me"]')?.click();
+  invokeCalls.length = 0;
+  document.getElementById("deleteAssetBtn")?.click();
+  if (document.getElementById("deleteAssetModalBackdrop").classList.contains("d-none")) {
+    failures.push("Expected Delete asset to open a confirmation modal.");
+  }
+  if (invokeCalls.some(call => call.command === "delete_asset")) {
+    failures.push("Expected opening the delete modal not to delete anything before confirmation.");
+  }
+  if (!document.getElementById("deleteAssetModalBody").textContent.includes("artwork, subtitles, generated images")) {
+    failures.push("Expected the delete modal to explain which companion files will be removed.");
+  }
+  document.getElementById("deleteAssetModalConfirm").click();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const deleteCall = invokeCalls.find(call => call.command === "delete_asset");
+  if (!deleteCall || deleteCall.args.entryKey !== "delete-me") {
+    failures.push("Expected confirming deletion to invoke delete_asset for the selected entry.");
+  }
+  if (!document.getElementById("deleteAssetModalBackdrop").classList.contains("d-none")) {
+    failures.push("Expected a successful deletion to close the confirmation modal.");
   }
 
   dom.window.close();

@@ -207,6 +207,20 @@ pub struct SubtitleRecord {
     pub fingerprint: String,
 }
 
+/// Files associated with one library entry that can be removed when the
+/// entry itself is permanently deleted. The manifest distinguishes all
+/// referenced artwork from its unshared subset because album covers, artist
+/// photos, and season artwork may belong to multiple entries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetDeletionManifest {
+    pub entry: EntryRecord,
+    /// Every artwork path referenced by this entry, including shared art.
+    pub artwork_paths: Vec<String>,
+    /// The subset of `artwork_paths` with no reference from another entry.
+    pub unshared_artwork_paths: Vec<String>,
+    pub subtitle_tracks: Vec<SubtitleRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptionJob {
     pub entry_key: String,
@@ -1015,6 +1029,13 @@ impl Library {
             .bind(size)
             .execute(&mut *transaction)
             .await?;
+        // Likes deliberately have no foreign key because they can arrive
+        // from a client before a catalog sync has populated the entry. A
+        // permanent, user-requested deletion still needs to forget them.
+        sqlx::query("DELETE FROM entry_likes WHERE entry_key = ?")
+            .bind(&entry_key)
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query(
             "INSERT OR REPLACE INTO deleted_library_entries (entry_key, relative_path, fingerprint, deleted_at) \
              VALUES (?, ?, ?, strftime('%s','now'))",
@@ -1033,6 +1054,69 @@ impl Library {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Build the filesystem cleanup plan for a permanent asset deletion.
+    /// The caller owns filesystem I/O; keeping the reference check here
+    /// makes the shared-artwork rule authoritative and testable next to the
+    /// schema that defines those references.
+    pub async fn asset_deletion_manifest(
+        &self,
+        entry_key: &str,
+    ) -> sqlx::Result<Option<AssetDeletionManifest>> {
+        let Some(entry) = self.get(entry_key).await? else {
+            return Ok(None);
+        };
+        type ArtworkPathRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let artwork: ArtworkPathRow = sqlx::query_as(
+            "SELECT poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
+             cover_relative_path, artist_art_relative_path FROM library_entries WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut artwork_paths = Vec::new();
+        let mut unshared_artwork_paths = Vec::new();
+        for path in [artwork.0, artwork.1, artwork.2, artwork.3, artwork.4]
+            .into_iter()
+            .flatten()
+        {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            artwork_paths.push(path.clone());
+            let (references,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM library_entries WHERE entry_key != ? AND (\
+                 poster_relative_path = ? OR season_poster_relative_path = ? OR \
+                 backdrop_relative_path = ? OR cover_relative_path = ? OR artist_art_relative_path = ?)",
+            )
+            .bind(entry_key)
+            .bind(&path)
+            .bind(&path)
+            .bind(&path)
+            .bind(&path)
+            .bind(&path)
+            .fetch_one(&self.pool)
+            .await?;
+            if references == 0 {
+                unshared_artwork_paths.push(path);
+            }
+        }
+
+        Ok(Some(AssetDeletionManifest {
+            entry,
+            artwork_paths,
+            unshared_artwork_paths,
+            subtitle_tracks: self.subtitle_tracks(entry_key).await?,
+        }))
     }
 
     pub async fn get(&self, entry_key: &str) -> sqlx::Result<Option<EntryRecord>> {

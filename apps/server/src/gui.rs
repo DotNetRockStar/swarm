@@ -1109,6 +1109,21 @@ async fn list_entries(
         .collect())
 }
 
+/// Permanently remove one catalog entry and its server-managed files. The
+/// destructive filesystem work lives in `ServerCore`, where it can share
+/// scan serialization and be exercised independently of the webview.
+#[tauri::command]
+async fn delete_asset(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+) -> Result<swarm_server::DeleteAssetReport, String> {
+    let core = state.core(&app).await?;
+    core.delete_asset(&entry_key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Every distinct genre/category value currently in use anywhere in the
 /// library — backs the Media tab's category picker, see
 /// `Library::distinct_genres`'s doc comment for why genres double as
@@ -1941,6 +1956,7 @@ fn main() {
             rescan,
             reclassify_library,
             list_entries,
+            delete_asset,
             list_categories,
             get_artwork_bytes,
             run_scrape,

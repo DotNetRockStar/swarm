@@ -13,7 +13,7 @@ pub mod transcription;
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use swarm_core::peer::MediaKind;
@@ -105,6 +105,15 @@ pub struct ServerStatus {
     /// progress — the library reflects whatever's been found so far either
     /// way, this is purely informational for a "still scanning…" indicator.
     pub scanning: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeleteAssetReport {
+    pub removed_files: u64,
+    /// Companion cleanup is best-effort after the primary media file has
+    /// been removed. Returning warnings keeps the catalog consistent while
+    /// still telling the UI about a permission or transient storage issue.
+    pub cleanup_warnings: Vec<String>,
 }
 
 struct StunContext {
@@ -203,6 +212,8 @@ pub enum ServerError {
     NoMediaRoots,
     #[error("no media root labeled \"{0}\" exists")]
     MediaRootNotFound(String),
+    #[error("refusing to delete unsafe asset path \"{0}\"")]
+    UnsafeAssetPath(String),
 }
 
 impl ServerCore {
@@ -485,6 +496,136 @@ impl ServerCore {
     ) -> Result<ScanReport, ServerError> {
         let roots = self.media_roots.roots();
         self.run_scan(&roots, progress_tx).await
+    }
+
+    /// Permanently delete one asset and every server-managed file attached
+    /// to it. The scan lock prevents an overlapping reconciliation from
+    /// rediscovering the file between filesystem and catalog deletion.
+    /// Shared artwork is retained until its final referencing entry is
+    /// deleted; entry-specific thumbnail cache files are never shared.
+    pub async fn delete_asset(&self, entry_key: &str) -> Result<DeleteAssetReport, ServerError> {
+        let _guard = self.scan_lock.lock().await;
+        let manifest = self
+            .library
+            .asset_deletion_manifest(entry_key)
+            .await?
+            .ok_or(ServerError::EntryNotFound)?;
+        let media_path = self.safe_media_path(&manifest.entry.relative_path)?;
+        // Validate every database-sourced media-root path before deleting
+        // the primary file. A corrupt/stale artwork path must never leave a
+        // still-catalogued entry whose media file is already gone.
+        let artwork_paths = manifest
+            .artwork_paths
+            .iter()
+            .map(|path| self.safe_media_path(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let unshared_artwork_paths = manifest
+            .unshared_artwork_paths
+            .iter()
+            .map(|path| self.safe_media_path(path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut removed_files = u64::from(remove_file_if_exists(&media_path).await?);
+        let mut cleanup_warnings = Vec::new();
+
+        for track in &manifest.subtitle_tracks {
+            let subtitle_path = PathBuf::from(&track.file_path);
+            if !self.subtitle_path_is_managed(entry_key, &media_path, &subtitle_path) {
+                cleanup_warnings.push(format!(
+                    "Skipped unrecognized subtitle path: {}",
+                    subtitle_path.display()
+                ));
+                continue;
+            }
+            match remove_file_if_exists(&subtitle_path).await {
+                Ok(removed) => removed_files += u64::from(removed),
+                Err(error) => cleanup_warnings.push(format!(
+                    "Could not delete subtitle {}: {error}",
+                    subtitle_path.display()
+                )),
+            }
+        }
+
+        let mut thumbnail_dirs = HashSet::new();
+        for artwork_path in &artwork_paths {
+            if let Some(parent) = artwork_path.parent() {
+                thumbnail_dirs.insert(parent.join(".swarm-thumbnails"));
+            }
+        }
+        for directory in &thumbnail_dirs {
+            match remove_entry_thumbnails(directory, entry_key).await {
+                Ok(count) => removed_files += count,
+                Err(error) => cleanup_warnings.push(format!(
+                    "Could not clean artwork thumbnails in {}: {error}",
+                    directory.display()
+                )),
+            }
+        }
+
+        let mut artwork_dirs = HashSet::new();
+        for artwork_path in &unshared_artwork_paths {
+            if let Some(parent) = artwork_path.parent() {
+                artwork_dirs.insert(parent.to_path_buf());
+            }
+            match remove_file_if_exists(artwork_path).await {
+                Ok(removed) => removed_files += u64::from(removed),
+                Err(error) => cleanup_warnings.push(format!(
+                    "Could not delete artwork {}: {error}",
+                    artwork_path.display()
+                )),
+            }
+        }
+
+        // These cache/images folders are server-created. Remove them only
+        // when empty; a non-empty directory necessarily still belongs to a
+        // sibling asset and is left untouched.
+        for directory in thumbnail_dirs.into_iter().chain(artwork_dirs) {
+            match tokio::fs::remove_dir(&directory).await {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => cleanup_warnings.push(format!(
+                    "Could not remove empty asset folder {}: {error}",
+                    directory.display()
+                )),
+            }
+        }
+
+        self.library
+            .remove_by_path(&manifest.entry.relative_path)
+            .await?;
+        Ok(DeleteAssetReport {
+            removed_files,
+            cleanup_warnings,
+        })
+    }
+
+    fn safe_media_path(&self, relative_path: &str) -> Result<PathBuf, ServerError> {
+        let (root, under_root) = self.media_roots.split(relative_path);
+        let relative = Path::new(&under_root);
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ServerError::UnsafeAssetPath(relative_path.to_string()));
+        }
+        Ok(root.join(relative))
+    }
+
+    fn subtitle_path_is_managed(&self, entry_key: &str, media_path: &Path, path: &Path) -> bool {
+        if path == transcription::whisper_subtitle_path(media_path) {
+            return true;
+        }
+        let managed_dir = self.data_dir.join("subtitles");
+        path.parent() == Some(managed_dir.as_path())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{entry_key}-")))
     }
 
     /// Live-swap the configured media roots and immediately reconcile the
@@ -1174,6 +1315,32 @@ impl ServerCore {
         tracing::debug!(count, "allowed-peer set synced from swarm roster(s)");
         Ok(count)
     }
+}
+
+async fn remove_file_if_exists(path: &Path) -> std::io::Result<bool> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn remove_entry_thumbnails(directory: &Path, entry_key: &str) -> std::io::Result<u64> {
+    let mut entries = match tokio::fs::read_dir(directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let prefix = format!("{entry_key}-");
+    let mut removed = 0;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && remove_file_if_exists(&entry.path()).await?
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// The reflector runs inside the STUN server process (`docs/PROTOCOL.md`),

@@ -74,6 +74,76 @@ async function refreshTranscriptionProgress() {
 
 setInterval(refreshTranscriptionProgress, 1000);
 
+// ---- permanent asset deletion ---------------------------------------------
+
+let pendingDeleteEntryKey = null;
+let deleteAssetInFlight = false;
+const deleteAssetModalBackdrop = document.getElementById("deleteAssetModalBackdrop");
+
+function closeDeleteAssetModal() {
+  if (deleteAssetInFlight) return;
+  pendingDeleteEntryKey = null;
+  deleteAssetModalBackdrop.classList.add("d-none");
+}
+
+function openDeleteAssetModal(entryKey) {
+  const entry = libraryEntries.find(candidate => candidate.entry_key === entryKey);
+  if (!entry) return;
+  pendingDeleteEntryKey = entryKey;
+  const kind = entry.kind === "episode" ? "episode" : entry.kind === "track" ? "track" : "movie";
+  document.getElementById("deleteAssetModalTitle").textContent = `Delete “${displayEntryTitle(entry)}”?`;
+  document.getElementById("deleteAssetModalBody").textContent =
+    `The ${kind} file and its metadata, artwork, subtitles, generated images, and other server-managed data will be permanently deleted.`;
+  document.getElementById("deleteAssetModalPath").textContent = entry.relative_path;
+  deleteAssetModalBackdrop.classList.remove("d-none");
+  document.getElementById("deleteAssetModalConfirm").focus();
+}
+
+document.getElementById("deleteAssetModalClose").addEventListener("click", closeDeleteAssetModal);
+document.getElementById("deleteAssetModalCancel").addEventListener("click", closeDeleteAssetModal);
+deleteAssetModalBackdrop.addEventListener("click", event => {
+  if (event.target === deleteAssetModalBackdrop) closeDeleteAssetModal();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !deleteAssetModalBackdrop.classList.contains("d-none")) {
+    closeDeleteAssetModal();
+  }
+});
+document.getElementById("deleteAssetModalConfirm").addEventListener("click", async () => {
+  if (!pendingDeleteEntryKey || deleteAssetInFlight) return;
+  const entryKey = pendingDeleteEntryKey;
+  const button = document.getElementById("deleteAssetModalConfirm");
+  deleteAssetInFlight = true;
+  button.disabled = true;
+  button.innerHTML = '<i class="bi bi-hourglass-split"></i>Deleting…';
+  try {
+    const report = await invoke("delete_asset", { entryKey });
+    deleteAssetInFlight = false;
+    closeDeleteAssetModal();
+    openManageKey = null;
+    browsePath = { kind: "root" };
+    clearArtworkCache();
+    await refreshLibrary();
+    const warningCount = report.cleanup_warnings?.length || 0;
+    showToast(
+      warningCount
+        ? `Asset deleted, but ${warningCount} companion file${warningCount === 1 ? "" : "s"} could not be cleaned up.`
+        : "Asset permanently deleted.",
+      warningCount ? "warning" : "success",
+    );
+  } catch (err) {
+    deleteAssetInFlight = false;
+    showToast(String(err), "error");
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-trash3"></i>Delete permanently';
+  }
+});
+
+function wireDeleteAsset(entryKey) {
+  document.getElementById("deleteAssetBtn")?.addEventListener("click", () => openDeleteAssetModal(entryKey));
+}
+
 // Applies to both the Browse root view and the All-entries table. Matches
 // against every identifying name field, not just title, so searching a
 // show/artist name keeps every episode/track under it (their show_title/
@@ -537,6 +607,7 @@ function wireDetailManage(entry) {
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(entry.entry_key));
     wireAddCategoryBtn();
     wireMoveKindFields(entry.entry_key);
+    wireDeleteAsset(entry.entry_key);
   }
 }
 
@@ -673,6 +744,7 @@ function wireTrackManageHandlers(container) {
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
     wireAddCategoryBtn();
     wireMoveKindFields(openManageKey);
+    wireDeleteAsset(openManageKey);
   }
 }
 
@@ -853,6 +925,7 @@ function renderLibrary() {
     document.getElementById("revertScrapeBtn")?.addEventListener("click", () => revertScrape(openManageKey));
     wireAddCategoryBtn();
     wireMoveKindFields(openManageKey);
+    wireDeleteAsset(openManageKey);
   }
 }
 
@@ -1005,8 +1078,13 @@ function manageRow(entry) {
       </section>
 
       <section class="metadata-editor-section metadata-file-section">
-        <h2><i class="bi bi-file-earmark-play"></i>File</h2>
-        <p class="mono muted" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
+        <div class="metadata-editor-heading">
+          <div>
+            <h2><i class="bi bi-file-earmark-play"></i>File</h2>
+            <p class="mono muted" title="${esc(entry.relative_path)}">${esc(entry.relative_path)}</p>
+          </div>
+          <button id="deleteAssetBtn" class="danger"><i class="bi bi-trash3"></i>Delete asset</button>
+        </div>
       </section>
     </div>`;
 }
