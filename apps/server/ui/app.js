@@ -262,6 +262,10 @@ function show(id) {
   // one place that owns "is it safe to see the page yet" instead of a
   // separate first-call flag to track.
   document.body.style.visibility = "visible";
+  // The startup splash (index.html's #splashView) is only ever meant to
+  // cover the boot() gap — remove it the first time we know which real view
+  // to show, same idempotent reasoning as the visibility line above.
+  document.getElementById("splashView")?.remove();
 }
 
 // "about" has no refresh*() dispatch below — its tab content is static

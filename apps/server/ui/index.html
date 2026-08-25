@@ -19,9 +19,18 @@
   reveals the body itself the first time it actually knows which view to
   display, once boot() has resolved.
 -->
-<style>body { visibility: hidden; }</style>
+<style>
+  body { visibility: hidden; }
+  /* #splashView overrides the inherited hidden state (visibility, unlike
+     display, cascades but can be overridden by a descendant) so the splash
+     portrait still paints on the very first frame, before app.js has run —
+     the same reasoning as the body rule above, just one level deeper. */
+  #splashView { visibility: visible; position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: #101828; }
+  #splashView img { max-width: min(80vw, 420px); max-height: 85vh; object-fit: contain; }
+</style>
 </head>
 <body>
+<div id="splashView"><img src="splash.png" alt="SWARM — Stream Whatever, Anywhere"></div>
 <header>
   <img src="badge.png" alt="" class="brand-mark">
   <div class="brand-text">
