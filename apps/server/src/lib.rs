@@ -11,7 +11,7 @@ mod state_db;
 mod subtitle_download;
 pub mod transcription;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -258,11 +258,8 @@ impl ServerCore {
             .map(|f| f.trim().to_lowercase())
             .collect();
         let allowed = AllowedPeers::new();
-        let local_fingerprints = state_db
-            .local_peers()
-            .await?
-            .into_iter()
-            .map(|peer| peer.fingerprint);
+        let local_peers = state_db.local_peers().await?;
+        let local_fingerprints = local_peers.iter().map(|peer| peer.fingerprint.clone());
         allowed.replace(
             static_fingerprints
                 .iter()
@@ -300,6 +297,11 @@ impl ServerCore {
             transcode_config,
             config.data_dir.join("artwork-cache"),
         ));
+        service.replace_client_names(
+            local_peers
+                .into_iter()
+                .map(|peer| (peer.fingerprint, peer.name)),
+        );
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
         tokio::spawn(bandwidth::run_periodic_probe(
             Arc::clone(&state_db),
@@ -710,6 +712,10 @@ impl ServerCore {
         self.service.bandwidth_meter().history()
     }
 
+    pub async fn artwork_cache_snapshot(&self) -> swarm_media::artwork_cache::ArtworkCacheSnapshot {
+        self.service.artwork_cache_snapshot().await
+    }
+
     /// Enables or pauses the durable local subtitle worker. Pausing is
     /// cooperative and preserves every completed ten-minute segment.
     pub fn set_local_transcription_enabled(&self, enabled: bool) {
@@ -1109,7 +1115,10 @@ impl ServerCore {
         &self,
         code: &str,
     ) -> Result<lan::LanPairingApproval, lan::LanPairingError> {
-        self.lan_service.approve_pairing_code(code).await
+        let approval = self.lan_service.approve_pairing_code(code).await?;
+        self.service
+            .set_client_name(approval.fingerprint.clone(), approval.name.clone());
+        Ok(approval)
     }
 
     pub async fn local_peers(&self) -> Result<Vec<LocalPeerRecord>, ServerError> {
@@ -1316,16 +1325,16 @@ impl ServerCore {
     async fn sync_roster(&self) -> Result<usize, ServerError> {
         let guard = self.stun.lock().await;
         let mut fingerprints: HashSet<String> = self.static_fingerprints.iter().cloned().collect();
-        fingerprints.extend(
-            self.state_db
-                .local_peers()
-                .await?
-                .into_iter()
-                .map(|peer| peer.fingerprint),
-        );
+        let local_peers = self.state_db.local_peers().await?;
+        let mut client_names: HashMap<String, String> = local_peers
+            .iter()
+            .map(|peer| (peer.fingerprint.clone(), peer.name.clone()))
+            .collect();
+        fingerprints.extend(local_peers.into_iter().map(|peer| peer.fingerprint));
         let Some(ctx) = guard.as_ref() else {
             let count = fingerprints.len();
             self.allowed.replace(fingerprints);
+            self.service.replace_client_names(client_names);
             return Ok(count);
         };
 
@@ -1352,6 +1361,7 @@ impl ServerCore {
                 Ok(roster) => {
                     for device in roster.devices {
                         if device.cert_fingerprint != self.identity.fingerprint {
+                            client_names.insert(device.cert_fingerprint.clone(), device.name);
                             fingerprints.insert(device.cert_fingerprint);
                         }
                     }
@@ -1369,6 +1379,7 @@ impl ServerCore {
         }
         let count = fingerprints.len();
         self.allowed.replace(fingerprints);
+        self.service.replace_client_names(client_names);
         tracing::debug!(count, "allowed-peer set synced from swarm roster(s)");
         Ok(count)
     }

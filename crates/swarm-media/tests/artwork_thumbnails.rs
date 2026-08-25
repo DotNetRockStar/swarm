@@ -158,7 +158,9 @@ async fn artwork_disk_cache_is_opt_in_read_through_and_version_invalidated() {
     assert!(!cache_root.exists());
 
     service.set_artwork_disk_cache_enabled(true);
-    let first = service.resolve(&art_request).await;
+    let first = service
+        .resolve_for_client(&art_request, true, "Living Room TV")
+        .await;
     assert_eq!(first.header.etag.as_deref(), Some("v1"));
     let Body::File {
         path: first_path, ..
@@ -171,13 +173,30 @@ async fn artwork_disk_cache_is_opt_in_read_through_and_version_invalidated() {
     let first_bytes = std::fs::read(&first_path).unwrap();
 
     std::fs::remove_file(&original).unwrap();
-    let cache_hit = service.resolve(&art_request).await;
+    let cache_hit = service
+        .resolve_for_client(&art_request, true, "Bedroom TV")
+        .await;
     assert_eq!(cache_hit.header.status, 200);
     let Body::File { path: hit_path, .. } = cache_hit.body else {
         panic!("cache hit should be file-backed")
     };
     assert_eq!(hit_path, first_path);
     assert_eq!(std::fs::read(hit_path).unwrap(), first_bytes);
+    let activity = service.artwork_cache_snapshot().await;
+    assert!(activity.enabled);
+    assert!(activity.disk_bytes > 0);
+    assert!(activity.file_count > 0);
+    assert_eq!(activity.events.len(), 2);
+    assert_eq!(activity.events[0].client, "Living Room TV");
+    assert_eq!(
+        activity.events[0].kind,
+        swarm_media::artwork_cache::ArtworkCacheEventKind::Cached
+    );
+    assert_eq!(activity.events[1].client, "Bedroom TV");
+    assert_eq!(
+        activity.events[1].kind,
+        swarm_media::artwork_cache::ArtworkCacheEventKind::ServedFromCache
+    );
 
     image::RgbImage::from_pixel(4, 6, image::Rgb([90, 80, 70]))
         .save(&original)

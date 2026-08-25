@@ -49,6 +49,7 @@ function invokeStub(command, args) {
         media_roots: [{ label: "test", path: "/tmp/swarm-boot-order-test" }],
         has_tmdb_key: false,
         streaming_upload_budget_enabled: true,
+        artwork_disk_cache_enabled: true,
         local_transcription_enabled: false,
         transcription_pause_while_streaming: true,
         transcription_skip_if_subtitles_exist: false,
@@ -68,6 +69,18 @@ function invokeStub(command, args) {
         streaming_upload_budget_enabled: true,
         active_playback_sessions: 0,
         scanning: false,
+      };
+    case "get_artwork_cache_snapshot":
+      return {
+        enabled: true,
+        cache_dir: "/tmp/swarm-server/artwork-cache",
+        disk_bytes: 1536,
+        file_count: 3,
+        events: [
+          { timestamp_ms: Date.now() - 12_000, client: "Living Room TV", kind: "cached" },
+          { timestamp_ms: Date.now() - 8_000, client: "Living Room TV", kind: "served_from_cache" },
+          { timestamp_ms: Date.now() - 4_000, client: "Bedroom TV", kind: "served_from_cache" },
+        ],
       };
     case "get_media_root_health":
       return testRootHealth;
@@ -146,6 +159,10 @@ async function main() {
         event: { listen: () => Promise.resolve(() => {}) },
       };
       window.IntersectionObserver = FakeIntersectionObserver;
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {},
+        stroke() {}, fill() {}, closePath() {}, arc() {}, fillText() {},
+      });
       window.navigator.clipboard = {
         writeText: (text) => {
           copiedText = text;
@@ -239,6 +256,28 @@ async function main() {
   }
   if (document.getElementById("statusGrid").textContent.includes("Listening (QUIC)")) {
     failures.push("Expected the Listening (QUIC) status panel to be removed.");
+  }
+  await dom.window.refreshArtworkCache();
+  if (!document.getElementById("artworkCacheStatusGrid").textContent.includes("1.5 KB")) {
+    failures.push(`Expected the artwork cache panel to report live disk usage, got: ${document.getElementById("artworkCacheStatusGrid").textContent}.`);
+  }
+  if (!document.getElementById("artworkCachePath").textContent.includes("/tmp/swarm-server/artwork-cache")) {
+    failures.push("Expected the interactive cache explanation to show the exact on-disk path.");
+  }
+  const cacheClientSelect = document.getElementById("artworkCacheClientSelect");
+  if (![...cacheClientSelect.options].some((option) => option.value === "Living Room TV")) {
+    failures.push("Expected the artwork cache graph to expose paired clients as filters.");
+  }
+  cacheClientSelect.value = "Bedroom TV";
+  cacheClientSelect.dispatchEvent(new dom.window.Event("change"));
+  if (!document.getElementById("artworkCacheRecent").textContent.includes("Bedroom TV") ||
+      document.getElementById("artworkCacheRecent").textContent.includes("Living Room TV")) {
+    failures.push("Expected artwork cache activity to filter to the selected client.");
+  }
+  const cacheExplainer = document.querySelector(".cache-explainer");
+  cacheExplainer.open = true;
+  if (!cacheExplainer.textContent.includes("refresh after 30 days")) {
+    failures.push("Expected the expandable cache explanation to describe refresh behavior.");
   }
   if (!document.getElementById("mediaRootWarning").classList.contains("d-none")) {
     failures.push("Expected the media-root warning to stay hidden while every root is readable.");

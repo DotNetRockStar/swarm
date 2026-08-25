@@ -10,7 +10,7 @@
 
 use swarm_core::peer::{PeerRequest, PeerResponseHeader};
 use swarm_p2p::endpoint::{
-    connect_on_socket, listen_on_socket, read_body, read_request, send_request,
+    connect_on_socket, listen_on_socket, peer_fingerprint, read_body, read_request, send_request,
     write_response_header,
 };
 use swarm_p2p::identity::ensure_identity;
@@ -51,11 +51,13 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
         listener_allowed,
     )
     .unwrap();
+    let dialer_fingerprint = dialer_identity.fingerprint.clone();
     let accept_task = tokio::spawn({
         let listener_endpoint = listener_endpoint.clone();
         async move {
             let incoming = listener_endpoint.accept().await.unwrap();
             let connection = incoming.await.unwrap();
+            assert_eq!(peer_fingerprint(&connection), Some(dialer_fingerprint));
             let (mut send, mut recv) = connection.accept_bi().await.unwrap();
             let request = read_request(&mut recv).await.unwrap();
             assert_eq!(request.path, "/ping");
@@ -86,6 +88,10 @@ async fn a_punched_socket_carries_a_real_pinned_quic_connection() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        peer_fingerprint(&connection),
+        Some(listener_identity.fingerprint.clone())
+    );
     let request = PeerRequest {
         path: "/ping".into(),
         range: None,

@@ -336,6 +336,7 @@ async fn browse_catalog_and_fetch_artwork_over_real_http() {
     let base_url = format!("http://{}", core.http_media_addr);
     let client = reqwest::Client::new();
     let token = pair_and_get_token(&client, &base_url, &core, "Living Room Roku").await;
+    core.set_artwork_disk_cache_enabled(true);
 
     // --- /catalog/thumbprint ---
     let thumbprint: CatalogThumbprint = client
@@ -397,6 +398,30 @@ async fn browse_catalog_and_fetch_artwork_over_real_http() {
         .to_string();
     let art_body = art_response.bytes().await.unwrap();
     assert_eq!(&art_body[..], &poster_bytes[..]);
+
+    let cache_hit = client
+        .get(format!("{base_url}/art/{}/poster", entry.entry_key))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cache_hit.status(), 200);
+    assert_eq!(&cache_hit.bytes().await.unwrap()[..], &poster_bytes[..]);
+
+    let activity = core.artwork_cache_snapshot().await;
+    assert_eq!(activity.events.len(), 2);
+    assert!(activity
+        .events
+        .iter()
+        .all(|event| event.client == "Living Room Roku"));
+    assert_eq!(
+        activity.events[0].kind,
+        swarm_media::artwork_cache::ArtworkCacheEventKind::Cached
+    );
+    assert_eq!(
+        activity.events[1].kind,
+        swarm_media::artwork_cache::ArtworkCacheEventKind::ServedFromCache
+    );
 
     let cached = client
         .get(format!("{base_url}/art/{}/poster", entry.entry_key))

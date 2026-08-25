@@ -25,7 +25,7 @@
 //!   single static-shared-secret comparison — a different, weaker model.
 
 use crate::state_db::StateDb;
-use axum::extract::{ConnectInfo, Json, OriginalUri, Path as AxumPath, State};
+use axum::extract::{ConnectInfo, Extension, Json, OriginalUri, Path as AxumPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -38,7 +38,9 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use swarm_core::peer::{ByteRange, ClientErrorReport, LikeToggle, PeerRequest, PlaybackPreferences};
+use swarm_core::peer::{
+    ByteRange, ClientErrorReport, LikeToggle, PeerRequest, PlaybackPreferences,
+};
 use swarm_media::serve::{is_lan_ip, stream_body, MediaService};
 use tokio::net::TcpListener;
 
@@ -279,6 +281,9 @@ struct AppState {
     pair_limiter: Arc<AllocationLimiter>,
 }
 
+#[derive(Clone)]
+struct AuthenticatedDevice(String);
+
 /// Starts the listener as a detached background task (matching every other
 /// listener in this app — QUIC's `accept_loop`, `lan.rs`'s TCP accept loop —
 /// none of which have a graceful-shutdown mechanism either; see the
@@ -377,7 +382,7 @@ async fn reject_cross_site(
 async fn require_bearer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let token = headers
@@ -390,7 +395,10 @@ async fn require_bearer(
         .http_media_device_name(&token_hash(token))
         .await
     {
-        Ok(Some(_name)) => Ok(next.run(request).await),
+        Ok(Some(name)) => {
+            request.extensions_mut().insert(AuthenticatedDevice(name));
+            Ok(next.run(request).await)
+        }
         Ok(None) => Err(StatusCode::UNAUTHORIZED),
         Err(err) => {
             tracing::error!(%err, "http media auth lookup failed");
@@ -470,6 +478,7 @@ async fn pair_poll(
 async fn play(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(device): Extension<AuthenticatedDevice>,
     AxumPath(entry_key): AxumPath<String>,
     Json(preferences): Json<PlaybackPreferences>,
 ) -> Response {
@@ -481,12 +490,13 @@ async fn play(
         error_report: None,
         like: None,
     };
-    resolve_and_respond(&state, &request, addr.ip()).await
+    resolve_and_respond(&state, &request, addr.ip(), &device.0).await
 }
 
 async fn report_client_error(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(device): Extension<AuthenticatedDevice>,
     Json(report): Json<ClientErrorReport>,
 ) -> Response {
     let request = PeerRequest {
@@ -497,12 +507,13 @@ async fn report_client_error(
         error_report: Some(report),
         like: None,
     };
-    resolve_and_respond(&state, &request, addr.ip()).await
+    resolve_and_respond(&state, &request, addr.ip(), &device.0).await
 }
 
 async fn toggle_like(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(device): Extension<AuthenticatedDevice>,
     Json(like): Json<LikeToggle>,
 ) -> Response {
     let request = PeerRequest {
@@ -513,7 +524,7 @@ async fn toggle_like(
         error_report: None,
         like: Some(like),
     };
-    resolve_and_respond(&state, &request, addr.ip()).await
+    resolve_and_respond(&state, &request, addr.ip(), &device.0).await
 }
 
 /// Shared by every non-`/play`, non-`/pair` route (`/stream/{id}/media`,
@@ -530,6 +541,7 @@ async fn toggle_like(
 async fn media_get(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(device): Extension<AuthenticatedDevice>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
@@ -550,7 +562,7 @@ async fn media_get(
         error_report: None,
         like: None,
     };
-    resolve_and_respond(&state, &request, addr.ip()).await
+    resolve_and_respond(&state, &request, addr.ip(), &device.0).await
 }
 
 fn parse_range_header(value: &axum::http::HeaderValue) -> Option<ByteRange> {
@@ -573,9 +585,17 @@ fn parse_range_header(value: &axum::http::HeaderValue) -> Option<ByteRange> {
     }
 }
 
-async fn resolve_and_respond(state: &AppState, request: &PeerRequest, remote_ip: IpAddr) -> Response {
+async fn resolve_and_respond(
+    state: &AppState,
+    request: &PeerRequest,
+    remote_ip: IpAddr,
+    client: &str,
+) -> Response {
     let is_lan = is_lan_ip(remote_ip);
-    let resolved = state.service.resolve_for_network(request, is_lan).await;
+    let resolved = state
+        .service
+        .resolve_for_client(request, is_lan, client)
+        .await;
 
     let status =
         StatusCode::from_u16(resolved.header.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

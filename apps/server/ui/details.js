@@ -1,7 +1,7 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshArtworkCache()]);
 }
 
 async function refreshTmdbKeyField() {
@@ -113,6 +113,7 @@ document.getElementById("artworkDiskCacheEnabledCheck").addEventListener("change
       enabled ? "Artwork disk cache enabled." : "Artwork disk cache disabled.",
       "success",
     );
+    await refreshArtworkCache();
   } catch (err) {
     event.currentTarget.checked = !enabled;
     showToast(String(err), "error");
@@ -378,6 +379,7 @@ bandwidthCanvas.addEventListener("mouseleave", () => {
 
 window.addEventListener("resize", () => {
   if (bandwidthChartState) drawBandwidthChart(bandwidthChartState.samples, null);
+  if (artworkCacheSnapshot) drawArtworkCacheChart(artworkCacheSnapshot, null);
 });
 
 // Every 5 seconds — matching the server's sample cadence — while the
@@ -385,8 +387,192 @@ window.addEventListener("resize", () => {
 // tab is first opened so there's no up-to-5s wait for the first paint.
 setInterval(() => {
   const panel = document.getElementById("tabPanel-details");
-  if (panel && !panel.classList.contains("d-none")) refreshBandwidth();
+  if (panel && !panel.classList.contains("d-none")) {
+    refreshBandwidth();
+    refreshArtworkCache();
+  }
 }, 5000);
+
+// ---- Artwork cache: activity by client + disk usage -------------------
+
+let artworkCacheSnapshot = null;
+let artworkCacheChartState = null;
+
+async function refreshArtworkCache() {
+  try {
+    const snapshot = await invoke("get_artwork_cache_snapshot");
+    artworkCacheSnapshot = snapshot;
+    document.getElementById("artworkDiskCacheEnabledCheck").checked = snapshot.enabled;
+    document.getElementById("artworkCachePath").textContent = snapshot.cache_dir || "Not available";
+    renderArtworkCacheStatus(snapshot);
+    refreshArtworkCacheClients(snapshot.events);
+    renderArtworkCacheRecent(snapshot.events);
+    drawArtworkCacheChart(snapshot, null);
+  } catch (err) {
+    // This is a live, best-effort panel; the next five-second poll retries.
+  }
+}
+
+function formatDiskUsage(bytes) {
+  if (!(bytes > 0)) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, index);
+  return `${value < 10 && index > 0 ? value.toFixed(1) : Math.round(value)} ${units[index]}`;
+}
+
+function renderArtworkCacheStatus(snapshot) {
+  const fills = snapshot.events.filter(event => event.kind === "cached").length;
+  const hits = snapshot.events.filter(event => event.kind === "served_from_cache").length;
+  document.getElementById("artworkCacheStatusGrid").innerHTML =
+    stat("Cache status", snapshot.enabled ? "On" : "Off", false, "artwork-cache") +
+    stat("Disk space used", formatDiskUsage(snapshot.disk_bytes), false, "artwork-cache") +
+    stat("Files on disk", snapshot.file_count, false, "artwork-cache") +
+    stat("Last 60 minutes", `${fills} cached · ${hits} hits`, false, "artwork-cache");
+}
+
+function refreshArtworkCacheClients(events) {
+  const select = document.getElementById("artworkCacheClientSelect");
+  const selected = select.value;
+  const clients = [...new Set(events.map(event => event.client))].sort((a, b) => a.localeCompare(b));
+  select.replaceChildren(new Option("All clients", ""), ...clients.map(client => new Option(client, client)));
+  select.value = clients.includes(selected) ? selected : "";
+}
+
+function filteredArtworkCacheEvents(events) {
+  const client = document.getElementById("artworkCacheClientSelect").value;
+  return client ? events.filter(event => event.client === client) : events;
+}
+
+function renderArtworkCacheRecent(events) {
+  const recent = filteredArtworkCacheEvents(events).slice(-5).reverse();
+  const container = document.getElementById("artworkCacheRecent");
+  if (!recent.length) {
+    container.textContent = "No recent cache activity for this client.";
+    return;
+  }
+  container.innerHTML = recent.map(event => {
+    const action = event.kind === "cached" ? "Cached from media root" : "Served from local cache";
+    const icon = event.kind === "cached" ? "bi-cloud-arrow-down" : "bi-lightning-charge-fill";
+    return `<span><i class="bi ${icon}"></i><strong>${esc(event.client)}</strong> ${action.toLowerCase()} <time>${esc(formatClock(event.timestamp_ms))}</time></span>`;
+  }).join("");
+}
+
+function artworkCacheBuckets(events) {
+  const intervalMs = 5000;
+  const endMs = Date.now();
+  const startMs = endMs - 60 * 60 * 1000;
+  const buckets = Array.from({ length: 721 }, (_, index) => ({
+    timestamp_ms: startMs + index * intervalMs,
+    cached: 0,
+    served_from_cache: 0,
+  }));
+  events.forEach(event => {
+    const index = Math.floor((event.timestamp_ms - startMs) / intervalMs);
+    if (index >= 0 && index < buckets.length) buckets[index][event.kind] += 1;
+  });
+  return buckets;
+}
+
+function drawArtworkCacheChart(snapshot, hoverIndex) {
+  const canvas = document.getElementById("artworkCacheChart");
+  const events = filteredArtworkCacheEvents(snapshot.events);
+  document.getElementById("artworkCacheChartEmpty").classList.toggle("d-none", events.length > 0);
+  const ctx = canvas.getContext("2d");
+  if (!events.length) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    artworkCacheChartState = null;
+    return;
+  }
+
+  const buckets = artworkCacheBuckets(events);
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const height = canvas.clientHeight || 130;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const padding = { top: 10, right: 42, bottom: 20, left: 4 };
+  const plotW = Math.max(width - padding.left - padding.right, 1);
+  const plotH = Math.max(height - padding.top - padding.bottom, 1);
+  const maxCount = Math.max(1, Math.ceil(Math.max(...buckets.flatMap(bucket => [bucket.cached, bucket.served_from_cache]))));
+  const x = index => padding.left + (index / (buckets.length - 1)) * plotW;
+  const y = count => padding.top + plotH - (count / maxCount) * plotH;
+  const styles = getComputedStyle(document.documentElement);
+  const border = styles.getPropertyValue("--border").trim();
+  const muted = styles.getPropertyValue("--muted").trim();
+  const accent = styles.getPropertyValue("--accent").trim();
+  const green = styles.getPropertyValue("--green").trim();
+
+  ctx.strokeStyle = border;
+  ctx.fillStyle = muted;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textBaseline = "middle";
+  [0, maxCount].forEach(count => {
+    const yy = Math.round(y(count)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, yy);
+    ctx.lineTo(padding.left + plotW, yy);
+    ctx.stroke();
+    ctx.textAlign = "left";
+    ctx.fillText(String(count), padding.left + plotW + 6, yy);
+  });
+
+  [["cached", accent], ["served_from_cache", green]].forEach(([key, color]) => {
+    ctx.beginPath();
+    buckets.forEach((bucket, index) => index === 0 ? ctx.moveTo(x(index), y(bucket[key])) : ctx.lineTo(x(index), y(bucket[key])));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = muted;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(formatClock(buckets[0].timestamp_ms), padding.left, padding.top + plotH + 14);
+  ctx.textAlign = "right";
+  ctx.fillText(formatClock(buckets[buckets.length - 1].timestamp_ms), padding.left + plotW, padding.top + plotH + 14);
+
+  if (hoverIndex != null) {
+    const px = x(hoverIndex);
+    ctx.beginPath();
+    ctx.moveTo(px, padding.top);
+    ctx.lineTo(px, padding.top + plotH);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  artworkCacheChartState = { buckets, padding, plotW };
+}
+
+const artworkCacheCanvas = document.getElementById("artworkCacheChart");
+const artworkCacheTooltip = document.getElementById("artworkCacheTooltip");
+
+artworkCacheCanvas.addEventListener("mousemove", event => {
+  if (!artworkCacheChartState || !artworkCacheSnapshot) return;
+  const rect = artworkCacheCanvas.getBoundingClientRect();
+  const ratio = Math.min(Math.max((event.clientX - rect.left - artworkCacheChartState.padding.left) / artworkCacheChartState.plotW, 0), 1);
+  const index = Math.round(ratio * (artworkCacheChartState.buckets.length - 1));
+  const bucket = artworkCacheChartState.buckets[index];
+  drawArtworkCacheChart(artworkCacheSnapshot, index);
+  artworkCacheTooltip.innerHTML = `<strong>${bucket.cached} cached · ${bucket.served_from_cache} hits</strong><span>${esc(formatClock(bucket.timestamp_ms))}</span>`;
+  artworkCacheTooltip.style.left = `${artworkCacheChartState.padding.left + ratio * artworkCacheChartState.plotW}px`;
+  artworkCacheTooltip.classList.remove("d-none");
+});
+
+artworkCacheCanvas.addEventListener("mouseleave", () => {
+  artworkCacheTooltip.classList.add("d-none");
+  if (artworkCacheSnapshot) drawArtworkCacheChart(artworkCacheSnapshot, null);
+});
+
+document.getElementById("artworkCacheClientSelect").addEventListener("change", () => {
+  if (!artworkCacheSnapshot) return;
+  renderArtworkCacheRecent(artworkCacheSnapshot.events);
+  drawArtworkCacheChart(artworkCacheSnapshot, null);
+});
 
 async function refreshMediaRoots() {
   const list = document.getElementById("mediaRootsList");

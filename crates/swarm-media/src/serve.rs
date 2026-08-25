@@ -6,6 +6,7 @@
 //! from the library row (derived from the scanned relative path under the
 //! media root) — never from request input.
 
+use crate::artwork_cache::{ArtworkCacheEventKind, ArtworkCacheMonitor, ArtworkCacheSnapshot};
 use crate::bandwidth::BandwidthMeter;
 use crate::range::{content_type, resolve, ResolvedRange};
 use crate::roots::{RootResolver, SharedRootResolver};
@@ -17,6 +18,7 @@ use bytes::Bytes;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures_util::stream::{self, Stream};
+use std::collections::HashMap;
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -38,6 +40,8 @@ pub struct MediaService {
     artwork_cache_dir: Option<PathBuf>,
     artwork_cache_enabled: AtomicBool,
     artwork_cache_fills: [tokio::sync::Mutex<()>; 32],
+    artwork_cache_monitor: ArtworkCacheMonitor,
+    client_names: std::sync::RwLock<HashMap<String, String>>,
     bandwidth: Arc<BandwidthMeter>,
 }
 
@@ -159,6 +163,7 @@ impl MediaService {
         config: TranscodeConfig,
         artwork_cache_dir: Option<PathBuf>,
     ) -> Self {
+        let artwork_cache_monitor = ArtworkCacheMonitor::new(artwork_cache_dir.clone());
         Self {
             library,
             roots,
@@ -167,12 +172,32 @@ impl MediaService {
             artwork_cache_dir,
             artwork_cache_enabled: AtomicBool::new(false),
             artwork_cache_fills: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
+            artwork_cache_monitor,
+            client_names: std::sync::RwLock::new(HashMap::new()),
             bandwidth: BandwidthMeter::new(),
         }
     }
 
     pub fn set_artwork_disk_cache_enabled(&self, enabled: bool) {
         self.artwork_cache_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub async fn artwork_cache_snapshot(&self) -> ArtworkCacheSnapshot {
+        self.artwork_cache_monitor
+            .snapshot(self.artwork_cache_enabled.load(Ordering::Relaxed))
+            .await
+    }
+
+    pub fn replace_client_names(&self, clients: impl IntoIterator<Item = (String, String)>) {
+        *self.client_names.write().unwrap() = clients.into_iter().collect();
+    }
+
+    pub fn set_client_name(&self, fingerprint: String, name: String) {
+        self.client_names.write().unwrap().insert(fingerprint, name);
+    }
+
+    fn client_name(&self, fingerprint: &str) -> Option<String> {
+        self.client_names.read().unwrap().get(fingerprint).cloned()
     }
 
     pub fn transcode_manager(&self) -> &Arc<TranscodeManager> {
@@ -184,13 +209,26 @@ impl MediaService {
     }
 
     pub async fn resolve(&self, request: &PeerRequest) -> Resolved {
-        self.resolve_for_network(request, false).await
+        self.resolve_for_client(request, false, "Local request")
+            .await
     }
 
     /// Resolve a request with transport context. `is_lan` bypasses upload
     /// admission limits and pacing because a local transfer does not spend
     /// the internet uplink the budget is meant to protect.
     pub async fn resolve_for_network(&self, request: &PeerRequest, is_lan: bool) -> Resolved {
+        self.resolve_for_client(request, is_lan, "Unknown client")
+            .await
+    }
+
+    /// Resolve with a dashboard-facing client label. Transports should use a
+    /// paired device name when available and a network address otherwise.
+    pub async fn resolve_for_client(
+        &self,
+        request: &PeerRequest,
+        is_lan: bool,
+        client: &str,
+    ) -> Resolved {
         let request_path = request
             .path
             .split_once('?')
@@ -219,7 +257,7 @@ impl MediaService {
                     let mut segments = rest.splitn(2, '/');
                     let entry_key = segments.next().unwrap_or("");
                     let kind = segments.next().unwrap_or("");
-                    self.art(entry_key, kind, request).await
+                    self.art(entry_key, kind, request, client).await
                 } else {
                     status(404)
                 }
@@ -563,7 +601,13 @@ impl MediaService {
     /// scrape wrote, served the same way as media bytes (Range + etag), with
     /// `if_none_match` short-circuiting to 304 when the client already has
     /// the current version.
-    async fn art(&self, entry_key: &str, kind_segment: &str, request: &PeerRequest) -> Resolved {
+    async fn art(
+        &self,
+        entry_key: &str,
+        kind_segment: &str,
+        request: &PeerRequest,
+        client: &str,
+    ) -> Resolved {
         if !is_valid_entry_key(entry_key) {
             return status(404);
         }
@@ -593,7 +637,13 @@ impl MediaService {
         }
         let source_path = self.roots.resolve(&relative_path);
         let source_path = self
-            .cached_artwork_path(&source_path, entry_key, kind.route_segment(), version)
+            .cached_artwork_path(
+                &source_path,
+                entry_key,
+                kind.route_segment(),
+                version,
+                client,
+            )
             .await
             .unwrap_or(source_path);
         let path = match requested_width {
@@ -665,6 +715,7 @@ impl MediaService {
         entry_key: &str,
         kind: &str,
         version: u32,
+        client: &str,
     ) -> Option<PathBuf> {
         if !self.artwork_cache_enabled.load(Ordering::Relaxed) {
             return None;
@@ -686,6 +737,8 @@ impl MediaService {
             .join(shard)
             .join(format!("{file_prefix}v{version}.{extension}"));
         if artwork_cache_file_is_fresh(&target) {
+            self.artwork_cache_monitor
+                .record(client, ArtworkCacheEventKind::ServedFromCache);
             return Some(target);
         }
 
@@ -695,6 +748,8 @@ impl MediaService {
             usize::from_str_radix(shard, 16).unwrap_or(0) % self.artwork_cache_fills.len();
         let _fill = self.artwork_cache_fills[fill_index].lock().await;
         if artwork_cache_file_is_fresh(&target) {
+            self.artwork_cache_monitor
+                .record(client, ArtworkCacheEventKind::ServedFromCache);
             return Some(target);
         }
 
@@ -707,7 +762,13 @@ impl MediaService {
                 .ok()
                 .and_then(Result::ok)
                 .is_some();
-        if refreshed || std::fs::metadata(&target).is_ok_and(|metadata| metadata.len() > 0) {
+        if refreshed {
+            self.artwork_cache_monitor
+                .record(client, ArtworkCacheEventKind::Cached);
+            Some(target)
+        } else if std::fs::metadata(&target).is_ok_and(|metadata| metadata.len() > 0) {
+            self.artwork_cache_monitor
+                .record(client, ArtworkCacheEventKind::ServedFromCache);
             Some(target)
         } else {
             None
@@ -1093,9 +1154,10 @@ pub async fn handle_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     is_lan: bool,
+    client: &str,
 ) -> Result<(), P2pError> {
     let request = read_request(&mut recv).await?;
-    let resolved = service.resolve_for_network(&request, is_lan).await;
+    let resolved = service.resolve_for_client(&request, is_lan, client).await;
     write_response_header(&mut send, &resolved.header).await?;
     let mut body = std::pin::pin!(stream_body(resolved, service));
     while let Some(chunk) = futures_util::StreamExt::next(&mut body).await {
@@ -1113,12 +1175,16 @@ pub async fn handle_stream(
 pub async fn serve_connection(connection: quinn::Connection, service: Arc<MediaService>) {
     let remote = connection.remote_address();
     let is_lan = is_lan_ip(remote.ip());
+    let client = swarm_p2p::endpoint::peer_fingerprint(&connection)
+        .and_then(|fingerprint| service.client_name(&fingerprint))
+        .unwrap_or_else(|| remote.ip().to_string());
     tracing::info!(%remote, is_lan, "peer connected");
     // Loop ends when accept_bi errors, i.e. the connection closed.
     while let Ok((send, recv)) = connection.accept_bi().await {
         let service = Arc::clone(&service);
+        let client = client.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_stream(&service, send, recv, is_lan).await {
+            if let Err(err) = handle_stream(&service, send, recv, is_lan, &client).await {
                 tracing::debug!(error = %err, "stream failed");
             }
         });

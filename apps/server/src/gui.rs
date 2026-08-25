@@ -999,6 +999,14 @@ async fn get_bandwidth_history(
     Ok(state.core(&app).await?.bandwidth_history())
 }
 
+#[tauri::command]
+async fn get_artwork_cache_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<swarm_media::artwork_cache::ArtworkCacheSnapshot, String> {
+    Ok(state.core(&app).await?.artwork_cache_snapshot().await)
+}
+
 #[derive(serde::Serialize)]
 struct RescanResult {
     added: u64,
@@ -2132,6 +2140,7 @@ fn main() {
             generate_mcp_access_token,
             get_status,
             get_bandwidth_history,
+            get_artwork_cache_snapshot,
             rescan,
             reclassify_library,
             list_entries,

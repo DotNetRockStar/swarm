@@ -19,6 +19,16 @@ pub const ALPN: &[u8] = b"swarm-peer/1";
 
 const MAX_HEADER_LINE: usize = 64 * 1024;
 
+/// Fingerprint the certificate authenticated for an established peer.
+/// Returns `None` only for a transport without rustls certificate identity.
+pub fn peer_fingerprint(connection: &quinn::Connection) -> Option<String> {
+    let identity = connection.peer_identity()?;
+    let certificates = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    certificates
+        .first()
+        .map(|certificate| crate::identity::fingerprint_der(certificate.as_ref()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {
     #[error("tls setup failed: {0}")]

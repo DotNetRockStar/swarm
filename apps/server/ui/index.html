@@ -81,8 +81,36 @@
       <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
       <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="uploadBudgetEnabledCheck"> Limit internet streaming to the measured upload budget</label>
       <p class="muted compact-help">LAN streaming is never throttled. Turn this off to let internet streams use all available upload bandwidth.</p>
-      <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="artworkDiskCacheEnabledCheck"> Cache requested artwork on this server</label>
-      <p class="muted compact-help">Recommended for media on network shares. Images are copied into local app storage as clients request them, refreshed after 30 days, and invalidated immediately when artwork is replaced.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2 class="info-trigger" data-info="artwork-cache" tabindex="0" role="button"><i class="bi bi-images heading-icon"></i>Artwork cache <i class="bi bi-info-circle info-affordance"></i></h2>
+        <label class="checkbox-label transcription-toggle"><input type="checkbox" id="artworkDiskCacheEnabledCheck"> Cache requested artwork</label>
+      </div>
+      <div class="grid" id="artworkCacheStatusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+      <div class="cache-chart-controls">
+        <div class="cache-chart-legend" aria-label="Artwork cache chart legend">
+          <span><i class="cache-legend-dot cache-legend-fill"></i>Cached</span>
+          <span><i class="cache-legend-dot cache-legend-hit"></i>Served from cache</span>
+        </div>
+        <label for="artworkCacheClientSelect">Client</label>
+        <select id="artworkCacheClientSelect"><option value="">All clients</option></select>
+      </div>
+      <div class="bandwidth-chart-wrap">
+        <canvas id="artworkCacheChart" class="bandwidth-chart" aria-label="Artwork cache fills and hits over the last 60 minutes"></canvas>
+        <div id="artworkCacheChartEmpty" class="muted bandwidth-chart-empty d-none">No artwork cache activity in the last 60 minutes.</div>
+        <div id="artworkCacheTooltip" class="bandwidth-tooltip d-none"></div>
+      </div>
+      <div id="artworkCacheRecent" class="cache-recent muted">No recent cache activity.</div>
+      <details class="cache-explainer">
+        <summary><i class="bi bi-chevron-right"></i>How the artwork cache works</summary>
+        <div class="cache-explainer-body">
+          <p>With caching enabled, the first request copies an image from its media root to this server. Later clients read the local copy. Copies refresh after 30 days, and a scrape or artwork replacement changes the version immediately.</p>
+          <p>Cached artwork and its generated thumbnails are stored at:</p>
+          <div id="artworkCachePath" class="mono cache-path">Loading…</div>
+        </div>
+      </details>
     </div>
 
     <div class="card">
