@@ -54,6 +54,7 @@ function invokeStub(command, args) {
         mcp_enabled: false,
         mcp_port: 7890,
         mcp_access_token: null,
+        auto_library_watch_enabled: true,
       };
     case "get_status":
       return {

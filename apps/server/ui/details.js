@@ -7,6 +7,7 @@ async function refreshDetails() {
 async function refreshTmdbKeyField() {
   const settings = await invoke("get_settings");
   document.getElementById("uploadBudgetEnabledCheck").checked = settings.streaming_upload_budget_enabled;
+  document.getElementById("autoLibraryWatchEnabledCheck").checked = settings.auto_library_watch_enabled;
   const status = document.getElementById("tmdbKeyStatus");
   status.textContent = settings.has_tmdb_key ? "A key is saved. Scraping is enabled." : "No key saved yet — scraping is disabled until one is added.";
   status.classList.toggle("error", !settings.has_tmdb_key);
@@ -80,6 +81,17 @@ document.getElementById("uploadBudgetEnabledCheck").addEventListener("change", a
     await invoke("set_streaming_upload_budget_enabled", { enabled });
     await refreshStatus();
     showToast(enabled ? "Internet streaming budget enabled." : "Internet streaming budget disabled.", "success");
+  } catch (err) {
+    event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("autoLibraryWatchEnabledCheck").addEventListener("change", async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    await invoke("set_auto_library_watch_enabled", { enabled });
+    showToast(enabled ? "Automatic library detection enabled." : "Automatic library detection disabled.", "success");
   } catch (err) {
     event.currentTarget.checked = !enabled;
     showToast(String(err), "error");

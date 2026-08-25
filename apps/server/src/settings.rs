@@ -494,6 +494,15 @@ pub struct Settings {
     /// Bearer token required by every MCP request.
     #[serde(default)]
     pub mcp_access_token: Option<String>,
+    /// Periodically re-scan every media root for added/removed/updated
+    /// files and, for anything newly found, automatically trigger metadata
+    /// scraping (TMDb for movies/shows, MusicBrainz for music) — see
+    /// `gui.rs`'s `start_auto_library_watch`. On by default: it reuses the
+    /// same scan/scrape machinery a manual Rescan/Scrape button already
+    /// runs, just on a timer, so there is no new heavy resource (unlike
+    /// Whisper's model download) that would justify defaulting it off.
+    #[serde(default = "default_auto_library_watch_enabled")]
+    pub auto_library_watch_enabled: bool,
 }
 
 fn default_streaming_upload_budget_enabled() -> bool {
@@ -506,6 +515,10 @@ fn default_transcription_pause_while_streaming() -> bool {
 
 fn default_mcp_port() -> u16 {
     7890
+}
+
+fn default_auto_library_watch_enabled() -> bool {
+    true
 }
 
 // Hand-written rather than `#[derive(Default)]` so a brand-new install (no
@@ -527,6 +540,7 @@ impl Default for Settings {
             mcp_enabled: false,
             mcp_port: default_mcp_port(),
             mcp_access_token: None,
+            auto_library_watch_enabled: true,
         }
     }
 }
@@ -588,6 +602,7 @@ mod tests {
         assert!(!loaded.local_transcription_enabled);
         assert!(loaded.transcription_pause_while_streaming);
         assert_eq!(loaded.mcp_access_token, None);
+        assert!(loaded.auto_library_watch_enabled);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

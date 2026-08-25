@@ -102,6 +102,8 @@
         <h2 class="info-trigger" data-info="media-roots" tabindex="0" role="button">Media roots <i class="bi bi-info-circle info-affordance"></i></h2>
         <button id="connectNetworkRootBtn" class="secondary"><i class="bi bi-hdd-network"></i>Connect SMB share…</button>
       </div>
+      <label class="checkbox-label"><input type="checkbox" id="autoLibraryWatchEnabledCheck"> Automatically detect new/changed/removed files and scrape their metadata</label>
+      <p class="muted compact-help">Checks every 15 minutes. Movies/shows scrape from TMDb only if a key is saved below; music always scrapes from MusicBrainz.</p>
       <div id="mediaRootsList">Loading…</div>
       <div class="row add-root-row">
         <input id="addRootLabel" placeholder="Label (e.g. nas-movies)">

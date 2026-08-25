@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
-use swarm_server::{ScanState, ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
+use swarm_server::{
+    ScanState, ServerConfig, ServerCore, ServerError, ServerStatus, TokenStoreMode,
+};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -146,7 +148,8 @@ impl AppState {
                 core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
-                start_media_root_recovery(Arc::clone(&core), recovery_settings_dir);
+                start_media_root_recovery(Arc::clone(&core), recovery_settings_dir.clone());
+                start_auto_library_watch(Arc::clone(&core), recovery_settings_dir);
                 if settings.mcp_enabled {
                     if let Some(access_token) = settings.mcp_access_token.filter(|token| !token.is_empty()) {
                         let mcp_core = Arc::clone(&core);
@@ -349,6 +352,130 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
     });
 }
 
+/// How often the idle-time watcher below re-walks every media root looking
+/// for added/removed/updated files. Short enough that a change is noticed
+/// without the user having to press Rescan, long enough that a large network
+/// share isn't re-walked so often it competes with playback/transcoding for
+/// I/O — the same trade-off `ROSTER_SYNC_INTERVAL` and the 10s root-health
+/// poll make for their own much cheaper checks.
+const AUTO_LIBRARY_WATCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Issue #37: periodically reconcile every media root against the library
+/// (reusing the exact scan/diff machinery `rescan` already exposes to the
+/// UI) and, whenever that finds new or changed files, automatically trigger
+/// metadata scraping and record a notification — no user action required.
+/// Scraping itself already skips movies/shows when no TMDb key is
+/// configured and always attempts music via MusicBrainz (no key needed
+/// there); see `run_bulk_scrape`'s per-kind gating, unchanged here.
+fn start_auto_library_watch(core: Arc<ServerCore>, settings_dir: PathBuf) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUTO_LIBRARY_WATCH_INTERVAL);
+        // The first tick fires immediately; skip it since `ServerCore::start`
+        // already kicked off an initial scan of its own.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !settings::load(&settings_dir).auto_library_watch_enabled {
+                continue;
+            }
+            let report = match core.rescan(None).await {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::warn!(%error, "automatic library scan failed");
+                    continue;
+                }
+            };
+            if report.added + report.updated + report.removed == 0 {
+                continue;
+            }
+            let message = format!(
+                "+{} added, {} updated, {} removed, {} unchanged.",
+                report.added, report.updated, report.removed, report.unchanged,
+            );
+            if let Err(error) = core
+                .library
+                .record_server_notification("success", "Library updated", &message)
+                .await
+            {
+                tracing::warn!(%error, "could not save library-change notification");
+            }
+            if report.added + report.updated == 0 {
+                continue;
+            }
+            let tmdb_api_key = settings::load(&settings_dir).tmdb_api_key;
+            let scrape_result = core
+                .run_scrape(
+                    ScrapeConfig {
+                        tmdb_api_key,
+                        ..Default::default()
+                    },
+                    None,
+                    false,
+                )
+                .await;
+            if matches!(scrape_result, Err(ServerError::ScrapeInProgress)) {
+                // A manual scrape happened to be running; not an error, and
+                // the next watch tick will pick up anything still unscraped.
+                continue;
+            }
+            record_scrape_result_notification(
+                &core,
+                &scrape_result,
+                "Automatic scrape finished with issues",
+                "Automatic scrape failed",
+            )
+            .await;
+        }
+    });
+}
+
+/// Shared by [`start_auto_library_watch`] and the manual `run_scrape`
+/// command: a clean run (no issues) intentionally records nothing — the
+/// caller already sees the result directly (UI refresh or this function's
+/// own "Library updated" notification), so a notification here is reserved
+/// for something the user should actually look at.
+async fn record_scrape_result_notification(
+    core: &ServerCore,
+    result: &Result<BulkScrapeReport, ServerError>,
+    issues_title: &str,
+    failure_title: &str,
+) {
+    match result {
+        Ok(report) if !report.issues.is_empty() => {
+            let mut message = format!(
+                "Matched: {}\nNot found: {}\nFailed: {}\nSkipped: {}",
+                report.matched, report.not_found, report.failed, report.skipped,
+            );
+            message.push_str("\n\nIssues:\n");
+            for issue in &report.issues {
+                message.push_str(&format!("• {} — {}\n", issue.title, issue.reason));
+            }
+            let level = if report.failed > 0 {
+                "error"
+            } else {
+                "warning"
+            };
+            if let Err(error) = core
+                .library
+                .record_server_notification(level, issues_title, message.trim_end())
+                .await
+            {
+                tracing::warn!(%error, "could not save scrape issues notification");
+            }
+        }
+        Err(error) => {
+            if let Err(save_error) = core
+                .library
+                .record_server_notification("error", failure_title, &error.to_string())
+                .await
+            {
+                tracing::warn!(%save_error, "could not save scrape failure notification");
+            }
+        }
+        _ => {}
+    }
+}
+
 fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
     settings
         .iter()
@@ -370,6 +497,7 @@ struct SettingsView {
     mcp_enabled: bool,
     mcp_port: u16,
     mcp_access_token: Option<String>,
+    auto_library_watch_enabled: bool,
 }
 
 #[tauri::command]
@@ -385,7 +513,23 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
         mcp_enabled: settings.mcp_enabled,
         mcp_port: settings.mcp_port,
         mcp_access_token: settings.mcp_access_token,
+        auto_library_watch_enabled: settings.auto_library_watch_enabled,
     })
+}
+
+/// Takes effect on the auto-watcher's next tick (at most
+/// `AUTO_LIBRARY_WATCH_INTERVAL` later) — it re-reads settings itself each
+/// time, same as the media-root recovery loop already does, so there is no
+/// live core state to push this into immediately.
+#[tauri::command]
+async fn set_auto_library_watch_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.auto_library_watch_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
 }
 
 /// Does not initialize `ServerCore`, so the warning can render even when a
@@ -1014,46 +1158,13 @@ async fn run_scrape(
     // its final report, so the frontend can't see "done" before the last
     // per-entry update.
     let _ = forward.await;
-    match &result {
-        Ok(report) if !report.issues.is_empty() => {
-            let mut message = format!(
-                "Matched: {}\nNot found: {}\nFailed: {}\nSkipped: {}",
-                report.matched, report.not_found, report.failed, report.skipped,
-            );
-            if !report.issues.is_empty() {
-                message.push_str("\n\nIssues:\n");
-                for issue in &report.issues {
-                    message.push_str(&format!("• {} — {}\n", issue.title, issue.reason));
-                }
-            }
-            let level = if report.failed > 0 {
-                "error"
-            } else {
-                "warning"
-            };
-            if let Err(error) = core
-                .library
-                .record_server_notification(
-                    level,
-                    "Metadata scrape finished with issues",
-                    message.trim_end(),
-                )
-                .await
-            {
-                tracing::warn!(%error, "could not save bulk-scrape error notification");
-            }
-        }
-        Err(error) => {
-            if let Err(save_error) = core
-                .library
-                .record_server_notification("error", "Metadata scrape failed", &error.to_string())
-                .await
-            {
-                tracing::warn!(%save_error, "could not save bulk-scrape failure notification");
-            }
-        }
-        _ => {}
-    }
+    record_scrape_result_notification(
+        &core,
+        &result,
+        "Metadata scrape finished with issues",
+        "Metadata scrape failed",
+    )
+    .await;
     result.map_err(|e| e.to_string())
 }
 
@@ -1778,6 +1889,7 @@ fn main() {
             set_opensubtitles_api_key,
             download_subtitle,
             set_streaming_upload_budget_enabled,
+            set_auto_library_watch_enabled,
             set_local_transcription_enabled,
             set_transcription_pause_while_streaming,
             get_transcription_status,
