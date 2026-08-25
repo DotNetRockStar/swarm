@@ -40,6 +40,8 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -81,7 +83,9 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.TrackGroup
 import androidx.media3.common.Tracks
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DecoderReuseEvaluation
@@ -101,6 +105,7 @@ import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.data.episodeNumberLabel
 import app.swarm.tv.app.data.pauseRecommendationTitle
 import app.swarm.tv.app.data.PreparedEpisodePlayback
+import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
@@ -325,16 +330,25 @@ private class VideoPlayerPool(context: Context) {
             // Direct-play containers may expose several embedded audio tracks.
             // Prefer English when it is tagged, while Media3 naturally falls
             // back to the container default when no English track exists.
+            // Same reasoning for subtitles: prefer an English-tagged track
+            // over whatever Media3's own tie-break would otherwise pick.
             trackSelectionParameters = trackSelectionParameters
                 .buildUpon()
                 .setPreferredAudioLanguages("en", "eng")
+                .setPreferredTextLanguages("en", "eng")
                 .build()
+            // Real bug, found live (#55): flagging every subtitle track as
+            // SELECTION_FLAG_DEFAULT left Media3's tie-break picking an
+            // inconsistent language whenever more than one subtitle track was
+            // attached, and offered no way to turn subtitles off. Leave
+            // selection to setPreferredTextLanguages above plus whatever the
+            // viewer picks via the native subtitle/settings control or the
+            // pause-screen picker instead of forcing one on.
             val subtitleConfigurations = config.subtitles.map { track ->
                 MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
                     .setMimeType(MimeTypes.TEXT_VTT)
                     .setLanguage(track.language)
                     .setLabel(track.label)
-                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                     .build()
             }
             setMediaItem(
@@ -415,7 +429,7 @@ fun PlayerScreen(
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
     var trackAvailability by remember(sessionId) {
-        mutableStateOf(trackAvailability(player.currentTracks, subtitles))
+        mutableStateOf(trackAvailability(player.currentTracks))
     }
 
     // Negotiation finishes asynchronously during the Continue countdown.
@@ -454,6 +468,12 @@ fun PlayerScreen(
     val playerView = remember(context) {
         PlayerView(context).apply {
             useController = true
+            // Real bug, found live (#55): Media3's subtitle button/settings
+            // submenu (which is where the built-in "Off" option lives) stays
+            // hidden unless explicitly requested — off by default. Without
+            // this, viewers had no reachable control to disable subtitles or
+            // switch tracks during active playback.
+            setShowSubtitleButton(true)
             applySwarmPlaybackControlColors(this)
         }
     }
@@ -557,7 +577,7 @@ fun PlayerScreen(
             }
 
             override fun onTracksChanged(tracks: Tracks) {
-                trackAvailability = trackAvailability(tracks, subtitles)
+                trackAvailability = trackAvailability(tracks)
             }
 
             // Fires strictly before STATE_READY can be observed for video,
@@ -712,37 +732,71 @@ fun PlayerScreen(
                 entry = entry,
                 recommendations = recommendations,
                 artworkUrl = artworkUrl,
-                audioLanguages = trackAvailability.audioLanguages,
-                subtitleLabels = trackAvailability.subtitles,
+                audioTracks = trackAvailability.audioTracks,
+                subtitleTracks = trackAvailability.subtitleTracks,
                 onResume = player::play,
                 onPlayRecommendation = onPlayRecommendation,
+                onSelectAudioTrack = { choice -> selectAudioTrack(player, choice) },
+                onSelectSubtitleTrack = { choice -> selectSubtitleTrack(player, choice) },
             )
         }
     }
 }
 
-private data class TrackAvailability(
-    val audioLanguages: List<String>,
-    val subtitles: List<String>,
+/** One selectable option in the pause-screen audio/subtitle pickers.
+ * [group]/[trackIndex] identify the real Media3 track to select; [group] is
+ * null only for the subtitle list's synthetic "Off" entry. */
+private data class TrackChoice(
+    val label: String,
+    val group: TrackGroup?,
+    val trackIndex: Int,
+    val isSelected: Boolean,
 )
 
-private fun trackAvailability(tracks: Tracks, configuredSubtitles: List<SubtitleTrack>): TrackAvailability {
-    val audioLanguages = mutableListOf<String>()
-    val subtitleLabels = configuredSubtitles.mapTo(mutableListOf()) { track ->
-        track.label.takeIf(String::isNotBlank) ?: languageDisplayName(track.language)
-    }
+private data class TrackAvailability(
+    val audioTracks: List<TrackChoice>,
+    val subtitleTracks: List<TrackChoice>,
+)
+
+private const val OFF_SUBTITLE_CHOICE_LABEL = "Off"
+
+private fun trackAvailability(tracks: Tracks): TrackAvailability {
+    val audioTracks = mutableListOf<TrackChoice>()
+    val subtitleTracks = mutableListOf<TrackChoice>()
+    var subtitleSelected = false
     for (group in tracks.groups) {
         for (index in 0 until group.length) {
+            if (!group.isTrackSupported(index)) continue
             val format = group.getTrackFormat(index)
+            val isSelected = group.isTrackSelected(index)
             when (group.type) {
-                C.TRACK_TYPE_AUDIO -> audioLanguages += audioTrackLabel(format)
-                C.TRACK_TYPE_TEXT -> subtitleLabels += subtitleTrackLabel(format, index)
+                C.TRACK_TYPE_AUDIO -> audioTracks += TrackChoice(
+                    label = audioTrackLabel(format),
+                    group = group.mediaTrackGroup,
+                    trackIndex = index,
+                    isSelected = isSelected,
+                )
+                C.TRACK_TYPE_TEXT -> {
+                    subtitleSelected = subtitleSelected || isSelected
+                    subtitleTracks += TrackChoice(
+                        label = subtitleTrackLabel(format, subtitleTracks.size),
+                        group = group.mediaTrackGroup,
+                        trackIndex = index,
+                        isSelected = isSelected,
+                    )
+                }
             }
         }
     }
+    val offChoice = TrackChoice(
+        label = OFF_SUBTITLE_CHOICE_LABEL,
+        group = null,
+        trackIndex = C.INDEX_UNSET,
+        isSelected = !subtitleSelected,
+    )
     return TrackAvailability(
-        audioLanguages = audioLanguages.distinctLabels(),
-        subtitles = subtitleLabels.distinctLabels(),
+        audioTracks = audioTracks.distinctByLabel(),
+        subtitleTracks = listOf(offChoice) + subtitleTracks.distinctByLabel(),
     )
 }
 
@@ -764,18 +818,48 @@ private fun languageDisplayName(code: String): String {
         ?: code.uppercase()
 }
 
-private fun List<String>.distinctLabels(): List<String> =
-    distinctBy { it.trim().lowercase() }
+private fun List<TrackChoice>.distinctByLabel(): List<TrackChoice> =
+    distinctBy { it.label.trim().lowercase() }
+
+/** Applies [choice] as the sole override for its track type, so picking a
+ * new audio track deselects whichever one was previously playing. */
+private fun selectAudioTrack(player: Player, choice: TrackChoice) {
+    val group = choice.group ?: return
+    player.trackSelectionParameters = player.trackSelectionParameters
+        .buildUpon()
+        .setOverrideForType(TrackSelectionOverride(group, choice.trackIndex))
+        .build()
+}
+
+/** [TrackChoice.group] is null for the synthetic "Off" entry — disabling the
+ * text track type is how Media3 turns subtitles off outright, distinct from
+ * merely clearing which track is overridden. */
+private fun selectSubtitleTrack(player: Player, choice: TrackChoice) {
+    val builder = player.trackSelectionParameters
+        .buildUpon()
+        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+    val group = choice.group
+    if (group == null) {
+        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+    } else {
+        builder
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setOverrideForType(TrackSelectionOverride(group, choice.trackIndex))
+    }
+    player.trackSelectionParameters = builder.build()
+}
 
 @Composable
 private fun PauseOverlay(
     entry: MergedEntry,
     recommendations: List<MergedEntry>,
     artworkUrl: (MergedEntry) -> String?,
-    audioLanguages: List<String>,
-    subtitleLabels: List<String>,
+    audioTracks: List<TrackChoice>,
+    subtitleTracks: List<TrackChoice>,
     onResume: () -> Unit,
     onPlayRecommendation: (MergedEntry) -> Unit,
+    onSelectAudioTrack: (TrackChoice) -> Unit,
+    onSelectSubtitleTrack: (TrackChoice) -> Unit,
 ) {
     val resumeFocusRequester = remember { FocusRequester() }
     LaunchedEffect(entry.fingerprint) { resumeFocusRequester.requestFocus() }
@@ -850,16 +934,18 @@ private fun PauseOverlay(
                     }
                 }
                 Column(modifier = Modifier.width(285.dp)) {
-                    AvailabilityBlock(
-                        heading = "Audio languages",
-                        values = audioLanguages,
+                    TrackPickerBlock(
+                        heading = "Audio language",
+                        choices = audioTracks,
                         emptyLabel = "None reported",
+                        onSelect = onSelectAudioTrack,
                     )
                     Spacer(Modifier.height(18.dp))
-                    AvailabilityBlock(
-                        heading = "Available subtitles",
-                        values = subtitleLabels,
+                    TrackPickerBlock(
+                        heading = "Subtitles",
+                        choices = subtitleTracks,
                         emptyLabel = "None available",
+                        onSelect = onSelectSubtitleTrack,
                     )
                 }
             }
@@ -885,18 +971,25 @@ private fun PauseOverlay(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AvailabilityBlock(heading: String, values: List<String>, emptyLabel: String) {
+private fun TrackPickerBlock(
+    heading: String,
+    choices: List<TrackChoice>,
+    emptyLabel: String,
+    onSelect: (TrackChoice) -> Unit,
+) {
     Text(heading, color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     Spacer(Modifier.height(5.dp))
-    Text(
-        values.take(6).joinToString("  •  ").ifBlank { emptyLabel },
-        color = SwarmText,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
-        maxLines = 4,
-        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-    )
+    if (choices.isEmpty()) {
+        Text(emptyLabel, color = SwarmText, fontSize = 13.sp)
+        return
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (choice in choices) {
+            SelectableChip(choice.label, isSelected = choice.isSelected, onClick = { onSelect(choice) })
+        }
+    }
 }
 
 @Composable
