@@ -15,6 +15,7 @@ LOCK_DIR="$STATE_DIR/worker.lock"
 COMPLETED_ISSUES_FILE="$STATE_DIR/completed-issues"
 PENDING_EMAIL_FILE="$STATE_DIR/pending-email.json"
 IN_PROGRESS_FILE="$STATE_DIR/in-progress-issue.json"
+PAUSED_ISSUES_DIR="$STATE_DIR/quota-paused-issues"
 AI_OUTPUT_FILE="$STATE_DIR/last-ai-output.log"
 AI_DIAGNOSTIC_FILE="$STATE_DIR/last-ai-diagnostic.log"
 GITHUB_COMMENT_FILE=""
@@ -64,6 +65,8 @@ SESSION_COMMENT_ID=0
 RESUME_COMMENTS_JSON="[]"
 RESUME_COMMENT_ID=0
 QUOTA_RESUME_READY=0
+PAUSED_ISSUES_JSON="[]"
+AVAILABLE_PAUSED_FILE=""
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$*" >&2
@@ -151,6 +154,7 @@ save_in_progress_issue() {
         --arg base_sha "$base_sha" \
         --arg work_type "$WORK_TYPE" \
         --arg previous_commit_sha "$PREVIOUS_COMMIT_SHA" \
+        --arg previous_ai "$PREVIOUS_AI" \
         --arg previous_completion_comment "$PREVIOUS_COMPLETION_COMMENT_JSON" \
         --arg followup_comments "$FOLLOWUP_COMMENTS_JSON" \
         --argjson trigger_comment_id "$TRIGGER_COMMENT_ID_JSON" \
@@ -167,6 +171,7 @@ save_in_progress_issue() {
                 base_sha: $base_sha,
                 work_type: $work_type,
                 previous_commit_sha: $previous_commit_sha,
+                previous_ai: $previous_ai,
                 previous_completion_comment: ($previous_completion_comment | fromjson),
                 followup_comments: ($followup_comments | fromjson),
                 trigger_comment_id: $trigger_comment_id,
@@ -293,6 +298,49 @@ selected_ai_has_capacity() {
     esac
 }
 
+select_available_ai_for_issue() {
+    local preferred_ai=""
+
+    if [ "$WORK_TYPE" = "followup" ]; then
+        case "$PREVIOUS_AI" in
+            Claude) preferred_ai="Codex" ;;
+            Codex) preferred_ai="Claude" ;;
+        esac
+    fi
+
+    if [ "$preferred_ai" = "Codex" ] && [ "$CODEX_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Codex"
+        SELECTED_MODEL="$CODEX_MODEL"
+        SELECTED_EFFORT="$CODEX_EFFORT"
+        AI_SESSION_ID=""
+        log "Follow-up review prefers Codex because Claude completed the previous pass."
+    elif [ "$preferred_ai" = "Claude" ] && [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Claude"
+        SELECTED_MODEL="$CLAUDE_MODEL"
+        SELECTED_EFFORT="$CLAUDE_EFFORT"
+        AI_SESSION_ID="$("$PYTHON_BIN" -c 'import uuid; print(uuid.uuid4())')"
+        log "Follow-up review prefers Claude because Codex completed the previous pass."
+    elif [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Claude"
+        SELECTED_MODEL="$CLAUDE_MODEL"
+        SELECTED_EFFORT="$CLAUDE_EFFORT"
+        AI_SESSION_ID="$("$PYTHON_BIN" -c 'import uuid; print(uuid.uuid4())')"
+        if [ -n "$preferred_ai" ]; then
+            log "$preferred_ai lacks capacity; falling back to Claude for this follow-up."
+        fi
+    elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
+        SELECTED_AI="Codex"
+        SELECTED_MODEL="$CODEX_MODEL"
+        SELECTED_EFFORT="$CODEX_EFFORT"
+        AI_SESSION_ID=""
+        if [ -n "$preferred_ai" ]; then
+            log "$preferred_ai lacks capacity; falling back to Codex for this follow-up."
+        fi
+    else
+        return 1
+    fi
+}
+
 update_in_progress() {
     local filter="$1"
 
@@ -416,6 +464,191 @@ mark_quota_resumed() {
     IN_PROGRESS_TEMP=""
 }
 
+validate_quota_paused_state() {
+    local state_file="$1"
+
+    "$JQ_BIN" -e '
+        (.issue_number | type) == "number"
+        and (.issue_title | type) == "string"
+        and (.issue_url | type) == "string"
+        and (.base_sha | type) == "string"
+        and (.base_sha | test("^[0-9a-f]{40}$"))
+        and (.ai_tool | IN("Claude", "Codex"))
+        and (.model | type) == "string" and (.model | length) > 0
+        and (.effort | type) == "string" and (.effort | length) > 0
+        and (.session_id | type) == "string" and (.session_id | length) > 0
+        and .status == "quota_paused"
+    ' "$state_file" >/dev/null 2>&1
+}
+
+drop_worker_stash() {
+    local stash_oid="$1"
+    local stash_ref
+
+    stash_ref="$(git -C "$REPO_DIR" stash list --format='%H %gd' \
+        | awk -v oid="$stash_oid" '$1 == oid { print $2; exit }')"
+    if [ -n "$stash_ref" ]; then
+        git -C "$REPO_DIR" stash drop "$stash_ref" >/dev/null \
+            || log "Warning: restored worker stash $stash_oid could not be dropped."
+    fi
+}
+
+# Move a quota-paused attempt out of the exclusive active slot. Any dirty
+# tracked, staged, or untracked work is shelved first so the next issue starts
+# from a clean tree. A commit made before quota ran out remains on main and is
+# pinned as candidate_sha, allowing the resumed session to verify or extend it
+# even if other issue commits have landed since.
+suspend_quota_paused_issue() {
+    local issue_number
+    local base_sha
+    local current_sha
+    local attempt_start_sha
+    local candidate_sha
+    local paused_at
+    local stash_oid=""
+    local paused_file
+
+    validate_quota_paused_state "$IN_PROGRESS_FILE" \
+        || fail "The saved quota-paused session is invalid: $IN_PROGRESS_FILE"
+    if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        fail "SWARM_REPO_DIR is not a Git repository: $REPO_DIR"
+    fi
+
+    issue_number="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
+    base_sha="$("$JQ_BIN" -r '.base_sha' "$IN_PROGRESS_FILE")"
+    attempt_start_sha="$("$JQ_BIN" -r '.attempt_start_sha // empty' "$IN_PROGRESS_FILE")"
+    candidate_sha="$("$JQ_BIN" -r '.candidate_sha // empty' "$IN_PROGRESS_FILE")"
+    paused_at="$("$JQ_BIN" -r '.quota_paused_at // empty' "$IN_PROGRESS_FILE")"
+    current_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+    if ! git -C "$REPO_DIR" merge-base --is-ancestor "$base_sha" "$current_sha"; then
+        fail "Main no longer descends from paused issue #$issue_number's saved base commit."
+    fi
+    mkdir -p -- "$PAUSED_ISSUES_DIR"
+    paused_file="$PAUSED_ISSUES_DIR/$issue_number.json"
+    if [ -e "$paused_file" ]; then
+        fail "A quota-paused state already exists for issue #$issue_number: $paused_file"
+    fi
+
+    if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+        git -C "$REPO_DIR" stash push --include-untracked \
+            --message "swarm issue worker paused #$issue_number" >/dev/null
+        stash_oid="$(git -C "$REPO_DIR" rev-parse refs/stash)"
+        if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+            fail "Could not shelve all work for quota-paused issue #$issue_number."
+        fi
+    fi
+
+    if [ -n "$attempt_start_sha" ]; then
+        if [ "$current_sha" != "$attempt_start_sha" ]; then
+            candidate_sha="$current_sha"
+        fi
+    elif [ -z "$candidate_sha" ] && [ -n "$paused_at" ]; then
+        # Legacy paused states predate attempt_start_sha. Main may have moved
+        # for unrelated work since the pause, so recover the newest commit
+        # that existed at the recorded pause time instead of claiming the
+        # current HEAD as this issue's candidate.
+        candidate_sha="$(git -C "$REPO_DIR" rev-list -1 \
+            --before="$paused_at" "$current_sha" 2>/dev/null || true)"
+        if [ "$candidate_sha" = "$base_sha" ]; then
+            candidate_sha=""
+        fi
+    fi
+    if [ -n "$candidate_sha" ] \
+        && ! git -C "$REPO_DIR" merge-base --is-ancestor "$base_sha" "$candidate_sha"; then
+        fail "The candidate commit for quota-paused issue #$issue_number is not after its saved base."
+    fi
+
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" \
+        --arg candidate_sha "$candidate_sha" \
+        --arg stash_oid "$stash_oid" '
+        (if $candidate_sha != "" then .candidate_sha = $candidate_sha else . end)
+        | (if $stash_oid != "" then .worktree_stash_oid = $stash_oid else . end)
+    ' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+
+    mv -- "$IN_PROGRESS_TEMP" "$paused_file"
+    IN_PROGRESS_TEMP=""
+    rm -f -- "$IN_PROGRESS_FILE"
+    log "Shelved quota-paused issue #$issue_number; other ready issues may now run."
+}
+
+restore_quota_paused_issue() {
+    local paused_file="$1"
+    local issue_number
+    local stash_oid
+    local resumed_at
+
+    [ ! -e "$IN_PROGRESS_FILE" ] \
+        || fail "Cannot restore a quota-paused issue while another issue is active."
+    validate_quota_paused_state "$paused_file" \
+        || fail "The saved quota-paused session is invalid: $paused_file"
+    if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+        fail "The repository must be clean before restoring a quota-paused issue."
+    fi
+
+    issue_number="$("$JQ_BIN" -r '.issue_number' "$paused_file")"
+    stash_oid="$("$JQ_BIN" -r '.worktree_stash_oid // empty' "$paused_file")"
+    if [ -n "$stash_oid" ]; then
+        if ! git -C "$REPO_DIR" cat-file -e "$stash_oid^{commit}" 2>/dev/null; then
+            fail "The shelved work for quota-paused issue #$issue_number is missing: $stash_oid"
+        fi
+        if ! git -C "$REPO_DIR" stash apply --index "$stash_oid" >/dev/null; then
+            fail "Shelved work for issue #$issue_number conflicts with newer issue commits; resolve the worktree manually."
+        fi
+    fi
+
+    resumed_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --arg resumed_at "$resumed_at" '
+        .status = "active"
+        | .quota_resumed_at = $resumed_at
+        | del(.worktree_stash_oid)
+    ' "$paused_file" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
+    rm -f -- "$paused_file"
+    if [ -n "$stash_oid" ]; then
+        drop_worker_stash "$stash_oid"
+    fi
+}
+
+load_paused_issue_numbers() {
+    local paused_file
+
+    PAUSED_ISSUES_JSON="[]"
+    [ -d "$PAUSED_ISSUES_DIR" ] || return 0
+    for paused_file in "$PAUSED_ISSUES_DIR"/*.json; do
+        [ -e "$paused_file" ] || continue
+        validate_quota_paused_state "$paused_file" \
+            || fail "The saved quota-paused session is invalid: $paused_file"
+        PAUSED_ISSUES_JSON="$(printf '%s' "$PAUSED_ISSUES_JSON" | "$JQ_BIN" -c \
+            --argjson issue_number "$("$JQ_BIN" -r '.issue_number' "$paused_file")" \
+            '. + [$issue_number] | unique')"
+    done
+}
+
+resume_available_paused_issue() {
+    local paused_file
+    local provider
+
+    [ -d "$PAUSED_ISSUES_DIR" ] || return 1
+    for paused_file in "$PAUSED_ISSUES_DIR"/*.json; do
+        [ -e "$paused_file" ] || continue
+        validate_quota_paused_state "$paused_file" \
+            || fail "The saved quota-paused session is invalid: $paused_file"
+        provider="$("$JQ_BIN" -r '.ai_tool' "$paused_file")"
+        if selected_ai_has_capacity "$provider"; then
+            AVAILABLE_PAUSED_FILE="$paused_file"
+            if [ "$DRY_RUN" = "1" ]; then
+                return 0
+            fi
+            restore_quota_paused_issue "$paused_file"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ai_output_indicates_quota() {
     grep -Eqi \
         'usage limit|rate[ _-]?limit|quota|credits? (are )?(exhausted|unavailable)|limit (has been )?reached|hit your .*limit|resets? at|insufficient_quota' \
@@ -464,6 +697,16 @@ save_session_comment_watermark() {
     mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
     IN_PROGRESS_TEMP=""
     SESSION_COMMENT_ID="$comment_id"
+}
+
+save_attempt_start_sha() {
+    local start_sha="$1"
+
+    IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
+    "$JQ_BIN" --arg start_sha "$start_sha" \
+        '.attempt_start_sha = $start_sha' "$IN_PROGRESS_FILE" > "$IN_PROGRESS_TEMP"
+    mv -- "$IN_PROGRESS_TEMP" "$IN_PROGRESS_FILE"
+    IN_PROGRESS_TEMP=""
 }
 
 deliver_pending_email() {
@@ -578,6 +821,12 @@ add_pending_ready_for_testing_label() {
     PENDING_STATE_TEMP=""
 }
 
+# Lets the shell regression test load the state-transition helpers without
+# acquiring the production lock, querying GitHub, or starting an AI process.
+if [ "${SWARM_ISSUE_WORKER_TEST_MODE:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -596,20 +845,12 @@ if [ -f "$PENDING_EMAIL_FILE" ]; then
     deliver_pending_email
 fi
 
-# A quota-paused run does not reselect or re-read the issue on every tick. It
-# completes any missing one-time notification, checks only the pinned provider,
-# and leaves the saved session untouched until that provider has capacity.
+# Migrate the single-slot quota-paused state written by the previous worker.
+# Once its one-time notifications are complete, either resume it immediately
+# or shelve its work and free the active slot so another issue can be selected.
 if [ -f "$IN_PROGRESS_FILE" ] \
     && "$JQ_BIN" -e '.status == "quota_paused"' "$IN_PROGRESS_FILE" >/dev/null 2>&1; then
-    if ! "$JQ_BIN" -e '
-        (.issue_number | type) == "number"
-        and (.issue_title | type) == "string"
-        and (.issue_url | type) == "string"
-        and (.ai_tool | IN("Claude", "Codex"))
-        and (.model | type) == "string" and (.model | length) > 0
-        and (.effort | type) == "string" and (.effort | length) > 0
-        and (.session_id | type) == "string" and (.session_id | length) > 0
-    ' "$IN_PROGRESS_FILE" >/dev/null 2>&1; then
+    if ! validate_quota_paused_state "$IN_PROGRESS_FILE"; then
         fail "The saved quota-paused session is invalid: $IN_PROGRESS_FILE"
     fi
     ISSUE_NUMBER="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
@@ -619,16 +860,48 @@ if [ -f "$IN_PROGRESS_FILE" ] \
     SELECTED_MODEL="$("$JQ_BIN" -r '.model' "$IN_PROGRESS_FILE")"
     SELECTED_EFFORT="$("$JQ_BIN" -r '.effort' "$IN_PROGRESS_FILE")"
     AI_SESSION_ID="$("$JQ_BIN" -r '.session_id' "$IN_PROGRESS_FILE")"
-    deliver_quota_pause_notifications
+    if [ "$DRY_RUN" != "1" ]; then
+        deliver_quota_pause_notifications
+    fi
     if ! selected_ai_has_capacity "$SELECTED_AI"; then
-        log "Issue #$ISSUE_NUMBER remains paused; waiting for $SELECTED_AI session $AI_SESSION_ID to regain usage."
+        if [ "$DRY_RUN" = "1" ]; then
+            log "Dry run: issue #$ISSUE_NUMBER remains quota-paused on $SELECTED_AI."
+            exit 0
+        fi
+        suspend_quota_paused_issue
         exit "$QUOTA_PAUSED_EXIT_CODE"
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+        log "Dry run: would resume $SELECTED_AI session $AI_SESSION_ID for issue #$ISSUE_NUMBER."
+        exit 0
     fi
     mark_quota_resumed
     QUOTA_RESUME_READY=1
     SESSION_IS_RESUME=1
     log "$SELECTED_AI usage is available again; preparing to resume session $AI_SESSION_ID for issue #$ISSUE_NUMBER."
 fi
+
+# Paused sessions no longer monopolize in-progress-issue.json. Prefer the
+# first one whose pinned provider has recovered; otherwise leave every paused
+# state untouched and continue on to fresh/follow-up issue selection.
+if [ ! -f "$IN_PROGRESS_FILE" ] && resume_available_paused_issue; then
+    if [ "$DRY_RUN" = "1" ]; then
+        log "Dry run: would restore quota-paused issue #$("$JQ_BIN" -r '.issue_number' "$AVAILABLE_PAUSED_FILE") with its pinned $("$JQ_BIN" -r '.ai_tool' "$AVAILABLE_PAUSED_FILE") session."
+        exit 0
+    fi
+    ISSUE_NUMBER="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
+    ISSUE_TITLE="$("$JQ_BIN" -r '.issue_title' "$IN_PROGRESS_FILE")"
+    ISSUE_URL="$("$JQ_BIN" -r '.issue_url' "$IN_PROGRESS_FILE")"
+    SELECTED_AI="$("$JQ_BIN" -r '.ai_tool' "$IN_PROGRESS_FILE")"
+    SELECTED_MODEL="$("$JQ_BIN" -r '.model' "$IN_PROGRESS_FILE")"
+    SELECTED_EFFORT="$("$JQ_BIN" -r '.effort' "$IN_PROGRESS_FILE")"
+    AI_SESSION_ID="$("$JQ_BIN" -r '.session_id' "$IN_PROGRESS_FILE")"
+    QUOTA_RESUME_READY=1
+    SESSION_IS_RESUME=1
+    log "$SELECTED_AI usage is available again; restored session $AI_SESSION_ID for issue #$ISSUE_NUMBER."
+fi
+
+load_paused_issue_numbers
 
 ISSUES_FILE="$(mktemp "$STATE_DIR/github-issues.XXXXXX")"
 if ! "$GH_BIN" api --method GET --paginate --slurp \
@@ -690,8 +963,10 @@ if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" != "null" ]; then
         'map(select(.number == $in_progress)) | .[0] // empty')"
 else
     FRESH_ISSUE_JSON="$(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
-        --argjson completed "$COMPLETED_JSON" '
+        --argjson completed "$COMPLETED_JSON" \
+        --argjson paused "$PAUSED_ISSUES_JSON" '
             map(select(.number as $number | ($completed | index($number)) == null))
+            | map(select(.number as $number | ($paused | index($number)) == null))
             | .[0] // empty
         ')"
     FOLLOWUP_ISSUE_JSON=""
@@ -718,6 +993,9 @@ else
                     | capture("swarm-issue-worker:commit:(?<sha>[0-9a-f]{40})")?
                     | .sha) // "") as $previous_commit_sha
                 | (($completion.body
+                    | capture("(?:Completed|Reworked) by \\*\\*(?<ai>Claude|Codex)\\*\\*")?
+                    | .ai) // "") as $previous_ai
+                | (($completion.body
                     | capture("through-comment:(?<id>[0-9]+)")?
                     | .id
                     | tonumber) // $completion.id) as $processed_through_id
@@ -730,6 +1008,7 @@ else
                 | if ($followups | length) == 0 then empty
                   else {
                     previous_commit_sha: $previous_commit_sha,
+                    previous_ai: $previous_ai,
                     previous_completion_comment: {
                         id: $completion.id,
                         author: ($completion.user.login // "unknown"),
@@ -766,7 +1045,11 @@ else
         fi
     done < <(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
         --argjson completed "$COMPLETED_JSON" \
-        '.[] | select(.number as $number | ($completed | index($number)) != null)')
+        --argjson paused "$PAUSED_ISSUES_JSON" '
+        .[]
+        | select(.number as $number | ($completed | index($number)) != null)
+        | select(.number as $number | ($paused | index($number)) == null)
+    ')
 
     if [ -n "$FOLLOWUP_ISSUE_JSON" ]; then
         ISSUE_JSON="$FOLLOWUP_ISSUE_JSON"
@@ -779,7 +1062,11 @@ if [ -z "$ISSUE_JSON" ]; then
     if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" != "null" ]; then
         fail "Saved in-progress issue #$IN_PROGRESS_ISSUE_NUMBER_JSON is no longer open and assigned to $GITHUB_ASSIGNEE; review $IN_PROGRESS_FILE."
     fi
-    log "No new issue or follow-up comment assigned to $GITHUB_ASSIGNEE was found."
+    if [ "$(printf '%s' "$PAUSED_ISSUES_JSON" | "$JQ_BIN" -r 'length')" -gt 0 ]; then
+        log "No other issue can be worked now; quota-paused issues remain safely shelved."
+    else
+        log "No new issue or follow-up comment assigned to $GITHUB_ASSIGNEE was found."
+    fi
     exit 0
 fi
 
@@ -790,6 +1077,7 @@ ISSUE_TAGS="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '[.labels[].name] | join(
 ISSUE_URL="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '.html_url')"
 WORK_TYPE="initial"
 PREVIOUS_COMMIT_SHA=""
+PREVIOUS_AI=""
 PREVIOUS_COMPLETION_COMMENT_JSON="null"
 FOLLOWUP_COMMENTS_JSON="[]"
 TRIGGER_COMMENT_ID_JSON="null"
@@ -797,12 +1085,14 @@ TRIGGER_COMMENT_ID_JSON="null"
 if [ -f "$IN_PROGRESS_FILE" ]; then
     WORK_TYPE="$("$JQ_BIN" -r '.work_type // "initial"' "$IN_PROGRESS_FILE")"
     PREVIOUS_COMMIT_SHA="$("$JQ_BIN" -r '.previous_commit_sha // empty' "$IN_PROGRESS_FILE")"
+    PREVIOUS_AI="$("$JQ_BIN" -r '.previous_ai // empty' "$IN_PROGRESS_FILE")"
     PREVIOUS_COMPLETION_COMMENT_JSON="$("$JQ_BIN" -c '.previous_completion_comment // null' "$IN_PROGRESS_FILE")"
     FOLLOWUP_COMMENTS_JSON="$("$JQ_BIN" -c '.followup_comments // []' "$IN_PROGRESS_FILE")"
     TRIGGER_COMMENT_ID_JSON="$("$JQ_BIN" -c '.trigger_comment_id // null' "$IN_PROGRESS_FILE")"
 elif printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -e '._swarm_followup != null' >/dev/null; then
     WORK_TYPE="followup"
     PREVIOUS_COMMIT_SHA="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '._swarm_followup.previous_commit_sha')"
+    PREVIOUS_AI="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -r '._swarm_followup.previous_ai // empty')"
     PREVIOUS_COMPLETION_COMMENT_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.previous_completion_comment')"
     FOLLOWUP_COMMENTS_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.followup_comments')"
     TRIGGER_COMMENT_ID_JSON="$(printf '%s' "$ISSUE_JSON" | "$JQ_BIN" -c '._swarm_followup.trigger_comment_id')"
@@ -840,6 +1130,7 @@ if [ -n "$PINNED_AI" ]; then
         fi
         mark_quota_paused
         deliver_quota_pause_notifications
+        suspend_quota_paused_issue
         exit "$QUOTA_PAUSED_EXIT_CODE"
     fi
 else
@@ -854,16 +1145,7 @@ else
         CODEX_AVAILABLE=1
     fi
 
-    if [ "$CLAUDE_AVAILABLE" -eq 1 ]; then
-        SELECTED_AI="Claude"
-        SELECTED_MODEL="$CLAUDE_MODEL"
-        SELECTED_EFFORT="$CLAUDE_EFFORT"
-        AI_SESSION_ID="$("$PYTHON_BIN" -c 'import uuid; print(uuid.uuid4())')"
-    elif [ "$CODEX_AVAILABLE" -eq 1 ]; then
-        SELECTED_AI="Codex"
-        SELECTED_MODEL="$CODEX_MODEL"
-        SELECTED_EFFORT="$CODEX_EFFORT"
-    else
+    if ! select_available_ai_for_issue; then
         log "Neither Claude nor Codex has at least $MIN_REMAINING_PERCENT% remaining in every active quota window; stopping."
         exit 0
     fi
@@ -980,6 +1262,8 @@ else
     save_in_progress_issue "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_URL" "$BASE_SHA"
 fi
 
+save_attempt_start_sha "$RUN_START_SHA"
+
 PROMPT_FILE="$(mktemp "$STATE_DIR/issue-prompt.XXXXXX")"
 if [ "$SESSION_IS_RESUME" -eq 1 ]; then
     load_resume_comments
@@ -1021,6 +1305,9 @@ else
         {
             printf '\n%s\n' "Follow-up rework context:"
             printf '%s\n' "This issue was previously worked, but one or more new GitHub comments indicate that it needs another pass. Treat the new comments as refinement or defect feedback. Reinspect the existing implementation, make the additional fix, verify it, and create a new commit on main that references #$ISSUE_NUMBER."
+            if [ -n "$PREVIOUS_AI" ] && [ "$SELECTED_AI" != "$PREVIOUS_AI" ]; then
+                printf '%s\n' "The previous pass was completed by $PREVIOUS_AI. You are intentionally providing an independent second-provider review; challenge prior assumptions and use the new comments and repository evidence as the source of truth."
+            fi
             printf '\nPrevious completion commit and change summary:\n'
             git -C "$REPO_DIR" show --no-ext-diff --format=fuller --stat --summary "$PREVIOUS_COMMIT_SHA"
             printf '\nInspect the complete previous patch with: git show --no-ext-diff %s\n' "$PREVIOUS_COMMIT_SHA"
@@ -1124,6 +1411,7 @@ if [ "$AI_STATUS" -ne 0 ] || [ ! -s "$AI_OUTPUT_FILE" ]; then
         fi
         mark_quota_paused
         deliver_quota_pause_notifications
+        suspend_quota_paused_issue
         exit "$QUOTA_PAUSED_EXIT_CODE"
     fi
     if [ "$AI_STATUS" -ne 0 ]; then

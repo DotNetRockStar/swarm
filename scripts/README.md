@@ -7,8 +7,9 @@ foreground runner immediately invokes it again after each successful issue:
 2. Fetch open issues assigned to `DotNetRockStar`. Rework a completed issue when
    it has a new comment after the latest worker completion; otherwise choose the
    oldest issue that has not completed successfully.
-3. Choose Claude when both its session and weekly windows have at least 10%
-   remaining; otherwise choose Codex when all reported Codex windows do.
+3. For new issues, choose Claude when both its session and weekly windows have
+   at least 10% remaining, otherwise Codex. For follow-ups, prefer whichever of
+   Claude or Codex did not perform the latest completed pass.
 4. Run the selected agent in the SWARM repository and require it to leave one
    or more descendant commits on `main`.
 5. Ensure the commit message references the issue number.
@@ -37,6 +38,11 @@ The agent is also directed to inspect the full previous commit diff before
 creating a new issue-referencing refinement commit. Trusted comments posted
 while a rework is running are beyond its saved watermark and therefore trigger
 another pass instead of being hidden by the new completion comment.
+For a follow-up pass, the worker prefers the opposite provider from the latest
+worker completion (Codex after Claude, or Claude after Codex) to provide an
+independent review and reduce same-model bias. If that provider lacks quota, it
+falls back to whichever provider can work. Quota-paused sessions are the
+exception: they resume their exact pinned provider and session.
 
 Before starting an agent, the worker records the issue number, current base
 commit, selected AI, model, effort, and persistent session ID in
@@ -52,12 +58,15 @@ link without rewriting history.
 
 When the selected AI runs out of usage during a turn, the worker marks that
 session `quota_paused`, posts one idempotent pause comment on the issue, and
-sends one pause email. Later ticks check only that same provider's quota; they
-do not reselect the issue, start the other AI, repeat the notifications, or
-create another session. When usage returns, the worker fetches trusted issue
-comments added since the session last received issue context and supplies them
-to the resumed session before work continues. As with normal follow-up work,
-only comments by `SWARM_TRUSTED_FOLLOWUP_AUTHOR` are inserted into an AI prompt.
+sends one pause email. Its state is moved under `quota-paused-issues/`, and any
+uncommitted work is shelved so the foreground runner can immediately select a
+different ready issue (using whichever provider has capacity). Paused issue
+numbers are excluded from fresh and follow-up selection, so no duplicate
+session is created. On later runs, a paused session whose pinned provider has
+recovered takes priority; its shelved changes and exact Claude or Codex session
+are restored before work continues. Trusted issue comments added since the
+session last received context are supplied to the resumed session. Only
+comments by `SWARM_TRUSTED_FOLLOWUP_AUTHOR` are inserted into an AI prompt.
 
 Agent runs are non-interactive. The prompt directs Claude and Codex to resolve
 ambiguity from the issue and repository, make reasonable safe assumptions, and
@@ -67,12 +76,14 @@ sandbox, and hook-trust prompts bypassed. This gives both tools broad access to
 the local machine and network, so run this worker only for repositories and
 assigned issues you trust.
 
-Quota checks run only after an eligible issue is found. Claude usage comes from
-Claude Code's non-interactive `/usage` command, allowing the CLI to refresh its
-own OAuth credentials; the worker does not call Anthropic's private OAuth usage
-URL. Codex usage comes from the local `codex app-server` over stdio using the
-`account/rateLimits/read` method; the Codex CLI owns its authenticated network
-connection, so the worker does not hard-code a remote Codex endpoint.
+Fresh-provider quota checks run only after an eligible issue is found; pinned
+providers for shelved sessions are checked first to decide whether they can be
+resumed. Claude usage comes from Claude Code's non-interactive `/usage` command,
+allowing the CLI to refresh its own OAuth credentials; the worker does not call
+Anthropic's private OAuth usage URL. Codex usage comes from the local
+`codex app-server` over stdio using the `account/rateLimits/read` method; the
+Codex CLI owns its authenticated network connection, so the worker does not
+hard-code a remote Codex endpoint.
 
 Preview a read-only selection run:
 
@@ -84,8 +95,8 @@ Set `SWARM_SMTP_CREDENTIALS_FILE` to a settings file containing `EMAIL_FROM`,
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, and the TLS settings, but **not** an
 SMTP password. Then run the worker in the current terminal. Queued issues are
 worked back to back; the ten-minute delay applies only when the queue is empty,
-neither AI has at least 10% remaining in every active quota window, or a run
-fails:
+every remaining issue is quota-paused, neither AI has at least 10% remaining in
+every active quota window, or a run fails:
 
 ```bash
 export SWARM_SMTP_CREDENTIALS_FILE=/path/to/smtp-settings

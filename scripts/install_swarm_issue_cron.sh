@@ -107,7 +107,8 @@ while true; do
         log "Issue completed successfully; checking the queue again immediately."
         continue
     elif [ "$worker_status" -eq "$QUOTA_PAUSED_EXIT_CODE" ]; then
-        log "The active AI session is paused for usage; checking that same provider again in $INTERVAL_SECONDS seconds."
+        log "The active AI session was safely shelved for usage; checking immediately for another ready issue."
+        continue
     elif [ "$worker_status" -ne 0 ]; then
         log "Worker exited with status $worker_status; it will retry after $INTERVAL_SECONDS seconds."
     else
