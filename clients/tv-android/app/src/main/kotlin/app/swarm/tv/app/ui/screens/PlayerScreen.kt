@@ -400,20 +400,29 @@ private class VideoPlayerPool(context: Context) {
             // Direct-play containers may expose several embedded audio tracks.
             // Prefer English when it is tagged, while Media3 naturally falls
             // back to the container default when no English track exists.
-            // Same reasoning for subtitles: prefer an English-tagged track
-            // over whatever Media3's own tie-break would otherwise pick.
+            // setPreferredTextLanguages keeps that same English-first order
+            // for whichever subtitle track the viewer later turns on, but by
+            // itself it also makes DefaultTrackSelector auto-select a
+            // matching text track — the exact "subtitles defaulted to ON"
+            // complaint in #55 — so text tracks are additionally disabled by
+            // type below and only re-enabled when the viewer explicitly
+            // picks one via the pause-screen picker or native subtitle
+            // control (see selectSubtitleTrack).
             trackSelectionParameters = trackSelectionParameters
                 .buildUpon()
                 .setPreferredAudioLanguages("en", "eng")
                 .setPreferredTextLanguages("en", "eng")
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                 .build()
-            // Real bug, found live (#55): flagging every subtitle track as
-            // SELECTION_FLAG_DEFAULT left Media3's tie-break picking an
-            // inconsistent language whenever more than one subtitle track was
-            // attached, and offered no way to turn subtitles off. Leave
-            // selection to setPreferredTextLanguages above plus whatever the
-            // viewer picks via the native subtitle/settings control or the
-            // pause-screen picker instead of forcing one on.
+            // Real bug, found live (#55): Media3's subtitle button/settings
+            // submenu (which is where the built-in "Off" option lives) stays
+            // hidden unless explicitly requested, and every subtitle track
+            // used to be flagged SELECTION_FLAG_DEFAULT, which left Media3's
+            // tie-break picking an inconsistent language whenever more than
+            // one subtitle track was attached. Subtitles now start disabled
+            // (above); the viewer opts in per-track via the native
+            // subtitle/settings control or the pause-screen picker instead of
+            // one being forced on.
             val subtitleConfigurations = config.subtitles.map { track ->
                 MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.path))
                     .setMimeType(MimeTypes.TEXT_VTT)
