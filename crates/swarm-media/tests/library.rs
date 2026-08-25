@@ -480,6 +480,15 @@ async fn rescan_of_a_root_that_stops_existing_refuses_to_wipe_the_known_library(
         result.is_err(),
         "a root that vanished entirely must be a hard error, not an empty scan"
     );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("local"),
+        "error must identify the root label"
+    );
+    assert!(
+        error.contains(&fx.root.to_string_lossy().to_string()),
+        "error must identify the unavailable root path"
+    );
     assert_eq!(
         fx.library.list().await.unwrap().len(),
         1,

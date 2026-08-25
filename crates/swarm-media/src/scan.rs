@@ -86,8 +86,13 @@ impl ScanProgress {
 pub enum ScanError {
     #[error("at least one media root is required")]
     NoMediaRoots,
-    #[error("io error under media root: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("I/O error while scanning media root \"{label}\" at {path}: {source}")]
+    RootIo {
+        label: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("library store error: {0}")]
     Store(#[from] sqlx::Error),
     #[error(
@@ -171,8 +176,9 @@ async fn scan_roots_scoped_inner(
 
     // Finish every root walk before catalog mutation, but stage the results
     // in local SQLite rather than growing an in-memory Vec with the library.
+    let mut complete_roots = Vec::with_capacity(roots.len());
     for root in roots {
-        discover_media_files(
+        let complete = discover_media_files(
             library,
             scan_id,
             root,
@@ -180,6 +186,18 @@ async fn scan_roots_scoped_inner(
             progress.as_ref(),
         )
         .await?;
+        if complete {
+            complete_roots.push(root);
+        } else {
+            // The manifest remains useful for additions and updates, but a
+            // changing directory is not a complete snapshot and must not
+            // make absent catalog rows unavailable.
+            tracing::warn!(
+                root = %root.label,
+                path = %root.path.display(),
+                "media root changed during scan; skipping deletion reconciliation for this root"
+            );
+        }
     }
     let total = library.scan_manifest_count(scan_id).await?;
     let known_in_scope = if multi_root_namespace {
@@ -201,10 +219,12 @@ async fn scan_roots_scoped_inner(
     }
 
     let prefixes = if multi_root_namespace {
-        roots
+        complete_roots
             .iter()
             .map(|root| Some(format!("{}/", root.label)))
             .collect::<Vec<_>>()
+    } else if complete_roots.is_empty() {
+        Vec::new()
     } else {
         vec![None]
     };
@@ -564,7 +584,7 @@ async fn discover_media_files(
     root: &MediaRoot,
     multi_root_namespace: bool,
     progress: Option<&Arc<ScanProgress>>,
-) -> Result<(), ScanError> {
+) -> Result<bool, ScanError> {
     const BATCH_SIZE: usize = 256;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ScanManifestEntry>>(2);
     let root_path = root.path.clone();
@@ -584,8 +604,35 @@ async fn discover_media_files(
     while let Some(batch) = rx.recv().await {
         library.append_scan_manifest(scan_id, &batch).await?;
     }
-    walk.await.expect("media walk task panicked")?;
-    Ok(())
+    let outcome = walk
+        .await
+        .expect("media walk task panicked")
+        .map_err(|source| ScanError::RootIo {
+            label: root.label.clone(),
+            path: root.path.clone(),
+            source,
+        })?;
+    Ok(outcome.complete)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalkOutcome {
+    complete: bool,
+}
+
+/// An entry can be renamed or removed after `read_dir` returns it but before
+/// `file_type` or `metadata` runs. Only that precise race is skippable. The
+/// incomplete marker prevents the resulting partial snapshot from being
+/// used to reconcile deletions.
+fn walk_value<T>(result: std::io::Result<T>, complete: &mut bool) -> std::io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *complete = false;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Pure synchronous directory walk — see [`discover_media_files`]'s doc
@@ -601,20 +648,35 @@ fn walk_media_files(
     progress: Option<&ScanProgress>,
     batch_size: usize,
     tx: Sender<Vec<ScanManifestEntry>>,
-) -> std::io::Result<()> {
+) -> std::io::Result<WalkOutcome> {
     let mut batch = Vec::with_capacity(batch_size);
     let mut stack = vec![root_path.to_path_buf()];
+    let mut complete = true;
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)?;
+        // The root itself not existing is a real unavailable-root failure.
+        // A descendant can legitimately disappear after its parent was
+        // listed, so tolerate only NotFound below the root.
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if dir != root_path && error.kind() == std::io::ErrorKind::NotFound => {
+                complete = false;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         for entry in entries {
-            let entry = entry?;
+            let Some(entry) = walk_value(entry, &mut complete)? else {
+                continue;
+            };
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with('.') {
                 continue;
             }
-            let file_type = entry.file_type()?;
+            let Some(file_type) = walk_value(entry.file_type(), &mut complete)? else {
+                continue;
+            };
             if file_type.is_symlink() {
                 continue;
             }
@@ -631,7 +693,9 @@ fn walk_media_files(
                 .collect::<Vec<_>>()
                 .join("/");
             if classify::media_extension(&relative_under_root).is_some() {
-                let metadata = entry.metadata()?;
+                let Some(metadata) = walk_value(entry.metadata(), &mut complete)? else {
+                    continue;
+                };
                 let modified_time = metadata
                     .modified()
                     .ok()
@@ -660,7 +724,7 @@ fn walk_media_files(
                     // batches to, so stop walking rather than keep working
                     // toward a result no one will read.
                     if tx.blocking_send(full_batch).is_err() {
-                        return Ok(());
+                        return Ok(WalkOutcome { complete });
                     }
                 }
             }
@@ -669,5 +733,34 @@ fn walk_media_files(
     if !batch.is_empty() {
         let _ = tx.blocking_send(batch);
     }
-    Ok(())
+    Ok(WalkOutcome { complete })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::walk_value;
+
+    #[test]
+    fn vanished_walk_entry_is_skipped_and_marks_snapshot_incomplete() {
+        let mut complete = true;
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        assert!(walk_value::<()>(Err(error), &mut complete)
+            .unwrap()
+            .is_none());
+        assert!(!complete);
+    }
+
+    #[test]
+    fn non_transient_walk_error_is_not_hidden() {
+        let mut complete = true;
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+        let result = walk_value::<()>(Err(error), &mut complete);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(complete);
+    }
 }
