@@ -11,6 +11,10 @@ name = "swarm-server-app"
 path = "src/gui.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "migrate-whisper-subtitles"
+path = "src/bin/migrate_whisper_subtitles.rs"
+
 [features]
 default = ["gui"]
 gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:keepawake", "dep:rmcp", "dep:schemars"]

@@ -974,6 +974,10 @@ function manageRow(entry) {
           <div class="row metadata-action-row">
             <button id="downloadSubtitleBtn" class="secondary"><i class="bi bi-cloud-arrow-down"></i>Find and download</button>
           </div>
+          <p class="muted compact-help">Or generate an English subtitle locally with Whisper, just for this ${entry.kind === "episode" ? "episode" : "movie"}.</p>
+          <div class="row metadata-action-row">
+            <button id="generateWhisperSubtitleBtn" class="secondary"><i class="bi bi-cpu"></i>Generate with Whisper</button>
+          </div>
         </section>` : ""}
       </div>
 
@@ -1171,6 +1175,20 @@ function wireSubtitleDownload(entryKey) {
     } finally {
       button.disabled = false;
       button.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>Find and download';
+    }
+  });
+  document.getElementById("generateWhisperSubtitleBtn")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.innerHTML = '<i class="bi bi-hourglass-split"></i>Queuing…';
+    try {
+      await invoke("generate_subtitles_for_entry", { entryKey });
+      showToast("Queued for Whisper subtitle generation. Track progress on the Media tab.", "success", { duration: 7000 });
+    } catch (err) {
+      showToast(String(err), "error", { duration: 8000 });
+    } finally {
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-cpu"></i>Generate with Whisper';
     }
   });
 }

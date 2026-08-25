@@ -1057,18 +1057,30 @@ impl Library {
     /// Make every movie/episode with a known duration eligible for local
     /// transcription. Existing work for the same fingerprint/model/language
     /// is preserved; changed media is reset atomically to a fresh job.
+    /// `skip_if_subtitles_exist` leaves any entry with an existing subtitle
+    /// track (of any source, not just Whisper) untouched — the bulk "skip"
+    /// preference. A targeted, user-triggered request always goes through
+    /// [`Self::enqueue_transcription_for_entry`] instead, which ignores it.
     pub async fn enqueue_missing_transcriptions(
         &self,
         model: &str,
         language: &str,
         segment_duration_secs: u64,
+        skip_if_subtitles_exist: bool,
     ) -> sqlx::Result<u64> {
         let now_ms = unix_time_ms();
         let segment_secs = segment_duration_secs.max(1) as f64;
-        let needs_queue = "entries.available = 1 AND entries.kind IN ('movie', 'episode') \
-            AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
-            AND (jobs.entry_key IS NULL OR jobs.fingerprint != entries.fingerprint \
-                 OR jobs.model != ? OR jobs.language != ?)";
+        let skip_clause = if skip_if_subtitles_exist {
+            " AND NOT EXISTS (SELECT 1 FROM subtitle_tracks st WHERE st.entry_key = entries.entry_key)"
+        } else {
+            ""
+        };
+        let needs_queue = format!(
+            "entries.available = 1 AND entries.kind IN ('movie', 'episode') \
+             AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
+             AND (jobs.entry_key IS NULL OR jobs.fingerprint != entries.fingerprint \
+                  OR jobs.model != ? OR jobs.language != ?){skip_clause}"
+        );
         let count_sql = format!(
             "SELECT COUNT(*) FROM library_entries entries \
              LEFT JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
@@ -1096,21 +1108,22 @@ impl Library {
 
         // Deleting a stale job cascades its old segment rows. New/missing
         // jobs have no row to delete and are inserted by the next statement.
-        sqlx::query(
+        let delete_jobs_sql = format!(
             "DELETE FROM transcription_jobs WHERE entry_key IN (\
                 SELECT entries.entry_key FROM library_entries entries \
                 JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
                 WHERE entries.available = 1 AND entries.kind IN ('movie', 'episode') \
                   AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
-                  AND (jobs.fingerprint != entries.fingerprint OR jobs.model != ? OR jobs.language != ?)\
-             )",
-        )
-        .bind(model)
-        .bind(language)
-        .execute(&mut *transaction)
-        .await?;
+                  AND (jobs.fingerprint != entries.fingerprint OR jobs.model != ? OR jobs.language != ?){skip_clause}\
+             )"
+        );
+        sqlx::query(&delete_jobs_sql)
+            .bind(model)
+            .bind(language)
+            .execute(&mut *transaction)
+            .await?;
 
-        sqlx::query(
+        let insert_jobs_sql = format!(
             "INSERT INTO transcription_jobs \
                 (entry_key, fingerprint, model, language, status, total_segments, \
                  completed_segments, created_at_ms, updated_at_ms) \
@@ -1123,19 +1136,77 @@ impl Library {
              LEFT JOIN transcription_jobs jobs ON jobs.entry_key = entries.entry_key \
              WHERE entries.available = 1 AND entries.kind IN ('movie', 'episode') \
                AND entries.audio_json IS NOT NULL AND entries.duration_secs > 0 \
-               AND jobs.entry_key IS NULL",
+               AND jobs.entry_key IS NULL{skip_clause}"
+        );
+        sqlx::query(&insert_jobs_sql)
+            .bind(model)
+            .bind(language)
+            .bind(segment_secs)
+            .bind(segment_secs)
+            .bind(segment_secs)
+            .bind(now_ms)
+            .bind(now_ms)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(queued.max(0) as u64)
+    }
+
+    /// Force one entry into the transcription queue regardless of any
+    /// existing completed/failed job or existing subtitle track — the
+    /// "targeted creation" entry point for a user clicking "Generate
+    /// subtitles" on a specific movie/episode. Returns `false` when the
+    /// entry doesn't exist or isn't eligible (wrong kind, no audio, unknown
+    /// duration).
+    pub async fn enqueue_transcription_for_entry(
+        &self,
+        entry_key: &str,
+        model: &str,
+        language: &str,
+        segment_duration_secs: u64,
+    ) -> sqlx::Result<bool> {
+        let now_ms = unix_time_ms();
+        let segment_secs = segment_duration_secs.max(1) as f64;
+        let mut transaction = self.pool.begin().await?;
+        let eligible: Option<(String, f64)> = sqlx::query_as(
+            "SELECT fingerprint, duration_secs FROM library_entries \
+             WHERE entry_key = ? AND available = 1 AND kind IN ('movie', 'episode') \
+               AND audio_json IS NOT NULL AND duration_secs > 0",
         )
+        .bind(entry_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((fingerprint, duration_secs)) = eligible else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query("DELETE FROM subtitle_tracks WHERE entry_key = ? AND source = 'whisper'")
+            .bind(entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        // Cascades any existing segment rows for this entry.
+        sqlx::query("DELETE FROM transcription_jobs WHERE entry_key = ?")
+            .bind(entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        let total_segments = (duration_secs / segment_secs).ceil().max(1.0) as i64;
+        sqlx::query(
+            "INSERT INTO transcription_jobs \
+                (entry_key, fingerprint, model, language, status, total_segments, \
+                 completed_segments, created_at_ms, updated_at_ms) \
+             VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?)",
+        )
+        .bind(entry_key)
+        .bind(&fingerprint)
         .bind(model)
         .bind(language)
-        .bind(segment_secs)
-        .bind(segment_secs)
-        .bind(segment_secs)
+        .bind(total_segments)
         .bind(now_ms)
         .bind(now_ms)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(queued.max(0) as u64)
+        Ok(true)
     }
 
     /// A process exit can leave a claimed job marked transcribing/finalizing.
@@ -1357,6 +1428,49 @@ impl Library {
             .await?
             .into_iter()
             .find(|track| track.id == id))
+    }
+
+    /// Every subtitle track across the whole library from a given source
+    /// (e.g. `"whisper"`) — used by the one-off storage-location migration
+    /// script rather than by the running server.
+    pub async fn subtitle_tracks_by_source(
+        &self,
+        source: &str,
+    ) -> sqlx::Result<Vec<SubtitleRecord>> {
+        type Row = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, entry_key, language, label, source, format, file_path, fingerprint \
+             FROM subtitle_tracks WHERE source = ? ORDER BY entry_key",
+        )
+        .bind(source)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, entry_key, language, label, source, format, file_path, fingerprint)| {
+                    SubtitleRecord {
+                        id,
+                        entry_key,
+                        language,
+                        label,
+                        source,
+                        format,
+                        file_path,
+                        fingerprint,
+                    }
+                },
+            )
+            .collect())
     }
 
     pub async fn transcription_queue_status(&self) -> sqlx::Result<TranscriptionQueueStatus> {

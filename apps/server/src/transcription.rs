@@ -82,12 +82,12 @@ pub struct TranscriptionManager {
     transcodes: Arc<TranscodeManager>,
     enabled: Arc<AtomicBool>,
     pause_while_streaming: Arc<AtomicBool>,
+    skip_if_subtitles_exist: Arc<AtomicBool>,
     scan_active: Arc<AtomicBool>,
     segment_progress: Arc<AtomicU32>,
     notify: Notify,
     runtime: RwLock<RuntimeStatus>,
     model_dir: PathBuf,
-    subtitle_dir: PathBuf,
     ffmpeg_path: PathBuf,
 }
 
@@ -107,12 +107,12 @@ impl TranscriptionManager {
             transcodes,
             enabled: Arc::new(AtomicBool::new(false)),
             pause_while_streaming: Arc::new(AtomicBool::new(true)),
+            skip_if_subtitles_exist: Arc::new(AtomicBool::new(false)),
             scan_active,
             segment_progress: Arc::new(AtomicU32::new(0)),
             notify: Notify::new(),
             runtime: RwLock::new(RuntimeStatus::default()),
             model_dir: data_dir.join("models").join("whisper"),
-            subtitle_dir: data_dir.join("subtitles"),
             ffmpeg_path,
         });
         let worker = Arc::clone(&manager);
@@ -128,6 +128,29 @@ impl TranscriptionManager {
     pub fn set_pause_while_streaming(&self, enabled: bool) {
         self.pause_while_streaming.store(enabled, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    pub fn set_skip_if_subtitles_exist(&self, enabled: bool) {
+        self.skip_if_subtitles_exist
+            .store(enabled, Ordering::Release);
+    }
+
+    /// Force one movie/episode into the queue regardless of the bulk
+    /// skip-if-exists preference — the "targeted creation" entry point.
+    pub async fn enqueue_entry(&self, entry_key: &str) -> Result<(), String> {
+        let queued = self
+            .library
+            .enqueue_transcription_for_entry(entry_key, MODEL_NAME, "en", SEGMENT_DURATION_SECS)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !queued {
+            return Err(
+                "This item isn't eligible for subtitle generation (movies and TV episodes with an audio track only)."
+                    .into(),
+            );
+        }
+        self.notify.notify_waiters();
+        Ok(())
     }
 
     fn should_pause_for_streaming(&self) -> bool {
@@ -210,7 +233,12 @@ impl TranscriptionManager {
 
             if let Err(error) = self
                 .library
-                .enqueue_missing_transcriptions(MODEL_NAME, "en", SEGMENT_DURATION_SECS)
+                .enqueue_missing_transcriptions(
+                    MODEL_NAME,
+                    "en",
+                    SEGMENT_DURATION_SECS,
+                    self.skip_if_subtitles_exist.load(Ordering::Acquire),
+                )
                 .await
             {
                 self.update_runtime(|status| {
@@ -500,10 +528,10 @@ impl TranscriptionManager {
             );
         }
         cues.sort_by_key(|cue| cue.start_ms);
-        std::fs::create_dir_all(&self.subtitle_dir).map_err(|error| error.to_string())?;
-        let filename = format!("{}-whisper-en.vtt", job.entry_key);
-        let final_path = self.subtitle_dir.join(&filename);
-        let partial_path = self.subtitle_dir.join(format!("{filename}.part"));
+        let final_path = whisper_subtitle_path(&media_path);
+        let mut partial_name = final_path.file_name().unwrap_or_default().to_os_string();
+        partial_name.push(".part");
+        let partial_path = final_path.with_file_name(partial_name);
         tokio::fs::write(&partial_path, render_webvtt(&cues))
             .await
             .map_err(|error| error.to_string())?;
@@ -526,6 +554,18 @@ impl TranscriptionManager {
         self.segment_progress.store(100, Ordering::Release);
         Ok(())
     }
+}
+
+/// Where a Whisper-generated subtitle for `media_path` lives: alongside the
+/// source file, same name minus its extension, so it travels with the media
+/// if it's ever moved or copied and needs no server-owned storage of its
+/// own. Shared with `bin/migrate_whisper_subtitles.rs`, which moves subtitles
+/// generated under the old app-data location to this one.
+pub fn whisper_subtitle_path(media_path: &Path) -> PathBuf {
+    let stem = media_path.file_stem().unwrap_or_default();
+    let mut filename = stem.to_os_string();
+    filename.push("-whisper-english-subtitles.vtt");
+    media_path.with_file_name(filename)
 }
 
 fn ensure_media_root_available(root: &Path) -> Result<(), String> {
@@ -769,6 +809,18 @@ async fn verify_and_install_model(partial_path: &Path, final_path: &Path) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whisper_subtitle_path_sits_alongside_the_source_media() {
+        let media = Path::new("/library/Movies/Inception (2010)/Inception (2010).mkv");
+        let subtitle = whisper_subtitle_path(media);
+        assert_eq!(
+            subtitle,
+            Path::new(
+                "/library/Movies/Inception (2010)/Inception (2010)-whisper-english-subtitles.vtt"
+            )
+        );
+    }
 
     #[test]
     fn webvtt_uses_absolute_segment_timestamps() {

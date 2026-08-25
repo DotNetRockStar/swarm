@@ -551,8 +551,21 @@ impl ServerCore {
         self.transcription.set_pause_while_streaming(enabled);
     }
 
+    /// Bulk-generation preference: skip a movie/episode that already has any
+    /// subtitle track instead of (re)generating one for it.
+    pub fn set_transcription_skip_if_subtitles_exist(&self, enabled: bool) {
+        self.transcription.set_skip_if_subtitles_exist(enabled);
+    }
+
     pub async fn transcription_status(&self) -> Result<TranscriptionStatus, ServerError> {
         Ok(self.transcription.status().await?)
+    }
+
+    /// Targeted, user-triggered subtitle generation for one movie/episode —
+    /// jumps the queue and (re)generates regardless of the bulk
+    /// skip-if-exists preference or a previously completed job.
+    pub async fn generate_subtitles_for_entry(&self, entry_key: &str) -> Result<(), String> {
+        self.transcription.enqueue_entry(entry_key).await
     }
 
     /// Download one subtitle from OpenSubtitles and register it in the same

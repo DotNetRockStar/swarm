@@ -26,6 +26,7 @@ async function refreshTranscriptionSetting() {
   const settings = await invoke("get_settings");
   document.getElementById("localTranscriptionEnabledCheck").checked = settings.local_transcription_enabled;
   document.getElementById("transcriptionPauseWhileStreamingCheck").checked = settings.transcription_pause_while_streaming;
+  document.getElementById("transcriptionSkipIfSubtitlesExistCheck").checked = settings.transcription_skip_if_subtitles_exist;
   const statusEl = document.getElementById("localTranscriptionSettingStatus");
   try {
     const status = await invoke("get_transcription_status");
@@ -69,6 +70,22 @@ document.getElementById("transcriptionPauseWhileStreamingCheck").addEventListene
       "success",
     );
     await refreshTranscriptionSetting();
+  } catch (err) {
+    event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("transcriptionSkipIfSubtitlesExistCheck").addEventListener("change", async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    await invoke("set_transcription_skip_if_subtitles_exist", { enabled });
+    showToast(
+      enabled
+        ? "Bulk generation will skip movies/episodes that already have subtitles."
+        : "Bulk generation will regenerate subtitles for every eligible movie/episode.",
+      "success",
+    );
   } catch (err) {
     event.currentTarget.checked = !enabled;
     showToast(String(err), "error");

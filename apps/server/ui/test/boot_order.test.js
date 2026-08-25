@@ -51,6 +51,7 @@ function invokeStub(command, args) {
         streaming_upload_budget_enabled: true,
         local_transcription_enabled: false,
         transcription_pause_while_streaming: true,
+        transcription_skip_if_subtitles_exist: false,
         mcp_enabled: false,
         mcp_port: 7890,
         mcp_access_token: null,

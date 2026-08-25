@@ -95,6 +95,8 @@
       <p id="localTranscriptionSettingStatus" class="muted compact-help">Loading subtitle settings…</p>
       <label class="checkbox-label transcription-toggle"><input type="checkbox" id="transcriptionPauseWhileStreamingCheck"> <i class="bi bi-pause-circle"></i>Pause subtitle generation while clients are streaming</label>
       <p class="muted compact-help">Recommended for smooth playback. Turn this off only if the server has enough CPU for streaming and Whisper at the same time.</p>
+      <label class="checkbox-label transcription-toggle"><input type="checkbox" id="transcriptionSkipIfSubtitlesExistCheck"> <i class="bi bi-skip-forward"></i>Skip movies/episodes that already have subtitles</label>
+      <p class="muted compact-help">When bulk-generating, leave anything with an existing subtitle track (Whisper or downloaded) alone instead of regenerating it. Generating subtitles for one specific movie or episode from its Manage panel always runs regardless of this.</p>
     </div>
 
     <div class="card">

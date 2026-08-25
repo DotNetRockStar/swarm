@@ -148,6 +148,7 @@ impl AppState {
                 core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
+                core.set_transcription_skip_if_subtitles_exist(settings.transcription_skip_if_subtitles_exist);
                 start_media_root_recovery(Arc::clone(&core), recovery_settings_dir.clone());
                 start_auto_library_watch(Arc::clone(&core), recovery_settings_dir);
                 if settings.mcp_enabled {
@@ -494,6 +495,7 @@ struct SettingsView {
     streaming_upload_budget_enabled: bool,
     local_transcription_enabled: bool,
     transcription_pause_while_streaming: bool,
+    transcription_skip_if_subtitles_exist: bool,
     mcp_enabled: bool,
     mcp_port: u16,
     mcp_access_token: Option<String>,
@@ -510,6 +512,7 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
         streaming_upload_budget_enabled: settings.streaming_upload_budget_enabled,
         local_transcription_enabled: settings.local_transcription_enabled,
         transcription_pause_while_streaming: settings.transcription_pause_while_streaming,
+        transcription_skip_if_subtitles_exist: settings.transcription_skip_if_subtitles_exist,
         mcp_enabled: settings.mcp_enabled,
         mcp_port: settings.mcp_port,
         mcp_access_token: settings.mcp_access_token,
@@ -883,6 +886,41 @@ async fn get_transcription_status(
         .transcription_status()
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_transcription_skip_if_subtitles_exist(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.transcription_skip_if_subtitles_exist = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let core = state.core(&app).await?;
+    core.set_transcription_skip_if_subtitles_exist(enabled);
+    Ok(())
+}
+
+/// Targeted, per-item generation trigger. Turns on background generation if
+/// it was off, since a user asking for subtitles on this one item clearly
+/// wants Whisper to actually run rather than sit queued and idle.
+#[tauri::command]
+async fn generate_subtitles_for_entry(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    let core = state.core(&app).await?;
+    if !settings.local_transcription_enabled {
+        settings.local_transcription_enabled = true;
+        settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+        core.set_local_transcription_enabled(true);
+    }
+    core.generate_subtitles_for_entry(&entry_key).await
 }
 
 /// Both take effect on next launch/restart, not live — see `mcp.rs`'s doc
@@ -1892,6 +1930,8 @@ fn main() {
             set_auto_library_watch_enabled,
             set_local_transcription_enabled,
             set_transcription_pause_while_streaming,
+            set_transcription_skip_if_subtitles_exist,
+            generate_subtitles_for_entry,
             get_transcription_status,
             set_mcp_enabled,
             set_mcp_port,

@@ -73,7 +73,7 @@ async fn transcription_queue_resumes_segments_and_cascades_with_media() {
     fx.library.upsert(&entry).await.unwrap();
     assert_eq!(
         fx.library
-            .enqueue_missing_transcriptions("small.en", "en", 600)
+            .enqueue_missing_transcriptions("small.en", "en", 600, false)
             .await
             .unwrap(),
         1
@@ -151,6 +151,159 @@ async fn transcription_queue_resumes_segments_and_cascades_with_media() {
             .total_segments,
         0
     );
+}
+
+fn movie_entry(entry_key: &str, relative_path: &str, fingerprint: &str) -> EntryRecord {
+    EntryRecord {
+        entry_key: entry_key.into(),
+        relative_path: relative_path.into(),
+        kind: MediaKind::Movie,
+        title: "Example".into(),
+        size: 100,
+        modified_time: 1,
+        fingerprint: fingerprint.into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        duration_secs: Some(1_201.0),
+        video: None,
+        audio: Some(AudioStreamInfo {
+            codec: "aac".into(),
+            channels: 2,
+            bitrate: Some(128_000),
+        }),
+        scraped_title: None,
+        episode_title: None,
+        genres: Vec::new(),
+        artwork_version: 0,
+        cast: Vec::new(),
+        overview: None,
+        rating: None,
+        community_rating: None,
+        community_rating_votes: None,
+    }
+}
+
+#[tokio::test]
+async fn bulk_enqueue_can_skip_entries_with_any_existing_subtitle() {
+    let fx = fixture("skip-existing-subtitles").await;
+    let with_subtitle = movie_entry("a1", "movies/a.mp4", "fp-a");
+    let without_subtitle = movie_entry("b2", "movies/b.mp4", "fp-b");
+    fx.library.upsert(&with_subtitle).await.unwrap();
+    fx.library.upsert(&without_subtitle).await.unwrap();
+    // A downloaded (non-Whisper) subtitle counts too — "any existing
+    // subtitle track", not just a prior Whisper job.
+    fx.library
+        .upsert_subtitle(&SubtitleRecord {
+            id: "opensubtitles-en".into(),
+            entry_key: with_subtitle.entry_key.clone(),
+            language: "en".into(),
+            label: "English".into(),
+            source: "opensubtitles".into(),
+            format: "vtt".into(),
+            file_path: "/tmp/downloaded.vtt".into(),
+            fingerprint: with_subtitle.fingerprint.clone(),
+        })
+        .await
+        .unwrap();
+
+    let queued = fx
+        .library
+        .enqueue_missing_transcriptions("small.en", "en", 600, true)
+        .await
+        .unwrap();
+    assert_eq!(queued, 1);
+    let job = fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.entry_key, without_subtitle.entry_key);
+    assert!(fx.library.claim_next_transcription().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn targeted_enqueue_forces_a_fresh_job_and_rejects_ineligible_entries() {
+    let fx = fixture("targeted-enqueue").await;
+    let entry = movie_entry("c3", "movies/c.mp4", "fp-c");
+    fx.library.upsert(&entry).await.unwrap();
+    fx.library
+        .enqueue_missing_transcriptions("small.en", "en", 600, false)
+        .await
+        .unwrap();
+    let job = fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 0, "[]")
+        .await
+        .unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 1, "[]")
+        .await
+        .unwrap();
+    fx.library
+        .store_transcription_segment(&entry.entry_key, 2, "[]")
+        .await
+        .unwrap();
+    fx.library
+        .complete_transcription(&SubtitleRecord {
+            id: "whisper-en".into(),
+            entry_key: entry.entry_key.clone(),
+            language: "en".into(),
+            label: "English — AI generated".into(),
+            source: "whisper".into(),
+            format: "vtt".into(),
+            file_path: "/tmp/c.vtt".into(),
+            fingerprint: job.fingerprint.clone(),
+        })
+        .await
+        .unwrap();
+
+    // A completed job for the current fingerprint is normally never
+    // re-queued by bulk enqueue...
+    let bulk_requeued = fx
+        .library
+        .enqueue_missing_transcriptions("small.en", "en", 600, false)
+        .await
+        .unwrap();
+    assert_eq!(bulk_requeued, 0);
+
+    // ...but a targeted request always forces a fresh job.
+    let targeted = fx
+        .library
+        .enqueue_transcription_for_entry(&entry.entry_key, "small.en", "en", 600)
+        .await
+        .unwrap();
+    assert!(targeted);
+    let requeued = fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((requeued.total_segments, requeued.completed_segments), (3, 0));
+    assert!(fx
+        .library
+        .subtitle_tracks(&entry.entry_key)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let ineligible = fx
+        .library
+        .enqueue_transcription_for_entry("does-not-exist", "small.en", "en", 600)
+        .await
+        .unwrap();
+    assert!(!ineligible);
 }
 
 #[tokio::test]

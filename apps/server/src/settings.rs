@@ -483,6 +483,12 @@ pub struct Settings {
     /// headroom can opt out and allow both workloads to run concurrently.
     #[serde(default = "default_transcription_pause_while_streaming")]
     pub transcription_pause_while_streaming: bool,
+    /// Bulk-generation preference: when true, a movie or episode that
+    /// already has any subtitle track (Whisper or downloaded) is left
+    /// alone rather than queued/regenerated. A user-triggered per-item
+    /// generation always runs regardless of this setting.
+    #[serde(default)]
+    pub transcription_skip_if_subtitles_exist: bool,
     /// Whether the read-only MCP server (see `mcp.rs`) starts alongside the
     /// GUI app's core. Takes effect on next launch/restart — no hot-reload,
     /// same posture as `media_root`'s pre-multi-root upgrade above having no
@@ -537,6 +543,7 @@ impl Default for Settings {
             streaming_upload_budget_enabled: true,
             local_transcription_enabled: false,
             transcription_pause_while_streaming: true,
+            transcription_skip_if_subtitles_exist: false,
             mcp_enabled: false,
             mcp_port: default_mcp_port(),
             mcp_access_token: None,
@@ -601,6 +608,7 @@ mod tests {
         assert!(loaded.streaming_upload_budget_enabled);
         assert!(!loaded.local_transcription_enabled);
         assert!(loaded.transcription_pause_while_streaming);
+        assert!(!loaded.transcription_skip_if_subtitles_exist);
         assert_eq!(loaded.mcp_access_token, None);
         assert!(loaded.auto_library_watch_enabled);
         std::fs::remove_dir_all(dir).unwrap();
