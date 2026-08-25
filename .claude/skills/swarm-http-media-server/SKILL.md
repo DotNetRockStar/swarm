@@ -160,24 +160,35 @@ needs peer IP).
    (route registration, middleware ordering, `ConnectInfo` availability)
    only surface over a real TCP connection.
 
-## What's still QUIC-only after all of this
+## Route parity with the QUIC dispatch is complete — what's still different
 
-Catalog manifest/thumbprint and artwork (`/catalog/thumbprint`,
-`/catalog/manifest[.gz]`, `/art/{entry_key}/{kind}`) **are** mirrored here
-now, via the exact same `media_get` handler as the byte-serving routes —
-a paired HTTP-only client can browse a library end-to-end, not just play
-an already-known `entry_key`. Two things specifically needed fixing to
-make `/art/*` work correctly, both easy to miss if you're only looking at
-the byte-serving routes as a template: `media_get` must forward the full
-path **and query string** (`OriginalUri::path_and_query`, not `.path()`
-alone) since a thumbnail-width request rides in the query
-(`?w=320`, parsed back out of the same `PeerRequest.path` field by
-`swarm-media`'s `artwork_thumbnail_width`), and the `If-None-Match`
-request header / `ETag` response header must round-trip through
+Every path `resolve_for_network`'s QUIC-side dispatch recognizes
+(`crates/swarm-media/src/serve.rs`) now has an HTTP route pointed at it:
+`/play`, `/stream/{id}/media`, `/media/{entry_key}`, `/hls/{id}/{*rest}`,
+`/catalog/thumbprint`, `/catalog/manifest[.gz]`, `/art/{entry_key}/{kind}`,
+`/stop/{id}`, `/subtitles/{entry_key}/{filename}`, `/errors/report`,
+`/likes/toggle`. A paired HTTP-only client can pair, browse, play,
+caption, release a session early, report an error, and like/unlike —
+the same feature set a QUIC peer has, not a subset. `/pair/*` itself has
+no QUIC equivalent at all (a QUIC-capable peer authenticates by
+presenting a cert, never needs to "pair" over the wire the way an
+HTTP-only device does).
+
+Two non-obvious fixes were needed to get full parity, both easy to miss
+if you're only looking at the byte-serving routes as a template:
+`media_get` must forward the full path **and query string**
+(`OriginalUri::path_and_query`, not `.path()` alone) since an artwork
+thumbnail-width request rides in the query (`?w=320`, parsed back out of
+the same `PeerRequest.path` field by `swarm-media`'s
+`artwork_thumbnail_width`); and the `If-None-Match` request header /
+`ETag` response header must round-trip through
 `PeerRequest.if_none_match`/`PeerResponseHeader.etag` for artwork's `304`
 caching path to ever trigger. See
 `browse_catalog_and_fetch_artwork_over_real_http` in
-`apps/server/tests/http_media.rs` for the real-HTTP proof of both.
+`apps/server/tests/http_media.rs` for the real-HTTP proof of both, and
+`hls_master_and_nested_rendition_playlist_serve_over_real_http` for why
+`/hls` specifically needed axum's `{*rest}` catch-all rather than a
+fixed-depth `{rendition}/{file}` pattern.
 
 Still true: no TLS (plain HTTP only, matching `mcp.rs`'s own precedent),
 and no graceful shutdown for the listener (matches every other listener

@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use swarm_core::peer::{ByteRange, PeerRequest, PlaybackPreferences};
+use swarm_core::peer::{ByteRange, ClientErrorReport, LikeToggle, PeerRequest, PlaybackPreferences};
 use swarm_media::serve::{is_lan_ip, stream_body, MediaService};
 use tokio::net::TcpListener;
 
@@ -326,6 +326,8 @@ pub async fn start(
         // verb-specific logic.
         .route("/stop/{session_id}", post(media_get))
         .route("/subtitles/{entry_key}/{filename}", get(media_get))
+        .route("/errors/report", post(report_client_error))
+        .route("/likes/toggle", post(toggle_like))
         .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
 
     let app = pairing_routes.merge(media_routes).with_state(state);
@@ -478,6 +480,38 @@ async fn play(
         playback: Some(preferences),
         error_report: None,
         like: None,
+    };
+    resolve_and_respond(&state, &request, addr.ip()).await
+}
+
+async fn report_client_error(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(report): Json<ClientErrorReport>,
+) -> Response {
+    let request = PeerRequest {
+        path: "/errors/report".into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: Some(report),
+        like: None,
+    };
+    resolve_and_respond(&state, &request, addr.ip()).await
+}
+
+async fn toggle_like(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(like): Json<LikeToggle>,
+) -> Response {
+    let request = PeerRequest {
+        path: "/likes/toggle".into(),
+        range: None,
+        if_none_match: None,
+        playback: None,
+        error_report: None,
+        like: Some(like),
     };
     resolve_and_respond(&state, &request, addr.ip()).await
 }

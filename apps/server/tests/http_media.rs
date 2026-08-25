@@ -694,3 +694,68 @@ async fn hls_master_and_nested_rendition_playlist_serve_over_real_http() {
     drop(core);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The two lowest-priority routes from the QUIC dispatch (client-error
+/// triage and like/unlike) — no playback/browsing depends on either, but a
+/// paired device still needs them mirrored for real feature parity.
+#[tokio::test]
+async fn error_reporting_and_likes_work_over_real_http() {
+    let base = std::env::temp_dir().join(format!("swarm-http-errors-likes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+
+    let core = ServerCore::start(test_config(&media_root, base.join("server-data")))
+        .await
+        .unwrap();
+    core.wait_for_scan().await.unwrap();
+
+    let relative_path = "movies/example.mp4";
+    let media_bytes = deterministic_bytes(1_000, 13);
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, &media_bytes).unwrap();
+    let entry = direct_play_entry("dddd11112222333344445555", relative_path, media_bytes.len() as u64);
+    core.library.upsert(&entry).await.unwrap();
+
+    let base_url = format!("http://{}", core.http_media_addr);
+    let client = reqwest::Client::new();
+    let token = pair_and_get_token(&client, &base_url, &core, "Living Room Roku").await;
+
+    let report_response = client
+        .post(format!("{base_url}/errors/report"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "device_id": "roku-test-device",
+            "device_name": "Living Room Roku",
+            "entry_key": entry.entry_key,
+            "message": "playback failed: decoder error",
+            "occurred_at_ms": 1_700_000_000_000i64,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(report_response.status(), 204);
+    let errors = core.library.list_client_errors().await.unwrap();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].message, "playback failed: decoder error");
+
+    let like_response = client
+        .post(format!("{base_url}/likes/toggle"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "device_id": "roku-test-device",
+            "device_name": "Living Room Roku",
+            "entry_key": entry.entry_key,
+            "liked": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(like_response.status(), 204);
+    let counts = core.library.like_counts().await.unwrap();
+    assert_eq!(counts.get(entry.entry_key.as_str()), Some(&1));
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&base);
+}
