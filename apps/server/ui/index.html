@@ -81,6 +81,8 @@
       <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
       <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="uploadBudgetEnabledCheck"> Limit internet streaming to the measured upload budget</label>
       <p class="muted compact-help">LAN streaming is never throttled. Turn this off to let internet streams use all available upload bandwidth.</p>
+      <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="artworkDiskCacheEnabledCheck"> Cache requested artwork on this server</label>
+      <p class="muted compact-help">Recommended for media on network shares. Images are copied into local app storage as clients request them, refreshed after 30 days, and invalidated immediately when artwork is replaced.</p>
     </div>
 
     <div class="card">

@@ -151,6 +151,7 @@ impl AppState {
                 };
                 let core = ServerCore::start(config).await.map_err(|e| e.to_string())?;
                 core.set_streaming_upload_budget_enabled(settings.streaming_upload_budget_enabled);
+                core.set_artwork_disk_cache_enabled(settings.artwork_disk_cache_enabled);
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
                 core.set_transcription_skip_if_subtitles_exist(settings.transcription_skip_if_subtitles_exist);
@@ -498,6 +499,7 @@ struct SettingsView {
     has_tmdb_key: bool,
     has_opensubtitles_key: bool,
     streaming_upload_budget_enabled: bool,
+    artwork_disk_cache_enabled: bool,
     local_transcription_enabled: bool,
     transcription_pause_while_streaming: bool,
     transcription_skip_if_subtitles_exist: bool,
@@ -515,6 +517,7 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
         has_tmdb_key: settings.tmdb_api_key.is_some(),
         has_opensubtitles_key: settings.opensubtitles_api_key.is_some(),
         streaming_upload_budget_enabled: settings.streaming_upload_budget_enabled,
+        artwork_disk_cache_enabled: settings.artwork_disk_cache_enabled,
         local_transcription_enabled: settings.local_transcription_enabled,
         transcription_pause_while_streaming: settings.transcription_pause_while_streaming,
         transcription_skip_if_subtitles_exist: settings.transcription_skip_if_subtitles_exist,
@@ -846,6 +849,22 @@ async fn set_streaming_upload_budget_enabled(
     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     if let Some(core) = state.core.get() {
         core.set_streaming_upload_budget_enabled(enabled);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_artwork_disk_cache_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.artwork_disk_cache_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    if let Some(core) = state.core.get() {
+        core.set_artwork_disk_cache_enabled(enabled);
     }
     Ok(())
 }
@@ -2101,6 +2120,7 @@ fn main() {
             set_opensubtitles_api_key,
             download_subtitle,
             set_streaming_upload_budget_enabled,
+            set_artwork_disk_cache_enabled,
             set_auto_library_watch_enabled,
             set_local_transcription_enabled,
             set_transcription_pause_while_streaming,

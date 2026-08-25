@@ -294,10 +294,11 @@ impl ServerCore {
             transcode_config.max_upload_bps = measured_bps;
         }
         let ffmpeg_path = transcode_config.ffmpeg_path.clone();
-        let service = Arc::new(MediaService::with_roots(
+        let service = Arc::new(MediaService::with_roots_and_artwork_cache(
             Arc::clone(&library),
             media_roots.clone(),
             transcode_config,
+            config.data_dir.join("artwork-cache"),
         ));
         tokio::spawn(accept_loop(endpoint, Arc::clone(&service)));
         tokio::spawn(bandwidth::run_periodic_probe(
@@ -754,6 +755,11 @@ impl ServerCore {
         self.service
             .transcode_manager()
             .set_upload_budget_enabled(enabled);
+    }
+
+    /// Live opt-in for the server-local artwork read-through cache.
+    pub fn set_artwork_disk_cache_enabled(&self, enabled: bool) {
+        self.service.set_artwork_disk_cache_enabled(enabled);
     }
 
     /// Scrape metadata/artwork for entries that don't have any yet. Rejects

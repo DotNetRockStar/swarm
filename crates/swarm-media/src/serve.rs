@@ -20,7 +20,9 @@ use futures_util::stream::{self, Stream};
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use swarm_core::entry_key::is_valid_entry_key;
 use swarm_core::peer::{
     CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, SubtitleTrack,
@@ -33,8 +35,13 @@ pub struct MediaService {
     roots: SharedRootResolver,
     transcodes: Arc<TranscodeManager>,
     thumbnail_generation: tokio::sync::Mutex<()>,
+    artwork_cache_dir: Option<PathBuf>,
+    artwork_cache_enabled: AtomicBool,
+    artwork_cache_fills: [tokio::sync::Mutex<()>; 32],
     bandwidth: Arc<BandwidthMeter>,
 }
+
+const ARTWORK_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// A resolved response: header plus a body source the transport streams out.
 pub enum Body {
@@ -130,13 +137,42 @@ impl MediaService {
         roots: SharedRootResolver,
         config: TranscodeConfig,
     ) -> Self {
+        Self::with_optional_artwork_cache(library, roots, config, None)
+    }
+
+    /// Construct a service whose optional artwork cache lives on the media
+    /// server's local disk. Caching remains off until
+    /// [`Self::set_artwork_disk_cache_enabled`] is called, matching the
+    /// persisted desktop preference's opt-in behavior.
+    pub fn with_roots_and_artwork_cache(
+        library: Arc<Library>,
+        roots: SharedRootResolver,
+        config: TranscodeConfig,
+        artwork_cache_dir: PathBuf,
+    ) -> Self {
+        Self::with_optional_artwork_cache(library, roots, config, Some(artwork_cache_dir))
+    }
+
+    fn with_optional_artwork_cache(
+        library: Arc<Library>,
+        roots: SharedRootResolver,
+        config: TranscodeConfig,
+        artwork_cache_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             library,
             roots,
             transcodes: TranscodeManager::new(config),
             thumbnail_generation: tokio::sync::Mutex::new(()),
+            artwork_cache_dir,
+            artwork_cache_enabled: AtomicBool::new(false),
+            artwork_cache_fills: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
             bandwidth: BandwidthMeter::new(),
         }
+    }
+
+    pub fn set_artwork_disk_cache_enabled(&self, enabled: bool) {
+        self.artwork_cache_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn transcode_manager(&self) -> &Arc<TranscodeManager> {
@@ -556,6 +592,10 @@ impl MediaService {
             };
         }
         let source_path = self.roots.resolve(&relative_path);
+        let source_path = self
+            .cached_artwork_path(&source_path, entry_key, kind.route_segment(), version)
+            .await
+            .unwrap_or(source_path);
         let path = match requested_width {
             Some(width) => self
                 .thumbnail_path(
@@ -615,6 +655,65 @@ impl MediaService {
         }
     }
 
+    /// Resolve an artwork request through the server-local read-through
+    /// cache. The library artwork version makes scrape/manual replacements
+    /// immediately select a new cache key; the fixed TTL also refreshes a
+    /// source file that was changed outside those managed workflows.
+    async fn cached_artwork_path(
+        &self,
+        source: &std::path::Path,
+        entry_key: &str,
+        kind: &str,
+        version: u32,
+    ) -> Option<PathBuf> {
+        if !self.artwork_cache_enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let cache_root = self.artwork_cache_dir.as_ref()?;
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 10
+                    && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .unwrap_or("img")
+            .to_ascii_lowercase();
+        let shard = entry_key.get(..2).unwrap_or("00");
+        let file_prefix = format!("{entry_key}-{kind}-");
+        let target = cache_root
+            .join(shard)
+            .join(format!("{file_prefix}v{version}.{extension}"));
+        if artwork_cache_file_is_fresh(&target) {
+            return Some(target);
+        }
+
+        // Requests for the same key share a lock to avoid duplicate SMB reads;
+        // unrelated misses can still fill concurrently during a large browse.
+        let fill_index =
+            usize::from_str_radix(shard, 16).unwrap_or(0) % self.artwork_cache_fills.len();
+        let _fill = self.artwork_cache_fills[fill_index].lock().await;
+        if artwork_cache_file_is_fresh(&target) {
+            return Some(target);
+        }
+
+        let source = source.to_path_buf();
+        let output = target.clone();
+        let prefix = file_prefix.clone();
+        let refreshed =
+            tokio::task::spawn_blocking(move || fill_artwork_cache(&source, &output, &prefix))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .is_some();
+        if refreshed || std::fs::metadata(&target).is_ok_and(|metadata| metadata.len() > 0) {
+            Some(target)
+        } else {
+            None
+        }
+    }
+
     /// Build a persistent, version-keyed JPEG thumbnail beside the source
     /// artwork. Generation is serialized and performed on the blocking pool:
     /// image decode/resize/encode is CPU and filesystem work and must never
@@ -651,6 +750,71 @@ impl MediaService {
         .and_then(Result::ok)
         .map(|_| target)
     }
+}
+
+fn artwork_cache_file_is_fresh(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| {
+        metadata.len() > 0
+            && metadata.modified().ok().is_some_and(|modified| {
+                modified
+                    .elapsed()
+                    .map_or(true, |age| age < ARTWORK_CACHE_TTL)
+            })
+    })
+}
+
+fn fill_artwork_cache(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    file_prefix: &str,
+) -> std::io::Result<()> {
+    let cache_dir = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artwork cache target has no parent",
+        )
+    })?;
+    std::fs::create_dir_all(cache_dir)?;
+    let filename = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artwork");
+    let temporary = cache_dir.join(format!(".{filename}.{}.tmp", std::process::id()));
+    if let Err(error) = std::fs::copy(source, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if std::fs::metadata(&temporary)?.len() == 0 {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artwork source is empty",
+        ));
+    }
+    if let Err(error) = std::fs::rename(&temporary, target) {
+        // Windows does not replace an existing destination. Only remove the
+        // stale file after the complete replacement has been copied locally.
+        if target.exists() {
+            std::fs::remove_file(target)?;
+            std::fs::rename(&temporary, target)?;
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    }
+
+    // Artwork-version changes invalidate immediately; removing superseded
+    // files prevents repeated scrapes from growing the cache indefinitely.
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(file_prefix) && path != target {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn artwork_thumbnail_width(path: &str) -> Option<u32> {

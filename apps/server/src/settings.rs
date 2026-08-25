@@ -475,6 +475,10 @@ pub struct Settings {
     /// playback always bypasses it regardless of this setting.
     #[serde(default = "default_streaming_upload_budget_enabled")]
     pub streaming_upload_budget_enabled: bool,
+    /// Copy requested artwork into app data before serving it, avoiding
+    /// repeated reads from slower network shares. Off unless opted in.
+    #[serde(default)]
+    pub artwork_disk_cache_enabled: bool,
     /// Generate English subtitles locally with Whisper. The model and queue
     /// live in app data; disabling pauses work without discarding progress.
     #[serde(default)]
@@ -541,6 +545,7 @@ impl Default for Settings {
             tmdb_api_key: None,
             opensubtitles_api_key: None,
             streaming_upload_budget_enabled: true,
+            artwork_disk_cache_enabled: false,
             local_transcription_enabled: false,
             transcription_pause_while_streaming: true,
             transcription_skip_if_subtitles_exist: false,
@@ -606,11 +611,27 @@ mod tests {
         .unwrap();
         let loaded = load(&dir);
         assert!(loaded.streaming_upload_budget_enabled);
+        assert!(!loaded.artwork_disk_cache_enabled);
         assert!(!loaded.local_transcription_enabled);
         assert!(loaded.transcription_pause_while_streaming);
         assert!(!loaded.transcription_skip_if_subtitles_exist);
         assert_eq!(loaded.mcp_access_token, None);
         assert!(loaded.auto_library_watch_enabled);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn artwork_disk_cache_preference_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "swarm-artwork-cache-settings-test-{}",
+            rand::random::<u64>()
+        ));
+        let mut settings = Settings::default();
+        settings.artwork_disk_cache_enabled = true;
+
+        save(&dir, &settings).unwrap();
+
+        assert!(load(&dir).artwork_disk_cache_enabled);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
