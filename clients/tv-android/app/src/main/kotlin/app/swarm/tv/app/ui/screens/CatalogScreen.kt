@@ -128,6 +128,19 @@ internal data class CatalogBrowseState(
     val likedOnly: Boolean = false,
 )
 
+/** Cap on visible assets per Movies/Shows/Music row (root or genre) before a
+ * "Browse All" tile takes over showing the rest — a real 10-foot remote
+ * can't usefully scroll an unbounded row, and every row already has a full
+ * grid destination one click away. */
+private const val MAX_SHELF_ITEMS = 20
+
+/** Last-watched-wins cap on the Continue Watching row. */
+private const val MAX_CONTINUE_WATCHING = 6
+
+/** A genre sub-shelf needs at least this many distinct assets to be worth
+ * its own row — fewer reads as a scraping gap, not a real category. */
+private const val MIN_GENRE_SHELF_SIZE = 6
+
 private enum class QuickAccessKind { MOVIE, EPISODE, SHOW }
 
 private data class QuickAccessItem(
@@ -150,10 +163,14 @@ internal fun CatalogScreen(
     artworkUrl: (MergedEntry) -> String?,
     artistPhotoUrl: (MergedEntry) -> String?,
     onOpenMovie: (MergedEntry) -> Unit,
-    onOpenMovieShelf: () -> Unit,
-    onOpenArtistShelf: () -> Unit,
+    // Take the row's own (root or genre-filtered) list so a genre sub-shelf's
+    // "Browse All" tile can reuse the same un-titled full-grid screen the
+    // top-level row's tile does, just pre-filtered — see
+    // [app.swarm.tv.app.data.SwarmViewModel.openMovieShelf]'s doc comment.
+    onOpenMovieShelf: (List<MergedEntry>) -> Unit,
+    onOpenArtistShelf: (List<ArtistGroup>) -> Unit,
     onOpenArtist: (ArtistGroup) -> Unit,
-    onOpenShowShelf: () -> Unit,
+    onOpenShowShelf: (List<ShowGroup>) -> Unit,
     onOpenShow: (ShowGroup) -> Unit,
     onOpenSwarm: () -> Unit,
     onBack: () -> Unit,
@@ -173,6 +190,11 @@ internal fun CatalogScreen(
     watchStates: Map<String, WatchState>,
     watchlistKeys: Set<String>,
     onPlay: (MergedEntry) -> Unit,
+    /** Continue Watching opens straight into the pause overlay (cast,
+     * synopsis, "More like this," an explicit Resume) instead of
+     * autoplaying — see [app.swarm.tv.app.data.SwarmViewModel.play]'s
+     * `startPaused` param. */
+    onPlayPaused: (MergedEntry) -> Unit,
     preview: BrowsePreview?,
     onStartPreview: (MergedEntry) -> Unit,
     onStopPreview: () -> Unit,
@@ -255,6 +277,8 @@ internal fun CatalogScreen(
     val initialCatalogFocusRequester = remember { FocusRequester() }
     val filterRailFocusRequester = remember { FocusRequester() }
     val watchlistRowFocusRequester = remember { FocusRequester() }
+    val searchFocusRequester = remember { FocusRequester() }
+    var searchBoxFocused by remember { mutableStateOf(false) }
     val catalogListState = rememberLazyListState()
     val focusNavigationScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -279,7 +303,26 @@ internal fun CatalogScreen(
     BackHandler(enabled = shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus)) {
         leaveFilterRail()
     }
-    BackHandler(enabled = !shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus), onBack = onBack)
+    // Back's second tier: with the rail collapsed, the first press scrolls
+    // up to and focuses the search box rather than leaving the screen
+    // outright — a real ask from live use, since this is a much shorter trip
+    // back to the top than manually scrolling a long catalog. A second press
+    // with the box already focused falls through to the normal exit
+    // (unchanged from before — [onBack] decides between the exit-confirm
+    // modal and returning to the dashboard).
+    BackHandler(
+        enabled = !shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus) && !searchBoxFocused,
+    ) {
+        focusNavigationScope.launch {
+            runCatching { catalogListState.scrollToItem(0) }
+            withFrameNanos {}
+            runCatching { searchFocusRequester.requestFocus() }
+        }
+    }
+    BackHandler(
+        enabled = !shouldLeaveFilterRailOnBack(filterRailExpanded, filterRailHasFocus) && searchBoxFocused,
+        onBack = onBack,
+    )
     val catalogControls: @Composable ((() -> Unit)?) -> Unit = { onNavigateDown ->
         CatalogControls(
             searchText = searchText,
@@ -299,6 +342,8 @@ internal fun CatalogScreen(
             playbackError = playbackError,
             onNavigateDown = onNavigateDown,
             filterRailFocusRequester = filterRailFocusRequester,
+            searchFocusRequester = searchFocusRequester,
+            onSearchFocusChanged = { searchBoxFocused = it },
         )
     }
 
@@ -396,9 +441,23 @@ internal fun CatalogScreen(
                             listOfNotNull(e.scrapedTitle, e.title, e.artist, e.album, e.showTitle).any { it.lowercase().contains(q) }
                         }
                     }
-                    val movies = remember(filtered) { filtered.filter { it.entry.kind == MediaKind.MOVIE } }
-                    val shows = remember(filtered) { CatalogGrouping.groupEpisodesByShowSeason(filtered) }
-                    val artists = remember(filtered) { CatalogGrouping.groupTracksByArtistAlbum(filtered) }
+                    // Highest rated/reviewed first in every shelf this feeds
+                    // (root rows, genre sub-shelves, and the genre-selected
+                    // full grid alike) — real feedback from live use asking
+                    // browse order to actually reflect quality, not just
+                    // alphabetical/insertion order.
+                    val movies = remember(filtered) {
+                        filtered.filter { it.entry.kind == MediaKind.MOVIE }
+                            .sortedWith(compareByDescending<MergedEntry> { it.ratingScore() }.thenBy { it.entry.displayTitle().lowercase() })
+                    }
+                    val shows = remember(filtered) {
+                        CatalogGrouping.groupEpisodesByShowSeason(filtered)
+                            .sortedWith(compareByDescending<ShowGroup> { it.ratingScore() }.thenBy { it.show.lowercase() })
+                    }
+                    val artists = remember(filtered) {
+                        CatalogGrouping.groupTracksByArtistAlbum(filtered)
+                            .sortedWith(compareByDescending<ArtistGroup> { it.ratingScore() }.thenBy { it.artist.lowercase() })
+                    }
 
                     // Quick-access rows intentionally use the full currently-visible
                     // catalog, not a genre/search subset, and disappear while a user
@@ -461,7 +520,10 @@ internal fun CatalogScreen(
                                         show = show,
                                     )
                                 }
-                            (movieItems + episodeItems).sortedByDescending { it.updatedAt }
+                            // Last-watched-wins: only the 6 most recently
+                            // touched titles stay on the home row, so an old
+                            // in-progress title doesn't linger indefinitely.
+                            (movieItems + episodeItems).sortedByDescending { it.updatedAt }.take(MAX_CONTINUE_WATCHING)
                         }
                     }
                     val watchlist = remember(entries, allShows, watchStates, watchlistKeys, showQuickAccess) {
@@ -648,7 +710,7 @@ internal fun CatalogScreen(
                                             title = "Continue Watching",
                                             items = continueWatching,
                                             artworkUrl = artworkUrl,
-                                            onClick = { item -> onPlay(item.representative) },
+                                            onClick = { item -> onPlayPaused(item.representative) },
                                             isLiked = isLiked,
                                             isDefaultFocusRow = firstSection == "continue",
                                             defaultFocusRequester = initialCatalogFocusRequester.takeIf { !restoringSelection && firstSection == "continue" },
@@ -689,7 +751,7 @@ internal fun CatalogScreen(
                                 if (movies.isNotEmpty()) {
                                     item {
                                         MovieRow(
-                                            "Movies", movies, artworkUrl, onOpenMovie, onOpenMovieShelf, movieRestoreIndex,
+                                            "Movies", movies, artworkUrl, onOpenMovie, onOpenMovieShelf, isTopLevel = true, movieRestoreIndex,
                                             isDefaultFocusRow = firstSection == "movies",
                                             isLiked = isLiked,
                                             defaultFocusRequester = initialCatalogFocusRequester.takeIf {
@@ -710,7 +772,8 @@ internal fun CatalogScreen(
                                         genreMovies,
                                         artworkUrl,
                                         onOpenMovie,
-                                        onOpenShelf = null,
+                                        onOpenShelf = onOpenMovieShelf,
+                                        isTopLevel = false,
                                         restoreFocusIndex = null,
                                         isDefaultFocusRow = false,
                                         isLiked = isLiked,
@@ -723,7 +786,7 @@ internal fun CatalogScreen(
                                 if (shows.isNotEmpty()) {
                                     item {
                                         ShowShelfRow(
-                                            "Shows", shows, artworkUrl, onOpenShowShelf, onOpenShow, showRestoreIndex,
+                                            "Shows", shows, artworkUrl, onOpenShowShelf, onOpenShow, isTopLevel = true, showRestoreIndex,
                                             isDefaultFocusRow = firstSection == "shows",
                                             defaultFocusRequester = initialCatalogFocusRequester.takeIf {
                                                 showRestoreIndex != null || (!restoringSelection && firstSection == "shows")
@@ -742,8 +805,9 @@ internal fun CatalogScreen(
                                         genre,
                                         genreShows,
                                         artworkUrl,
-                                        onOpenShowShelf = null,
+                                        onOpenShowShelf = onOpenShowShelf,
                                         onOpenShow = onOpenShow,
+                                        isTopLevel = false,
                                         restoreFocusIndex = null,
                                         isDefaultFocusRow = false,
                                         preview = preview,
@@ -755,13 +819,17 @@ internal fun CatalogScreen(
                                 if (artists.isNotEmpty()) {
                                     item {
                                         ArtistShelfRow(
-                                            "Music", artists, artworkUrl, artistPhotoUrl, onOpenArtistShelf, onOpenArtist, artistRestoreIndex,
+                                            "Music", artists, artworkUrl, artistPhotoUrl, onOpenArtistShelf, onOpenArtist, isTopLevel = true, artistRestoreIndex,
                                             isDefaultFocusRow = firstSection == "music",
                                             defaultFocusRequester = initialCatalogFocusRequester.takeIf {
                                                 artistRestoreIndex != null || (!restoringSelection && firstSection == "music")
                                             },
                                             firstCardFocusRequester = catalogEntryFocusRequester.takeIf { firstSection == "music" },
                                             requestInitialFocus = automaticInitialFocusEnabled && !filterRailExpanded,
+                                            preview = preview,
+                                            expandedPreviewEntryKey = expandedPreviewEntryKey,
+                                            onPreviewFocusChanged = previewFocusChanged,
+                                            onPreviewFinished = previewFinished,
                                         )
                                     }
                                 }
@@ -771,10 +839,15 @@ internal fun CatalogScreen(
                                         genreArtists,
                                         artworkUrl,
                                         artistPhotoUrl,
-                                        onOpenArtistShelf = null,
+                                        onOpenArtistShelf = onOpenArtistShelf,
                                         onOpenArtist = onOpenArtist,
+                                        isTopLevel = false,
                                         restoreFocusIndex = null,
                                         isDefaultFocusRow = false,
+                                        preview = preview,
+                                        expandedPreviewEntryKey = expandedPreviewEntryKey,
+                                        onPreviewFocusChanged = previewFocusChanged,
+                                        onPreviewFinished = previewFinished,
                                     )
                                 }
                             }
@@ -807,6 +880,8 @@ private fun CatalogControls(
     playbackError: String?,
     onNavigateDown: (() -> Unit)?,
     filterRailFocusRequester: FocusRequester,
+    searchFocusRequester: FocusRequester,
+    onSearchFocusChanged: (Boolean) -> Unit,
 ) {
     Column {
         Row(
@@ -829,7 +904,9 @@ private fun CatalogControls(
                 placeholder = { Text("Search title, artist, show…", color = SwarmMuted) },
                 colors = searchFieldColors(),
                 onSubmit = onSubmitSearch,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f)
+                    .focusRequester(searchFocusRequester)
+                    .onFocusChanged { onSearchFocusChanged(it.isFocused) },
             )
             Button(
                 onClick = onOpenSwarm,
@@ -868,15 +945,32 @@ private fun CatalogControls(
     }
 }
 
-/** Ranks [entries]' genres by how many entries in this specific kind carry each one (descending), takes the top 5 (or fewer, if the kind has fewer distinct genres), and groups each genre's matching subset via [group] — [ShowGroup]/[ArtistGroup] for Shows/Music, the identity function for the already-flat Movies list. */
+/** Ranks [entries]' genres by how many entries in this specific kind carry each one (descending), keeps only genres whose *grouped* asset count reaches [MIN_GENRE_SHELF_SIZE] (a scraping gap, not a real category, otherwise), takes the top 5 of those (or fewer, if fewer qualify), and groups each genre's matching subset via [group] — [ShowGroup]/[ArtistGroup] for Shows/Music, the identity function for the already-flat Movies list. */
 private fun <T> topGenreShelves(entries: List<MergedEntry>, group: (List<MergedEntry>) -> List<T>): List<Pair<String, List<T>>> =
     entries.flatMap { it.entry.genres }
         .groupingBy { it }
         .eachCount()
         .entries
         .sortedByDescending { it.value }
-        .take(5)
         .map { (genre, _) -> genre to group(entries.filter { it.entry.genres.contains(genre) }) }
+        .filter { (_, grouped) -> grouped.size >= MIN_GENRE_SHELF_SIZE }
+        .take(5)
+
+/** Highest rated/reviewed first within each asset category — falls back to
+ * `-1.0` for anything IntroDB/TMDb never scored, so unrated titles sink to
+ * the end rather than interleaving with rated ones by coincidence of list
+ * order. */
+private fun MergedEntry.ratingScore(): Double = entry.communityRating ?: -1.0
+
+private fun ShowGroup.ratingScore(): Double {
+    val ratings = seasons.flatMap { it.episodes }.mapNotNull { it.entry.communityRating }
+    return if (ratings.isEmpty()) -1.0 else ratings.average()
+}
+
+private fun ArtistGroup.ratingScore(): Double {
+    val ratings = albums.flatMap { it.tracks }.mapNotNull { it.entry.communityRating }
+    return if (ratings.isEmpty()) -1.0 else ratings.average()
+}
 
 private fun WatchState.progressFraction(): Float =
     if (durationSecs <= 0.0) 0f else (positionSecs / durationSecs).coerceIn(0.0, 1.0).toFloat()
@@ -1248,15 +1342,36 @@ private fun searchFieldColors() = OutlinedTextFieldDefaults.colors(
 private val TOP_LEVEL_TITLE_SIZE = 20.sp
 private val GENRE_TITLE_SIZE = 16.sp
 
-/** [onOpenAll] null (a genre sub-shelf) skips the "Browse all" button — there's no full-grid screen for "this kind, filtered to this one genre" today, just the row itself. */
+/** No more header-level "Browse all" button — every row (root or genre) now
+ * carries its own in-row [BrowseAllTile] at the end once it's over
+ * [MAX_SHELF_ITEMS], so this is just the row's title. */
 @Composable
-private fun ShelfHeader(label: String, onOpenAll: (() -> Unit)?, fontSize: TextUnit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(label, color = SwarmMuted, fontSize = fontSize, fontWeight = FontWeight.Black)
-        if (onOpenAll != null) {
-            Button(onClick = onOpenAll, colors = swarmActionButtonColors()) {
-                Text("Browse all", fontSize = 12.sp)
-            }
+private fun ShelfHeader(label: String, fontSize: TextUnit) {
+    Text(label, color = SwarmMuted, fontSize = fontSize, fontWeight = FontWeight.Black)
+}
+
+/** Appended as the last card in a shelf row once it exceeds [MAX_SHELF_ITEMS]
+ * — replaces the old header-level "Browse all" button with an in-row tile,
+ * matching the same poster-sized footprint as every other card in the row. */
+@Composable
+private fun BrowseAllTile(onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.colors(containerColor = SwarmSurfaceMuted),
+        scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
+        modifier = Modifier.width(CARD_WIDTH),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth().height(CARD_MEDIA_HEIGHT).clip(RoundedCornerShape(4.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Browse\nAll  →",
+                color = SwarmAccent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Black,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
         }
     }
 }
@@ -1331,7 +1446,7 @@ private fun QuickAccessRow(
         requestInitialFocus = requestInitialFocus,
     )
     Column {
-        ShelfHeader(title, onOpenAll = null, fontSize = TOP_LEVEL_TITLE_SIZE)
+        ShelfHeader(title, fontSize = TOP_LEVEL_TITLE_SIZE)
         Spacer(Modifier.height(TOP_LEVEL_TITLE_SPACING))
         LazyRow(
             state = listState,
@@ -1367,7 +1482,8 @@ private fun MovieRow(
     movies: List<MergedEntry>,
     artworkUrl: (MergedEntry) -> String?,
     onOpenMovie: (MergedEntry) -> Unit,
-    onOpenShelf: (() -> Unit)?,
+    onOpenShelf: (List<MergedEntry>) -> Unit,
+    isTopLevel: Boolean,
     restoreFocusIndex: Int?,
     isDefaultFocusRow: Boolean,
     isLiked: (MergedEntry) -> Boolean,
@@ -1379,12 +1495,13 @@ private fun MovieRow(
     onPreviewFocusChanged: (MergedEntry, Boolean) -> Unit,
     onPreviewFinished: (String) -> Unit,
 ) {
-    val isTopLevel = onOpenShelf != null
+    val visibleMovies = remember(movies) { movies.take(MAX_SHELF_ITEMS) }
+    val showBrowseAllTile = movies.size > MAX_SHELF_ITEMS
     val listState = rememberLazyListState()
-    val artworkUrls = remember(movies, artworkUrl) { movies.map(artworkUrl) }
+    val artworkUrls = remember(visibleMovies, artworkUrl) { visibleMovies.map(artworkUrl) }
     PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        movies.size,
+        visibleMovies.size,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1392,7 +1509,7 @@ private fun MovieRow(
         requestInitialFocus,
     )
     Column {
-        ShelfHeader(title, onOpenShelf, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
+        ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         // contentPadding, not just the Column's own outer padding: tv-material3's
         // Card scales up in place when it gains focus, so the leftmost/topmost card
@@ -1403,7 +1520,7 @@ private fun MovieRow(
         // animation room without moving any card's resting position.
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
             itemsIndexed(
-                items = movies,
+                items = visibleMovies,
                 key = { _, entry -> entry.entry.entryKey },
                 contentType = { _, _ -> "movie" },
             ) { index, entry ->
@@ -1420,6 +1537,11 @@ private fun MovieRow(
                     onPreviewFinished = onPreviewFinished,
                 )
             }
+            if (showBrowseAllTile) {
+                item(key = "browse-all", contentType = "browse-all") {
+                    BrowseAllTile(onClick = { onOpenShelf(movies) })
+                }
+            }
         }
     }
 }
@@ -1429,8 +1551,9 @@ private fun ShowShelfRow(
     title: String,
     shows: List<ShowGroup>,
     artworkUrl: (MergedEntry) -> String?,
-    onOpenShowShelf: (() -> Unit)?,
+    onOpenShowShelf: (List<ShowGroup>) -> Unit,
     onOpenShow: (ShowGroup) -> Unit,
+    isTopLevel: Boolean,
     restoreFocusIndex: Int?,
     isDefaultFocusRow: Boolean,
     defaultFocusRequester: FocusRequester? = null,
@@ -1441,22 +1564,23 @@ private fun ShowShelfRow(
     onPreviewFocusChanged: (MergedEntry, Boolean) -> Unit,
     onPreviewFinished: (String) -> Unit,
 ) {
-    val isTopLevel = onOpenShowShelf != null
+    val visibleShows = remember(shows) { shows.take(MAX_SHELF_ITEMS) }
+    val showBrowseAllTile = shows.size > MAX_SHELF_ITEMS
     val listState = rememberLazyListState()
     // Keep each card's random choice stable across recompositions/focus
     // animation. A refreshed show list produces a fresh season+episode pick.
-    val previewEntries = remember(shows) {
-        shows.map(CatalogGrouping::randomPreviewEpisode)
+    val previewEntries = remember(visibleShows) {
+        visibleShows.map(CatalogGrouping::randomPreviewEpisode)
     }
     val artworkUrls = remember(previewEntries, artworkUrl) {
         previewEntries.map { it?.let(artworkUrl) }
     }
-    val realSeasonCounts = remember(shows) {
-        shows.map { CatalogGrouping.previewSeasons(it).size }
+    val realSeasonCounts = remember(visibleShows) {
+        visibleShows.map { CatalogGrouping.previewSeasons(it).size }
     }
     PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        shows.size,
+        visibleShows.size,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1464,11 +1588,11 @@ private fun ShowShelfRow(
         requestInitialFocus,
     )
     Column {
-        ShelfHeader(title, onOpenShowShelf, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
+        ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
             itemsIndexed(
-                items = shows,
+                items = visibleShows,
                 key = { _, show -> show.show },
                 contentType = { _, _ -> "show" },
             ) { index, show ->
@@ -1486,6 +1610,11 @@ private fun ShowShelfRow(
                     onPreviewFinished = onPreviewFinished,
                 )
             }
+            if (showBrowseAllTile) {
+                item(key = "browse-all", contentType = "browse-all") {
+                    BrowseAllTile(onClick = { onOpenShowShelf(shows) })
+                }
+            }
         }
     }
 }
@@ -1496,22 +1625,34 @@ private fun ArtistShelfRow(
     artists: List<ArtistGroup>,
     artworkUrl: (MergedEntry) -> String?,
     artistPhotoUrl: (MergedEntry) -> String?,
-    onOpenArtistShelf: (() -> Unit)?,
+    onOpenArtistShelf: (List<ArtistGroup>) -> Unit,
     onOpenArtist: (ArtistGroup) -> Unit,
+    isTopLevel: Boolean,
     restoreFocusIndex: Int?,
     isDefaultFocusRow: Boolean,
     defaultFocusRequester: FocusRequester? = null,
     firstCardFocusRequester: FocusRequester? = null,
     requestInitialFocus: Boolean = true,
+    preview: BrowsePreview?,
+    expandedPreviewEntryKey: String?,
+    onPreviewFocusChanged: (MergedEntry, Boolean) -> Unit,
+    onPreviewFinished: (String) -> Unit,
 ) {
-    val isTopLevel = onOpenArtistShelf != null
+    val visibleArtists = remember(artists) { artists.take(MAX_SHELF_ITEMS) }
+    val showBrowseAllTile = artists.size > MAX_SHELF_ITEMS
     val listState = rememberLazyListState()
-    val artistArtwork = remember(artists, artworkUrl, artistPhotoUrl) {
-        artists.map { it.artworkUrls(artworkUrl, artistPhotoUrl) }
+    val artistArtwork = remember(visibleArtists, artworkUrl, artistPhotoUrl) {
+        visibleArtists.map { it.artworkUrls(artworkUrl, artistPhotoUrl) }
+    }
+    // Same hover-preview rules as Shows: one stable representative track per
+    // artist, kept across recompositions/focus animation so it doesn't
+    // resample on every focus change.
+    val previewEntries = remember(visibleArtists) {
+        visibleArtists.map { it.randomPreviewTrack() }
     }
     PrefetchArtworkRow(listState, artistArtwork.map { it.artistPhoto ?: it.albumCoverFallback })
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        artists.size,
+        visibleArtists.size,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1519,11 +1660,11 @@ private fun ArtistShelfRow(
         requestInitialFocus,
     )
     Column {
-        ShelfHeader(title, onOpenArtistShelf, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
+        ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
             itemsIndexed(
-                items = artists,
+                items = visibleArtists,
                 key = { _, artist -> artist.artist },
                 contentType = { _, _ -> "artist" },
             ) { index, artist ->
@@ -1539,11 +1680,27 @@ private fun ArtistShelfRow(
                     onClick = { onOpenArtist(artist) },
                     focusRequester = if (index == targetIndex) focusRequester else null,
                     additionalFocusRequester = firstCardFocusRequester.takeIf { index == 0 },
+                    previewEntry = previewEntries[index],
+                    preview = preview,
+                    expandedPreviewEntryKey = expandedPreviewEntryKey,
+                    onPreviewFocusChanged = onPreviewFocusChanged,
+                    onPreviewFinished = onPreviewFinished,
                 )
+            }
+            if (showBrowseAllTile) {
+                item(key = "browse-all", contentType = "browse-all") {
+                    BrowseAllTile(onClick = { onOpenArtistShelf(artists) })
+                }
             }
         }
     }
 }
+
+/** Same "preview eligible" concept as [CatalogGrouping.randomPreviewEpisode],
+ * for Music: one track, picked from a random album so a multi-album artist's
+ * preview varies rather than always sampling album one. */
+private fun ArtistGroup.randomPreviewTrack(): MergedEntry? =
+    albums.randomOrNull()?.tracks?.randomOrNull()
 
 // Card width: smaller than this screen used to be (was 160.dp) so more
 // fit across one horizontal row at once — the same "see more per row"

@@ -296,14 +296,14 @@ private class VideoPlayerPool(context: Context) {
     private var preloadedSessionId: String? = null
     private var preloadedPlayer: ExoPlayer? = null
 
-    fun activate(config: PlaybackPlayerConfig): ExoPlayer {
+    fun activate(config: PlaybackPlayerConfig, startPaused: Boolean = false): ExoPlayer {
         if (activeSessionId == config.sessionId) return checkNotNull(activePlayer)
 
         var player = if (preloadedSessionId == config.sessionId) {
             preloadedSessionId = null
-            preloadedPlayer.also { preloadedPlayer = null } ?: createPlayer(config, playWhenReady = true)
+            preloadedPlayer.also { preloadedPlayer = null } ?: createPlayer(config, playWhenReady = !startPaused)
         } else {
-            createPlayer(config, playWhenReady = true)
+            createPlayer(config, playWhenReady = !startPaused)
         }
         // A preload can fail while it has no UI listener. Recreate from the
         // still-valid negotiated URL on promotion so the active listener gets
@@ -311,11 +311,11 @@ private class VideoPlayerPool(context: Context) {
         // player state.
         if (player.playerError != null) {
             player.release()
-            player = createPlayer(config, playWhenReady = true)
+            player = createPlayer(config, playWhenReady = !startPaused)
         }
         activeSessionId = config.sessionId
         activePlayer = player
-        player.playWhenReady = true
+        player.playWhenReady = !startPaused
         return player
     }
 
@@ -431,6 +431,11 @@ fun PlayerScreen(
     hasNext: Boolean,
     nextTitle: String?,
     preloadedNext: PreparedEpisodePlayback?,
+    /** Opens straight into [PauseOverlay] instead of autoplaying — set for
+     * "Continue Watching" taps, so the viewer sees where they left off (cast,
+     * synopsis, "More like this") and presses Resume deliberately rather than
+     * being dropped straight back into mid-scene audio/video. */
+    startPaused: Boolean = false,
     onBack: () -> Unit,
     onPositionUpdate: (positionSecs: Double, durationSecs: Double) -> Unit,
     onContinue: () -> Unit,
@@ -462,6 +467,7 @@ fun PlayerScreen(
                 subtitles = subtitles,
                 resumePositionSecs = resumePositionSecs,
             ),
+            startPaused = startPaused,
         )
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
@@ -843,6 +849,20 @@ fun PlayerScreen(
                 onPlayRecommendation = onPlayRecommendation,
                 onSelectAudioTrack = { choice -> selectAudioTrack(player, choice) },
                 onSelectSubtitleTrack = { choice -> selectSubtitleTrack(player, choice) },
+            )
+        }
+
+        sectionLabel?.takeIf { !showPauseOverlay && !showContinuePrompt }?.let { label ->
+            Text(
+                label,
+                color = SwarmText,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 42.dp, top = 36.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
             )
         }
 

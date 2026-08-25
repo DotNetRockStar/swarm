@@ -205,6 +205,10 @@ sealed class UiState {
         /** The ended session is released before [preloadedNext] is negotiated
          * so a one-slot server can reserve the next stream immediately. */
         val sessionReleased: Boolean = false,
+        /** Set by a "Continue Watching" tap so [PlayerScreen] opens straight
+         * into its paused overlay instead of autoplaying — see that param's
+         * own doc comment. */
+        val startPaused: Boolean = false,
     ) : UiState()
 }
 
@@ -1315,7 +1319,7 @@ class SwarmViewModel(
      * it — the exact current screen (not just its embedded [Catalog]) is
      * what Back returns to, see [UiState.Player.previous].
      */
-    fun play(entry: MergedEntry) {
+    fun play(entry: MergedEntry, startPaused: Boolean = false) {
         val current = _state.value
         val catalog = current.embeddedCatalog() ?: return
         stopBrowsePreview()
@@ -1324,6 +1328,7 @@ class SwarmViewModel(
             catalog,
             previousScreen = current,
             replaceSession = _minimizedPlayer.value,
+            startPaused = startPaused,
         )
     }
 
@@ -1347,7 +1352,7 @@ class SwarmViewModel(
      * immediately instead of leaking a transcode/upload slot.
      */
     fun startBrowsePreview(entry: MergedEntry) {
-        if (entry.entry.kind == MediaKind.TRACK || _state.value !is UiState.Catalog) return
+        if (_state.value !is UiState.Catalog) return
         requestedBrowsePreview = entry
         if (_browsePreview.value?.entryKey == entry.entry.entryKey || browsePreviewWorker?.isActive == true) return
 
@@ -1800,6 +1805,7 @@ class SwarmViewModel(
         keepMinimized: Boolean = false,
         replaceSession: UiState.Player? = null,
         startPositionSecsOverride: Double? = null,
+        startPaused: Boolean = false,
     ) {
         // ExoPlayer can report ENDED more than once around teardown, and a
         // remote button can repeat. Until negotiation commits a new Player
@@ -1911,6 +1917,7 @@ class SwarmViewModel(
                 lyrics = selection.lyrics,
                 subtitles = selection.subtitles,
                 recommendations = pauseRecommendations(entry, catalog.entries),
+                startPaused = startPaused,
             )
             // keepMinimized: an autoplay-to-next-track that started while
             // the mini-bar (not the full screen) was showing stays in the
@@ -2213,10 +2220,16 @@ class SwarmViewModel(
 
     // --- Hierarchical browsing: Music (Artist -> Album -> Track) ---
 
-    fun openArtistShelf() {
+    /** [artists] lets a genre sub-shelf's own "Browse All" tile open this
+     * same full grid pre-filtered to just that genre, reusing the one
+     * [ArtistShelfScreen] rather than needing a genre-aware variant — the
+     * screen itself has no title/header to reflect either way, see
+     * [MovieShelfScreen]'s doc comment. Null (the top-level Music row's own
+     * tile) falls back to the full catalog, same as before. */
+    fun openArtistShelf(artists: List<ArtistGroup>? = null) {
         val current = _state.value
         if (current !is UiState.Catalog) return
-        _state.value = UiState.ArtistShelf(current, CatalogGrouping.groupTracksByArtistAlbum(current.entries))
+        _state.value = UiState.ArtistShelf(current, artists ?: CatalogGrouping.groupTracksByArtistAlbum(current.entries))
     }
 
     fun openArtistAlbums(artist: ArtistGroup) {
@@ -2252,10 +2265,13 @@ class SwarmViewModel(
         if (current is UiState.MovieDetail) _state.value = current.previous
     }
 
-    fun openMovieShelf() {
+    /** [movies] lets a genre sub-shelf's own "Browse All" tile reuse this
+     * same full grid pre-filtered to just that genre — see [openArtistShelf]'s
+     * doc comment for why a single un-titled screen can serve both cases. */
+    fun openMovieShelf(movies: List<MergedEntry>? = null) {
         val current = _state.value
         if (current !is UiState.Catalog) return
-        _state.value = UiState.MovieShelf(current, current.entries.filter { it.entry.kind == MediaKind.MOVIE })
+        _state.value = UiState.MovieShelf(current, movies ?: current.entries.filter { it.entry.kind == MediaKind.MOVIE })
     }
 
     fun backFromMovieShelf() {
@@ -2265,10 +2281,13 @@ class SwarmViewModel(
 
     // --- Hierarchical browsing: Shows (Show -> Season -> Episode) ---
 
-    fun openShowShelf() {
+    /** [shows] lets a genre sub-shelf's own "Browse All" tile reuse this
+     * same full grid pre-filtered to just that genre — see [openArtistShelf]'s
+     * doc comment for why a single un-titled screen can serve both cases. */
+    fun openShowShelf(shows: List<ShowGroup>? = null) {
         val current = _state.value
         if (current !is UiState.Catalog) return
-        _state.value = UiState.ShowShelf(current, CatalogGrouping.groupEpisodesByShowSeason(current.entries))
+        _state.value = UiState.ShowShelf(current, shows ?: CatalogGrouping.groupEpisodesByShowSeason(current.entries))
     }
 
     fun openShowSeasons(show: ShowGroup) {
