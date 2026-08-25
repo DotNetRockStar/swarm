@@ -14,7 +14,7 @@ use swarm_core::peer::MediaKind;
 use swarm_core::{entry_key, fingerprint};
 use tokio::sync::mpsc::Sender;
 
-const MISSING_CONFIRMATION_GRACE_MS: i64 = 60 * 60 * 1_000;
+pub(crate) const MISSING_CONFIRMATION_GRACE_MS: i64 = 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {

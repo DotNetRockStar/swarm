@@ -334,6 +334,27 @@ impl MediaService {
         }
     }
 
+    /// A client hitting a catalog entry whose backing file is gone (renamed
+    /// or deleted since the last scan) means the periodic library watch
+    /// hasn't caught up yet — flip the row unavailable right now instead of
+    /// leaving every subsequent request against the same stale entry to
+    /// fail the same way until the next scheduled rescan (up to
+    /// `AUTO_LIBRARY_WATCH_INTERVAL`, 15 minutes, or a manual rescan) runs.
+    /// Uses the exact same first-miss-flips-`available`-immediately policy
+    /// `scan::scan_roots_scoped_inner` already applies, so this only ever
+    /// makes the existing reconciliation fire sooner, never differently.
+    /// Best-effort: a DB error here just leaves the row as it was, same as
+    /// before this existed.
+    async fn mark_entry_missing(&self, relative_path: &str) {
+        if let Err(error) = self
+            .library
+            .mark_missing_by_path(relative_path, crate::scan::MISSING_CONFIRMATION_GRACE_MS)
+            .await
+        {
+            tracing::warn!(%error, "could not mark streaming-time-missing entry unavailable");
+        }
+    }
+
     async fn media(&self, entry_key: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
         if !is_valid_entry_key(entry_key) {
             return status(404);
@@ -354,6 +375,7 @@ impl MediaService {
     ) -> Resolved {
         let path = self.roots.resolve(&entry.relative_path);
         let Ok(metadata) = std::fs::metadata(&path) else {
+            self.mark_entry_missing(&entry.relative_path).await;
             return status(404); // deleted since last scan
         };
         let total = metadata.len();
@@ -409,6 +431,7 @@ impl MediaService {
         };
         let media_path = self.roots.resolve(&entry.relative_path);
         if !media_path.is_file() {
+            self.mark_entry_missing(&entry.relative_path).await;
             return status(404);
         }
         match self
