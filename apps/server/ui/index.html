@@ -39,7 +39,10 @@
     <h2>Welcome to SWARM</h2>
     <p class="tagline centered">Stream Whatever, Anywhere — Remote Media</p>
     <p class="muted">Choose the folder with your music and video. SWARM will scan it and can stream from it to devices in your swarm.</p>
-    <button id="chooseFolderBtn" style="margin-top:14px"><i class="bi bi-folder2-open"></i>Choose media folder…</button>
+    <div class="onboarding-root-actions">
+      <button id="chooseFolderBtn"><i class="bi bi-folder2-open"></i>Choose media folder…</button>
+      <button id="onboardNetworkRootBtn" class="secondary"><i class="bi bi-hdd-network"></i>Connect SMB…</button>
+    </div>
   </div>
 </div>
 
@@ -95,7 +98,10 @@
     </div>
 
     <div class="card">
-      <h2 class="info-trigger" data-info="media-roots" tabindex="0" role="button">Media roots <i class="bi bi-info-circle info-affordance"></i></h2>
+      <div class="card-head">
+        <h2 class="info-trigger" data-info="media-roots" tabindex="0" role="button">Media roots <i class="bi bi-info-circle info-affordance"></i></h2>
+        <button id="connectNetworkRootBtn" class="secondary"><i class="bi bi-hdd-network"></i>Connect SMB share…</button>
+      </div>
       <div id="mediaRootsList">Loading…</div>
       <div class="row add-root-row">
         <input id="addRootLabel" placeholder="Label (e.g. nas-movies)">
@@ -374,6 +380,32 @@
     <h2 id="infoModalTitle"></h2>
     <p id="infoModalBody" class="muted"></p>
     <div id="infoModalLinks" class="modal-links"></div>
+  </div>
+</div>
+
+<div id="networkRootModalBackdrop" class="modal-backdrop d-none">
+  <div class="modal-box network-root-modal-box" role="dialog" aria-modal="true" aria-labelledby="networkRootModalTitle">
+    <button id="networkRootModalClose" class="modal-close" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    <div class="modal-icon"><i class="bi bi-hdd-network"></i></div>
+    <h2 id="networkRootModalTitle">Connect an SMB share</h2>
+    <p class="muted network-root-help">Connect a NAS share through macOS. The password stays in the macOS credential prompt and Keychain.</p>
+    <div class="network-root-fields">
+      <label for="networkRootLabel">Label</label>
+      <input id="networkRootLabel" placeholder="nas-movies" autocomplete="off">
+      <label for="networkRootServer">NAS hostname or IP address</label>
+      <input id="networkRootServer" placeholder="nas.local" autocomplete="off" spellcheck="false">
+      <label id="networkRootShareLabel" for="networkRootShare">SMB share name</label>
+      <input id="networkRootShare" placeholder="Media" autocomplete="off" spellcheck="false">
+      <div id="networkRootUsernameField">
+        <label for="networkRootUsername">SMB username (optional)</label>
+        <input id="networkRootUsername" placeholder="Your NAS username" autocomplete="username">
+      </div>
+    </div>
+    <p id="networkRootProtocolNote" class="muted compact-help">macOS will ask for the SMB password and can save it in Keychain. SWARM never sees or stores it.</p>
+    <div class="network-root-modal-actions">
+      <button id="networkRootCancelBtn" class="secondary">Cancel</button>
+      <button id="networkRootConnectBtn"><i class="bi bi-link-45deg"></i>Connect and scan</button>
+    </div>
   </div>
 </div>
 

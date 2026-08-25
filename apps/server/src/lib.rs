@@ -24,7 +24,7 @@ use swarm_core::rest::{
 use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::bandwidth::BandwidthSample;
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
-use swarm_media::scan::{scan_roots, ScanProgressEvent, ScanReport};
+use swarm_media::scan::{scan_roots, scan_roots_scoped, ScanProgressEvent, ScanReport};
 use swarm_media::scrape::{
     run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig,
     ScrapeOneError, ScrapeProgressEvent, TmdbOverride,
@@ -181,6 +181,8 @@ pub enum ServerError {
     EntryNotFound,
     #[error("at least one media root is required")]
     NoMediaRoots,
+    #[error("no media root labeled \"{0}\" exists")]
+    MediaRootNotFound(String),
 }
 
 impl ServerCore {
@@ -267,9 +269,12 @@ impl ServerCore {
         // Always on, like the QUIC listener above — not gated behind a
         // settings toggle the way MCP is. See http_media.rs's module doc
         // comment for why it gets its own port rather than sharing bind's.
-        let http_media =
-            http_media::start(Arc::clone(&service), Arc::clone(&state_db), config.http_media_bind)
-                .await?;
+        let http_media = http_media::start(
+            Arc::clone(&service),
+            Arc::clone(&state_db),
+            config.http_media_bind,
+        )
+        .await?;
         let transcription = TranscriptionManager::start(
             Arc::clone(&library),
             media_roots.clone(),
@@ -371,6 +376,47 @@ impl ServerCore {
                 self.scan_status
                     .send_modify(|s| *s = ScanState::Failed(err.to_string()));
                 Err(err.into())
+            }
+        }
+    }
+
+    /// Reconcile only named roots while preserving the current full root
+    /// namespace. Used by network recovery so a returning SMB share does not
+    /// force unrelated local roots to make another complete filesystem walk.
+    pub async fn rescan_roots_by_label(
+        &self,
+        labels: &[String],
+    ) -> Result<ScanReport, ServerError> {
+        let all_roots = self.media_roots.roots();
+        let requested = labels.iter().map(String::as_str).collect::<HashSet<_>>();
+        let selected = all_roots
+            .iter()
+            .filter(|root| requested.contains(root.label.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(missing) = labels
+            .iter()
+            .find(|label| !selected.iter().any(|root| root.label == label.as_str()))
+        {
+            return Err(ServerError::MediaRootNotFound(missing.clone()));
+        }
+        if selected.is_empty() {
+            return Err(ServerError::NoMediaRoots);
+        }
+
+        let _guard = self.scan_lock.lock().await;
+        self.scan_status
+            .send_modify(|state| *state = ScanState::Scanning);
+        match scan_roots_scoped(&self.library, &selected, all_roots.len() > 1, None).await {
+            Ok(report) => {
+                self.scan_status
+                    .send_modify(|state| *state = ScanState::Done(report.clone()));
+                Ok(report)
+            }
+            Err(error) => {
+                self.scan_status
+                    .send_modify(|state| *state = ScanState::Failed(error.to_string()));
+                Err(error.into())
             }
         }
     }

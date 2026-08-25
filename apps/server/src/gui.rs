@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
-use swarm_server::{ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
+use swarm_server::{ScanState, ServerConfig, ServerCore, ServerStatus, TokenStoreMode};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -193,12 +193,14 @@ impl AppState {
 
 /// Network mounts can remain present under `/Volumes` while every read
 /// fails. Poll the same real-read health check used by the UI, ask macOS to
-/// remount known SMB roots with saved credentials, and rescan once after a
-/// root becomes readable again. Attempts are throttled so an offline NAS
-/// cannot produce a reconnect storm.
+/// remount known SMB roots with saved credentials, and retry only a scan that
+/// overlapped the outage or had failed. A healthy catalog does not need a
+/// filesystem walk merely because the same mount came back. Attempts are
+/// throttled so an offline NAS cannot produce a reconnect storm.
 fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
     tokio::spawn(async move {
         let mut unavailable = HashSet::<String>::new();
+        let mut needs_recovery_rescan = HashSet::<String>::new();
         let mut last_attempt = HashMap::<String, Instant>::new();
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
@@ -216,18 +218,56 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
             })
             .await
             .unwrap_or_default();
-            let mut recovered = false;
+            let configured_labels = roots
+                .iter()
+                .map(|root| root.label.as_str())
+                .collect::<HashSet<_>>();
+            unavailable.retain(|label| configured_labels.contains(label.as_str()));
+            needs_recovery_rescan.retain(|label| configured_labels.contains(label.as_str()));
+            last_attempt.retain(|label, _| configured_labels.contains(label.as_str()));
+            let mut recovered = Vec::<String>::new();
+            let mut recovered_needing_rescan = Vec::<String>::new();
+            let scan_needs_retry = matches!(
+                core.scan_status(),
+                ScanState::Scanning | ScanState::Failed(_)
+            );
             for (root, status) in roots.iter().zip(health) {
                 if status.available {
                     if unavailable.remove(&root.label) {
                         tracing::info!(root = %root.label, path = %root.path, "media root recovered");
-                        recovered = true;
+                        recovered.push(root.label.clone());
+                        if needs_recovery_rescan.remove(&root.label) {
+                            recovered_needing_rescan.push(root.label.clone());
+                        }
                     }
                     last_attempt.remove(&root.label);
                     continue;
                 }
-                unavailable.insert(root.label.clone());
-                let should_attempt = root.reconnect_url.is_some()
+                if scan_needs_retry {
+                    needs_recovery_rescan.insert(root.label.clone());
+                }
+                if unavailable.insert(root.label.clone()) {
+                    let retry_message = if status.auto_reconnect {
+                        "SWARM will ask macOS to reconnect it automatically. It will retry a scan only if one overlapped this outage."
+                    } else {
+                        "Reconnect the storage, then use Rescan so the library is synchronized."
+                    };
+                    let message = format!(
+                        "The media root \"{}\" at {} failed a real directory/file read: {}\n\n{}",
+                        root.label,
+                        root.path,
+                        status.error.as_deref().unwrap_or("unknown I/O error"),
+                        retry_message,
+                    );
+                    if let Err(error) = core
+                        .library
+                        .record_server_notification("error", "Media storage unavailable", &message)
+                        .await
+                    {
+                        tracing::warn!(%error, "could not save media-root failure notification");
+                    }
+                }
+                let should_attempt = status.auto_reconnect
                     && last_attempt
                         .get(&root.label)
                         .is_none_or(|last| last.elapsed() >= Duration::from_secs(30));
@@ -247,9 +287,62 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                     });
                 }
             }
-            if recovered {
-                if let Err(error) = core.rescan(None).await {
-                    tracing::warn!(%error, "media-root recovery rescan failed");
+            if !recovered.is_empty() {
+                if recovered_needing_rescan.is_empty() {
+                    let message = format!(
+                        "Recovered: {}\n\nThe existing library remains valid; no rescan was needed.",
+                        recovered.join(", "),
+                    );
+                    if let Err(error) = core
+                        .library
+                        .record_server_notification("success", "Media storage recovered", &message)
+                        .await
+                    {
+                        tracing::warn!(%error, "could not save media-root recovery notification");
+                    }
+                    continue;
+                }
+                match core.rescan_roots_by_label(&recovered_needing_rescan).await {
+                    Ok(report) => {
+                        let message = format!(
+                            "Recovered: {}\nRescanned after the interrupted scan: {}\n\nResult: +{} added, {} updated, {} removed, {} unchanged.",
+                            recovered.join(", "),
+                            recovered_needing_rescan.join(", "),
+                            report.added,
+                            report.updated,
+                            report.removed,
+                            report.unchanged,
+                        );
+                        if let Err(error) = core
+                            .library
+                            .record_server_notification(
+                                "success",
+                                "Media storage recovered",
+                                &message,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "could not save media-root recovery notification");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "media-root recovery rescan failed");
+                        let message = format!(
+                            "Recovered: {}\n\nThe interrupted library scan could not be retried: {error}",
+                            recovered.join(", "),
+                        );
+                        if let Err(save_error) = core
+                            .library
+                            .record_server_notification(
+                                "error",
+                                "Media storage recovered, but rescan failed",
+                                &message,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%save_error, "could not save recovery-rescan failure notification");
+                        }
+                    }
                 }
             }
         }
@@ -407,6 +500,107 @@ async fn add_media_root(
     let rescan = state.apply_live_roots(&settings.media_roots).await?;
     Ok(MediaRootsResult {
         media_roots: settings.media_roots,
+        rescan,
+    })
+}
+
+/// Connects an SMB share and adds the resulting OS mount as a media root.
+/// Credential entry/storage stays in macOS rather than passing a password
+/// through the webview or persisting one in SWARM settings.
+#[tauri::command]
+async fn connect_smb_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    label: String,
+    server: String,
+    share: String,
+    username: Option<String>,
+) -> Result<MediaRootsResult, String> {
+    let label = label.trim().to_string();
+    let server = server.trim().to_string();
+    let share = share.trim().to_string();
+    let username = username.map(|value| value.trim().to_string());
+    let dir = app_data_dir(&app)?;
+    if settings::load(&dir)
+        .media_roots
+        .iter()
+        .any(|root| root.label == label)
+    {
+        return Err(format!("a root labeled \"{label}\" already exists"));
+    }
+
+    let mounted = tokio::task::spawn_blocking({
+        let label = label.clone();
+        let server = server.clone();
+        let share = share.clone();
+        move || settings::connect_smb_share(&label, &server, &share, username.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let mut persisted = settings::load(&dir);
+    if persisted.media_roots.iter().any(|root| root.label == label) {
+        return Err(format!("a root labeled \"{label}\" already exists"));
+    }
+    persisted.media_roots.push(MediaRootSetting {
+        label,
+        path: mounted.path,
+        reconnect_url: Some(mounted.reconnect_url),
+    });
+    settings::save(&dir, &persisted).map_err(|error| error.to_string())?;
+    let rescan = state.apply_live_roots(&persisted.media_roots).await?;
+    Ok(MediaRootsResult {
+        media_roots: persisted.media_roots,
+        rescan,
+    })
+}
+
+/// User-triggered stale-SMB recovery. The background loop only asks macOS to
+/// reopen a share; this explicit action is allowed to force-unmount the exact
+/// `/Volumes/<name>` SMB mount first. It retries scanning only when the
+/// current/last scan was interrupted; an otherwise-valid catalog is reused.
+#[tauri::command]
+async fn repair_smb_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    label: String,
+) -> Result<MediaRootsResult, String> {
+    let dir = app_data_dir(&app)?;
+    let persisted = settings::load(&dir);
+    let root = persisted
+        .media_roots
+        .iter()
+        .find(|root| root.label == label)
+        .cloned()
+        .ok_or_else(|| format!("no media root labeled \"{label}\" exists"))?;
+    let needs_rescan = state.core.get().is_some_and(|core| {
+        matches!(
+            core.scan_status(),
+            ScanState::Scanning | ScanState::Failed(_)
+        )
+    });
+    tokio::task::spawn_blocking(move || settings::repair_smb_root(&root))
+        .await
+        .map_err(|error| error.to_string())??;
+    let rescan = if needs_rescan {
+        let Some(core) = state.core.get() else {
+            return Err("media server stopped during SMB repair".to_string());
+        };
+        let report = core
+            .rescan_roots_by_label(&[label])
+            .await
+            .map_err(|error| error.to_string())?;
+        Some(RescanResult {
+            added: report.added,
+            updated: report.updated,
+            removed: report.removed,
+            unchanged: report.unchanged,
+        })
+    } else {
+        None
+    };
+    Ok(MediaRootsResult {
+        media_roots: persisted.media_roots,
         rescan,
     })
 }
@@ -1576,6 +1770,8 @@ fn main() {
             read_file_bytes,
             list_media_roots,
             add_media_root,
+            connect_smb_root,
+            repair_smb_root,
             remove_media_root,
             set_tmdb_api_key,
             set_opensubtitles_api_key,

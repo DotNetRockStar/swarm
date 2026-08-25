@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use swarm_core::entry_key::entry_key;
 use swarm_core::peer::{AudioStreamInfo, MediaKind, TrackLyrics};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
-use swarm_media::scan::{scan_root, scan_roots};
+use swarm_media::scan::{scan_root, scan_roots, scan_roots_scoped};
 use swarm_media::store::{ArtworkKind, EntryRecord, Library, SubtitleRecord};
 
 struct Fixture {
@@ -595,6 +595,54 @@ async fn two_roots_with_the_same_relative_path_get_distinct_entry_keys() {
     assert!(paths.contains(&"nas/movies/Heat (1995)/Heat.1995.mkv"));
     assert_ne!(entries[0].entry_key, entries[1].entry_key);
     assert_ne!(entries[0].fingerprint, entries[1].fingerprint); // distinct content too
+}
+
+#[tokio::test]
+async fn scoped_rescan_reconciles_only_the_selected_multi_root() {
+    let base = std::env::temp_dir().join(format!("swarm-lib-scoped-roots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let local = base.join("local");
+    let nas = base.join("nas");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::create_dir_all(&nas).unwrap();
+    let library = Library::open(base.join("library.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    write(&local, "movies/Local One.mkv", &[1u8; 16]);
+    write(&local, "movies/Local Two.mkv", &[2u8; 16]);
+    write(&nas, "movies/NAS One.mkv", &[3u8; 16]);
+    write(&nas, "movies/NAS Two.mkv", &[4u8; 16]);
+    let roots = vec![
+        MediaRoot {
+            label: "local".into(),
+            path: local.clone(),
+        },
+        MediaRoot {
+            label: "nas".into(),
+            path: nas.clone(),
+        },
+    ];
+    scan_roots(&library, &roots, None).await.unwrap();
+
+    std::fs::remove_file(local.join("movies/Local Two.mkv")).unwrap();
+    std::fs::remove_file(nas.join("movies/NAS Two.mkv")).unwrap();
+    let report = scan_roots_scoped(&library, &roots[..1], true, None)
+        .await
+        .unwrap();
+
+    assert_eq!((report.removed, report.unchanged), (1, 1));
+    let paths = library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.relative_path)
+        .collect::<Vec<_>>();
+    assert!(!paths.contains(&"local/movies/Local Two.mkv".to_string()));
+    assert!(
+        paths.contains(&"nas/movies/NAS Two.mkv".to_string()),
+        "a scoped local rescan must not reconcile an unscanned NAS root"
+    );
 }
 
 #[tokio::test]

@@ -92,7 +92,7 @@ const INFO_TOPICS = {
   },
   "media-roots": {
     icon: "bi-folder2-open", title: "Media roots",
-    body: "The folders on this computer — or a mounted network share — that SWARM scans for movies, shows, and music. You can add more than one.",
+    body: "The folders SWARM scans for movies, shows, and music. Add a local folder or connect an SMB share from a NAS. You can combine more than one root.",
   },
   "tmdb-scraping": {
     icon: "bi-cloud-download", title: "TMDb scraping",

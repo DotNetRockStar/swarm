@@ -347,15 +347,30 @@ setInterval(() => {
 async function refreshMediaRoots() {
   const list = document.getElementById("mediaRootsList");
   try {
-    const roots = await invoke("list_media_roots");
-    list.innerHTML = roots.map(r => `
+    const [roots, health] = await Promise.all([
+      invoke("list_media_roots"),
+      invoke("get_media_root_health"),
+    ]);
+    const healthByLabel = new Map(health.map(root => [root.label, root]));
+    list.innerHTML = roots.map(r => {
+      const status = healthByLabel.get(r.label);
+      const protocol = status?.network_protocol;
+      let reconnectButton = "";
+      if (status && !status.available && protocol === "SMB") {
+        reconnectButton = `<button class="secondary" data-repair-smb="${esc(r.label)}"><i class="bi bi-tools"></i>Repair SMB</button>`;
+      }
+      return `
       <div class="media-root-row">
         <div class="media-root-info">
-          <div class="media-root-label">${esc(r.label)}</div>
+          <div class="media-root-label">${esc(r.label)}${protocol ? `<span class="media-root-protocol">${esc(protocol)}</span>` : ""}${status ? `<span class="media-root-status ${status.available ? "" : "media-root-status-unavailable"}">${status.available ? "Connected" : "Unavailable"}</span>` : ""}</div>
           <div class="mono muted media-root-path">${esc(r.path)}</div>
         </div>
-        <button class="danger" data-remove-root="${esc(r.label)}" ${roots.length <= 1 ? "disabled" : ""}><i class="bi bi-trash"></i>Remove</button>
-      </div>`).join("");
+        <div class="media-root-actions">
+          ${reconnectButton}
+          <button class="danger" data-remove-root="${esc(r.label)}" ${roots.length <= 1 ? "disabled" : ""}><i class="bi bi-trash"></i>Remove</button>
+        </div>
+      </div>`;
+    }).join("");
     list.querySelectorAll("[data-remove-root]").forEach(btn => {
       btn.addEventListener("click", async () => {
         try {
@@ -364,6 +379,23 @@ async function refreshMediaRoots() {
           describeRootChange(result);
         } catch (err) {
           showToast(String(err), "error");
+        }
+      });
+    });
+    list.querySelectorAll("[data-repair-smb]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const result = await invoke("repair_smb_root", { label: btn.dataset.repairSmb });
+          await Promise.all([refreshMediaRoots(), refreshMediaRootHealth()]);
+          if (result.rescan) {
+            describeRootChange(result);
+          } else {
+            showToast("SMB share repaired — the existing library is ready; no rescan was needed.", "success");
+          }
+        } catch (err) {
+          showToast(String(err), "error");
+          btn.disabled = false;
         }
       });
     });
@@ -400,4 +432,54 @@ document.getElementById("addRootBtn").addEventListener("click", async () => {
 document.getElementById("chooseAddRootBtn").addEventListener("click", async () => {
   const picked = await invoke("pick_folder_path").catch(() => null);
   if (picked) document.getElementById("addRootPath").value = picked;
+});
+
+// ---- SMB network roots -----------------------------------------------------
+
+const networkRootModal = document.getElementById("networkRootModalBackdrop");
+
+function openNetworkRootModal() {
+  networkRootModal.classList.remove("d-none");
+  document.getElementById("networkRootLabel").focus();
+}
+
+function closeNetworkRootModal() {
+  networkRootModal.classList.add("d-none");
+}
+
+document.getElementById("connectNetworkRootBtn").addEventListener("click", openNetworkRootModal);
+document.getElementById("onboardNetworkRootBtn").addEventListener("click", openNetworkRootModal);
+document.getElementById("networkRootModalClose").addEventListener("click", closeNetworkRootModal);
+document.getElementById("networkRootCancelBtn").addEventListener("click", closeNetworkRootModal);
+networkRootModal.addEventListener("click", event => {
+  if (event.target === networkRootModal) closeNetworkRootModal();
+});
+
+document.getElementById("networkRootConnectBtn").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  const wasOnboarding = !document.getElementById("onboardFolderView").classList.contains("d-none");
+  button.disabled = true;
+  try {
+    const result = await invoke("connect_smb_root", {
+      label: document.getElementById("networkRootLabel").value,
+      server: document.getElementById("networkRootServer").value,
+      share: document.getElementById("networkRootShare").value,
+      username: document.getElementById("networkRootUsername").value || null,
+    });
+    for (const id of ["networkRootLabel", "networkRootServer", "networkRootShare", "networkRootUsername"]) {
+      document.getElementById(id).value = "";
+    }
+    closeNetworkRootModal();
+    showToast("SMB share connected.", "success");
+    if (wasOnboarding) {
+      await enterDashboard();
+    } else {
+      await Promise.all([refreshMediaRoots(), refreshMediaRootHealth()]);
+      describeRootChange(result);
+    }
+  } catch (err) {
+    showToast(String(err), "error", { duration: 9000 });
+  } finally {
+    button.disabled = false;
+  }
 });
