@@ -17,6 +17,13 @@
  * [app.swarm.tv.app.data.SwarmViewModel.UiState.Loading] screen), while
  * [R.drawable.loading_black]'s flat black matches [PlayerScreen]'s own pure-
  * black backdrop.
+ *
+ * [useBufferingSpinner] swaps the mascot out entirely for
+ * [R.drawable.loading_buffering], a plain yellow ring spinner on the same
+ * flat-black backdrop as [onBlackBackground]'s player variant — the mascot's
+ * whimsy reads fine for a cold app-start or catalog merge, but popping it up
+ * mid-movie every time the stream stalls was real, reported feedback: a
+ * plain spinner reads as "buffering," not "something broke."
  */
 package app.swarm.tv.app.ui.components
 
@@ -95,11 +102,16 @@ private val LOADING_MESSAGES = listOf(
 fun SwarmLoadingIndicator(
     modifier: Modifier = Modifier,
     onBlackBackground: Boolean = false,
+    useBufferingSpinner: Boolean = false,
     messageOverride: String? = null,
     messageColor: Color = SwarmMuted,
 ) {
     val loadingMessage = remember(messageOverride) { messageOverride ?: LOADING_MESSAGES.random() }
-    val gif = if (onBlackBackground) R.drawable.loading_black else R.drawable.loading
+    val gif = when {
+        useBufferingSpinner -> R.drawable.loading_buffering
+        onBlackBackground -> R.drawable.loading_black
+        else -> R.drawable.loading
+    }
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         AsyncImage(model = gif, contentDescription = null, modifier = Modifier.size(160.dp))
         Spacer(Modifier.height(14.dp))

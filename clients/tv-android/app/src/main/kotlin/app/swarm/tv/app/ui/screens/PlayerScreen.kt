@@ -38,6 +38,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -133,16 +134,27 @@ private const val SERVER_OFFLINE_RETRY_DELAY_MS = 2_000L
 private const val SKIP_INTRO_OFFER_MS = 10_000L
 private const val INTRO_POSITION_POLL_MS = 250L
 
-/** Returns the intro covering [positionMs], using IntroDB's null-start
- * convention for an intro that begins with the episode. Invalid/open-ended
- * intro markers cannot provide a seek target and are ignored. */
-internal fun activeIntroSegment(segments: List<SkipSegment>, positionMs: Long): SkipSegment? =
+/** D-pad left/right rewind/fast-forward step. Android's own key-repeat
+ * mechanism redelivers ACTION_DOWN with an incrementing repeatCount while a
+ * hardware button stays held, so consuming every one of those (not just the
+ * first) is what makes holding the button keep seeking. */
+private const val DPAD_SEEK_STEP_MS = 60_000L
+
+/** Returns the [kind] IntroDB marker covering [positionMs], using IntroDB's
+ * null-start convention for a segment that begins with the episode.
+ * Open-ended segments (no [SkipSegment.endMs]) cannot provide a skip target
+ * or a reliable "still in this section" bound, so they're ignored — same
+ * reasoning [activeIntroSegment] always applied, generalized to any kind. */
+internal fun activeSkipSegment(segments: List<SkipSegment>, positionMs: Long, kind: SkipSegmentKind): SkipSegment? =
     segments.firstOrNull { segment ->
-        if (segment.kind != SkipSegmentKind.INTRO) return@firstOrNull false
+        if (segment.kind != kind) return@firstOrNull false
         val start = segment.startMs ?: 0L
         val end = segment.endMs ?: return@firstOrNull false
         start >= 0L && end > start && positionMs >= start && positionMs < end
     }
+
+internal fun activeIntroSegment(segments: List<SkipSegment>, positionMs: Long): SkipSegment? =
+    activeSkipSegment(segments, positionMs, SkipSegmentKind.INTRO)
 
 // Real complaint from live use: even at max system/TV volume, some content isn't
 // loud enough. LoudnessEnhancer processes the decoded PCM before it reaches the
@@ -411,7 +423,6 @@ fun PlayerScreen(
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
 ) {
-    BackHandler(onBack = onBack)
     val context = LocalContext.current
     var showContinuePrompt by remember(sessionId) { mutableStateOf(false) }
     // Covers the gap between "screen opened" and "a frame is actually up" —
@@ -443,8 +454,24 @@ fun PlayerScreen(
     var lastVideoHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
+    // First Back pauses instead of leaving outright — a real complaint from
+    // live use, since the old unconditional-exit behavior threw away the
+    // playhead's context the instant Back was pressed. Once paused (or if
+    // playback had already ended into the Continue prompt), Back falls
+    // through to the normal exit, which always returns to [UiState.Player
+    // .previous] — the exact screen/card Play was invoked from.
+    BackHandler(
+        onBack = {
+            if (showPauseOverlay || showContinuePrompt) onBack() else player.pause()
+        },
+    )
     var offeredIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
     var dismissedIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
+    // Netflix-style "which section is this" label — Recap/Credits get a
+    // plain badge (no skip action; Recap is short and Credits is already
+    // near the Continue/next-episode flow), while Intro keeps its dedicated
+    // Skip button below instead of duplicating into this badge too.
+    var sectionLabel by remember(sessionId) { mutableStateOf<String?>(null) }
     var trackAvailability by remember(sessionId) {
         mutableStateOf(trackAvailability(player.currentTracks))
     }
@@ -488,19 +515,25 @@ fun PlayerScreen(
     // or timeout until playback reaches another intro marker.
     LaunchedEffect(player, entry.fingerprint) {
         while (true) {
-            val active = if (
-                entry.entry.kind == MediaKind.EPISODE &&
-                !isLoading &&
-                !showPauseOverlay &&
-                !showContinuePrompt
-            ) {
-                activeIntroSegment(entry.entry.skipSegments, controllerPlayer.currentPosition)
+            val segmentsVisible = !isLoading && !showPauseOverlay && !showContinuePrompt
+            val active = if (entry.entry.kind == MediaKind.EPISODE && segmentsVisible) {
+                activeSkipSegment(entry.entry.skipSegments, controllerPlayer.currentPosition, SkipSegmentKind.INTRO)
             } else {
                 null
             }
             when {
                 active == null -> offeredIntro = null
                 active != dismissedIntro -> offeredIntro = active
+            }
+            sectionLabel = if (!segmentsVisible) {
+                null
+            } else {
+                val position = controllerPlayer.currentPosition
+                when {
+                    activeSkipSegment(entry.entry.skipSegments, position, SkipSegmentKind.RECAP) != null -> "Recap"
+                    activeSkipSegment(entry.entry.skipSegments, position, SkipSegmentKind.CREDITS) != null -> "Credits"
+                    else -> null
+                }
             }
             delay(INTRO_POSITION_POLL_MS)
         }
@@ -712,6 +745,21 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { composeEvent ->
                 val event = composeEvent.nativeKeyEvent
+                // D-pad left/right seek directly during active playback,
+                // ahead of Media3's own controller (which would otherwise
+                // treat them as focus-navigation between its transport
+                // buttons) — real feedback from live use asking for an
+                // immediate rewind/fast-forward gesture that doesn't first
+                // require bringing up the controller bar.
+                if (!showPauseOverlay && !showContinuePrompt &&
+                    (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
+                ) {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        val deltaMs = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) DPAD_SEEK_STEP_MS else -DPAD_SEEK_STEP_MS
+                        controllerPlayer.seekTo((controllerPlayer.currentPosition + deltaMs).coerceAtLeast(0L))
+                    }
+                    return@onPreviewKeyEvent true
+                }
                 val action = remotePlaybackAction(event.keyCode) ?: return@onPreviewKeyEvent false
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     when (action) {
@@ -766,6 +814,7 @@ fun PlayerScreen(
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 SwarmLoadingIndicator(
                     onBlackBackground = true,
+                    useBufferingSpinner = true,
                     messageOverride = if (isRebuffering) "Buffering…" else null,
                     messageColor = if (isRebuffering) SwarmAccentHot else SwarmMuted,
                 )
@@ -787,7 +836,9 @@ fun PlayerScreen(
                 artworkUrl = artworkUrl,
                 audioTracks = trackAvailability.audioTracks,
                 subtitleTracks = trackAvailability.subtitleTracks,
+                hasNextEpisode = hasNext && entry.entry.kind == MediaKind.EPISODE,
                 onResume = player::play,
+                onNextEpisode = onContinue,
                 onPlayRecommendation = onPlayRecommendation,
                 onSelectAudioTrack = { choice -> selectAudioTrack(player, choice) },
                 onSelectSubtitleTrack = { choice -> selectSubtitleTrack(player, choice) },
@@ -926,7 +977,9 @@ private fun PauseOverlay(
     artworkUrl: (MergedEntry) -> String?,
     audioTracks: List<TrackChoice>,
     subtitleTracks: List<TrackChoice>,
+    hasNextEpisode: Boolean,
     onResume: () -> Unit,
+    onNextEpisode: () -> Unit,
     onPlayRecommendation: (MergedEntry) -> Unit,
     onSelectAudioTrack: (TrackChoice) -> Unit,
     onSelectSubtitleTrack: (TrackChoice) -> Unit,
@@ -995,12 +1048,19 @@ private fun PauseOverlay(
                         )
                     }
                     Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = onResume,
-                        modifier = Modifier.focusRequester(resumeFocusRequester),
-                        colors = swarmActionButtonColors(),
-                    ) {
-                        Text("▶  Resume", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onResume,
+                            modifier = Modifier.focusRequester(resumeFocusRequester),
+                            colors = swarmActionButtonColors(),
+                        ) {
+                            Text("▶  Resume", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
+                        }
+                        if (hasNextEpisode) {
+                            Button(onClick = onNextEpisode, colors = swarmActionButtonColors()) {
+                                Text("Next Episode  ⏭", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
                 Column(modifier = Modifier.width(285.dp)) {
@@ -1025,7 +1085,7 @@ private fun PauseOverlay(
                 Text("More like this", color = SwarmText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
                 LazyRow(
-                    modifier = Modifier.fillMaxWidth().height(142.dp),
+                    modifier = Modifier.fillMaxWidth().height(162.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(recommendations, key = { it.fingerprint }) { recommendation ->
@@ -1062,31 +1122,27 @@ private fun TrackPickerBlock(
     }
 }
 
+/** Same 2:3 poster box every other shelf in the app uses (see
+ * `CatalogScreen`'s `CARD_MEDIA_HEIGHT`/`MovieShelfScreen`'s
+ * `aspectRatio(2f / 3f)`) — a square box here used to force [ArtworkImage]'s
+ * `ContentScale.Crop` to chop the top/bottom off every portrait poster. No
+ * title underneath either: this shelf is "more like this" browsing, not a
+ * text-first list, and the poster art alone reads fine at this size like it
+ * does everywhere else artwork is shown without a caption. */
 @Composable
 private fun PauseRecommendationCard(entry: MergedEntry, artworkUrl: String?, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         colors = CardDefaults.colors(containerColor = SwarmSurface),
         scale = CardDefaults.scale(scale = 1f, focusedScale = 1.06f, pressedScale = 0.98f),
-        modifier = Modifier.width(102.dp),
+        modifier = Modifier.width(108.dp),
     ) {
-        Column {
-            ArtworkImage(
-                label = pauseRecommendationTitle(entry),
-                placeholderType = if (entry.entry.kind == MediaKind.MOVIE) "Movie" else "Show",
-                primaryUrl = artworkUrl,
-                modifier = Modifier.fillMaxWidth().height(102.dp).clip(RoundedCornerShape(4.dp)),
-            )
-            Text(
-                pauseRecommendationTitle(entry),
-                color = SwarmText,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-            )
-        }
+        ArtworkImage(
+            label = pauseRecommendationTitle(entry),
+            placeholderType = if (entry.entry.kind == MediaKind.MOVIE) "Movie" else "Show",
+            primaryUrl = artworkUrl,
+            modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+        )
     }
 }
 
