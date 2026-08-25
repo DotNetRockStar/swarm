@@ -131,6 +131,7 @@ GIT_AUTHOR_DATE='2026-08-25T09:30:00-0500' \
 GIT_COMMITTER_DATE='2026-08-25T09:30:00-0500' \
     git -C "$LEGACY_REPO" commit -q -m "partial issue #202"
 LEGACY_CANDIDATE_SHA="$(git -C "$LEGACY_REPO" rev-parse HEAD)"
+LEGACY_DAMAGED_CANDIDATE_SHA="${LEGACY_CANDIDATE_SHA:0:8}00000000000000000000000000000000"
 printf 'later\n' > "$LEGACY_REPO/later.txt"
 git -C "$LEGACY_REPO" add later.txt
 GIT_AUTHOR_DATE='2026-08-25T10:30:00-0500' \
@@ -141,12 +142,15 @@ REPO_DIR="$LEGACY_REPO"
 STATE_DIR="$LEGACY_STATE"
 IN_PROGRESS_FILE="$STATE_DIR/in-progress-issue.json"
 PAUSED_ISSUES_DIR="$STATE_DIR/quota-paused-issues"
-"$JQ_BIN" -n --arg base_sha "$LEGACY_BASE_SHA" '
+"$JQ_BIN" -n \
+    --arg base_sha "$LEGACY_BASE_SHA" \
+    --arg candidate_sha "$LEGACY_DAMAGED_CANDIDATE_SHA" '
     {
         issue_number: 202,
         issue_title: "Legacy paused work",
         issue_url: "https://example.invalid/issues/202",
         base_sha: $base_sha,
+        candidate_sha: $candidate_sha,
         ai_tool: "Codex",
         model: "test-model",
         effort: "high",

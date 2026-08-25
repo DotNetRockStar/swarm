@@ -146,6 +146,9 @@ save_in_progress_issue() {
     local issue_url="$3"
     local base_sha="$4"
 
+    base_sha="$(git -C "$REPO_DIR" rev-parse --verify "$base_sha^{commit}" 2>/dev/null)" \
+        || fail "Cannot save issue #$issue_number with an invalid base commit: $4"
+
     IN_PROGRESS_TEMP="$(mktemp "$STATE_DIR/in-progress.XXXXXX")"
     "$JQ_BIN" -n \
         --argjson issue_number "$issue_number" \
@@ -473,12 +476,105 @@ validate_quota_paused_state() {
         and (.issue_url | type) == "string"
         and (.base_sha | type) == "string"
         and (.base_sha | test("^[0-9a-f]{40}$"))
+        and ((.candidate_sha? // "") as $sha
+            | ($sha | type) == "string"
+            and ($sha == "" or ($sha | test("^[0-9a-f]{40}$"))))
+        and ((.attempt_start_sha? // "") as $sha
+            | ($sha | type) == "string"
+            and ($sha == "" or ($sha | test("^[0-9a-f]{40}$"))))
         and (.ai_tool | IN("Claude", "Codex"))
         and (.model | type) == "string" and (.model | length) > 0
         and (.effort | type) == "string" and (.effort | length) > 0
         and (.session_id | type) == "string" and (.session_id | length) > 0
         and .status == "quota_paused"
     ' "$state_file" >/dev/null 2>&1
+}
+
+# Resolve recovery commit IDs before they are persisted or trusted. If a
+# damaged 40-character ID still has an accurate eight-character prefix, only
+# repair it when that prefix identifies exactly one commit between the saved
+# base and current main. This recovers a transcription error without guessing
+# across unrelated history.
+resolve_recovery_candidate_sha() {
+    local base_sha="$1"
+    local saved_sha="$2"
+    local tip_sha="$3"
+    local canonical_sha
+    local prefix
+    local matches
+
+    canonical_sha="$(git -C "$REPO_DIR" rev-parse --verify "$saved_sha^{commit}" 2>/dev/null || true)"
+    if [ -n "$canonical_sha" ] \
+        && git -C "$REPO_DIR" merge-base --is-ancestor "$base_sha" "$canonical_sha" \
+        && git -C "$REPO_DIR" merge-base --is-ancestor "$canonical_sha" "$tip_sha"; then
+        printf '%s\n' "$canonical_sha"
+        return 0
+    fi
+
+    [[ "$saved_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+    prefix="${saved_sha:0:8}"
+    matches="$(git -C "$REPO_DIR" rev-list "$tip_sha" "^$base_sha" \
+        | awk -v prefix="$prefix" 'index($0, prefix) == 1 { print }')"
+    [ "$(printf '%s\n' "$matches" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] \
+        || return 1
+    printf '%s\n' "$matches"
+}
+
+normalize_saved_recovery_commits() {
+    local state_file="$1"
+    local tip_sha="$2"
+    local base_sha
+    local canonical_base_sha
+    local candidate_sha
+    local canonical_candidate_sha=""
+    local attempt_start_sha
+    local canonical_attempt_start_sha=""
+    local state_temp
+
+    base_sha="$("$JQ_BIN" -r '.base_sha // empty' "$state_file")"
+    canonical_base_sha="$(git -C "$REPO_DIR" rev-parse --verify "$base_sha^{commit}" 2>/dev/null)" \
+        || return 1
+    git -C "$REPO_DIR" merge-base --is-ancestor "$canonical_base_sha" "$tip_sha" \
+        || return 1
+
+    candidate_sha="$("$JQ_BIN" -r '.candidate_sha // empty' "$state_file")"
+    if [ -n "$candidate_sha" ]; then
+        canonical_candidate_sha="$(resolve_recovery_candidate_sha \
+            "$canonical_base_sha" "$candidate_sha" "$tip_sha")" || return 1
+    fi
+
+    attempt_start_sha="$("$JQ_BIN" -r '.attempt_start_sha // empty' "$state_file")"
+    if [ -n "$attempt_start_sha" ]; then
+        canonical_attempt_start_sha="$(git -C "$REPO_DIR" rev-parse --verify \
+            "$attempt_start_sha^{commit}" 2>/dev/null)" || return 1
+        git -C "$REPO_DIR" merge-base --is-ancestor \
+            "$canonical_base_sha" "$canonical_attempt_start_sha" || return 1
+        git -C "$REPO_DIR" merge-base --is-ancestor \
+            "$canonical_attempt_start_sha" "$tip_sha" || return 1
+    fi
+
+    if [ "$base_sha" = "$canonical_base_sha" ] \
+        && [ "$candidate_sha" = "$canonical_candidate_sha" ] \
+        && [ "$attempt_start_sha" = "$canonical_attempt_start_sha" ]; then
+        return 0
+    fi
+
+    state_temp="$(mktemp "$STATE_DIR/recovery-state.XXXXXX")"
+    if ! "$JQ_BIN" \
+        --arg base_sha "$canonical_base_sha" \
+        --arg candidate_sha "$canonical_candidate_sha" \
+        --arg attempt_start_sha "$canonical_attempt_start_sha" '
+            .base_sha = $base_sha
+            | (if $candidate_sha != "" then .candidate_sha = $candidate_sha else del(.candidate_sha) end)
+            | (if $attempt_start_sha != "" then .attempt_start_sha = $attempt_start_sha else del(.attempt_start_sha) end)
+        ' "$state_file" > "$state_temp"; then
+        rm -f -- "$state_temp"
+        return 1
+    fi
+    mv -- "$state_temp" "$state_file"
+    if [ -n "$candidate_sha" ] && [ "$candidate_sha" != "$canonical_candidate_sha" ]; then
+        log "Repaired saved recovery commit $candidate_sha as $canonical_candidate_sha."
+    fi
 }
 
 drop_worker_stash() {
@@ -514,12 +610,14 @@ suspend_quota_paused_issue() {
         fail "SWARM_REPO_DIR is not a Git repository: $REPO_DIR"
     fi
 
+    current_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+    normalize_saved_recovery_commits "$IN_PROGRESS_FILE" "$current_sha" \
+        || fail "The saved commits for the quota-paused session are invalid or not on main: $IN_PROGRESS_FILE"
     issue_number="$("$JQ_BIN" -r '.issue_number' "$IN_PROGRESS_FILE")"
     base_sha="$("$JQ_BIN" -r '.base_sha' "$IN_PROGRESS_FILE")"
     attempt_start_sha="$("$JQ_BIN" -r '.attempt_start_sha // empty' "$IN_PROGRESS_FILE")"
     candidate_sha="$("$JQ_BIN" -r '.candidate_sha // empty' "$IN_PROGRESS_FILE")"
     paused_at="$("$JQ_BIN" -r '.quota_paused_at // empty' "$IN_PROGRESS_FILE")"
-    current_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
     if ! git -C "$REPO_DIR" merge-base --is-ancestor "$base_sha" "$current_sha"; then
         fail "Main no longer descends from paused issue #$issue_number's saved base commit."
     fi
@@ -577,6 +675,7 @@ restore_quota_paused_issue() {
     local issue_number
     local stash_oid
     local resumed_at
+    local current_sha
 
     [ ! -e "$IN_PROGRESS_FILE" ] \
         || fail "Cannot restore a quota-paused issue while another issue is active."
@@ -585,6 +684,10 @@ restore_quota_paused_issue() {
     if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
         fail "The repository must be clean before restoring a quota-paused issue."
     fi
+
+    current_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+    normalize_saved_recovery_commits "$paused_file" "$current_sha" \
+        || fail "The saved commits for the quota-paused session are invalid or not on main: $paused_file"
 
     issue_number="$("$JQ_BIN" -r '.issue_number' "$paused_file")"
     stash_oid="$("$JQ_BIN" -r '.worktree_stash_oid // empty' "$paused_file")"
@@ -1193,6 +1296,8 @@ if [ -f "$IN_PROGRESS_FILE" ]; then
     if [ "$SAVED_ISSUE_NUMBER" != "$ISSUE_NUMBER" ]; then
         fail "Issue #$SAVED_ISSUE_NUMBER is already in progress; refusing to start issue #$ISSUE_NUMBER."
     fi
+    normalize_saved_recovery_commits "$IN_PROGRESS_FILE" "$RUN_START_SHA" \
+        || fail "The saved commits for issue #$ISSUE_NUMBER are invalid or not on main."
     BASE_SHA="$("$JQ_BIN" -r '.base_sha' "$IN_PROGRESS_FILE")"
     RECOVERY_CANDIDATE_SHA="$("$JQ_BIN" -r '.candidate_sha // empty' "$IN_PROGRESS_FILE")"
     if ! git -C "$REPO_DIR" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
