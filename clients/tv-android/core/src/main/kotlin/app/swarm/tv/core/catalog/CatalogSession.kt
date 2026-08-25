@@ -111,19 +111,25 @@ class CatalogSession internal constructor(
     private val proxy: PeerLoopbackProxy,
     private val catalogCache: CatalogCache? = null,
     private val directConnector: DirectConnector,
+    private val onConnectionRestored: (serverId: String) -> Unit = {},
 ) : AutoCloseable {
     constructor(
         proxy: PeerLoopbackProxy,
         catalogCache: CatalogCache? = null,
+        onConnectionRestored: (serverId: String) -> Unit = {},
     ) : this(
         proxy,
         catalogCache,
         { device, clientCertificate, clientKey ->
             connectToServer(device, clientCertificate, clientKey)
         },
+        onConnectionRestored,
     )
 
     private val connections = ConcurrentHashMap<String, PeerConnection>()
+    /** A transport failure removed these devices' raw connections. The next
+     * successful handshake is a genuine reconnect, not an initial connect. */
+    private val disconnectedDevices = ConcurrentHashMap.newKeySet<String>()
     /** Prevent an artwork burst and a simultaneous catalog refresh from
      * opening several replacement QUIC connections to the same server. */
     private val connectionLocks = ConcurrentHashMap<String, Mutex>()
@@ -195,6 +201,7 @@ class CatalogSession internal constructor(
     /** Close this TV's connection to one server without changing any other device's swarm membership. */
     fun disconnect(deviceId: String) {
         connections.remove(deviceId)?.let(::closeConnection)
+        disconnectedDevices.remove(deviceId)
         connectionLocks.remove(deviceId)
         routeMemory.forget(deviceId)
         if (proxyRegisteredDevices.remove(deviceId)) proxy.unregister(deviceId)
@@ -458,6 +465,11 @@ class CatalogSession internal constructor(
         // looks up the *current* raw connection dynamically at request
         // time, so it never goes stale on its own.
         ensureProxyRegistration(device, clientCertificate, clientKey)
+        if (disconnectedDevices.remove(device.deviceId)) {
+            // Observability must never turn a healthy replacement transport
+            // into a failed request if an app-level listener misbehaves.
+            runCatching { onConnectionRestored(device.deviceId) }
+        }
         return connection
     }
 
@@ -577,7 +589,7 @@ class CatalogSession internal constructor(
     /** Evict only the connection that actually failed. Another worker may
      * already have installed a healthy replacement for this server. */
     private fun evictConnection(serverId: String, failed: PeerConnection) {
-        connections.remove(serverId, failed)
+        if (connections.remove(serverId, failed)) disconnectedDevices.add(serverId)
         closeConnection(failed)
     }
 
@@ -602,6 +614,7 @@ class CatalogSession internal constructor(
         proxyRegisteredDevices.clear()
         connections.values.forEach(::closeConnection)
         connections.clear()
+        disconnectedDevices.clear()
         connectionLocks.clear()
         manifests.clear()
     }

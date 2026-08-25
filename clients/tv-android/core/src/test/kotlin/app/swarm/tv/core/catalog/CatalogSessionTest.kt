@@ -17,6 +17,9 @@ import app.swarm.tv.core.transport.PeerResponse
 import app.swarm.tv.core.transport.TestIdentity
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
@@ -111,10 +114,13 @@ class CatalogSessionTest {
     }
 
     @Test
-    fun `interrupted playback reconnect becomes a recoverable 503`() = runBlocking {
+    fun `interrupted playback reconnect becomes 503 then reconnects on a later request`() = runBlocking {
         val manifest = CatalogManifest(thumbprint = "catalog-v1", entries = emptyList())
         val connection = InterruptingCatalogConnection(manifest)
-        var connectionAttempts = 0
+        val replacement = MediaConnection("resumed")
+        val connectionAttempts = AtomicInteger()
+        val allowReconnect = AtomicBoolean()
+        val restoredServer = AtomicReference<String>()
         val proxy = PeerLoopbackProxy.start()
         val identity = TestIdentity.generate()
         val device = SwarmDevice(
@@ -126,12 +132,21 @@ class CatalogSessionTest {
             metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
         )
 
-        CatalogSession(proxy, directConnector = { _, _, _ ->
-            connectionAttempts += 1
-            if (connectionAttempts == 1) connection else null
-        }).use { session ->
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                val attempt = connectionAttempts.incrementAndGet()
+                when {
+                    attempt == 1 -> connection
+                    allowReconnect.get() -> replacement
+                    else -> null
+                }
+            },
+            onConnectionRestored = restoredServer::set,
+        ).use { session ->
             val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
             assertTrue(result.unreachable.isEmpty())
+            assertEquals(null, restoredServer.get())
 
             // Mirrors the Fire TV crash: kwik reported the dead connection
             // and left the proxy worker interrupted immediately before its
@@ -140,6 +155,20 @@ class CatalogSessionTest {
             OkHttpClient().newCall(
                 Request.Builder().url(proxy.urlFor(device.deviceId, "/media/song")).build(),
             ).execute().use { response -> assertEquals(503, response.code) }
+            assertEquals(null, restoredServer.get())
+
+            // Media3 retries this loopback URL after its two-second outage
+            // delay. Once the server is available, the durable proxy route
+            // must establish a new raw QUIC connection and serve the song.
+            allowReconnect.set(true)
+            OkHttpClient().newCall(
+                Request.Builder().url(proxy.urlFor(device.deviceId, "/media/song")).build(),
+            ).execute().use { response ->
+                assertEquals(200, response.code)
+                assertEquals("resumed", response.body?.string())
+            }
+            assertTrue(connectionAttempts.get() >= 2)
+            assertEquals(device.deviceId, restoredServer.get())
         }
         proxy.close()
     }
@@ -192,6 +221,24 @@ class CatalogSessionTest {
                 "/catalog/manifest" -> SwarmJson.encodeToString(manifest)
                 else -> error("unexpected catalog request: $path")
             }.toByteArray()
+            return PeerResponse(
+                PeerResponseHeader(status = 200, len = body.size.toLong()),
+                ByteArrayInputStream(body),
+            )
+        }
+    }
+
+    private class MediaConnection(private val content: String) : PeerConnection {
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            require(path == "/media/song") { "unexpected media request: $path" }
+            val body = content.toByteArray()
             return PeerResponse(
                 PeerResponseHeader(status = 200, len = body.size.toLong()),
                 ByteArrayInputStream(body),

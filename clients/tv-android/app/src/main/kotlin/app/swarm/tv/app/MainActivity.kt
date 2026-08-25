@@ -32,6 +32,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -74,7 +75,10 @@ import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
 import app.swarm.tv.app.ui.screens.isServerOfflineLoadError
+import app.swarm.tv.app.ui.screens.playbackErrorContext
+import app.swarm.tv.app.ui.screens.playbackHttpResponseCode
 import app.swarm.tv.app.ui.screens.serverOfflineMediaSourceFactory
+import app.swarm.tv.app.ui.screens.shouldRecoverExpiredPlaybackSession
 import app.swarm.tv.app.ui.screens.SeasonScreen
 import app.swarm.tv.app.ui.screens.ShowShelfScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
@@ -520,6 +524,25 @@ private fun SwarmApp(
                 // here, so this stays correct even if nextEntry changed
                 // (shuffle toggled) since this listener was attached.
                 if (playbackState == Player.STATE_ENDED) onTrackPlaybackEnded()
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val session = activeMusicSession ?: return
+                val activePlayer = player ?: return
+                val responseCode = playbackHttpResponseCode(error)
+                if (!shouldRecoverExpiredPlaybackSession(error.errorCode, responseCode)) return
+
+                // A restarted server accepts the proxy connection again but
+                // cannot restore its old in-memory playback session, so the
+                // first successful request is a 404. Music used to stop here
+                // because only PlayerScreen's video listener renegotiated.
+                musicIsLoading = true
+                val positionSecs = session.positionOffsetSecs + activePlayer.currentPosition.coerceAtLeast(0L) / 1000.0
+                onRecoverExpiredPlaybackSession(
+                    session.sessionId,
+                    positionSecs,
+                    playbackErrorContext(error, activePlayer),
+                )
             }
         }
         player?.addAnalyticsListener(analyticsListener)

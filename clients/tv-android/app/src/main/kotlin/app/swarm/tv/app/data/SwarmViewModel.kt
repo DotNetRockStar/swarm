@@ -364,9 +364,12 @@ class SwarmViewModel(
      * Retain a small in-memory queue and retry after the next successful
      * catalog connection instead of silently losing the most useful error. */
     private val pendingClientErrors = mutableListOf<PendingClientError>()
+    private val playbackConnectionTracker = PlaybackConnectionTracker()
 
     private val proxy = PeerLoopbackProxy.start()
-    private val catalogSession = CatalogSession(proxy, catalogCache)
+    private val catalogSession = CatalogSession(proxy, catalogCache) { serverId ->
+        reportServerReconnected(serverId)
+    }
 
     init {
         lanDiscovery.start()
@@ -1948,6 +1951,7 @@ class SwarmViewModel(
      * successful replacement session. */
     fun reportServerOffline(sessionId: String, context: String? = null) {
         val current = activePlayerSession()?.takeIf { it.sessionId == sessionId } ?: return
+        playbackConnectionTracker.markOffline(current.serverId, current.sessionId)
         val message = "server has gone offline"
         notify(message, ClientNotificationKind.ERROR)
         val device = current.previous.embeddedCatalog()?.devices?.find { it.deviceId == current.serverId } ?: return
@@ -1959,6 +1963,17 @@ class SwarmViewModel(
             kind = current.entry.entry.kind.name.lowercase(),
             context = context,
         )
+    }
+
+    /** The catalog transport invokes this only after replacing a connection
+     * it previously evicted as failed. Restrict the toast to the server that
+     * owns active playback so background artwork/catalog recovery stays
+     * silent. */
+    private fun reportServerReconnected(serverId: String) {
+        val active = activePlayerSession()
+        if (playbackConnectionTracker.markRestored(serverId, active?.serverId, active?.sessionId)) {
+            notify("server has reconnected", ClientNotificationKind.SUCCESS)
+        }
     }
 
     /** [PlayerScreen] detects HLS rendition switches entirely on its own —
@@ -1982,14 +1997,15 @@ class SwarmViewModel(
      * player, while [positionSecs] preserves the live playhead rather than
      * falling back to the last position saved before playback began.
      *
-     * This path is intentionally silent to the viewer: the 404 describes an
-     * expected stale session, not a failed asset. It is still reported to the
-     * server with the original Media3 context so repeated recovery can be
-     * diagnosed without showing a transient error notification on the TV.
+     * Applies to both the full player and minimized music: a restarted server
+     * loses the old in-memory stream id in either case. This path remains
+     * silent for an ordinary idle-expiry 404; an actual outage/reconnect toast
+     * is driven by the transport transition tracked above. The 404 is still
+     * reported with Media3 context for diagnostics.
      */
     fun recoverExpiredPlaybackSession(sessionId: String, positionSecs: Double, context: String? = null) {
-        val current = _state.value as? UiState.Player ?: return
-        if (current.sessionId != sessionId) return
+        val current = activePlayerSession()?.takeIf { it.sessionId == sessionId } ?: return
+        val keepMinimized = _minimizedPlayer.value?.sessionId == sessionId
         val catalog = current.previous.embeddedCatalog() ?: return
         catalog.devices.find { it.deviceId == current.serverId }?.let { device ->
             reportClientError(
@@ -2005,6 +2021,7 @@ class SwarmViewModel(
             entry = current.entry,
             catalog = catalog,
             previousScreen = current.previous,
+            keepMinimized = keepMinimized,
             replaceSession = current,
             startPositionSecsOverride = positionSecs,
         )

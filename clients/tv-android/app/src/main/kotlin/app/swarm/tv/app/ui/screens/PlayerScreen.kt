@@ -219,7 +219,7 @@ private fun PreparedEpisodePlayback.toPlayerConfig() = PlaybackPlayerConfig(
  * playback can resume without user intervention when the route returns. */
 private class ServerOfflineRetryPolicy : DefaultLoadErrorHandlingPolicy(Int.MAX_VALUE) {
     override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorInfo): Long {
-        val responseCode = httpResponseCode(loadErrorInfo.exception)
+        val responseCode = playbackHttpResponseCode(loadErrorInfo.exception)
         return when {
             isServerOfflineLoadError(loadErrorInfo.exception) -> SERVER_OFFLINE_RETRY_DELAY_MS
             // A permanent HTTP response (especially the expired-session
@@ -238,7 +238,7 @@ internal fun serverOfflineMediaSourceFactory(context: Context): DefaultMediaSour
 internal fun isServerOfflineHttpStatus(responseCode: Int): Boolean =
     responseCode == 500 || responseCode == 502 || responseCode == 503 || responseCode == 504
 
-private fun httpResponseCode(error: IOException): Int? =
+internal fun playbackHttpResponseCode(error: Throwable): Int? =
     generateSequence<Throwable>(error) { it.cause }
         .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
         .firstOrNull()
@@ -258,6 +258,25 @@ internal fun isServerOfflineLoadError(error: IOException): Boolean =
             else -> false
         }
     }
+
+internal fun playbackErrorContext(error: PlaybackException, player: Player): String {
+    val causes = generateSequence<Throwable>(error) { it.cause }
+        .take(6)
+        .joinToString(" -> ") { cause ->
+            val detail = cause.message?.takeIf { it.isNotBlank() }
+            if (detail == null) cause.javaClass.simpleName else "${cause.javaClass.simpleName}: $detail"
+        }
+    return buildString {
+        append("error_code=").append(error.errorCode)
+        append("; error_code_name=").append(error.errorCodeName)
+        append("; position_ms=").append(player.currentPosition)
+        append("; buffered_position_ms=").append(player.bufferedPosition)
+        append("; duration_ms=").append(player.duration)
+        append("; playback_state=").append(player.playbackState)
+        append("; play_when_ready=").append(player.playWhenReady)
+        append("; causes=").append(causes)
+    }
+}
 
 // Media3's own defaults (DEFAULT_BUFFER_FOR_PLAYBACK_MS = 2_500,
 // DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 5_000) size these for a
@@ -680,22 +699,7 @@ fun PlayerScreen(
             // not caught by, the negotiation-failure path in SwarmViewModel.
             // Playback-triage-worthy either way, so it gets the same report.
             override fun onPlayerError(error: PlaybackException) {
-                val causes = generateSequence<Throwable>(error) { it.cause }
-                    .take(6)
-                    .joinToString(" -> ") { cause ->
-                        val detail = cause.message?.takeIf { it.isNotBlank() }
-                        if (detail == null) cause.javaClass.simpleName else "${cause.javaClass.simpleName}: $detail"
-                    }
-                val context = buildString {
-                    append("error_code=").append(error.errorCode)
-                    append("; error_code_name=").append(error.errorCodeName)
-                    append("; position_ms=").append(player.currentPosition)
-                    append("; buffered_position_ms=").append(player.bufferedPosition)
-                    append("; duration_ms=").append(player.duration)
-                    append("; playback_state=").append(player.playbackState)
-                    append("; play_when_ready=").append(player.playWhenReady)
-                    append("; causes=").append(causes)
-                }
+                val context = playbackErrorContext(error, player)
 
                 // Playback URLs name a server-side session that is removed
                 // after five idle minutes. A long pause therefore makes the
@@ -704,10 +708,7 @@ fun PlayerScreen(
                 // again can never heal it: negotiate a fresh session at the
                 // absolute playhead instead. Other 404s and all other player
                 // failures retain the normal reporting path below.
-                val responseCode = generateSequence<Throwable>(error) { it.cause }
-                    .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
-                    .firstOrNull()
-                    ?.responseCode
+                val responseCode = playbackHttpResponseCode(error)
                 if (shouldRecoverExpiredPlaybackSession(error.errorCode, responseCode)) {
                     isLoading = true
                     val positionSecs = positionOffsetSecs + player.currentPosition.coerceAtLeast(0L) / 1000.0
