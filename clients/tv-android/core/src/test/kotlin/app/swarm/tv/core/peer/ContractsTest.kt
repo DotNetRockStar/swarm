@@ -49,6 +49,21 @@ class ContractsTest {
         val entry = SwarmJson.decodeFromString<CatalogEntry>(json)
         assertNull(entry.year)
         assertEquals(emptyList<CastMember>(), entry.cast)
+        assertEquals(emptyList<SkipSegment>(), entry.skipSegments)
+    }
+
+    @Test
+    fun `catalog entry decodes intro database markers`() {
+        val json = """{"entry_key":"k","fingerprint":"f","kind":"episode","title":"Episode","size":1,"skip_segments":[{"kind":"intro","start_ms":30000,"end_ms":90000},{"kind":"credits","start_ms":3000000}]}"""
+        val entry = SwarmJson.decodeFromString<CatalogEntry>(json)
+
+        assertEquals(
+            listOf(
+                SkipSegment(SkipSegmentKind.INTRO, 30_000L, 90_000L),
+                SkipSegment(SkipSegmentKind.CREDITS, 3_000_000L, null),
+            ),
+            entry.skipSegments,
+        )
     }
 
     @Test

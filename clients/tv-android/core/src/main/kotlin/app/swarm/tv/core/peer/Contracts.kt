@@ -36,6 +36,22 @@ enum class MediaKind {
 }
 
 @Serializable
+enum class SkipSegmentKind {
+    @SerialName("intro") INTRO,
+    @SerialName("recap") RECAP,
+    @SerialName("credits") CREDITS,
+    @SerialName("preview") PREVIEW,
+}
+
+/** Community playback marker cached by the server from TheIntroDB. */
+@Serializable
+data class SkipSegment(
+    val kind: SkipSegmentKind,
+    val startMs: Long? = null,
+    val endMs: Long? = null,
+)
+
+@Serializable
 data class VideoStreamInfo(
     val codec: String,
     val width: Int,
@@ -92,6 +108,8 @@ data class CatalogEntry(
     val communityRatingVotes: Long? = null,
     /** Number of distinct devices that currently have this liked — see [LikeToggle]. */
     val likeCount: Int = 0,
+    /** IntroDB markers; retained for every supported kind even though today's player consumes intros. */
+    val skipSegments: List<SkipSegment> = emptyList(),
 )
 
 @Serializable

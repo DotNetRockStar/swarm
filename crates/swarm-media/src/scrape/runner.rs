@@ -16,9 +16,12 @@ use crate::classify;
 use crate::roots::SharedRootResolver;
 use crate::scrape::artwork;
 use crate::scrape::coverart::{CoverArtClient, CoverArtError};
+use crate::scrape::introdb::{IntroDbClient, IntroDbError};
 use crate::scrape::lrclib::{LrclibClient, LrclibError};
 use crate::scrape::musicbrainz::{MbError, MusicBrainzClient};
-use crate::scrape::tmdb::{ScrapedEpisode, ScrapedSeason, ScrapedVideo, TmdbClient, TmdbError, TmdbOverride};
+use crate::scrape::tmdb::{
+    ScrapedEpisode, ScrapedSeason, ScrapedVideo, TmdbClient, TmdbError, TmdbOverride,
+};
 use crate::scrape::wikimedia::WikimediaClient;
 use crate::store::{ArtworkKind, CastMember, EntryRecord, Library};
 use std::collections::HashMap;
@@ -37,6 +40,7 @@ pub struct ScrapeConfig {
     /// mirror. `None` means the real public endpoint.
     pub tmdb_api_base: Option<String>,
     pub tmdb_image_base: Option<String>,
+    pub introdb_api_base: Option<String>,
     pub musicbrainz_base: Option<String>,
     pub coverart_base: Option<String>,
     pub wikimedia_base: Option<String>,
@@ -506,6 +510,46 @@ async fn search_movie_for_entry(
     Err(TmdbError::NotFound)
 }
 
+async fn cache_introdb_segments(
+    library: &Library,
+    introdb: &IntroDbClient,
+    entry: &EntryRecord,
+    tmdb_id: u64,
+) -> sqlx::Result<()> {
+    // TheIntroDB's TV identity requires a positive season and episode.
+    // Specials/unstructured files cannot be looked up reliably, but an
+    // empty cached result still records that no valid query was possible.
+    let identity = match entry.kind {
+        MediaKind::Movie => Some((None, None)),
+        MediaKind::Episode => match (entry.season, entry.episode) {
+            (Some(season), Some(episode)) if season > 0 && episode > 0 => {
+                Some((Some(season), Some(episode)))
+            }
+            _ => None,
+        },
+        MediaKind::Track => None,
+    };
+    let Some((season, episode)) = identity else {
+        return library
+            .set_introdb_segments(&entry.entry_key, tmdb_id, &[])
+            .await;
+    };
+    match introdb
+        .segments(tmdb_id, season, episode, entry.duration_secs)
+        .await
+    {
+        Ok(segments) => {
+            library
+                .set_introdb_segments(&entry.entry_key, tmdb_id, &segments)
+                .await
+        }
+        Err(IntroDbError::Unavailable(reason)) => {
+            tracing::warn!(entry = %entry.entry_key, %reason, "introdb unavailable, will retry next run");
+            library.mark_introdb_retry(&entry.entry_key).await
+        }
+    }
+}
+
 /// TMDb specials are season 0, but local DVD extras usually have no numeric
 /// episode number. Match their filename title to TMDb's season-0 episode
 /// names, retaining the episode metadata instead of displaying the show's
@@ -542,7 +586,10 @@ fn match_tmdb_episode_title<'a>(
     })
 }
 
-fn match_tmdb_episode<'a>(entry: &EntryRecord, season: &'a ScrapedSeason) -> Option<&'a ScrapedEpisode> {
+fn match_tmdb_episode<'a>(
+    entry: &EntryRecord,
+    season: &'a ScrapedSeason,
+) -> Option<&'a ScrapedEpisode> {
     match_tmdb_episode_title(&entry.title, entry.season, entry.episode, season)
 }
 
@@ -570,6 +617,11 @@ async fn scrape_videos(
         }
         _ => TmdbClient::new(api_key.clone()),
     };
+    let introdb = config
+        .introdb_api_base
+        .as_deref()
+        .map(IntroDbClient::with_base_url)
+        .unwrap_or_else(IntroDbClient::new);
     // One TMDb TV lookup per show, shared across every episode entry —
     // avoids N calls for an N-episode season.
     let mut tv_cache: HashMap<String, Result<ScrapedVideo, TmdbError>> = HashMap::new();
@@ -651,6 +703,7 @@ async fn scrape_videos(
                 library
                     .set_episode_title(&entry.entry_key, scraped.episode_title.as_deref())
                     .await?;
+                cache_introdb_segments(library, &introdb, entry, scraped.tmdb_id).await?;
                 if let Some(overview) = scraped
                     .episode_overview
                     .as_deref()
@@ -699,6 +752,7 @@ async fn scrape_videos(
                 library
                     .set_scrape_result(&entry.entry_key, None, &[], &[], None, None, None)
                     .await?;
+                library.clear_introdb_segments(&entry.entry_key).await?;
                 report.not_found += 1;
                 let reason = "no match found on TMDb".to_string();
                 report.issues.push(ScrapeIssue {
@@ -1118,6 +1172,11 @@ pub async fn scrape_one_video(
         }
         _ => TmdbClient::new(api_key.clone()),
     };
+    let introdb = config
+        .introdb_api_base
+        .as_deref()
+        .map(IntroDbClient::with_base_url)
+        .unwrap_or_else(IntroDbClient::new);
     let media_type = match entry.kind {
         MediaKind::Movie => "movie",
         MediaKind::Episode => "tv",
@@ -1175,6 +1234,7 @@ pub async fn scrape_one_video(
     library
         .set_episode_title(&entry.entry_key, scraped.episode_title.as_deref())
         .await?;
+    cache_introdb_segments(library, &introdb, entry, scraped.tmdb_id).await?;
     if let Some(overview) = scraped
         .episode_overview
         .as_deref()
@@ -1303,6 +1363,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, CoverArtError> {
 mod tests {
     use super::*;
     use crate::scan::scan_root;
+    use axum::extract::Query;
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
@@ -1411,7 +1472,10 @@ mod tests {
             &season,
         )
         .unwrap();
-        assert_eq!(matched.title, "A Sitdown with Michael C. Hall and John Lithgow");
+        assert_eq!(
+            matched.title,
+            "A Sitdown with Michael C. Hall and John Lithgow"
+        );
         assert_eq!(
             match_tmdb_episode_title("Dissecting Dexter", Some(0), None, &season)
                 .unwrap()
@@ -1624,6 +1688,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}/img")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
         let report = run_bulk_scrape(
@@ -1722,6 +1787,18 @@ mod tests {
                     }))
                 }),
             )
+            .route(
+                "/media",
+                get(|Query(query): Query<HashMap<String, String>>| async move {
+                    assert_eq!(query.get("tmdb_id").map(String::as_str), Some("1433"));
+                    assert_eq!(query.get("season").map(String::as_str), Some("2"));
+                    assert_eq!(query.get("episode").map(String::as_str), Some("1"));
+                    Json(json!({
+                        "intro": [{"start_ms": 30_000, "end_ms": 90_000}],
+                        "credits": [{"start_ms": 1_200_000, "end_ms": null}]
+                    }))
+                }),
+            )
             .route("/img/w342/show.jpg", get(|| async { [1u8, 1, 1] }))
             .route(
                 "/img/w1280/show-backdrop.jpg",
@@ -1735,6 +1812,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}/img")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
         let report = run_bulk_scrape(
@@ -1770,6 +1848,12 @@ mod tests {
         assert_eq!(std::fs::read(root.join(poster)).unwrap(), vec![1, 1, 1]);
         assert_eq!(std::fs::read(root.join(season)).unwrap(), vec![3, 3, 3]);
         assert_eq!(std::fs::read(root.join(still)).unwrap(), vec![4, 4, 4]);
+        let (_, catalog) = library.catalog_snapshot().await.unwrap();
+        assert_eq!(catalog[0].skip_segments.len(), 2);
+        assert_eq!(
+            catalog[0].skip_segments[0].kind,
+            swarm_core::peer::SkipSegmentKind::Intro
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -1801,6 +1885,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
 
@@ -1876,6 +1961,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
 
@@ -1952,6 +2038,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
 
@@ -2107,6 +2194,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}")),
+            introdb_api_base: Some(format!("http://{addr}")),
             ..Default::default()
         };
         let report = run_bulk_scrape(
@@ -2202,6 +2290,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}")),
+            introdb_api_base: Some(format!("http://{addr}")),
             musicbrainz_base: Some(format!("http://{addr}/mb")),
             ..Default::default()
         };
@@ -2506,6 +2595,7 @@ mod tests {
             tmdb_api_key: Some("key".into()),
             tmdb_api_base: Some(format!("http://{addr}")),
             tmdb_image_base: Some(format!("http://{addr}/img")),
+            introdb_api_base: Some(format!("http://{addr}")),
             musicbrainz_base: Some(format!("http://{addr}/mb")),
             coverart_base: Some(format!("http://{addr}/ca")),
             ..Default::default()

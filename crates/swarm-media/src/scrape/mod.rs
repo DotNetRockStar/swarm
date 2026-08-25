@@ -5,6 +5,7 @@
 
 pub mod artwork;
 pub mod coverart;
+pub mod introdb;
 pub mod lrclib;
 pub mod musicbrainz;
 pub mod runner;

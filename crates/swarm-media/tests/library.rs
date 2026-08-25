@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use swarm_core::entry_key::entry_key;
-use swarm_core::peer::{AudioStreamInfo, MediaKind, TrackLyrics};
+use swarm_core::peer::{AudioStreamInfo, MediaKind, SkipSegment, SkipSegmentKind, TrackLyrics};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
 use swarm_media::scan::{scan_root, scan_roots, scan_roots_scoped};
 use swarm_media::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, SubtitleRecord};
@@ -189,6 +189,39 @@ fn movie_entry(entry_key: &str, relative_path: &str, fingerprint: &str) -> Entry
 }
 
 #[tokio::test]
+async fn introdb_segments_are_cached_and_version_the_catalog() {
+    let fx = fixture("introdb-segments").await;
+    let entry = movie_entry(
+        "0123456789abcdef01234567",
+        "movies/example.mp4",
+        "introdb-fingerprint",
+    );
+    fx.library.upsert(&entry).await.unwrap();
+    let before = fx.library.thumbprint().await.unwrap();
+    let segments = vec![
+        SkipSegment {
+            kind: SkipSegmentKind::Intro,
+            start_ms: Some(30_000),
+            end_ms: Some(90_000),
+        },
+        SkipSegment {
+            kind: SkipSegmentKind::Credits,
+            start_ms: Some(3_000_000),
+            end_ms: None,
+        },
+    ];
+
+    fx.library
+        .set_introdb_segments(&entry.entry_key, 27205, &segments)
+        .await
+        .unwrap();
+    let (after, catalog) = fx.library.catalog_snapshot().await.unwrap();
+
+    assert_ne!(before, after);
+    assert_eq!(catalog[0].skip_segments, segments);
+}
+
+#[tokio::test]
 async fn bulk_enqueue_can_skip_entries_with_any_existing_subtitle() {
     let fx = fixture("skip-existing-subtitles").await;
     let with_subtitle = movie_entry("a1", "movies/a.mp4", "fp-a");
@@ -224,7 +257,12 @@ async fn bulk_enqueue_can_skip_entries_with_any_existing_subtitle() {
         .unwrap()
         .unwrap();
     assert_eq!(job.entry_key, without_subtitle.entry_key);
-    assert!(fx.library.claim_next_transcription().await.unwrap().is_none());
+    assert!(fx
+        .library
+        .claim_next_transcription()
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -290,7 +328,10 @@ async fn targeted_enqueue_forces_a_fresh_job_and_rejects_ineligible_entries() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((requeued.total_segments, requeued.completed_segments), (3, 0));
+    assert_eq!(
+        (requeued.total_segments, requeued.completed_segments),
+        (3, 0)
+    );
     assert!(fx
         .library
         .subtitle_tracks(&entry.entry_key)

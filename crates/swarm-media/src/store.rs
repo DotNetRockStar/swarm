@@ -8,7 +8,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::str::FromStr;
-use swarm_core::peer::{AudioStreamInfo, CatalogEntry, MediaKind, TrackLyrics, VideoStreamInfo};
+use swarm_core::peer::{
+    AudioStreamInfo, CatalogEntry, MediaKind, SkipSegment, TrackLyrics, VideoStreamInfo,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryRecord {
@@ -66,7 +68,7 @@ pub struct EntryRecord {
 /// Bump whenever a successful online scrape begins populating new durable
 /// metadata. Rows written by an older scraper version become eligible for a
 /// one-time backfill even though their title/artwork scrape already finished.
-const CURRENT_SCRAPE_VERSION: i64 = 2;
+const CURRENT_SCRAPE_VERSION: i64 = 3;
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
 /// order) at scrape time. Same status as `scraped_title`/`genres` — display
@@ -436,12 +438,17 @@ impl Library {
             ("community_rating_votes", "INTEGER"),
             ("scrape_version", "INTEGER NOT NULL DEFAULT 0"),
             ("episode_title", "TEXT"),
+            ("tmdb_id", "INTEGER"),
+            ("skip_segments_json", "TEXT"),
             ("available", "INTEGER NOT NULL DEFAULT 1"),
             ("missing_scan_count", "INTEGER NOT NULL DEFAULT 0"),
             ("missing_since_ms", "INTEGER"),
             ("missing_confirmed", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(&pool, "library_entries", column, ddl_type).await?;
+        }
+        for (column, ddl_type) in [("tmdb_id", "INTEGER"), ("skip_segments_json", "TEXT")] {
+            ensure_column(&pool, "asset_metadata_history", column, ddl_type).await?;
         }
         Ok(Self { pool })
     }
@@ -778,12 +785,12 @@ impl Library {
                 fingerprint, size, source_relative_path, kind, scraped_title, episode_title, \
                 genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
                 poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
-                cover_relative_path, artist_art_relative_path, scrape_version, \
+                cover_relative_path, artist_art_relative_path, tmdb_id, skip_segments_json, scrape_version, \
                 restore_automatically, archived_at_ms) \
              SELECT fingerprint, size, relative_path, kind, scraped_title, episode_title, \
                 genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
                 poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
-                cover_relative_path, artist_art_relative_path, scrape_version, ?, ? \
+                cover_relative_path, artist_art_relative_path, tmdb_id, skip_segments_json, scrape_version, ?, ? \
              FROM library_entries WHERE entry_key = ? \
              ON CONFLICT(fingerprint, size, restore_automatically) DO UPDATE SET \
                 source_relative_path = excluded.source_relative_path, kind = excluded.kind, \
@@ -797,6 +804,7 @@ impl Library {
                 backdrop_relative_path = excluded.backdrop_relative_path, \
                 cover_relative_path = excluded.cover_relative_path, \
                 artist_art_relative_path = excluded.artist_art_relative_path, \
+                tmdb_id = excluded.tmdb_id, skip_segments_json = excluded.skip_segments_json, \
                 scrape_version = excluded.scrape_version, \
                 restore_automatically = excluded.restore_automatically, \
                 archived_at_ms = excluded.archived_at_ms",
@@ -923,7 +931,7 @@ impl Library {
             "SELECT source_relative_path, kind, scraped_title, episode_title, genres_json, cast_json, \
              overview, rating, community_rating, community_rating_votes, poster_relative_path, \
              season_poster_relative_path, backdrop_relative_path, cover_relative_path, \
-             artist_art_relative_path, scrape_version FROM asset_metadata_history \
+             artist_art_relative_path, tmdb_id, skip_segments_json, scrape_version FROM asset_metadata_history \
              WHERE fingerprint = ? AND size = ? AND restore_automatically = 1 \
                AND kind = (SELECT kind FROM library_entries WHERE entry_key = ?)",
         )
@@ -942,7 +950,7 @@ impl Library {
                 "SELECT relative_path AS source_relative_path, kind, scraped_title, episode_title, \
                  genres_json, cast_json, overview, rating, community_rating, community_rating_votes, \
                  poster_relative_path, season_poster_relative_path, backdrop_relative_path, \
-                 cover_relative_path, artist_art_relative_path, scrape_version \
+                 cover_relative_path, artist_art_relative_path, tmdb_id, skip_segments_json, scrape_version \
                  FROM library_entries WHERE fingerprint = ? AND size = ? AND entry_key != ? \
                    AND kind = (SELECT kind FROM library_entries WHERE entry_key = ?) \
                  ORDER BY available DESC LIMIT 1",
@@ -967,7 +975,8 @@ impl Library {
              cast_json = ?, overview = ?, rating = ?, community_rating = ?, \
              community_rating_votes = ?, poster_relative_path = ?, season_poster_relative_path = ?, \
              backdrop_relative_path = ?, cover_relative_path = ?, artist_art_relative_path = ?, \
-             scrape_version = ?, artwork_version = artwork_version + 1 WHERE entry_key = ?",
+             tmdb_id = ?, skip_segments_json = ?, scrape_version = ?, \
+             artwork_version = artwork_version + 1 WHERE entry_key = ?",
         )
         .bind(history.scraped_title)
         .bind(history.episode_title)
@@ -982,6 +991,8 @@ impl Library {
         .bind(remap(history.backdrop_relative_path))
         .bind(remap(history.cover_relative_path))
         .bind(remap(history.artist_art_relative_path))
+        .bind(history.tmdb_id)
+        .bind(history.skip_segments_json)
         .bind(history.scrape_version)
         .bind(entry_key)
         .execute(&self.pool)
@@ -1619,6 +1630,76 @@ impl Library {
         Ok(())
     }
 
+    /// Atomically replace the community playback markers associated with a
+    /// TMDb match. An empty vector is meaningful: TheIntroDB was checked and
+    /// has no accepted data, which prevents needless repeat requests.
+    pub async fn set_introdb_segments(
+        &self,
+        entry_key: &str,
+        tmdb_id: u64,
+        segments: &[SkipSegment],
+    ) -> sqlx::Result<()> {
+        let json = serde_json::to_string(segments).unwrap_or_else(|_| "[]".into());
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE library_entries SET tmdb_id = ?, skip_segments_json = ? WHERE entry_key = ?",
+        )
+        .bind(tmdb_id as i64)
+        .bind(json)
+        .bind(entry_key)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO library_changes (entry_key, operation) VALUES (?, 'upsert') \
+             ON CONFLICT(entry_key) DO UPDATE SET operation = 'upsert'",
+        )
+        .bind(entry_key)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await
+    }
+
+    /// Clear stale segment data when TMDb no longer matches the asset.
+    pub async fn clear_introdb_segments(&self, entry_key: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE library_entries SET tmdb_id = NULL, skip_segments_json = NULL WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Leave a transient IntroDB failure eligible for the next automatic
+    /// metadata run without throwing away the successful TMDb scrape.
+    pub async fn mark_introdb_retry(&self, entry_key: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE library_entries SET scrape_version = ? WHERE entry_key = ? AND scrape_version >= ?",
+        )
+        .bind(CURRENT_SCRAPE_VERSION - 1)
+        .bind(entry_key)
+        .bind(CURRENT_SCRAPE_VERSION)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn introdb_segments(&self) -> sqlx::Result<HashMap<String, Vec<SkipSegment>>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT entry_key, skip_segments_json FROM library_entries \
+             WHERE available = 1 AND skip_segments_json IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(entry_key, json)| {
+                let segments = serde_json::from_str(&json).unwrap_or_default();
+                (entry_key, segments)
+            })
+            .collect())
+    }
+
     /// The exact catalog payload plus its stable SHA-256 version token.
     ///
     /// This intentionally hashes every client-visible field, including
@@ -1629,11 +1710,16 @@ impl Library {
     pub async fn catalog_snapshot(&self) -> sqlx::Result<(String, Vec<CatalogEntry>)> {
         let entries = self.list().await?;
         let like_counts = self.like_counts().await?;
+        let introdb_segments = self.introdb_segments().await?;
         let catalog_entries: Vec<CatalogEntry> = entries
             .iter()
             .map(|entry| {
                 let mut catalog_entry = entry.to_catalog_entry();
                 catalog_entry.like_count = like_counts.get(&entry.entry_key).copied().unwrap_or(0);
+                catalog_entry.skip_segments = introdb_segments
+                    .get(&entry.entry_key)
+                    .cloned()
+                    .unwrap_or_default();
                 catalog_entry
             })
             .collect();
@@ -2082,7 +2168,7 @@ impl Library {
 
         sqlx::query(
             "UPDATE library_entries SET scraped_title = NULL, episode_title = NULL, genres_json = NULL, cast_json = NULL, overview = NULL, \
-             rating = NULL, community_rating = NULL, community_rating_votes = NULL, scrape_version = 0, \
+             rating = NULL, community_rating = NULL, community_rating_votes = NULL, tmdb_id = NULL, skip_segments_json = NULL, scrape_version = 0, \
              poster_relative_path = NULL, season_poster_relative_path = NULL, backdrop_relative_path = NULL, cover_relative_path = NULL, \
              artist_art_relative_path = NULL, artwork_version = artwork_version + 1 WHERE entry_key = ?",
         )
@@ -2518,6 +2604,8 @@ struct MetadataHistoryRow {
     backdrop_relative_path: Option<String>,
     cover_relative_path: Option<String>,
     artist_art_relative_path: Option<String>,
+    tmdb_id: Option<i64>,
+    skip_segments_json: Option<String>,
     scrape_version: i64,
 }
 
@@ -2630,6 +2718,10 @@ impl EntryRecord {
             // needs the row's own `artwork_version` but `like_count` needs a
             // separate, whole-table aggregate query instead.
             like_count: 0,
+            // Loaded in `catalog_snapshot` alongside aggregate likes. Keeping
+            // the JSON out of EntryRecord avoids inflating scan/probe paths
+            // that never consume playback markers.
+            skip_segments: Vec::new(),
         }
     }
 }

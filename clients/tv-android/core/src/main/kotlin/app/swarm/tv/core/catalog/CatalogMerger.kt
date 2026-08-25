@@ -62,7 +62,8 @@ object CatalogMerger {
         fun score(e: CatalogEntry) =
             (if (e.scrapedTitle != null) 1 else 0) +
                 (if (e.episodeTitle != null) 1 else 0) +
-                (if (e.artworkEtag != null) 1 else 0)
+                (if (e.artworkEtag != null) 1 else 0) +
+                (if (e.skipSegments.isNotEmpty()) 1 else 0)
         return score(candidate) > score(existing)
     }
 

@@ -2,6 +2,8 @@ package app.swarm.tv.app.ui.screens
 
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
+import app.swarm.tv.core.peer.SkipSegment
+import app.swarm.tv.core.peer.SkipSegmentKind
 import java.io.EOFException
 import java.io.IOException
 import java.net.SocketException
@@ -11,6 +13,26 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class PlayerSeekTest {
+    @Test
+    fun `intro marker is active only inside its seekable bounds`() {
+        val intro = SkipSegment(SkipSegmentKind.INTRO, startMs = 30_000L, endMs = 90_000L)
+
+        assertEquals(null, activeIntroSegment(listOf(intro), 29_999L))
+        assertEquals(intro, activeIntroSegment(listOf(intro), 30_000L))
+        assertEquals(intro, activeIntroSegment(listOf(intro), 89_999L))
+        assertEquals(null, activeIntroSegment(listOf(intro), 90_000L))
+    }
+
+    @Test
+    fun `intro may begin with episode but must have a skip target`() {
+        val openingIntro = SkipSegment(SkipSegmentKind.INTRO, startMs = null, endMs = 15_000L)
+        val openEndedIntro = SkipSegment(SkipSegmentKind.INTRO, startMs = 10_000L, endMs = null)
+        val recap = SkipSegment(SkipSegmentKind.RECAP, startMs = 0L, endMs = 20_000L)
+
+        assertEquals(openingIntro, activeIntroSegment(listOf(openingIntro), 0L))
+        assertEquals(null, activeIntroSegment(listOf(openEndedIntro, recap), 12_000L))
+    }
+
     @Test
     fun `seek inside generated HLS window stays in current player`() {
         assertFalse(shouldRestartHlsPlaybackForSeek(relativeTargetMs = 45_000L, availableDurationMs = 60_000L))

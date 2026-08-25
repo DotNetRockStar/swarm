@@ -224,6 +224,29 @@ pub enum MediaKind {
     Track,
 }
 
+/// A community-sourced playback segment from TheIntroDB. The same wire
+/// shape covers every segment type the service exposes so clients can add
+/// recap/credits/preview controls without another catalog migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipSegmentKind {
+    Intro,
+    Recap,
+    Credits,
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipSegment {
+    pub kind: SkipSegmentKind,
+    /// `None` means the segment begins with the media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ms: Option<u64>,
+    /// `None` means the segment continues to the end of the media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+}
+
 /// One asset as advertised by a server. Clients merge manifests from all
 /// servers keyed on `fingerprint` — the same bytes on two servers collapse
 /// into one catalog entry with multiple sources.
@@ -293,6 +316,11 @@ pub struct CatalogEntry {
     /// (`entry_likes`, one row per device — see `Library::like_counts`).
     #[serde(default)]
     pub like_count: u32,
+    /// IntroDB playback markers cached by the media server during metadata
+    /// scraping. Intro is consumed by today's TV UI; the other kinds are
+    /// retained now so the database integration does not discard them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_segments: Vec<SkipSegment>,
 }
 
 /// One TMDb credits-list entry, capped to roughly the first ten (billing
@@ -468,6 +496,11 @@ mod tests {
                 community_rating: Some(8.4),
                 community_rating_votes: Some(36_000),
                 like_count: 3,
+                skip_segments: vec![SkipSegment {
+                    kind: SkipSegmentKind::Intro,
+                    start_ms: Some(30_000),
+                    end_ms: Some(90_000),
+                }],
             }],
             removed: vec![],
         };
