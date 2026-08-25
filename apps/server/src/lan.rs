@@ -167,6 +167,7 @@ impl LanService {
         peer_addr: SocketAddr,
         allowed: AllowedPeers,
         state_db: Arc<StateDb>,
+        http_media_port: u16,
     ) -> std::io::Result<Self> {
         // TCP and QUIC/UDP can share the same numeric port. Keeping activation
         // on the peer port avoids an unpredictable firewall exception.
@@ -207,7 +208,7 @@ impl LanService {
             }
         });
 
-        let advertisement = advertise(&server_fingerprint, peer_addr, pairing_port);
+        let advertisement = advertise(&server_fingerprint, peer_addr, pairing_port, http_media_port);
         Ok(Self {
             pairing,
             state_db,
@@ -237,6 +238,7 @@ fn advertise(
     server_fingerprint: &str,
     peer_addr: SocketAddr,
     pairing_port: u16,
+    http_media_port: u16,
 ) -> Option<Advertisement> {
     let daemon = ServiceDaemon::new()
         .map_err(|err| tracing::warn!(%err, "could not start mDNS advertiser"))
@@ -246,12 +248,20 @@ fn advertise(
     let hostname = format!("swarm-{short}.local.");
     let peer_port = peer_addr.port().to_string();
     let pair_port = pairing_port.to_string();
+    // Not consumed by any existing client — the Fire TV client only ever
+    // reads fingerprint/peer_port/pair_port here and pairs over QUIC, never
+    // this port. Advertised for a future HTTP-only client (Roku) that can't
+    // speak QUIC at all and has no other way to discover this port; adding
+    // it now costs nothing and means that client's own resolver work
+    // doesn't also need a server-side change.
+    let http_media_port_str = http_media_port.to_string();
     let properties = [
         ("protocol", "2"),
         ("name", "SWARM Media Server"),
         ("fingerprint", server_fingerprint),
         ("peer_port", peer_port.as_str()),
         ("pair_port", pair_port.as_str()),
+        ("http_media_port", http_media_port_str.as_str()),
     ];
     let address = swarm_p2p::local_addr::detect_local_ipv4().to_string();
     let info = ServiceInfo::new(
@@ -269,7 +279,12 @@ fn advertise(
         .register(info)
         .map_err(|err| tracing::warn!(%err, "could not register mDNS advertisement"))
         .ok()?;
-    tracing::info!(service = %fullname, pairing_port, "advertising media server on the LAN");
+    tracing::info!(
+        service = %fullname,
+        pairing_port,
+        http_media_port,
+        "advertising media server on the LAN"
+    );
     Some(Advertisement { daemon, fullname })
 }
 

@@ -263,6 +263,12 @@ impl ServerCore {
             listen_addr,
             allowed.clone(),
             Arc::clone(&state_db),
+            // The *configured* port, not http_media's actual bound one —
+            // http_media::start() hasn't run yet at this point in start(),
+            // but for every real deployment (never ":0") the two are the
+            // same value anyway, and advertising it doesn't need to block
+            // on the listener actually being up.
+            config.http_media_bind.port(),
         )
         .await?;
 
