@@ -3,10 +3,14 @@
 //! pending-changes queue, the deleted-archive, and the thumbprint.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use swarm_core::entry_key::entry_key;
 use swarm_core::peer::{AudioStreamInfo, MediaKind, SkipSegment, SkipSegmentKind, TrackLyrics};
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
-use swarm_media::scan::{scan_root, scan_roots, scan_roots_scoped};
+use swarm_media::scan::{
+    scan_root, scan_roots, scan_roots_cancellable, scan_roots_scoped, ScanError,
+};
 use swarm_media::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, SubtitleRecord};
 
 struct Fixture {
@@ -33,6 +37,24 @@ fn write(root: &Path, relative: &str, content: &[u8]) {
     let path = root.join(relative);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_scan_stops_before_catalog_reconciliation() {
+    let fx = fixture("cancelled-scan").await;
+    write(&fx.root, "movie.mp4", b"media");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let roots = vec![MediaRoot {
+        label: "local".into(),
+        path: fx.root.clone(),
+    }];
+
+    let error = scan_roots_cancellable(&fx.library, &roots, None, cancel)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ScanError::Cancelled));
+    assert!(fx.library.list().await.unwrap().is_empty());
 }
 
 #[tokio::test]

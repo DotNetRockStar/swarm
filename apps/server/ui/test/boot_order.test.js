@@ -94,6 +94,12 @@ function invokeStub(command, args) {
       return testLibraryEntries;
     case "delete_asset":
       return { removed_files: 1, cleanup_warnings: [] };
+    case "run_library_maintenance":
+      return {
+        scan: { added: 1, updated: 0, removed: 0, unchanged: 2 },
+        scrape: { matched: 1, not_found: 0, failed: 0, skipped: 2, issues: [] },
+        classifications: { changed: 0, unchanged: 3 },
+      };
     case "list_media_roots":
       return testMediaRoots;
     case "list_categories":
@@ -192,6 +198,26 @@ async function main() {
   }
   if (document.getElementById("tabPanel-media").classList.contains("d-none")) {
     failures.push("Expected the Media panel to be visible after boot.");
+  }
+  if (document.getElementById("scrapeBtn") || document.getElementById("reclassifyBtn") || document.getElementById("rescanBtn")) {
+    failures.push("Expected scan, scrape, and classification repair to be consolidated into one library action.");
+  }
+  document.getElementById("maintainLibraryBtn").click();
+  if (document.getElementById("libraryMaintenanceModalBackdrop").classList.contains("d-none")) {
+    failures.push("Expected the consolidated library action to ask how existing metadata should be handled.");
+  }
+  if (!document.getElementById("libraryMaintenanceModalBody").textContent.includes("redownloads titles, artwork, and details")) {
+    failures.push("Expected the library update dialog to explain replacement concisely.");
+  }
+  invokeCalls.length = 0;
+  document.getElementById("libraryMaintenanceMissingBtn").click();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const maintenanceCall = invokeCalls.find((call) => call.command === "run_library_maintenance");
+  if (!maintenanceCall || maintenanceCall.args.force !== false) {
+    failures.push("Expected missing-only library maintenance to run the consolidated command without overriding metadata.");
+  }
+  if (document.querySelectorAll("#libraryMaintenanceProgress .progress-bar").length !== 1) {
+    failures.push("Expected consolidated library maintenance to expose one progress bar.");
   }
   if (!document.getElementById("tabPanel-about").classList.contains("d-none")) {
     failures.push("Expected the About panel to be hidden when Media is the default.");

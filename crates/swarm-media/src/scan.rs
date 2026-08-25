@@ -8,7 +8,7 @@ use crate::scrape::artwork;
 use crate::store::{ArtworkKind, EntryRecord, Library, MissingDisposition, ScanManifestEntry};
 use crate::{classify, probe, tags};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use swarm_core::peer::MediaKind;
 use swarm_core::{entry_key, fingerprint};
@@ -95,6 +95,8 @@ pub enum ScanError {
     },
     #[error("library store error: {0}")]
     Store(#[from] sqlx::Error),
+    #[error("scan cancelled")]
+    Cancelled,
     #[error(
         "found 0 files across every configured root, but the library already has {0} known entries — refusing to \
          treat this as \"everything was deleted\" (a dropped network mount looks identical to an empty root). \
@@ -132,7 +134,19 @@ pub async fn scan_roots(
     roots: &[MediaRoot],
     progress_tx: Option<Sender<ScanProgressEvent>>,
 ) -> Result<ScanReport, ScanError> {
-    scan_roots_scoped(library, roots, roots.len() > 1, progress_tx).await
+    scan_roots_scoped_inner_entry(library, roots, roots.len() > 1, progress_tx, None).await
+}
+
+/// Cancellable counterpart to [`scan_roots`]. Cancellation is checked while
+/// walking directories and between files during catalog processing. A scan
+/// cancelled before reconciliation never marks absent entries unavailable.
+pub async fn scan_roots_cancellable(
+    library: &Library,
+    roots: &[MediaRoot],
+    progress_tx: Option<Sender<ScanProgressEvent>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<ScanReport, ScanError> {
+    scan_roots_scoped_inner_entry(library, roots, roots.len() > 1, progress_tx, Some(cancel)).await
 }
 
 /// Reconcile only `roots` while preserving the path namespace of the full
@@ -146,12 +160,29 @@ pub async fn scan_roots_scoped(
     multi_root_namespace: bool,
     progress_tx: Option<Sender<ScanProgressEvent>>,
 ) -> Result<ScanReport, ScanError> {
+    scan_roots_scoped_inner_entry(library, roots, multi_root_namespace, progress_tx, None).await
+}
+
+async fn scan_roots_scoped_inner_entry(
+    library: &Library,
+    roots: &[MediaRoot],
+    multi_root_namespace: bool,
+    progress_tx: Option<Sender<ScanProgressEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ScanReport, ScanError> {
     if roots.is_empty() {
         return Err(ScanError::NoMediaRoots);
     }
     let scan_id = library.begin_scan_manifest().await?;
-    let result =
-        scan_roots_scoped_inner(library, roots, multi_root_namespace, progress_tx, &scan_id).await;
+    let result = scan_roots_scoped_inner(
+        library,
+        roots,
+        multi_root_namespace,
+        progress_tx,
+        cancel,
+        &scan_id,
+    )
+    .await;
     let cleanup = library.clear_scan_manifest(&scan_id).await;
     match (result, cleanup) {
         (Err(error), _) => Err(error),
@@ -165,6 +196,7 @@ async fn scan_roots_scoped_inner(
     roots: &[MediaRoot],
     multi_root_namespace: bool,
     progress_tx: Option<Sender<ScanProgressEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
     scan_id: &str,
 ) -> Result<ScanReport, ScanError> {
     let mut report = ScanReport::default();
@@ -178,12 +210,14 @@ async fn scan_roots_scoped_inner(
     // in local SQLite rather than growing an in-memory Vec with the library.
     let mut complete_roots = Vec::with_capacity(roots.len());
     for root in roots {
+        check_cancelled(cancel.as_deref())?;
         let complete = discover_media_files(
             library,
             scan_id,
             root,
             multi_root_namespace,
             progress.as_ref(),
+            cancel.as_ref(),
         )
         .await?;
         if complete {
@@ -231,11 +265,13 @@ async fn scan_roots_scoped_inner(
 
     let mut cursor = String::new();
     loop {
+        check_cancelled(cancel.as_deref())?;
         let files = library.scan_manifest_page(scan_id, &cursor, 256).await?;
         if files.is_empty() {
             break;
         }
         for file in files {
+            check_cancelled(cancel.as_deref())?;
             cursor.clone_from(&file.relative_path);
             let relative = file.relative_path.clone();
             let absolute = PathBuf::from(&file.absolute_path);
@@ -280,9 +316,10 @@ async fn scan_roots_scoped_inner(
             // already `continue`d), so this cost is paid exactly where it's
             // unavoidable, not on every file in a routine rescan.
             let fp_path = absolute.clone();
-            let Ok(fp) = tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&fp_path))
-                .await
-                .expect("fingerprint task panicked")
+            let Ok(fp) =
+                tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&fp_path))
+                    .await
+                    .expect("fingerprint task panicked")
             else {
                 continue;
             };
@@ -291,6 +328,7 @@ async fn scan_roots_scoped_inner(
                 .await
                 .expect("tag-read task panicked");
             let media = probe::probe(&absolute).await;
+            check_cancelled(cancel.as_deref())?;
             let entry_key = entry_key::entry_key(&relative);
             let mut record = EntryRecord {
                 entry_key: entry_key.clone(),
@@ -381,6 +419,7 @@ async fn scan_roots_scoped_inner(
     for prefix in &prefixes {
         let mut missing_cursor = String::new();
         loop {
+            check_cancelled(cancel.as_deref())?;
             let missing = library
                 .paths_missing_from_scan(scan_id, prefix.as_deref(), &missing_cursor, 256)
                 .await?;
@@ -388,6 +427,7 @@ async fn scan_roots_scoped_inner(
                 break;
             }
             for path in missing {
+                check_cancelled(cancel.as_deref())?;
                 missing_cursor.clone_from(&path);
                 if matches!(
                     library
@@ -402,6 +442,14 @@ async fn scan_roots_scoped_inner(
     }
 
     Ok(report)
+}
+
+fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), ScanError> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        Err(ScanError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// Classifies an `images/` sibling file by the exact, small set of
@@ -584,18 +632,21 @@ async fn discover_media_files(
     root: &MediaRoot,
     multi_root_namespace: bool,
     progress: Option<&Arc<ScanProgress>>,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<bool, ScanError> {
     const BATCH_SIZE: usize = 256;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ScanManifestEntry>>(2);
     let root_path = root.path.clone();
     let label = root.label.clone();
     let progress = progress.cloned();
+    let cancel = cancel.cloned();
     let walk = tokio::task::spawn_blocking(move || {
         walk_media_files(
             &root_path,
             &label,
             multi_root_namespace,
             progress.as_deref(),
+            cancel.as_deref(),
             BATCH_SIZE,
             tx,
         )
@@ -612,12 +663,16 @@ async fn discover_media_files(
             path: root.path.clone(),
             source,
         })?;
+    if outcome.cancelled {
+        return Err(ScanError::Cancelled);
+    }
     Ok(outcome.complete)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalkOutcome {
     complete: bool,
+    cancelled: bool,
 }
 
 /// An entry can be renamed or removed after `read_dir` returns it but before
@@ -646,6 +701,7 @@ fn walk_media_files(
     label: &str,
     multi_root_namespace: bool,
     progress: Option<&ScanProgress>,
+    cancel: Option<&AtomicBool>,
     batch_size: usize,
     tx: Sender<Vec<ScanManifestEntry>>,
 ) -> std::io::Result<WalkOutcome> {
@@ -653,6 +709,12 @@ fn walk_media_files(
     let mut stack = vec![root_path.to_path_buf()];
     let mut complete = true;
     while let Some(dir) = stack.pop() {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return Ok(WalkOutcome {
+                complete,
+                cancelled: true,
+            });
+        }
         // The root itself not existing is a real unavailable-root failure.
         // A descendant can legitimately disappear after its parent was
         // listed, so tolerate only NotFound below the root.
@@ -665,6 +727,12 @@ fn walk_media_files(
             Err(error) => return Err(error),
         };
         for entry in entries {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+                return Ok(WalkOutcome {
+                    complete,
+                    cancelled: true,
+                });
+            }
             let Some(entry) = walk_value(entry, &mut complete)? else {
                 continue;
             };
@@ -724,7 +792,10 @@ fn walk_media_files(
                     // batches to, so stop walking rather than keep working
                     // toward a result no one will read.
                     if tx.blocking_send(full_batch).is_err() {
-                        return Ok(WalkOutcome { complete });
+                        return Ok(WalkOutcome {
+                            complete,
+                            cancelled: false,
+                        });
                     }
                 }
             }
@@ -733,7 +804,10 @@ fn walk_media_files(
     if !batch.is_empty() {
         let _ = tx.blocking_send(batch);
     }
-    Ok(WalkOutcome { complete })
+    Ok(WalkOutcome {
+        complete,
+        cancelled: false,
+    })
 }
 
 #[cfg(test)]

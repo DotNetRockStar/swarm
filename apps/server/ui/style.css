@@ -182,6 +182,17 @@ td.mono {
 .issue-list .issue-reason { color: #ff8db4; }
 
 .scrape-progress { margin-bottom: 14px; }
+.library-maintenance-progress {
+  margin: 2px 0 16px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 9px; background: var(--surface-muted);
+}
+.library-maintenance-progress.d-none { display: none; }
+.library-maintenance-progress-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  margin-bottom: 7px; font-size: .82rem; font-weight: 700;
+}
+.library-maintenance-progress-head button { flex: 0 0 auto; padding: 4px 9px; font-size: .74rem; }
+#libraryMaintenanceProgressText { font-size: .8rem; }
 .progress-bar { width: 100%; height: 6px; border-radius: 4px; background: var(--surface-muted); overflow: hidden; margin-bottom: 4px; }
 .progress-bar-fill { height: 100%; background: var(--accent); transition: width .15s ease-out; }
 .transcription-toggle { cursor: pointer; }
@@ -495,6 +506,7 @@ td.mono {
 .modal-box.notification-modal-box { max-width: 1360px; }
 .modal-box.network-root-modal-box { max-width: 520px; }
 .modal-box.delete-asset-modal-box { max-width: 500px; }
+.modal-box.library-maintenance-modal-box { max-width: 600px; }
 .modal-icon.modal-icon-danger { background: rgba(255, 93, 122, .12); color: #ff8db4; }
 .delete-asset-modal-path {
   margin-top: 12px; padding: 9px 10px; border-radius: 8px; background: var(--surface-muted);
@@ -504,6 +516,10 @@ td.mono {
 .delete-asset-warning i { margin-right: 7px; }
 .delete-asset-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .delete-asset-modal-actions button { flex: 0 0 auto; }
+.library-maintenance-modal-actions {
+  display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 20px;
+}
+.library-maintenance-modal-actions button { flex: 0 0 auto; }
 .network-root-help { margin-bottom: 12px; }
 .network-root-fields label { margin-top: 10px; }
 .network-root-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }

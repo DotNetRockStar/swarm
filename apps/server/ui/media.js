@@ -1271,55 +1271,19 @@ function wireSubtitleDownload(entryKey) {
   });
 }
 
-// Real bug this fixes: a rescan over a slow network mount (SMB/NFS) can
-// legitimately take minutes — confirmed live against a real ~3,700-file
-// remote share — and gave no indication anything was happening until it
-// finished. Mirrors the Scrape button's own `scrape-progress` bar exactly
-// (`scan-progress` events from the Rust side, one per discovered file).
-document.getElementById("rescanBtn").addEventListener("click", async () => {
-  const progressBox = document.getElementById("scanProgress");
-  const progressFill = document.getElementById("scanProgressFill");
-  const progressText = document.getElementById("scanProgressText");
-  const rescanBtn = document.getElementById("rescanBtn");
-  progressFill.style.width = "0%";
-  progressText.textContent = "Starting…";
-  progressBox.classList.remove("d-none");
-  rescanBtn.disabled = true;
+const libraryMaintenanceModal = document.getElementById("libraryMaintenanceModalBackdrop");
+let libraryMaintenanceRunning = false;
 
-  const unlisten = await listen("scan-progress", ({ payload }) => {
-    if (payload.phase === "discovering") {
-      progressFill.style.width = "0%";
-      progressText.textContent = `Finding files… ${payload.found} found so far`;
-    } else {
-      progressFill.style.width = `${Math.round((payload.processed / payload.total) * 100)}%`;
-      progressText.textContent = `Scanning ${payload.processed} of ${payload.total} files…`;
-    }
-  });
-  try {
-    const r = await invoke("rescan");
-    showToast(`+${r.added} added, ${r.updated} updated, ${r.removed} removed`, "success");
-    await refreshLibrary();
-  } catch (err) {
-    showToast(String(err), "error");
-  } finally {
-    unlisten();
-    progressBox.classList.add("d-none");
-    rescanBtn.disabled = false;
-  }
+function closeLibraryMaintenanceModal() {
+  libraryMaintenanceModal.classList.add("d-none");
+}
+
+document.getElementById("maintainLibraryBtn").addEventListener("click", () => {
+  if (!libraryMaintenanceRunning) libraryMaintenanceModal.classList.remove("d-none");
 });
-
-document.getElementById("reclassifyBtn").addEventListener("click", async () => {
-  try {
-    const r = await invoke("reclassify_library");
-    showToast(
-      `${r.changed} corrected, ${r.unchanged} already correct` +
-      (r.changed ? " — run Scrape metadata again to re-match the corrected entries." : ""),
-      "success",
-    );
-    await refreshLibrary();
-  } catch (err) {
-    showToast(String(err), "error");
-  }
+document.getElementById("libraryMaintenanceModalClose").addEventListener("click", closeLibraryMaintenanceModal);
+libraryMaintenanceModal.addEventListener("click", (event) => {
+  if (event.target === libraryMaintenanceModal) closeLibraryMaintenanceModal();
 });
 
 function renderScrapeIssues(issues) {
@@ -1389,49 +1353,100 @@ function patchEntryLive(p) {
   }
 }
 
-document.getElementById("scrapeBtn").addEventListener("click", async () => {
-  const progressBox = document.getElementById("scrapeProgress");
-  const progressFill = document.getElementById("scrapeProgressFill");
-  const progressText = document.getElementById("scrapeProgressText");
+async function runLibraryMaintenance(force) {
+  if (libraryMaintenanceRunning) return;
+  libraryMaintenanceRunning = true;
+  closeLibraryMaintenanceModal();
+
+  const progressBox = document.getElementById("libraryMaintenanceProgress");
+  const progressFill = document.getElementById("libraryMaintenanceProgressFill");
+  const progressStage = document.getElementById("libraryMaintenanceProgressStage");
+  const progressText = document.getElementById("libraryMaintenanceProgressText");
+  const maintainBtn = document.getElementById("maintainLibraryBtn");
+  const cancelBtn = document.getElementById("cancelLibraryMaintenanceBtn");
   renderScrapeIssues(null);
   progressFill.style.width = "0%";
-  progressText.textContent = "Starting…";
+  progressStage.textContent = "Preparing library update…";
+  progressText.textContent = force ? "Existing metadata will be replaced." : "Existing metadata will be kept.";
   progressBox.classList.remove("d-none");
+  maintainBtn.disabled = true;
+  cancelBtn.disabled = false;
+  cancelBtn.innerHTML = '<i class="bi bi-x-circle"></i>Cancel';
 
-  const unlisten = await listen("scrape-progress", ({ payload }) => {
-    progressFill.style.width = `${Math.round((payload.processed / payload.total) * 100)}%`;
-    progressText.textContent = `Scraping ${payload.processed} of ${payload.total} — ${payload.scraped_title || payload.title}`;
-    patchEntryLive(payload);
+  const unlisten = await listen("library-maintenance-progress", ({ payload }) => {
+    if (payload.stage === "scanning") {
+      const scan = payload.progress;
+      progressStage.textContent = "Step 1 of 3 — Scanning files";
+      if (scan.phase === "discovering") {
+        progressFill.style.width = "2%";
+        progressText.textContent = `Finding files… ${scan.found} found so far`;
+      } else {
+        const ratio = scan.total ? scan.processed / scan.total : 1;
+        progressFill.style.width = `${Math.round(ratio * 33)}%`;
+        progressText.textContent = `Scanning ${scan.processed} of ${scan.total} files…`;
+      }
+    } else if (payload.stage === "scraping") {
+      const scrape = payload.progress;
+      progressStage.textContent = "Step 2 of 3 — Scraping metadata";
+      if (!scrape) {
+        progressFill.style.width = "34%";
+        progressText.textContent = force ? "Redownloading metadata and artwork…" : "Looking for missing metadata and artwork…";
+      } else {
+        const ratio = scrape.total ? scrape.processed / scrape.total : 1;
+        progressFill.style.width = `${Math.round(34 + ratio * 32)}%`;
+        progressText.textContent = `Scraping ${scrape.processed} of ${scrape.total} — ${scrape.scraped_title || scrape.title}`;
+        patchEntryLive(scrape);
+      }
+    } else if (payload.stage === "fixing_classifications") {
+      progressStage.textContent = "Step 3 of 3 — Fixing classifications";
+      progressFill.style.width = "85%";
+      progressText.textContent = "Checking library sections and grouping…";
+    }
   });
-  const hideProgress = () => {
-    progressBox.classList.add("d-none");
-    progressFill.style.width = "0%";
-    progressText.textContent = "";
-    renderScrapeIssues(null);
-  };
   try {
-    const force = document.getElementById("forceScrapeCheck").checked;
-    const r = await invoke("run_scrape", { force });
-    hideProgress();
-    const issueCount = Number(r.failed || 0) + Number(r.not_found || 0);
+    const result = await invoke("run_library_maintenance", { force });
+    progressFill.style.width = "100%";
+    progressStage.textContent = "Library update complete";
+    const issueCount = Number(result.scrape.failed || 0) + Number(result.scrape.not_found || 0);
     showToast(
       issueCount > 0
-        ? `Metadata scraping finished with ${issueCount} issue${issueCount === 1 ? "" : "s"} (${r.not_found} not found, ${r.failed} failed). View Notifications for details.`
-        : `Metadata scraping finished: matched ${r.matched}, not found ${r.not_found}, skipped ${r.skipped}.`,
+        ? `Library updated with ${issueCount} metadata issue${issueCount === 1 ? "" : "s"}. View Notifications for details.`
+        : `Library updated: +${result.scan.added} added, ${result.scan.updated} updated, ${result.scrape.matched} metadata matches, ${result.classifications.changed} classifications corrected.`,
       issueCount > 0 ? "warning" : "success",
     );
     if (issueCount > 0) await refreshNotificationBadge();
-    // A final full refresh as a safety net (picks up anything not visible
-    // in the current view during the run) — most of what it would show is
-    // already on screen from live patching by this point, so it no longer
-    // reads as content suddenly appearing out of nowhere.
-    await refreshLibrary();
   } catch (err) {
-    hideProgress();
-    showToast(`Metadata scraping failed. View Notifications for details. ${String(err)}`, "error");
-    await refreshNotificationBadge();
+    if (String(err) === "cancelled") {
+      showToast("Library update cancelled. Changes completed before cancellation were kept.", "warning");
+    } else {
+      showToast(`Library update failed. ${String(err)}`, "error");
+      await refreshNotificationBadge();
+    }
   } finally {
     unlisten();
-    hideProgress();
+    progressBox.classList.add("d-none");
+    progressFill.style.width = "0%";
+    progressText.textContent = "";
+    maintainBtn.disabled = false;
+    cancelBtn.disabled = false;
+    cancelBtn.innerHTML = '<i class="bi bi-x-circle"></i>Cancel';
+    libraryMaintenanceRunning = false;
+    await refreshLibrary();
+  }
+}
+
+document.getElementById("libraryMaintenanceMissingBtn").addEventListener("click", () => runLibraryMaintenance(false));
+document.getElementById("libraryMaintenanceOverrideBtn").addEventListener("click", () => runLibraryMaintenance(true));
+document.getElementById("cancelLibraryMaintenanceBtn").addEventListener("click", async (event) => {
+  if (!libraryMaintenanceRunning) return;
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.innerHTML = '<i class="bi bi-hourglass-split"></i>Cancelling…';
+  try {
+    await invoke("cancel_library_maintenance");
+  } catch (err) {
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-x-circle"></i>Cancel';
+    showToast(`Could not cancel. ${String(err)}`, "error");
   }
 });

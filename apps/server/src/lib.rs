@@ -24,7 +24,9 @@ use swarm_core::rest::{
 use swarm_core::signal::{SignalMessage, SignalPayload};
 use swarm_media::bandwidth::BandwidthSample;
 use swarm_media::roots::{MediaRoot, RootResolver, SharedRootResolver};
-use swarm_media::scan::{scan_roots, scan_roots_scoped, ScanProgressEvent, ScanReport};
+use swarm_media::scan::{
+    scan_roots, scan_roots_cancellable, scan_roots_scoped, ScanProgressEvent, ScanReport,
+};
 use swarm_media::scrape::{
     run_bulk_scrape, scrape_one_track, scrape_one_video, BulkScrapeReport, ScrapeConfig,
     ScrapeOneError, ScrapeProgressEvent, TmdbOverride,
@@ -407,10 +409,23 @@ impl ServerCore {
         roots: &[MediaRoot],
         progress_tx: Option<mpsc::Sender<ScanProgressEvent>>,
     ) -> Result<ScanReport, ServerError> {
+        self.run_scan_inner(roots, progress_tx, None).await
+    }
+
+    async fn run_scan_inner(
+        &self,
+        roots: &[MediaRoot],
+        progress_tx: Option<mpsc::Sender<ScanProgressEvent>>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<ScanReport, ServerError> {
         let _guard = self.scan_lock.lock().await;
         let _scan_activity = ScanActivityGuard::start(&self.scan_active);
         self.scan_status.send_modify(|s| *s = ScanState::Scanning);
-        match scan_roots(&self.library, roots, progress_tx).await {
+        let result = match cancel {
+            Some(cancel) => scan_roots_cancellable(&self.library, roots, progress_tx, cancel).await,
+            None => scan_roots(&self.library, roots, progress_tx).await,
+        };
+        match result {
             Ok(report) => {
                 self.scan_status
                     .send_modify(|s| *s = ScanState::Done(report.clone()));
@@ -496,6 +511,18 @@ impl ServerCore {
     ) -> Result<ScanReport, ServerError> {
         let roots = self.media_roots.roots();
         self.run_scan(&roots, progress_tx).await
+    }
+
+    /// Manual full scan with cooperative cancellation. The ordinary
+    /// background and root-management scans intentionally remain
+    /// non-cancellable; this is reserved for a user-owned maintenance run.
+    pub async fn rescan_cancellable(
+        &self,
+        progress_tx: Option<mpsc::Sender<ScanProgressEvent>>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<ScanReport, ServerError> {
+        let roots = self.media_roots.roots();
+        self.run_scan_inner(&roots, progress_tx, Some(cancel)).await
     }
 
     /// Permanently delete one asset and every server-managed file attached
@@ -743,10 +770,34 @@ impl ServerCore {
         progress_tx: Option<mpsc::UnboundedSender<ScrapeProgressEvent>>,
         force: bool,
     ) -> Result<BulkScrapeReport, ServerError> {
+        self.run_scrape_inner(config, progress_tx, force, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// Cancellable bulk scrape used by the desktop library-maintenance
+    /// workflow. Work already written remains valid; cancellation stops
+    /// before the next entry or lyric lookup.
+    pub async fn run_scrape_cancellable(
+        &self,
+        config: ScrapeConfig,
+        progress_tx: Option<mpsc::UnboundedSender<ScrapeProgressEvent>>,
+        force: bool,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<BulkScrapeReport, ServerError> {
+        self.run_scrape_inner(config, progress_tx, force, cancel)
+            .await
+    }
+
+    async fn run_scrape_inner(
+        &self,
+        config: ScrapeConfig,
+        progress_tx: Option<mpsc::UnboundedSender<ScrapeProgressEvent>>,
+        force: bool,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<BulkScrapeReport, ServerError> {
         if self.scraping.swap(true, Ordering::AcqRel) {
             return Err(ServerError::ScrapeInProgress);
         }
-        let cancel = AtomicBool::new(false);
         let result = run_bulk_scrape(
             &self.library,
             &self.media_roots,

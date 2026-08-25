@@ -194,10 +194,7 @@
       <div class="card-head">
         <h2>Library</h2>
         <div class="card-head-actions">
-          <label class="checkbox-label"><input type="checkbox" id="forceScrapeCheck"> Redownload / override existing</label>
-          <button id="scrapeBtn" class="secondary"><i class="bi bi-cloud-download"></i>Scrape metadata</button>
-          <button id="reclassifyBtn" class="secondary" title="Re-checks every entry's folder path for show/season/bonus-content signals a normal Rescan can't re-derive on its own, and clears stale scrape data for anything it corrects"><i class="bi bi-tools"></i>Fix classifications</button>
-          <button id="rescanBtn"><i class="bi bi-arrow-clockwise"></i>Rescan</button>
+          <button id="maintainLibraryBtn"><i class="bi bi-arrow-repeat"></i>Scan and update library</button>
         </div>
       </div>
       <div id="transcriptionProgress" class="transcription-progress" aria-live="polite">
@@ -211,13 +208,13 @@
           <span id="transcriptionProgressCounts" class="muted"></span>
         </div>
       </div>
-      <div id="scanProgress" class="scrape-progress d-none">
-        <div class="progress-bar"><div id="scanProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
-        <span id="scanProgressText" class="muted" style="font-size:.8rem"></span>
-      </div>
-      <div id="scrapeProgress" class="scrape-progress d-none">
-        <div class="progress-bar"><div id="scrapeProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
-        <span id="scrapeProgressText" class="muted" style="font-size:.8rem"></span>
+      <div id="libraryMaintenanceProgress" class="library-maintenance-progress d-none" aria-live="polite">
+        <div class="library-maintenance-progress-head">
+          <span id="libraryMaintenanceProgressStage">Preparing library update…</span>
+          <button id="cancelLibraryMaintenanceBtn" class="secondary"><i class="bi bi-x-circle"></i>Cancel</button>
+        </div>
+        <div class="progress-bar"><div id="libraryMaintenanceProgressFill" class="progress-bar-fill" style="width:0%"></div></div>
+        <span id="libraryMaintenanceProgressText" class="muted"></span>
       </div>
       <div id="scrapeIssuesWrap" class="d-none">
         <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:6px">
@@ -437,6 +434,19 @@
     <div class="delete-asset-modal-actions">
       <button id="deleteAssetModalCancel" class="secondary">Cancel</button>
       <button id="deleteAssetModalConfirm" class="danger"><i class="bi bi-trash3"></i>Delete permanently</button>
+    </div>
+  </div>
+</div>
+
+<div id="libraryMaintenanceModalBackdrop" class="modal-backdrop d-none">
+  <div class="modal-box library-maintenance-modal-box" role="dialog" aria-modal="true" aria-labelledby="libraryMaintenanceModalTitle" aria-describedby="libraryMaintenanceModalBody">
+    <button id="libraryMaintenanceModalClose" class="modal-close" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    <div class="modal-icon"><i class="bi bi-arrow-repeat"></i></div>
+    <h2 id="libraryMaintenanceModalTitle">Update library metadata</h2>
+    <p id="libraryMaintenanceModalBody">Choose how metadata should be handled. Replacing existing data redownloads titles, artwork, and details; missing-only keeps what you have and fills gaps. Both options scan files, scrape metadata, then repair classifications.</p>
+    <div class="library-maintenance-modal-actions">
+      <button id="libraryMaintenanceMissingBtn" class="secondary"><i class="bi bi-plus-circle"></i>Only scrape missing data</button>
+      <button id="libraryMaintenanceOverrideBtn"><i class="bi bi-arrow-repeat"></i>Replace existing metadata</button>
     </div>
   </div>
 </div>

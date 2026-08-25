@@ -18,11 +18,13 @@ use rand::RngCore;
 use settings::{MediaRootHealth, MediaRootSetting, Settings};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
-use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig};
+use swarm_media::scan::ScanProgressEvent;
+use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig, ScrapeProgressEvent};
 use swarm_server::{
     ScanState, ServerConfig, ServerCore, ServerError, ServerStatus, TokenStoreMode,
 };
@@ -31,10 +33,13 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 struct AppState {
     core: OnceCell<Arc<ServerCore>>,
+    /// Present only while the user-triggered consolidated library workflow
+    /// is active. The separate cancel command flips this shared token.
+    library_maintenance_cancel: Mutex<Option<Arc<AtomicBool>>>,
     // The OS releases this process-scoped power assertion when the state is
     // dropped, which only happens when the user actually quits the app (not
     // when the main window is hidden to the tray).
@@ -1177,6 +1182,159 @@ async fn get_artwork_bytes(
 /// The frontend listens via `window.__TAURI__.event.listen`.
 const SCRAPE_PROGRESS_EVENT: &str = "scrape-progress";
 
+const LIBRARY_MAINTENANCE_PROGRESS_EVENT: &str = "library-maintenance-progress";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+enum LibraryMaintenanceProgressEvent {
+    Scanning {
+        progress: ScanProgressEvent,
+    },
+    Scraping {
+        progress: Option<ScrapeProgressEvent>,
+    },
+    FixingClassifications,
+}
+
+#[derive(serde::Serialize)]
+struct LibraryMaintenanceResult {
+    scan: RescanResult,
+    scrape: BulkScrapeReport,
+    classifications: swarm_media::store::ReclassifyReport,
+}
+
+/// Performs the complete browse-page maintenance sequence as one operation:
+/// scan, scrape, then classification repair. `force` selects whether the
+/// scrape replaces existing metadata or fills only missing fields.
+#[tauri::command]
+async fn run_library_maintenance(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    force: bool,
+) -> Result<LibraryMaintenanceResult, String> {
+    let cancel = {
+        let mut active = state.library_maintenance_cancel.lock().await;
+        if active.is_some() {
+            return Err("library maintenance is already running".to_string());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *active = Some(Arc::clone(&cancel));
+        cancel
+    };
+
+    let result = async {
+        let core = state.core(&app).await?;
+
+        let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel(64);
+        let scan_emitter = app.clone();
+        let scan_forward = tokio::spawn(async move {
+            while let Some(progress) = scan_rx.recv().await {
+                let _ = scan_emitter.emit(
+                    LIBRARY_MAINTENANCE_PROGRESS_EVENT,
+                    LibraryMaintenanceProgressEvent::Scanning { progress },
+                );
+            }
+        });
+        let scan_result = core
+            .rescan_cancellable(Some(scan_tx), Arc::clone(&cancel))
+            .await;
+        let _ = scan_forward.await;
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".to_string());
+        }
+        let scan = scan_result.map_err(|error| error.to_string())?;
+
+        let _ = app.emit(
+            LIBRARY_MAINTENANCE_PROGRESS_EVENT,
+            LibraryMaintenanceProgressEvent::Scraping { progress: None },
+        );
+        let tmdb_api_key = settings::load(&app_data_dir(&app)?).tmdb_api_key;
+        let (scrape_tx, mut scrape_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scrape_emitter = app.clone();
+        let scrape_forward = tokio::spawn(async move {
+            while let Some(progress) = scrape_rx.recv().await {
+                let _ = scrape_emitter.emit(
+                    LIBRARY_MAINTENANCE_PROGRESS_EVENT,
+                    LibraryMaintenanceProgressEvent::Scraping {
+                        progress: Some(progress),
+                    },
+                );
+            }
+        });
+        let scrape_result = core
+            .run_scrape_cancellable(
+                ScrapeConfig {
+                    tmdb_api_key,
+                    ..Default::default()
+                },
+                Some(scrape_tx),
+                force,
+                Arc::clone(&cancel),
+            )
+            .await;
+        let _ = scrape_forward.await;
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".to_string());
+        }
+        record_scrape_result_notification(
+            &core,
+            &scrape_result,
+            "Metadata scrape finished with issues",
+            "Metadata scrape failed",
+        )
+        .await;
+        let scrape = scrape_result.map_err(|error| error.to_string())?;
+
+        let _ = app.emit(
+            LIBRARY_MAINTENANCE_PROGRESS_EVENT,
+            LibraryMaintenanceProgressEvent::FixingClassifications,
+        );
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".to_string());
+        }
+        let classifications = core
+            .library
+            .reclassify_all(&core.media_roots)
+            .await
+            .map_err(|error| error.to_string())?;
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".to_string());
+        }
+
+        Ok(LibraryMaintenanceResult {
+            scan: RescanResult {
+                added: scan.added,
+                updated: scan.updated,
+                removed: scan.removed,
+                unchanged: scan.unchanged,
+            },
+            scrape,
+            classifications,
+        })
+    }
+    .await;
+
+    let mut active = state.library_maintenance_cancel.lock().await;
+    if active
+        .as_ref()
+        .is_some_and(|active| Arc::ptr_eq(active, &cancel))
+    {
+        *active = None;
+    }
+    result
+}
+
+#[tauri::command]
+async fn cancel_library_maintenance(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let active = state.library_maintenance_cancel.lock().await;
+    if let Some(cancel) = active.as_ref() {
+        cancel.store(true, Ordering::Release);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[tauri::command]
 async fn run_scrape(
     app: tauri::AppHandle,
@@ -1922,6 +2080,7 @@ fn main() {
         })
         .manage(AppState {
             core: OnceCell::new(),
+            library_maintenance_cancel: Mutex::new(None),
             _sleep_inhibitor: acquire_sleep_inhibitor(),
         })
         .invoke_handler(tauri::generate_handler![
@@ -1959,6 +2118,8 @@ fn main() {
             delete_asset,
             list_categories,
             get_artwork_bytes,
+            run_library_maintenance,
+            cancel_library_maintenance,
             run_scrape,
             rescrape_entry,
             set_manual_metadata,
