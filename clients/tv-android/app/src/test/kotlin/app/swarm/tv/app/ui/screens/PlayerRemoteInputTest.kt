@@ -78,6 +78,29 @@ class PlayerRemoteInputTest {
     }
 
     @Test
+    fun `credits-triggered continue prompt dismisses instead of exiting`() {
+        assertEquals(
+            PlaybackBackAction.DISMISS_CONTINUE_PROMPT,
+            playbackBackAction(
+                showPauseOverlay = false,
+                showContinuePrompt = true,
+                controlsVisible = true,
+                continuePromptDismissable = true,
+            ),
+        )
+        // Without an active continue prompt, the dismissable flag is moot.
+        assertEquals(
+            PlaybackBackAction.PAUSE,
+            playbackBackAction(
+                showPauseOverlay = false,
+                showContinuePrompt = false,
+                controlsVisible = false,
+                continuePromptDismissable = true,
+            ),
+        )
+    }
+
+    @Test
     fun `music maps D-pad directions and transport buttons to seeking`() {
         assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT))
         assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT))

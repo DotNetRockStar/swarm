@@ -17,13 +17,18 @@
  * stay wherever it was at the last normal exit instead of near the true
  * last-watched position.
  *
- * Continue/autoplay: when [hasNext] is true and playback reaches
- * `Player.STATE_ENDED` naturally (not on back-press/manual exit — those
- * still go straight through [onBack] as before), a brief overlay offers
- * to play [nextTitle] next (with [nextArtworkUrl]'s box art above the
- * button), auto-confirming after a few seconds unless cancelled.
- * Manual-exit resume/position-save is untouched either way — [onDispose]
- * always fires the same report regardless of which path led to disposal.
+ * Continue/autoplay: when [hasNext] is true, the same "Up next" overlay can
+ * appear two ways (#80). If the episode's IntroDB markers include a CREDITS
+ * segment, the overlay pops as soon as playback enters it — mirroring how
+ * streaming apps offer the next episode while credits roll instead of over a
+ * dead black frame — and Cancel/Back there just dismisses the overlay so
+ * credits keep playing underneath. Otherwise (no credits marker, or the
+ * viewer already dismissed that early offer) it falls back to appearing when
+ * playback reaches `Player.STATE_ENDED` naturally, where Cancel/Back instead
+ * exits through [onBack] since there is nothing left to keep watching. Either
+ * way, "Play now" behaves the same. Manual-exit resume/position-save is
+ * untouched by any of this — [onDispose] always fires the same report
+ * regardless of which path led to disposal.
  */
 package app.swarm.tv.app.ui.screens
 
@@ -179,6 +184,7 @@ internal enum class PlaybackBackAction {
     EXIT,
     HIDE_CONTROLS,
     PAUSE,
+    DISMISS_CONTINUE_PROMPT,
 }
 
 /** Fire TV remotes send these as activity key events, rather than invoking
@@ -229,7 +235,13 @@ internal fun playbackBackAction(
     showPauseOverlay: Boolean,
     showContinuePrompt: Boolean,
     controlsVisible: Boolean,
+    // True only while the current continue prompt was triggered by an
+    // in-progress CREDITS marker rather than STATE_ENDED (#80) — playback is
+    // still going underneath it, so Back should dismiss the offer and keep
+    // watching rather than exit.
+    continuePromptDismissable: Boolean = false,
 ): PlaybackBackAction = when {
+    showContinuePrompt && continuePromptDismissable -> PlaybackBackAction.DISMISS_CONTINUE_PROMPT
     showPauseOverlay || showContinuePrompt -> PlaybackBackAction.EXIT
     controlsVisible -> PlaybackBackAction.HIDE_CONTROLS
     else -> PlaybackBackAction.PAUSE
@@ -550,6 +562,14 @@ fun PlayerScreen(
     var consumeSurfaceSelectKeyUp by remember(sessionId) { mutableStateOf(false) }
     var offeredIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
     var dismissedIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
+    // Credits-triggered "Play Next Episode" (#80): non-null while the active
+    // continue prompt was popped because playback entered this CREDITS
+    // segment, rather than from STATE_ENDED — see playbackBackAction and the
+    // ContinueOverlay call site below for how that changes Cancel/Back.
+    // dismissedCreditsSegment stops a cancelled offer from immediately
+    // reappearing on the very next poll while still inside the same segment.
+    var continuePromptCreditsSegment by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
+    var dismissedCreditsSegment by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
     // Netflix-style "which section is this" label — Recap/Credits get a
     // plain badge (no skip action; Recap is short and Credits is already
     // near the Continue/next-episode flow), while Intro keeps its dedicated
@@ -616,6 +636,20 @@ fun PlayerScreen(
                 active == null -> offeredIntro = null
                 active != dismissedIntro -> offeredIntro = active
             }
+            // Popped the moment playback enters a CREDITS marker, instead of
+            // waiting for STATE_ENDED (#80). Guarded on segmentsVisible so it
+            // never fires while some other overlay (pause, an already-shown
+            // continue prompt) is up, and on identity against
+            // dismissedCreditsSegment so cancelling the offer doesn't
+            // re-trigger it on the very next poll of the same segment.
+            if (entry.entry.kind == MediaKind.EPISODE && hasNext && segmentsVisible) {
+                val credits = activeSkipSegment(entry.entry.skipSegments, controllerPlayer.currentPosition, SkipSegmentKind.CREDITS)
+                if (credits != null && credits != dismissedCreditsSegment) {
+                    continuePromptCreditsSegment = credits
+                    showContinuePrompt = true
+                    onPreloadNext()
+                }
+            }
             sectionLabel = if (!segmentsVisible) {
                 null
             } else {
@@ -659,9 +693,15 @@ fun PlayerScreen(
                     showPauseOverlay = showPauseOverlay,
                     showContinuePrompt = showContinuePrompt,
                     controlsVisible = playerView.isControllerFullyVisible,
+                    continuePromptDismissable = continuePromptCreditsSegment != null,
                 )
             ) {
                 PlaybackBackAction.EXIT -> onBack()
+                PlaybackBackAction.DISMISS_CONTINUE_PROMPT -> {
+                    showContinuePrompt = false
+                    continuePromptCreditsSegment?.let { dismissedCreditsSegment = it }
+                    continuePromptCreditsSegment = null
+                }
                 PlaybackBackAction.HIDE_CONTROLS -> {
                     playerView.hideController()
                     playerView.requestFocus()
@@ -759,6 +799,10 @@ fun PlayerScreen(
                     isLoading = true
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
+                    // Reached the true end, not just a credits marker (or no
+                    // marker exists at all) — Cancel/Back on this prompt must
+                    // exit rather than dismiss-and-keep-watching.
+                    continuePromptCreditsSegment = null
                     showPauseOverlay = false
                     showContinuePrompt = true
                     onPreloadNext()
@@ -930,7 +974,19 @@ fun PlayerScreen(
                 nextTitle = nextTitle,
                 nextArtworkUrl = nextArtworkUrl,
                 onPlayNow = { showContinuePrompt = false; onContinue() },
-                onCancel = { showContinuePrompt = false; onBack() },
+                onCancel = {
+                    showContinuePrompt = false
+                    val creditsSegment = continuePromptCreditsSegment
+                    if (creditsSegment != null) {
+                        // Popped early, mid-credits — playback never stopped,
+                        // so dismiss the offer and keep watching instead of
+                        // exiting like the STATE_ENDED-triggered prompt does.
+                        dismissedCreditsSegment = creditsSegment
+                        continuePromptCreditsSegment = null
+                    } else {
+                        onBack()
+                    }
+                },
             )
         }
 
