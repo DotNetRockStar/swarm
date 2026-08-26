@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,6 +28,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -623,6 +627,33 @@ private fun SwarmApp(
             (activeMusicSession != null && musicIsPlaying) ||
             (browsePreview != null && !browsePreview.released),
     )
+
+    // #78: Home and the remote's Power button never reach the app as key
+    // events (the system launcher/power manager intercepts both), so the
+    // only signal this app gets is the standard Activity lifecycle — both
+    // land on ComponentActivity's onStop (Android invokes onStop whenever
+    // the window stops being visible, which is the documented behavior for
+    // screen-off same as for Home). Without this, playback kept decoding
+    // and rendering audio/video behind the launcher or a blank screen.
+    // rememberUpdatedState keeps the observer itself stable (added once per
+    // lifecycle instance) while still reading the latest state on the event.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val latestState = rememberUpdatedState(state)
+    val latestMinimizedPlayer = rememberUpdatedState(minimizedPlayer)
+    val latestOnStopPlayback = rememberUpdatedState(onStopPlayback)
+    val latestOnStopMinimizedPlayback = rememberUpdatedState(onStopMinimizedPlayback)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_STOP) return@LifecycleEventObserver
+            if (latestState.value is UiState.Player) {
+                latestOnStopPlayback.value()
+            } else if (latestMinimizedPlayer.value != null) {
+                latestOnStopMinimizedPlayback.value()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val config = LocalConfiguration.current
     val contentModifier = if (state is UiState.Player || state is UiState.PlaybackLoading) {
