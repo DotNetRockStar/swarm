@@ -624,9 +624,18 @@ class SwarmViewModel(
      * code when the server already trusts this client's certificate; a new
      * client is rejected by the existing mutual-TLS verifier and can then
      * use [startLanPairing] once to display a media-server approval code.
+     *
+     * [server] may already be a trusted, previously-paired device (the
+     * common case: the user is just reselecting a server they stream from
+     * all the time). Captured *before* the connection attempt — not
+     * re-derived inside [connectLanServerNow] — because a successful pairing
+     * updates [_pairedLanFingerprints] before that function's catalog fetch
+     * even runs (see [startLanPairing]), which would otherwise make every
+     * caller look "already trusted" by the time it could check.
      */
     fun connectLanServer(server: LanServer, deviceName: String) {
-        viewModelScope.launch { connectLanServerNow(server, deviceName) }
+        val knownPaired = normalizeFingerprint(server.certFingerprint) in _pairedLanFingerprints.value
+        viewModelScope.launch { connectLanServerNow(server, deviceName, knownPaired) }
     }
 
     fun startLanPairing(server: LanServer, deviceName: String) {
@@ -686,7 +695,7 @@ class SwarmViewModel(
             saveLanConnection(server, trimmedName)
             _lanPairingActivation.value = null
             notify("${server.name} approved this TV.", ClientNotificationKind.SUCCESS)
-            connectLanServerNow(server, trimmedName)
+            connectLanServerNow(server, trimmedName, knownPaired = false)
         }
     }
 
@@ -698,7 +707,7 @@ class SwarmViewModel(
         _lanError.value = null
     }
 
-    private suspend fun connectLanServerNow(server: LanServer, clientName: String) {
+    private suspend fun connectLanServerNow(server: LanServer, clientName: String, knownPaired: Boolean) {
         _lanPairingBusy.value = true
         _lanError.value = null
         val name = clientName.ifBlank { "Fire TV" }
@@ -735,9 +744,25 @@ class SwarmViewModel(
         }
         _lanPairingBusy.value = false
         if (result == null || result.unreachable.isNotEmpty()) {
-            val message = "Could not connect securely. If this is the first connection, open LAN pairing on the media server and enter its code."
-            _lanError.value = message
-            notify(message, ClientNotificationKind.ERROR)
+            // A server this TV has already paired with (the common case —
+            // reselecting a server it streams from routinely) can still fail
+            // one reconnect attempt to a route/ARP hiccup or a Wi-Fi blip
+            // without anything actually being wrong: the device stays
+            // trusted and any in-progress playback on its own connection is
+            // unaffected. Surfacing a security-sounding error here was
+            // misleading (#66) — it read as a real problem even while the
+            // user was streaming successfully — so this case stays silent
+            // and simply leaves the device as unreachable for this attempt;
+            // the next resync/browse naturally retries. Only a device this
+            // TV has never actually paired with gets an actionable message,
+            // since that's the one case where LAN pairing genuinely helps.
+            if (!knownPaired) {
+                val message = "Could not reach ${server.name} on the local network. If it hasn't approved this TV, open LAN pairing on the media server and enter its code."
+                _lanError.value = message
+                notify(message, ClientNotificationKind.WARNING)
+            } else {
+                Log.w(logTag, "reconnect to already-paired LAN server ${server.name} failed; leaving it unreachable for this attempt")
+            }
             return
         }
         deviceId = deviceId ?: "lan-client-${certFingerprint.take(16)}"
