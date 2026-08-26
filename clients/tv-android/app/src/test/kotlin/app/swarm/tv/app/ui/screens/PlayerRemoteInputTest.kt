@@ -49,6 +49,42 @@ class PlayerRemoteInputTest {
     }
 
     @Test
+    fun `focused skip-intro button claims the D-pad instead of pausing or seeking`() {
+        assertNull(
+            videoSurfacePlaybackAction(
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                playWhenReady = true,
+                controlsVisible = false,
+                surfaceButtonFocused = true,
+            ),
+        )
+        assertNull(
+            videoSurfacePlaybackAction(
+                KeyEvent.KEYCODE_ENTER,
+                playWhenReady = true,
+                controlsVisible = false,
+                surfaceButtonFocused = true,
+            ),
+        )
+        assertNull(
+            videoSurfacePlaybackAction(
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                playWhenReady = true,
+                controlsVisible = false,
+                surfaceButtonFocused = true,
+            ),
+        )
+        assertNull(
+            videoSurfacePlaybackAction(
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                playWhenReady = true,
+                controlsVisible = false,
+                surfaceButtonFocused = true,
+            ),
+        )
+    }
+
+    @Test
     fun `paused video and visible controls retain normal D-pad behavior`() {
         assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT, playWhenReady = false, controlsVisible = false))
         assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT, playWhenReady = false, controlsVisible = false))

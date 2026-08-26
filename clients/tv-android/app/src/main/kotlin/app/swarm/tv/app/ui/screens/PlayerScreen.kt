@@ -218,8 +218,13 @@ internal fun videoSurfacePlaybackAction(
     keyCode: Int,
     playWhenReady: Boolean,
     controlsVisible: Boolean,
+    // True while an on-surface Compose button (currently the "Skip intro"
+    // offer) holds D-pad focus. When a button is focused, Select must click
+    // that button and the D-pad must interact with it, never pause or seek
+    // the video underneath it (#94).
+    surfaceButtonFocused: Boolean = false,
 ): RemotePlaybackAction? {
-    if (!playWhenReady || controlsVisible) return null
+    if (!playWhenReady || controlsVisible || surfaceButtonFocused) return null
     return when (keyCode) {
         KeyEvent.KEYCODE_DPAD_LEFT -> RemotePlaybackAction.SEEK_BACK
         KeyEvent.KEYCODE_DPAD_RIGHT -> RemotePlaybackAction.SEEK_FORWARD
@@ -892,6 +897,9 @@ fun PlayerScreen(
                     keyCode = event.keyCode,
                     playWhenReady = player.playWhenReady && !showPauseOverlay && !showContinuePrompt,
                     controlsVisible = playerView.isControllerFullyVisible,
+                    // The "Skip intro" button owns focus while it is offered,
+                    // so let its key events reach it instead of pausing (#94).
+                    surfaceButtonFocused = offeredIntro != null,
                 )
                 if (surfaceAction != null) {
                     if (event.action == KeyEvent.ACTION_DOWN) {
