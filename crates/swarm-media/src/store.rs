@@ -186,6 +186,21 @@ pub struct ClientErrorRecord {
     pub context: Option<String>,
     pub occurred_at_ms: i64,
     pub received_at_ms: i64,
+    pub resolution_comments: Option<String>,
+    pub resolved_at_ms: Option<i64>,
+    pub dismissed_at_ms: Option<i64>,
+}
+
+/// A resolved problem waiting for the reporting client to view or dismiss it.
+/// The server remains the source of truth while the TV keeps a local copy for
+/// offline viewing and de-duplicates the next poll by `(server_id, id)`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClientResolutionNotification {
+    pub id: i64,
+    pub asset_title: Option<String>,
+    pub original_message: String,
+    pub comments: Option<String>,
+    pub resolved_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,7 +379,10 @@ impl Library {
                 message TEXT NOT NULL,
                 context TEXT,
                 occurred_at_ms INTEGER NOT NULL,
-                received_at_ms INTEGER NOT NULL
+                received_at_ms INTEGER NOT NULL,
+                resolution_comments TEXT,
+                resolved_at_ms INTEGER,
+                dismissed_at_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_client_errors_received ON client_errors(received_at_ms DESC);
             CREATE TABLE IF NOT EXISTS server_notifications (
@@ -450,6 +468,20 @@ impl Library {
         for (column, ddl_type) in [("tmdb_id", "INTEGER"), ("skip_segments_json", "TEXT")] {
             ensure_column(&pool, "asset_metadata_history", column, ddl_type).await?;
         }
+        for (column, ddl_type) in [
+            ("resolution_comments", "TEXT"),
+            ("resolved_at_ms", "INTEGER"),
+            ("dismissed_at_ms", "INTEGER"),
+        ] {
+            ensure_column(&pool, "client_errors", column, ddl_type).await?;
+        }
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_client_errors_notifications \
+             ON client_errors(device_id, resolved_at_ms DESC) \
+             WHERE resolved_at_ms IS NOT NULL AND dismissed_at_ms IS NULL",
+        )
+        .execute(&pool)
+        .await?;
         Ok(Self { pool })
     }
 
@@ -2340,9 +2372,13 @@ impl Library {
             Option<String>,
             i64,
             i64,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
         );
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms \
+            "SELECT id, device_id, device_name, entry_key, asset_title, kind, message, context, occurred_at_ms, received_at_ms, \
+                    resolution_comments, resolved_at_ms, dismissed_at_ms \
              FROM client_errors ORDER BY received_at_ms DESC",
         )
         .fetch_all(&self.pool)
@@ -2361,6 +2397,9 @@ impl Library {
                     context,
                     occurred_at_ms,
                     received_at_ms,
+                    resolution_comments,
+                    resolved_at_ms,
+                    dismissed_at_ms,
                 )| {
                     ClientErrorRecord {
                         id,
@@ -2373,6 +2412,9 @@ impl Library {
                         context,
                         occurred_at_ms,
                         received_at_ms,
+                        resolution_comments,
+                        resolved_at_ms,
+                        dismissed_at_ms,
                     }
                 },
             )
@@ -2380,10 +2422,78 @@ impl Library {
     }
 
     pub async fn client_error_count(&self) -> sqlx::Result<u64> {
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM client_errors")
-            .fetch_one(&self.pool)
-            .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM client_errors WHERE resolved_at_ms IS NULL")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count as u64)
+    }
+
+    /// Marks an open report resolved. Repeating the action is idempotent and
+    /// does not change the original resolution time or re-notify the client.
+    pub async fn resolve_client_error(
+        &self,
+        id: i64,
+        comments: Option<&str>,
+    ) -> sqlx::Result<bool> {
+        let comments = comments.map(str::trim).filter(|value| !value.is_empty());
+        let result = sqlx::query(
+            "UPDATE client_errors SET resolution_comments = ?, resolved_at_ms = ? \
+             WHERE id = ? AND resolved_at_ms IS NULL",
+        )
+        .bind(comments)
+        .bind(unix_time_ms())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_client_resolution_notifications(
+        &self,
+        device_id: &str,
+    ) -> sqlx::Result<Vec<ClientResolutionNotification>> {
+        type Row = (i64, Option<String>, String, Option<String>, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, asset_title, message, resolution_comments, resolved_at_ms \
+             FROM client_errors \
+             WHERE device_id = ? AND resolved_at_ms IS NOT NULL AND dismissed_at_ms IS NULL \
+             ORDER BY resolved_at_ms DESC, id DESC",
+        )
+        .bind(device_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, asset_title, original_message, comments, resolved_at_ms)| {
+                    ClientResolutionNotification {
+                        id,
+                        asset_title,
+                        original_message,
+                        comments,
+                        resolved_at_ms,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    pub async fn dismiss_client_resolution_notification(
+        &self,
+        device_id: &str,
+        id: i64,
+    ) -> sqlx::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE client_errors SET dismissed_at_ms = ? \
+             WHERE id = ? AND device_id = ? AND resolved_at_ms IS NOT NULL",
+        )
+        .bind(unix_time_ms())
+        .bind(id)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn delete_client_error(&self, id: i64) -> sqlx::Result<()> {

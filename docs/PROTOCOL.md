@@ -60,6 +60,10 @@ Routes:
 | `/media/{entry_key}` | file bytes | legacy/unnegotiated direct play; globally upload-paced |
 | `/hls/{session_id}/master.m3u8` | multivariant playlist | ladder pruned by client limits and remaining server upload |
 | `/hls/{session_id}/{rendition}/{file}` | playlist/fMP4 bytes | four-second CMAF/fMP4 HLS; resume offset was supplied during `/play` |
+| `/errors/report` | empty (204) | request carries a client problem report for server-side triage |
+| `/notifications/{device_id}` | `ClientResolutionNotification[]` | resolved reports for that client that have not been dismissed |
+| `/notifications/{device_id}/{error_id}/dismiss` | empty (204) | acknowledges and dismisses one resolved-problem notification |
+| `/likes/toggle` | empty (204) | request carries an idempotent desired like state |
 
 `entry_key` values must pass `entry_key::is_valid_entry_key` before any filesystem lookup. Session ids are random 128-bit values. Status vocabulary additionally uses 400 for missing playback preferences, 429 for exhausted session/upload capacity, and 503 for an unavailable/failed transcoder.
 

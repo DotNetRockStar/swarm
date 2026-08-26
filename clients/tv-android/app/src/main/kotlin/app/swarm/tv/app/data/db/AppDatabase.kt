@@ -12,8 +12,9 @@ import androidx.room.RoomDatabase
         AppSettingsEntity::class,
         KidModeSettingsEntity::class,
         LocalServerConnectionEntity::class,
+        ClientNotificationEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun appSettingsDao(): AppSettingsDao
     abstract fun kidModeDao(): KidModeDao
     abstract fun localServerConnectionDao(): LocalServerConnectionDao
+    abstract fun clientNotificationDao(): ClientNotificationDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null

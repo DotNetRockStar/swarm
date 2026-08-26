@@ -40,6 +40,7 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import app.swarm.tv.app.data.AndroidCatalogCache
 import app.swarm.tv.app.data.AndroidConnectionStore
+import app.swarm.tv.app.data.AndroidClientNotificationStore
 import app.swarm.tv.app.data.AndroidDeviceIdentity
 import app.swarm.tv.app.data.AndroidDisconnectedServerStore
 import app.swarm.tv.app.data.AndroidKidModeStore
@@ -48,6 +49,7 @@ import app.swarm.tv.app.data.AndroidLikedEntriesStore
 import app.swarm.tv.app.data.AndroidProblemReportDiagnostics
 import app.swarm.tv.app.data.AndroidTokenStore
 import app.swarm.tv.app.data.KidModeSettings
+import app.swarm.tv.app.data.ResolvedProblemNotification
 import app.swarm.tv.app.data.LanDiscoveryManager
 import app.swarm.tv.app.data.LanPairingActivation
 import app.swarm.tv.app.data.LanServer
@@ -144,6 +146,7 @@ class MainActivity : ComponentActivity() {
         val connectionStore = AndroidConnectionStore(applicationContext)
         val likedEntriesStore = AndroidLikedEntriesStore(applicationContext)
         val kidModeStore = AndroidKidModeStore(applicationContext)
+        val clientNotificationStore = AndroidClientNotificationStore(applicationContext)
         val lanDiscovery = LanDiscoveryManager(applicationContext)
         val lanConnectionStore = AndroidLanConnectionStore(applicationContext)
         val disconnectedServerStore = AndroidDisconnectedServerStore(applicationContext)
@@ -195,6 +198,7 @@ class MainActivity : ComponentActivity() {
                                     connectionStore,
                                     likedEntriesStore,
                                     kidModeStore,
+                                    clientNotificationStore,
                                     lanDiscovery,
                                     lanConnectionStore,
                                     disconnectedServerStore,
@@ -214,6 +218,7 @@ class MainActivity : ComponentActivity() {
                     val watchStates by viewModel.watchStates.collectAsState()
                     val watchlistKeys by viewModel.watchlistKeys.collectAsState()
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
+                    val resolvedProblemNotifications by viewModel.resolvedProblemNotifications.collectAsState()
                     val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
                     val browsePreview by viewModel.browsePreview.collectAsState()
@@ -252,6 +257,8 @@ class MainActivity : ComponentActivity() {
                         onEnableKidMode = viewModel::enableKidMode,
                         onUpdateKidModeRules = viewModel::updateKidModeRules,
                         onDisableKidMode = viewModel::disableKidMode,
+                        resolvedProblemNotifications = resolvedProblemNotifications,
+                        onDismissResolvedProblem = viewModel::dismissResolvedProblem,
                         shuffleEnabled = shuffleEnabled,
                         onToggleShuffle = viewModel::toggleShuffle,
                         minimizedPlayer = minimizedPlayer,
@@ -344,6 +351,8 @@ private fun SwarmApp(
     onEnableKidMode: (pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
     onUpdateKidModeRules: (allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
     onDisableKidMode: () -> Unit,
+    resolvedProblemNotifications: List<ResolvedProblemNotification>,
+    onDismissResolvedProblem: (ResolvedProblemNotification) -> Unit,
     shuffleEnabled: Boolean,
     onToggleShuffle: () -> Unit,
     minimizedPlayer: UiState.Player?,
@@ -682,6 +691,8 @@ private fun SwarmApp(
                     onEnableKidMode = onEnableKidMode,
                     onUpdateKidModeRules = onUpdateKidModeRules,
                     onDisableKidMode = onDisableKidMode,
+                    notifications = resolvedProblemNotifications,
+                    onDismissNotification = onDismissResolvedProblem,
                 )
             is UiState.Catalog ->
                 CatalogScreen(

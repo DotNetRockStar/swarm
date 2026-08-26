@@ -223,7 +223,7 @@
           <button id="clearClientErrorsBtn" class="secondary d-none"><i class="bi bi-check2-all"></i>Clear all</button>
         </div>
       </div>
-      <p class="muted" style="margin-top:-6px">Errors reported back by client devices (playback failures, unreachable servers, etc.) — sent here for triage. Delete an entry once you've resolved it.</p>
+      <p class="muted" style="margin-top:-6px">Problems reported by client devices. Mark one resolved to notify that device the next time it connects.</p>
       <div id="clientErrorsList" style="margin-top:10px">Loading…</div>
     </div>
   </div>
@@ -456,8 +456,13 @@
     <h2 id="notificationModalTitle"></h2>
     <div id="notificationModalMeta" class="client-error-meta"></div>
     <div id="notificationModalBody" class="notification-modal-body"></div>
+    <div id="notificationResolutionFields" class="d-none">
+      <label for="notificationResolutionComments">Resolution comments (optional)</label>
+      <textarea id="notificationResolutionComments" rows="4" placeholder="Tell the client what was fixed or what they should try next."></textarea>
+    </div>
     <div class="notification-modal-actions">
       <button id="notificationModalCopy" class="secondary"><i class="bi bi-copy"></i>Copy notification</button>
+      <button id="notificationModalResolve" class="d-none"><i class="bi bi-check-circle-fill"></i>Mark resolved</button>
     </div>
   </div>
 </div>

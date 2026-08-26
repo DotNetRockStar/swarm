@@ -7,13 +7,28 @@ function closeNotificationModal() {
   notificationModalBackdrop.classList.add("d-none");
 }
 
-function openNotificationModal({ title, body, meta, level = "error", icon = "bi-bell-fill" }) {
+function openNotificationModal({ title, body, meta, level = "error", icon = "bi-bell-fill", onResolve = null }) {
   document.getElementById("notificationModalTitle").textContent = title;
   document.getElementById("notificationModalBody").textContent = body || "No additional details.";
   document.getElementById("notificationModalMeta").textContent = meta || "";
   const iconEl = document.getElementById("notificationModalIcon");
   iconEl.className = `bi ${icon}`;
   iconEl.parentElement.style.color = level === "error" ? "#ff5d7a" : level === "warning" ? "#f5c451" : "var(--green)";
+  const resolutionFields = document.getElementById("notificationResolutionFields");
+  const resolutionComments = document.getElementById("notificationResolutionComments");
+  const resolveButton = document.getElementById("notificationModalResolve");
+  resolutionComments.value = "";
+  resolutionFields.classList.toggle("d-none", !onResolve);
+  resolveButton.classList.toggle("d-none", !onResolve);
+  resolveButton.onclick = onResolve ? async () => {
+    resolveButton.disabled = true;
+    try {
+      await onResolve(resolutionComments.value.trim() || null);
+      closeNotificationModal();
+    } finally {
+      resolveButton.disabled = false;
+    }
+  } : null;
   notificationModalBackdrop.classList.remove("d-none");
 }
 
@@ -99,19 +114,23 @@ async function loadClientErrors() {
   const clearBtn = document.getElementById("clearClientErrorsBtn");
   try {
     const errors = await invoke("list_client_errors");
-    countEl.textContent = errors.length ? `${errors.length} error${errors.length === 1 ? "" : "s"}` : "";
+    const openCount = errors.filter(error => !error.resolved_at_ms).length;
+    const resolvedCount = errors.length - openCount;
+    countEl.textContent = errors.length ? `${openCount} open${resolvedCount ? ` • ${resolvedCount} resolved` : ""}` : "";
     clearBtn.classList.toggle("d-none", errors.length === 0);
     list.innerHTML = errors.length ? errors.map(error => `
-      <div class="client-error-row notification-level-error" data-open-notification="client-${error.id}" tabindex="0" role="button">
+      <div class="client-error-row notification-level-${error.resolved_at_ms ? "success" : "error"}" data-open-notification="client-${error.id}" tabindex="0" role="button">
         <div style="flex:1; min-width:0">
           <div class="client-error-message">${esc(error.asset_title || error.device_name || "Client error")}</div>
           <div class="client-error-meta">
             <span><i class="bi bi-clock"></i> ${esc(new Date(error.occurred_at_ms).toLocaleString())}</span>
             <span><i class="bi bi-tv"></i> ${esc(error.device_name)}</span>
             ${error.kind ? `<span>${esc(error.kind)}</span>` : ""}
+            ${error.resolved_at_ms ? `<span class="client-error-status"><i class="bi bi-check-circle-fill"></i> Resolved ${esc(new Date(error.resolved_at_ms).toLocaleString())}</span>` : ""}
           </div>
-          <div class="notification-preview">${esc([error.message, error.context].filter(Boolean).join("\n"))}</div>
+          <div class="notification-preview">${esc(error.resolved_at_ms ? (error.resolution_comments || "Resolved without comments.") : [error.message, error.context].filter(Boolean).join("\n"))}</div>
         </div>
+        ${error.resolved_at_ms ? "" : `<button class="secondary" data-resolve-error="${error.id}" style="padding:5px 10px; font-size:.75rem" title="Resolve"><i class="bi bi-check-circle"></i>Resolve</button>`}
         <button class="danger" data-delete-error="${error.id}" style="padding:5px 10px; font-size:.75rem" title="Delete"><i class="bi bi-x-lg"></i></button>
       </div>`).join("") : `<p class="muted">No client errors reported.</p>`;
 
@@ -119,14 +138,33 @@ async function loadClientErrors() {
       const row = list.querySelector(`[data-open-notification="client-${error.id}"]`);
       const open = () => openNotificationModal({
         title: error.asset_title || "Client error",
-        body: [error.message, error.context].filter(Boolean).join("\n\n"),
-        meta: `${new Date(error.occurred_at_ms).toLocaleString()} • ${error.device_name}${error.kind ? ` • ${error.kind}` : ""}`,
-        level: "error",
-        icon: "bi-tv",
+        body: error.resolved_at_ms
+          ? [`Resolution: ${error.resolution_comments || "No comments were provided."}`, `Original report: ${error.message}`, error.context].filter(Boolean).join("\n\n")
+          : [error.message, error.context].filter(Boolean).join("\n\n"),
+        meta: `${new Date(error.occurred_at_ms).toLocaleString()} • ${error.device_name}${error.kind ? ` • ${error.kind}` : ""}${error.resolved_at_ms ? ` • Resolved ${new Date(error.resolved_at_ms).toLocaleString()}` : ""}`,
+        level: error.resolved_at_ms ? "success" : "error",
+        icon: error.resolved_at_ms ? "bi-check-circle-fill" : "bi-tv",
+        onResolve: error.resolved_at_ms ? null : async comments => {
+          try {
+            await invoke("resolve_client_error", { id: error.id, comments });
+            showToast("Problem marked resolved. The client will be notified when it next connects.", "success");
+            await loadClientErrors();
+            await refreshNotificationBadge();
+          } catch (resolveError) {
+            showToast(String(resolveError), "error");
+            throw resolveError;
+          }
+        },
       });
       row.addEventListener("click", open);
       row.addEventListener("keydown", event => {
         if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+      });
+    });
+    list.querySelectorAll("[data-resolve-error]").forEach(button => {
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        list.querySelector(`[data-open-notification="client-${button.dataset.resolveError}"]`).click();
       });
     });
     list.querySelectorAll("[data-delete-error]").forEach(button => {

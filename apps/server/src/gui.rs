@@ -1873,6 +1873,9 @@ struct ClientErrorView {
     context: Option<String>,
     occurred_at_ms: i64,
     received_at_ms: i64,
+    resolution_comments: Option<String>,
+    resolved_at_ms: Option<i64>,
+    dismissed_at_ms: Option<i64>,
 }
 
 impl From<swarm_media::store::ClientErrorRecord> for ClientErrorView {
@@ -1888,6 +1891,9 @@ impl From<swarm_media::store::ClientErrorRecord> for ClientErrorView {
             context: r.context,
             occurred_at_ms: r.occurred_at_ms,
             received_at_ms: r.received_at_ms,
+            resolution_comments: r.resolution_comments,
+            resolved_at_ms: r.resolved_at_ms,
+            dismissed_at_ms: r.dismissed_at_ms,
         }
     }
 }
@@ -1935,6 +1941,26 @@ async fn delete_client_error(
         .delete_client_error(id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resolve_client_error(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    comments: Option<String>,
+) -> Result<(), String> {
+    let core = state.core(&app).await?;
+    let resolved = core
+        .library
+        .resolve_client_error(id, comments.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    if resolved {
+        Ok(())
+    } else {
+        Err("That client problem was already resolved or no longer exists.".into())
+    }
 }
 
 #[tauri::command]
@@ -2197,6 +2223,7 @@ fn main() {
             list_client_errors,
             client_error_count,
             delete_client_error,
+            resolve_client_error,
             clear_client_errors,
             list_server_notifications,
             notification_count,

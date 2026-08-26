@@ -21,6 +21,7 @@ import app.swarm.tv.core.peer.ByteRange
 import app.swarm.tv.core.peer.CatalogManifest
 import app.swarm.tv.core.peer.CatalogThumbprint
 import app.swarm.tv.core.peer.ClientErrorReport
+import app.swarm.tv.core.peer.ClientResolutionNotification
 import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.peer.PlaybackPlan
@@ -316,6 +317,46 @@ class CatalogSession internal constructor(
             }
         }
         return false
+    }
+
+    /** Fetches every resolved report the client has not dismissed on this
+     * server. The app persists these locally before showing them. */
+    suspend fun resolutionNotifications(
+        device: SwarmDevice,
+        clientDeviceId: String,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
+    ): List<ClientResolutionNotification> {
+        var connection = connectionFor(device, clientCertificate, clientKey) ?: return emptyList()
+        repeat(2) { attempt ->
+            val notifications = runCatching {
+                val response = connection.request(path = "/notifications/$clientDeviceId")
+                val body = response.body.readBytes().decodeToString()
+                if (response.header.status != 200) throw IOException("notification request failed (${response.header.status})")
+                SwarmJson.decodeFromString<List<ClientResolutionNotification>>(body)
+            }.getOrNull()
+            if (notifications != null) return notifications
+            evictConnection(device.deviceId, connection)
+            if (attempt == 0) {
+                connection = connectionFor(device, clientCertificate, clientKey) ?: return emptyList()
+            }
+        }
+        return emptyList()
+    }
+
+    /** Best-effort remote acknowledgement; the local tombstone remains the
+     * authoritative UI state if the server is unreachable during dismissal. */
+    suspend fun dismissResolutionNotification(
+        device: SwarmDevice,
+        clientDeviceId: String,
+        notificationId: Long,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
+    ) {
+        val connection = connectionFor(device, clientCertificate, clientKey) ?: return
+        runCatching {
+            connection.request(path = "/notifications/$clientDeviceId/$notificationId/dismiss").body.readBytes()
+        }
     }
 
     /**

@@ -241,7 +241,9 @@ impl MediaService {
             "/errors/report" => self.report_error(request).await,
             "/likes/toggle" => self.set_like(request).await,
             path => {
-                if let Some(entry_key) = path.strip_prefix("/media/") {
+                if let Some(rest) = path.strip_prefix("/notifications/") {
+                    self.client_notifications(rest).await
+                } else if let Some(entry_key) = path.strip_prefix("/media/") {
                     self.media(entry_key, request, is_lan).await
                 } else if let Some(entry_key) = path.strip_prefix("/play/") {
                     self.play(entry_key, request, is_lan).await
@@ -308,6 +310,39 @@ impl MediaService {
             Ok(()) => status(204),
             Err(_) => status(500),
         }
+    }
+
+    /// Resolved-problem inbox for one client. A list request is
+    /// `/notifications/{device_id}`; dismissal is
+    /// `/notifications/{device_id}/{error_id}/dismiss`. These ride the same
+    /// authenticated peer plane as reporting the original problem.
+    async fn client_notifications(&self, rest: &str) -> Resolved {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        if parts.len() == 1 && !parts[0].is_empty() {
+            return match self
+                .library
+                .list_client_resolution_notifications(parts[0])
+                .await
+            {
+                Ok(notifications) => json_response(200, &notifications),
+                Err(_) => status(500),
+            };
+        }
+        if parts.len() == 3 && parts[2] == "dismiss" && !parts[0].is_empty() {
+            let Ok(id) = parts[1].parse::<i64>() else {
+                return status(400);
+            };
+            return match self
+                .library
+                .dismiss_client_resolution_notification(parts[0], id)
+                .await
+            {
+                Ok(true) => status(204),
+                Ok(false) => status(404),
+                Err(_) => status(500),
+            };
+        }
+        status(404)
     }
 
     /// `/likes/toggle` — see [`swarm_core::peer::LikeToggle`]'s doc comment

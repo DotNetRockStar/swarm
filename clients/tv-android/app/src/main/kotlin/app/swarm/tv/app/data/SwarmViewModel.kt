@@ -259,6 +259,7 @@ class SwarmViewModel(
     private val connectionStore: AndroidConnectionStore,
     private val likedEntriesStore: AndroidLikedEntriesStore,
     private val kidModeStore: AndroidKidModeStore,
+    private val clientNotificationStore: AndroidClientNotificationStore,
     private val lanDiscovery: LanDiscoveryManager,
     private val lanConnectionStore: AndroidLanConnectionStore,
     private val disconnectedServerStore: AndroidDisconnectedServerStore,
@@ -306,6 +307,9 @@ class SwarmViewModel(
     /** Loaded once in [init], refreshed on every [enableKidMode]/[updateKidModeRules]/[disableKidMode] — [browseCatalog] filters through this every time it applies a fresh manifest, see that function. */
     private val _kidModeSettings = MutableStateFlow<KidModeSettings?>(null)
     val kidModeSettings: StateFlow<KidModeSettings?> = _kidModeSettings.asStateFlow()
+
+    private val _resolvedProblemNotifications = MutableStateFlow<List<ResolvedProblemNotification>>(emptyList())
+    val resolvedProblemNotifications: StateFlow<List<ResolvedProblemNotification>> = _resolvedProblemNotifications.asStateFlow()
 
     /** The last successfully-browsed catalog's genres — see [UiState.Settings.availableGenres]'s doc comment for why this can't just be read off [UiState.Settings] itself. */
     private var lastKnownGenres: List<String> = emptyList()
@@ -368,6 +372,7 @@ class SwarmViewModel(
      * Retain a small in-memory queue and retry after the next successful
      * catalog connection instead of silently losing the most useful error. */
     private val pendingClientErrors = mutableListOf<PendingClientError>()
+    private val notificationServers = mutableMapOf<String, SwarmDevice>()
     private val playbackConnectionTracker = PlaybackConnectionTracker()
 
     private val proxy = PeerLoopbackProxy.start()
@@ -402,6 +407,9 @@ class SwarmViewModel(
         viewModelScope.launch { _likedFingerprints.value = likedEntriesStore.loadAll() }
         viewModelScope.launch { _watchStates.value = watchStateStore.all() }
         viewModelScope.launch { _watchlistKeys.value = watchlistStore.loadAll() }
+        viewModelScope.launch {
+            clientNotificationStore.observe().collect { _resolvedProblemNotifications.value = it }
+        }
         // Keep the UI tied to Room's authoritative row instead of taking a
         // one-time startup snapshot. Enabling/updating Kid Mode is async;
         // observing the row guarantees the enabled state survives settings
@@ -767,6 +775,7 @@ class SwarmViewModel(
         }
         deviceId = deviceId ?: "lan-client-${certFingerprint.take(16)}"
         deviceName = name
+        syncResolutionNotifications(listOf(device))
         lastKnownGenres = result.entries.flatMap { it.entry.genres }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
         saveLanConnection(server, name)
         val fingerprint = normalizeFingerprint(server.certFingerprint)
@@ -1231,6 +1240,7 @@ class SwarmViewModel(
                 }
             } else {
                 Log.i(logTag, "browseCatalog() refresh done: entries=${result.entries.size} unreachable=${result.unreachable.size}")
+                syncResolutionNotifications(connectionDevices - result.unreachable.toSet())
                 result.unreachable.forEach { activeLanRoutes.remove(it.deviceId) }
                 if (result.entries.isNotEmpty() || result.unreachable.isEmpty()) flushPendingClientErrors()
                 result.failures.forEach { failure ->
@@ -1799,6 +1809,45 @@ class SwarmViewModel(
                 if (!sent) pendingClientErrors += item
             }
             while (pendingClientErrors.size > 20) pendingClientErrors.removeAt(0)
+        }
+    }
+
+    /** Polls reachable media servers after a successful connection. Room's
+     * insert-ignore result is the one-time-popup gate across app restarts. */
+    private suspend fun syncResolutionNotifications(devices: List<SwarmDevice>) {
+        val clientId = deviceId ?: return
+        for (server in devices.filter { it.deviceType != DeviceType.CLIENT }) {
+            notificationServers[server.deviceId] = server
+            val remote = withContext(Dispatchers.IO) {
+                catalogSession.resolutionNotifications(server, clientId, clientCertificate, clientKey)
+            }
+            for (notification in remote) {
+                if (clientNotificationStore.add(normalizeFingerprint(server.certFingerprint), server.deviceId, server.name, notification)) {
+                    val subject = notification.assetTitle?.let { "“$it”" } ?: "Your reported problem"
+                    val detail = notification.comments?.takeIf { it.isNotBlank() }
+                    notify(
+                        if (detail == null) "$subject was resolved." else "$subject was resolved: $detail",
+                        ClientNotificationKind.SUCCESS,
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissResolvedProblem(notification: ResolvedProblemNotification) {
+        viewModelScope.launch {
+            clientNotificationStore.dismiss(notification.key)
+            val clientId = deviceId ?: return@launch
+            val server = notificationServers[notification.serverId] ?: return@launch
+            withContext(Dispatchers.IO) {
+                catalogSession.dismissResolutionNotification(
+                    server,
+                    clientId,
+                    notification.remoteId,
+                    clientCertificate,
+                    clientKey,
+                )
+            }
         }
     }
 

@@ -147,3 +147,71 @@ async fn delete_and_clear_remove_from_the_store() {
     library.clear_client_errors().await.unwrap();
     assert_eq!(library.client_error_count().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn resolving_notifies_only_the_reporting_device_until_dismissed() {
+    let (service, library) = service_with_fresh_library().await;
+    service
+        .resolve(&report_request(Some(sample_report())))
+        .await;
+    let error = library.list_client_errors().await.unwrap().remove(0);
+
+    assert!(library
+        .resolve_client_error(error.id, Some("Replaced the damaged media file."))
+        .await
+        .unwrap());
+    assert!(!library
+        .resolve_client_error(error.id, Some("A second resolution must not re-notify."))
+        .await
+        .unwrap());
+    assert_eq!(library.client_error_count().await.unwrap(), 0);
+
+    let other_device = service
+        .resolve(&PeerRequest {
+            path: "/notifications/device-2".into(),
+            range: None,
+            if_none_match: None,
+            playback: None,
+            error_report: None,
+            like: None,
+        })
+        .await;
+    assert_eq!(other_device.header.status, 200);
+    assert_eq!(other_device.header.len, 2); // []
+
+    let listed = service
+        .resolve(&PeerRequest {
+            path: "/notifications/device-1".into(),
+            range: None,
+            if_none_match: None,
+            playback: None,
+            error_report: None,
+            like: None,
+        })
+        .await;
+    assert_eq!(listed.header.status, 200);
+    let swarm_media::serve::Body::Bytes(body) = listed.body else {
+        panic!("notification response must be in-memory JSON");
+    };
+    let notifications: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(notifications.as_array().unwrap().len(), 1);
+    assert_eq!(notifications[0]["id"], error.id);
+    assert_eq!(notifications[0]["comments"], "Replaced the damaged media file.");
+
+    let dismissed = service
+        .resolve(&PeerRequest {
+            path: format!("/notifications/device-1/{}/dismiss", error.id),
+            range: None,
+            if_none_match: None,
+            playback: None,
+            error_report: None,
+            like: None,
+        })
+        .await;
+    assert_eq!(dismissed.header.status, 204);
+    assert!(library
+        .list_client_resolution_notifications("device-1")
+        .await
+        .unwrap()
+        .is_empty());
+}

@@ -68,4 +68,27 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+/** Adds the durable resolved-problem inbox and dismissal tombstones. */
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS client_notification (" +
+                "`key` TEXT NOT NULL PRIMARY KEY, " +
+                "server_id TEXT NOT NULL, " +
+                "remote_id INTEGER NOT NULL, " +
+                "server_name TEXT NOT NULL, " +
+                "asset_title TEXT, " +
+                "original_message TEXT NOT NULL, " +
+                "comments TEXT, " +
+                "resolved_at INTEGER NOT NULL, " +
+                "dismissed INTEGER NOT NULL" +
+                ")",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_client_notification_resolved_at " +
+                "ON client_notification(resolved_at)",
+        )
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)

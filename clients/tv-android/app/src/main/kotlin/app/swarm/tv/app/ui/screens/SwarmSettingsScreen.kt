@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.RatingScale
+import app.swarm.tv.app.data.ResolvedProblemNotification
 import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
@@ -49,6 +50,8 @@ import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.peer.MediaKind
 import kotlinx.coroutines.delay
+import java.text.DateFormat
+import java.util.Date
 
 @Composable
 fun SwarmSettingsScreen(
@@ -64,6 +67,8 @@ fun SwarmSettingsScreen(
     onEnableKidMode: (pin: String, allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
     onUpdateKidModeRules: (allowedKinds: Set<MediaKind>, allowedGenres: Set<String>?, maxMovieRating: String?, maxTvRating: String?) -> Unit,
     onDisableKidMode: () -> Unit,
+    notifications: List<ResolvedProblemNotification>,
+    onDismissNotification: (ResolvedProblemNotification) -> Unit,
 ) {
     var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
     var deviceNameField by remember(deviceName) { mutableStateOf(deviceName) }
@@ -93,6 +98,11 @@ fun SwarmSettingsScreen(
                 modifier = Modifier.focusRequester(firstSectionFocusRequester),
             )
             SettingsTab("Family", section == SettingsSection.FAMILY, { section = SettingsSection.FAMILY })
+            SettingsTab(
+                if (notifications.isEmpty()) "Notifications" else "Notifications (${notifications.size})",
+                section == SettingsSection.NOTIFICATIONS,
+                { section = SettingsSection.NOTIFICATIONS },
+            )
         }
         Spacer(Modifier.height(16.dp))
 
@@ -150,11 +160,87 @@ fun SwarmSettingsScreen(
                     onDisable = onDisableKidMode,
                 )
             }
+
+            SettingsSection.NOTIFICATIONS -> SettingsPanel(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                NotificationInbox(
+                    notifications = notifications,
+                    onDismiss = onDismissNotification,
+                )
+            }
         }
     }
 }
 
-private enum class SettingsSection { GENERAL, FAMILY }
+private enum class SettingsSection { GENERAL, FAMILY, NOTIFICATIONS }
+
+@Composable
+private fun NotificationInbox(
+    notifications: List<ResolvedProblemNotification>,
+    onDismiss: (ResolvedProblemNotification) -> Unit,
+) {
+    var selectedKey by remember { mutableStateOf<String?>(null) }
+    val selected = notifications.firstOrNull { it.key == selectedKey }
+    LaunchedEffect(notifications, selectedKey) {
+        if (selectedKey != null && selected == null) selectedKey = null
+    }
+
+    Text("Resolved problems", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "Select a notification to view its resolution, then dismiss it when you are done.",
+        color = SwarmMuted,
+        fontSize = 12.sp,
+    )
+    Spacer(Modifier.height(16.dp))
+    if (notifications.isEmpty()) {
+        Text("No notifications.", color = SwarmMuted, fontSize = 14.sp)
+        return
+    }
+
+    notifications.forEach { notification ->
+        Button(
+            onClick = { selectedKey = notification.key },
+            modifier = Modifier.fillMaxWidth(),
+            colors = swarmActionButtonColors(),
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text(notification.assetTitle ?: "Reported problem resolved", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${notification.serverName} • ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(notification.resolvedAtMs))}",
+                    fontSize = 11.sp,
+                    color = SwarmMuted,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+
+    selected?.let { notification ->
+        Spacer(Modifier.height(8.dp))
+        Text(notification.assetTitle ?: "Reported problem resolved", color = SwarmText, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            notification.comments?.takeIf { it.isNotBlank() } ?: "The media server marked this problem as resolved.",
+            color = SwarmText,
+            fontSize = 14.sp,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text("Original report", color = SwarmMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text(notification.originalMessage, color = SwarmMuted, fontSize = 12.sp)
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = {
+                selectedKey = null
+                onDismiss(notification)
+            },
+            colors = swarmActionButtonColors(),
+        ) {
+            Text("Dismiss notification")
+        }
+    }
+}
 
 @Composable
 private fun SettingsTab(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {

@@ -209,6 +209,16 @@ data class ClientErrorReport(
     val occurredAtMs: Long,
 )
 
+/** A resolved problem returned by `/notifications/{deviceId}`. */
+@Serializable
+data class ClientResolutionNotification(
+    val id: Long,
+    val assetTitle: String? = null,
+    val originalMessage: String,
+    val comments: String? = null,
+    val resolvedAtMs: Long,
+)
+
 @Serializable
 data class PlaybackPreferences(
     val capabilities: CapabilityProfile,

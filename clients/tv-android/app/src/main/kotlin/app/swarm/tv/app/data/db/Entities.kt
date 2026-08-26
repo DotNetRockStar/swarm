@@ -116,3 +116,21 @@ data class LocalServerConnectionEntity(
     @ColumnInfo(name = "device_name") val deviceName: String,
     @ColumnInfo(name = "last_connected_at") val lastConnectedAt: Long,
 )
+
+/** Durable client inbox. Dismissed rows remain as tombstones so a failed
+ * remote acknowledgement cannot make the same resolution reappear later. */
+@Entity(
+    tableName = "client_notification",
+    indices = [Index(value = ["resolved_at"])],
+)
+data class ClientNotificationEntity(
+    @PrimaryKey val key: String,
+    @ColumnInfo(name = "server_id") val serverId: String,
+    @ColumnInfo(name = "remote_id") val remoteId: Long,
+    @ColumnInfo(name = "server_name") val serverName: String,
+    @ColumnInfo(name = "asset_title") val assetTitle: String?,
+    @ColumnInfo(name = "original_message") val originalMessage: String,
+    val comments: String?,
+    @ColumnInfo(name = "resolved_at") val resolvedAt: Long,
+    val dismissed: Boolean = false,
+)

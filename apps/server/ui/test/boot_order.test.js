@@ -36,6 +36,7 @@ let testLibraryEntries = [];
 let testRootHealth = [{ label: "test", path: "/tmp/swarm-boot-order-test", available: true, error: null }];
 let testMediaRoots = [];
 let testServerNotifications = [];
+let testClientErrors = [];
 let copiedText = null;
 
 function invokeStub(command, args) {
@@ -116,8 +117,16 @@ function invokeStub(command, args) {
     case "list_media_roots":
       return testMediaRoots;
     case "list_categories":
-    case "list_client_errors":
       return [];
+    case "list_client_errors":
+      return testClientErrors;
+    case "resolve_client_error":
+      testClientErrors = testClientErrors.map(error => error.id === args.id ? {
+        ...error,
+        resolution_comments: args.comments,
+        resolved_at_ms: Date.now(),
+      } : error);
+      return {};
     case "list_server_notifications":
       return testServerNotifications;
     case "client_error_count":
@@ -379,6 +388,36 @@ async function main() {
     if (copiedText !== expectedCopiedText) {
       failures.push("Expected Copy notification to include the title, metadata, and full notification details.");
     }
+  }
+
+  testClientErrors = [{
+    id: 11,
+    device_id: "client-1",
+    device_name: "Living Room Fire TV",
+    asset_title: "Example Movie",
+    kind: "movie",
+    message: "Playback failed.",
+    context: "HTTP 503",
+    occurred_at_ms: Date.now(),
+    received_at_ms: Date.now(),
+    resolution_comments: null,
+    resolved_at_ms: null,
+    dismissed_at_ms: null,
+  }];
+  await dom.window.refreshNotifications();
+  document.querySelector('[data-resolve-error="11"]')?.click();
+  if (document.getElementById("notificationResolutionFields").classList.contains("d-none")) {
+    failures.push("Expected resolving a client problem to offer optional comments.");
+  }
+  document.getElementById("notificationResolutionComments").value = "Replaced the damaged file.";
+  document.getElementById("notificationModalResolve").click();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const resolveCall = invokeCalls.find(call => call.command === "resolve_client_error");
+  if (!resolveCall || resolveCall.args.comments !== "Replaced the damaged file.") {
+    failures.push("Expected Mark resolved to persist optional resolution comments.");
+  }
+  if (!document.querySelector('[data-open-notification="client-11"]')?.classList.contains("notification-level-success")) {
+    failures.push("Expected a resolved client problem to remain visible with resolved status.");
   }
 
   // Group re-scrape regression: the show action must include episodes from

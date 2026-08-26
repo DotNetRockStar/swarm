@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// `/play/{entry_key}` (playback negotiation), `/stream/{session}/media`
 /// (budgeted direct play), `/hls/{session}/...` (transcode),
 /// `/errors/report` (client-observed error triage — see
-/// [`ClientErrorReport`]), and `/likes/toggle` (see [`LikeToggle`]).
+/// [`ClientErrorReport`]), `/notifications/{device_id}[/{error_id}/dismiss]`
+/// (resolved-problem delivery), and `/likes/toggle` (see [`LikeToggle`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerRequest {

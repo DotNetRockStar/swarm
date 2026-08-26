@@ -107,3 +107,15 @@ interface LocalServerConnectionDao {
     @Query("DELETE FROM local_server_connection WHERE cert_fingerprint = :fingerprint")
     suspend fun delete(fingerprint: String)
 }
+
+@Dao
+interface ClientNotificationDao {
+    @Query("SELECT * FROM client_notification WHERE dismissed = 0 ORDER BY resolved_at DESC")
+    fun observeActive(): Flow<List<ClientNotificationEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(entity: ClientNotificationEntity): Long
+
+    @Query("UPDATE client_notification SET dismissed = 1 WHERE key = :key")
+    suspend fun dismiss(key: String)
+}

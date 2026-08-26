@@ -311,6 +311,10 @@ td.mono {
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; line-height: 1.5;
 }
 .notification-modal-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+.notification-modal-actions { gap: 8px; }
+#notificationResolutionFields { margin-top: 16px; }
+#notificationResolutionFields textarea { width: 100%; margin-top: 6px; resize: vertical; }
+.client-error-status { font-weight: 700; }
 
 /* Passcode display (Swarm tab) */
 .passcode {

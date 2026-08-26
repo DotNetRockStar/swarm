@@ -333,7 +333,15 @@ pub async fn start(
         .route("/subtitles/{entry_key}/{filename}", get(media_get))
         .route("/errors/report", post(report_client_error))
         .route("/likes/toggle", post(toggle_like))
-        .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
+        .route("/notifications/{device_id}", get(media_get))
+        .route(
+            "/notifications/{device_id}/{error_id}/dismiss",
+            post(media_get),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
 
     let app = pairing_routes.merge(media_routes).with_state(state);
 

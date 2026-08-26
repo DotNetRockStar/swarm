@@ -17,6 +17,21 @@ import org.junit.jupiter.api.Test
 class ContractsTest {
 
     @Test
+    fun `resolved problem notification decodes serde field names`() {
+        val json = """{"id":7,"asset_title":"Example Movie","original_message":"Playback failed.","comments":"Replaced the file.","resolved_at_ms":1700000000000}"""
+        assertEquals(
+            ClientResolutionNotification(
+                id = 7,
+                assetTitle = "Example Movie",
+                originalMessage = "Playback failed.",
+                comments = "Replaced the file.",
+                resolvedAtMs = 1_700_000_000_000,
+            ),
+            SwarmJson.decodeFromString<ClientResolutionNotification>(json),
+        )
+    }
+
+    @Test
     fun `kotlin decodes a real serde-produced catalog manifest`() {
         val json = """{"thumbprint":"${"ff".repeat(32)}","entries":[{"entry_key":"030fe19c72f2665e6efd018a",""" +
             """"fingerprint":"704ac5a4284267953aab77855e0e32aa","kind":"movie","title":"Inception",""" +
