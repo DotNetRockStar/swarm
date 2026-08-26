@@ -31,6 +31,7 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.PlayerView
 import androidx.compose.material3.CircularProgressIndicator
 import app.swarm.tv.R
+import app.swarm.tv.app.PausePlayerWhenAppBackgrounded
 import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import kotlinx.coroutines.delay
@@ -96,6 +97,7 @@ internal fun BrowsePreviewPlayer(
             prepare()
         }
     }
+    PausePlayerWhenAppBackgrounded(player)
 
     LaunchedEffect(player, shouldPlay, finished) {
         player.playWhenReady = shouldPlay && !finished

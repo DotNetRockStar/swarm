@@ -273,6 +273,7 @@ class MainActivity : ComponentActivity() {
                         onMinimizePlayback = viewModel::minimizePlayback,
                         onRestoreMinimizedPlayback = viewModel::restoreMinimizedPlayback,
                         onStopMinimizedPlayback = viewModel::stopMinimizedPlayback,
+                        onStopAllStreaming = viewModel::stopAllStreaming,
                         onTrackPlaybackEnded = viewModel::onTrackPlaybackEnded,
                         artistPhotoUrl = viewModel::artistPhotoUrl,
                         artistPhotoThumbnailUrl = viewModel::artistPhotoThumbnailUrl,
@@ -367,6 +368,7 @@ private fun SwarmApp(
     onMinimizePlayback: () -> Unit,
     onRestoreMinimizedPlayback: () -> Unit,
     onStopMinimizedPlayback: () -> Unit,
+    onStopAllStreaming: () -> Unit,
     onTrackPlaybackEnded: () -> Unit,
     artistPhotoUrl: (MergedEntry) -> String?,
     artistPhotoThumbnailUrl: (MergedEntry) -> String?,
@@ -465,6 +467,7 @@ private fun SwarmApp(
             }
         }
     }
+    PausePlayerWhenAppBackgrounded(musicPlayer)
     var musicIsPlaying by remember(musicPlayer) { mutableStateOf(true) }
     var musicIsLoading by remember(musicPlayer) { mutableStateOf(true) }
     var musicPositionMs by remember(musicPlayer) { mutableLongStateOf(0L) }
@@ -626,28 +629,14 @@ private fun SwarmApp(
             (browsePreview != null && !browsePreview.released),
     )
 
-    // #78: Home and the remote's Power button never reach the app as key
-    // events (the system launcher/power manager intercepts both), so the
-    // only signal this app gets is the standard Activity lifecycle — both
-    // land on ComponentActivity's onStop (Android invokes onStop whenever
-    // the window stops being visible, which is the documented behavior for
-    // screen-off same as for Home). Without this, playback kept decoding
-    // and rendering audio/video behind the launcher or a blank screen.
-    // rememberUpdatedState keeps the observer itself stable (added once per
-    // lifecycle instance) while still reading the latest state on the event.
+    // #78: Home and Power are intercepted by Fire TV before key dispatch.
+    // ON_PAUSE is the earliest reliable foreground-loss signal, so stop every
+    // client/server stream here instead of waiting for the later ON_STOP.
     val lifecycleOwner = LocalLifecycleOwner.current
-    val latestState = rememberUpdatedState(state)
-    val latestMinimizedPlayer = rememberUpdatedState(minimizedPlayer)
-    val latestOnStopPlayback = rememberUpdatedState(onStopPlayback)
-    val latestOnStopMinimizedPlayback = rememberUpdatedState(onStopMinimizedPlayback)
+    val latestOnStopAllStreaming = rememberUpdatedState(onStopAllStreaming)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event != Lifecycle.Event.ON_STOP) return@LifecycleEventObserver
-            if (latestState.value is UiState.Player) {
-                latestOnStopPlayback.value()
-            } else if (latestMinimizedPlayer.value != null) {
-                latestOnStopMinimizedPlayback.value()
-            }
+            if (event == Lifecycle.Event.ON_PAUSE) latestOnStopAllStreaming.value()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }

@@ -72,6 +72,11 @@ data class BrowsePreview(
     val released: Boolean = false,
 )
 
+private data class PendingPlaybackReplacement(
+    val requestGeneration: Long,
+    val player: UiState.Player,
+)
+
 /** A next-episode session negotiated while the finished episode's Continue
  * prompt is still visible. [PlayerScreen] prepares this URL in a paused
  * ExoPlayer so the server negotiation and initial buffering are both already
@@ -340,6 +345,12 @@ class SwarmViewModel(
     private var lanPairingJob: Job? = null
     /** Serializes play/skip/autoplay negotiation so repeated callbacks cannot reserve duplicate server sessions. */
     private var playbackNegotiationJob: Job? = null
+    /** Invalidates a negotiation without cancelling its server response, allowing a
+     * late-created reservation to be explicitly released instead of timing out. */
+    private var playbackRequestGeneration = 0L
+    /** The player removed while a replacement is negotiated. Retained so a
+     * foreground-loss cleanup can release it and restore its previous screen. */
+    private var pendingPlaybackReplacement: PendingPlaybackReplacement? = null
     /** Enhancement-only next-episode negotiation performed during the
      * Continue countdown. Separate from [playbackNegotiationJob] so a viewer
      * accepting the prompt can wait for and promote this exact reservation. */
@@ -1885,7 +1896,9 @@ class SwarmViewModel(
         // state, both callbacks otherwise see the same old `nextEntry` and
         // reserve duplicate transcode sessions for it.
         if (playbackNegotiationJob?.isActive == true) return
+        val requestGeneration = ++playbackRequestGeneration
         if (replaceSession != null) {
+            pendingPlaybackReplacement = PendingPlaybackReplacement(requestGeneration, replaceSession)
             // Drop the client-side reader before doing any network cleanup.
             // For a full-screen player, the black video surface and buffering
             // toast occupy the brief handoff; for a minimized player, removing
@@ -1909,6 +1922,7 @@ class SwarmViewModel(
             // playback with 429.
             browsePreviewWorker?.join()
             browsePreviewReleaseJob?.join()
+            if (requestGeneration != playbackRequestGeneration) return@launch
             if (replaceSession?.preloadedNext != null) {
                 runCatching {
                     releasePlaybackSessionNow(
@@ -1931,6 +1945,7 @@ class SwarmViewModel(
                     Log.w(logTag, "failed to release playback session ${replaceSession.sessionId}", it)
                 }
             }
+            if (requestGeneration != playbackRequestGeneration) return@launch
             val resumePositionSecs = startPositionSecsOverride
                 ?: watchStateStore.get(fingerprint)?.takeUnless { it.watched }?.positionSecs
                 ?: 0.0
@@ -1946,6 +1961,10 @@ class SwarmViewModel(
                     )
                 }
             }.getOrElse { error ->
+                if (requestGeneration != playbackRequestGeneration) return@launch
+                if (pendingPlaybackReplacement?.requestGeneration == requestGeneration) {
+                    pendingPlaybackReplacement = null
+                }
                 Log.e(logTag, "playback negotiation failed", error)
                 val message = error.message ?: "Could not prepare playback."
                 _state.value = catalog.copy(playbackError = message)
@@ -1958,6 +1977,14 @@ class SwarmViewModel(
                         assetTitle = entry.entry.displayTitle(),
                         kind = entry.entry.kind.name.lowercase(),
                     )
+                }
+                return@launch
+            }
+            if (requestGeneration != playbackRequestGeneration) {
+                runCatching {
+                    releasePlaybackSessionNow(catalog, serverId, selection.sessionId)
+                }.onFailure {
+                    Log.w(logTag, "failed to release backgrounded playback session ${selection.sessionId}", it)
                 }
                 return@launch
             }
@@ -1997,6 +2024,7 @@ class SwarmViewModel(
             // background instead of popping the full player back up just
             // because the track changed underneath it — see [playNext].
             if (keepMinimized) _minimizedPlayer.value = playerState else _state.value = playerState
+            if (pendingPlaybackReplacement?.requestGeneration == requestGeneration) pendingPlaybackReplacement = null
         }
     }
 
@@ -2420,6 +2448,49 @@ class SwarmViewModel(
             }
             _state.value = current.previous
         }
+    }
+
+    /**
+     * Stops every stream owned by this client when the Activity loses the
+     * foreground: full-screen video/music, minimized music, browse previews,
+     * prepared next episodes, and a replacement negotiation still in flight.
+     * The Compose players pause synchronously on ON_PAUSE; this method removes
+     * their state and releases all known server-side reservations.
+     */
+    fun stopAllStreaming() {
+        val current = _state.value as? UiState.Player
+        val minimized = _minimizedPlayer.value
+        val pendingReplacement = pendingPlaybackReplacement?.player
+
+        // Let any in-flight /play response complete so its newly allocated
+        // session id can be stopped. The generation check in playEntry keeps
+        // that late response from ever becoming an active local player.
+        playbackRequestGeneration++
+        playbackNegotiationJob = null
+        pendingPlaybackReplacement = null
+        continueAfterPreloadSessionId = null
+
+        stopBrowsePreview()
+        _minimizedPlayer.value = null
+        when {
+            current != null -> _state.value = current.previous
+            _state.value == UiState.PlaybackLoading && pendingReplacement != null -> {
+                _state.value = pendingReplacement.previous
+            }
+        }
+
+        listOfNotNull(current, minimized, pendingReplacement)
+            .distinctBy { it.sessionId }
+            .forEach { player ->
+                player.previous.embeddedCatalog()?.let { catalog ->
+                    if (!player.sessionReleased) {
+                        releasePlaybackSession(catalog, player.serverId, player.sessionId)
+                    }
+                    player.preloadedNext?.let { prepared ->
+                        releasePlaybackSession(catalog, prepared.serverId, prepared.sessionId)
+                    }
+                }
+            }
     }
 
     fun backToDashboard() {

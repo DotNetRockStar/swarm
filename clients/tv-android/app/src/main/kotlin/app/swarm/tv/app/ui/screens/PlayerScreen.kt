@@ -105,6 +105,7 @@ import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.PausePlayerWhenAppBackgrounded
 import app.swarm.tv.app.data.episodeNumberLabel
 import app.swarm.tv.app.data.pauseRecommendationTitle
 import app.swarm.tv.app.data.PreparedEpisodePlayback
@@ -541,6 +542,7 @@ fun PlayerScreen(
             startPaused = startPaused,
         )
     }
+    PausePlayerWhenAppBackgrounded(player)
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
     var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
