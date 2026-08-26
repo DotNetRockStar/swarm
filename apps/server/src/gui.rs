@@ -483,6 +483,30 @@ async fn record_scrape_result_notification(
     }
 }
 
+/// Rejects a new root `path` that names the same filesystem location as an
+/// already-configured root, or is nested inside/around one — e.g. a
+/// dedicated mount added for one show's folder on top of an existing
+/// umbrella root that already contains it. Scanning both would catalog the
+/// same physical files twice (once per root's `{label}/` prefix), silently
+/// duplicating every entry under the overlap in the catalog even though
+/// there is exactly one copy of each file on disk (see
+/// `swarm_media::roots::paths_overlap`'s doc comment) — caught here, at the
+/// point a new root is actually added, rather than only self-healing on a
+/// later scan.
+fn reject_overlapping_root(existing: &[MediaRootSetting], new_path: &str) -> Result<(), String> {
+    let new_path = PathBuf::from(new_path);
+    for root in existing {
+        if swarm_media::roots::paths_overlap(&PathBuf::from(&root.path), &new_path) {
+            return Err(format!(
+                "this path overlaps with the existing root \"{}\" ({}) — scanning both would \
+                 catalog the same files twice",
+                root.label, root.path
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn to_media_roots(settings: &[MediaRootSetting]) -> Vec<MediaRoot> {
     settings
         .iter()
@@ -645,6 +669,7 @@ async fn add_media_root(
     if settings.media_roots.iter().any(|r| r.label == label) {
         return Err(format!("a root labeled \"{label}\" already exists"));
     }
+    reject_overlapping_root(&settings.media_roots, &path)?;
     let reconnect_url = settings::discover_reconnect_url(&path);
     settings.media_roots.push(MediaRootSetting {
         label,
@@ -697,6 +722,7 @@ async fn connect_smb_root(
     if persisted.media_roots.iter().any(|root| root.label == label) {
         return Err(format!("a root labeled \"{label}\" already exists"));
     }
+    reject_overlapping_root(&persisted.media_roots, &mounted.path)?;
     persisted.media_roots.push(MediaRootSetting {
         label,
         path: mounted.path,

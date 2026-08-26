@@ -13,7 +13,7 @@
 //! nothing is gained by forcing a prefix onto the single-root case just to
 //! make a future transition uniform.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +167,51 @@ impl SharedRootResolver {
     }
 }
 
+/// True if a recursive directory walk rooted at `container` visits every
+/// file under `candidate` too — either the same location, or `candidate`
+/// nested somewhere inside it (`Path::starts_with` is component-wise, so a
+/// merely-shared string prefix like `"tv"` vs. `"tv2"` never false-positives).
+///
+/// Compares canonicalized paths when possible, so two different mount
+/// points for the same underlying share (symlinks, bind mounts, an SMB
+/// share mounted both directly and via a parent folder) still resolve to
+/// the same real location. Falls back to the configured path as-is when
+/// canonicalization fails (e.g. a network root that isn't currently
+/// mounted) — an unreachable root must not be treated as automatically
+/// distinct just because it can't be resolved right now.
+pub fn path_contains(container: &Path, candidate: &Path) -> bool {
+    let container = std::fs::canonicalize(container).unwrap_or_else(|_| container.to_path_buf());
+    let candidate = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    candidate.starts_with(&container)
+}
+
+/// True if `a` and `b` name the same filesystem location or one is nested
+/// inside the other — scanning both as separate roots would catalog the
+/// same physical files twice, once per root's `{label}/` prefix (see this
+/// module's doc comment), silently duplicating every affected show/movie/
+/// track in the catalog even though there is exactly one copy of each file
+/// on disk. Real trigger: a NAS share (or its subfolder) mounted and added
+/// as a second root alongside a root that already contains it — e.g. a
+/// dedicated mount for one show's folder added on top of an existing
+/// umbrella "TV Shows" root.
+pub fn paths_overlap(a: &Path, b: &Path) -> bool {
+    path_contains(a, b) || path_contains(b, a)
+}
+
+/// The first pair of configured `roots` whose filesystem locations overlap
+/// (see [`paths_overlap`]), if any — checked pairwise, which is fine for the
+/// handful of roots a real install ever configures.
+pub fn find_overlapping_roots(roots: &[MediaRoot]) -> Option<(&MediaRoot, &MediaRoot)> {
+    for (i, a) in roots.iter().enumerate() {
+        for b in &roots[i + 1..] {
+            if paths_overlap(&a.path, &b.path) {
+                return Some((a, b));
+            }
+        }
+    }
+    None
+}
+
 /// Parse `SWARM_MEDIA_ROOTS`'s `label=path,label2=path2` format.
 pub fn parse_roots_env(value: &str) -> Vec<MediaRoot> {
     value
@@ -271,6 +316,68 @@ mod tests {
                 path: PathBuf::from("/path")
             }]
         );
+    }
+
+    #[test]
+    fn overlapping_roots_detects_identical_and_nested_paths() {
+        assert!(paths_overlap(
+            Path::new("/media/tv/office-nonexistent"),
+            Path::new("/media/tv/office-nonexistent")
+        ));
+        assert!(paths_overlap(
+            Path::new("/media/tv-nonexistent"),
+            Path::new("/media/tv-nonexistent/office")
+        ));
+        assert!(paths_overlap(
+            Path::new("/media/tv-nonexistent/office"),
+            Path::new("/media/tv-nonexistent")
+        ));
+        assert!(!paths_overlap(
+            Path::new("/media/tv-nonexistent"),
+            Path::new("/media/music-nonexistent")
+        ));
+        // A shared prefix that isn't a real path-component boundary must not
+        // false-positive (e.g. "/media/tv" vs "/media/tv2").
+        assert!(!paths_overlap(
+            Path::new("/media/tv-nonexistent"),
+            Path::new("/media/tv-nonexistent2")
+        ));
+    }
+
+    #[test]
+    fn find_overlapping_roots_reports_the_first_conflicting_pair() {
+        let roots = vec![
+            MediaRoot {
+                label: "local".into(),
+                path: PathBuf::from("/media/tv-nonexistent"),
+            },
+            MediaRoot {
+                label: "nas".into(),
+                path: PathBuf::from("/Volumes/nas-nonexistent"),
+            },
+            MediaRoot {
+                label: "office".into(),
+                path: PathBuf::from("/media/tv-nonexistent/The Office"),
+            },
+        ];
+        let (a, b) = find_overlapping_roots(&roots).expect("overlap expected");
+        assert_eq!(a.label, "local");
+        assert_eq!(b.label, "office");
+    }
+
+    #[test]
+    fn find_overlapping_roots_is_none_for_disjoint_roots() {
+        let roots = vec![
+            MediaRoot {
+                label: "local".into(),
+                path: PathBuf::from("/media/tv-nonexistent"),
+            },
+            MediaRoot {
+                label: "nas".into(),
+                path: PathBuf::from("/Volumes/nas-nonexistent"),
+            },
+        ];
+        assert!(find_overlapping_roots(&roots).is_none());
     }
 
     #[test]

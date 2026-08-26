@@ -206,10 +206,54 @@ async fn scan_roots_scoped_inner(
     // not a borrow tied to this function's stack frame.
     let progress = progress_tx.map(|tx| Arc::new(ScanProgress::new(tx)));
 
+    // A misconfigured pair of roots (one nested inside, or identical to,
+    // another — e.g. a dedicated mount added for one show's folder on top of
+    // an existing umbrella root that already contains it) would otherwise
+    // walk the same physical files twice, once per root's `{label}/` prefix,
+    // silently duplicating every entry under the overlap even though there
+    // is exactly one copy of each file on disk. An ancestor root's own
+    // recursive walk already visits everything under a nested root, so the
+    // nested one is dropped unconditionally — regardless of configuration
+    // order, since skipping the *ancestor* instead would silently stop
+    // scanning everything else under it, not just the duplicate-causing
+    // overlap. Two roots at the exact same location (neither a genuine
+    // ancestor of the other) tie-break on configuration order. Dropped roots
+    // still participate in this scan's deletion reconciliation below (see
+    // `redundant_roots`) so any already-duplicated entries under their
+    // prefix, from before the overlap was recognized, self-heal on this very
+    // scan instead of lingering forever.
+    let mut walked_roots: Vec<&MediaRoot> = Vec::with_capacity(roots.len());
+    let mut redundant_roots: Vec<&MediaRoot> = Vec::new();
+    for (index, root) in roots.iter().enumerate() {
+        let redundant = roots.iter().enumerate().any(|(other_index, other)| {
+            if other_index == index || !crate::roots::path_contains(&other.path, &root.path) {
+                return false;
+            }
+            // `other` and `root` are the exact same location, not a genuine
+            // ancestor/descendant pair: keep only the earlier-configured one.
+            if crate::roots::path_contains(&root.path, &other.path) {
+                other_index < index
+            } else {
+                true
+            }
+        });
+        if redundant {
+            tracing::warn!(
+                root = %root.label,
+                path = %root.path.display(),
+                "media root overlaps with another configured root; skipping its scan and \
+                 reconciling any entries already catalogued under it as missing"
+            );
+            redundant_roots.push(root);
+        } else {
+            walked_roots.push(root);
+        }
+    }
+
     // Finish every root walk before catalog mutation, but stage the results
     // in local SQLite rather than growing an in-memory Vec with the library.
-    let mut complete_roots = Vec::with_capacity(roots.len());
-    for root in roots {
+    let mut complete_roots = Vec::with_capacity(walked_roots.len());
+    for root in &walked_roots {
         check_cancelled(cancel.as_deref())?;
         let complete = discover_media_files(
             library,
@@ -221,7 +265,7 @@ async fn scan_roots_scoped_inner(
         )
         .await?;
         if complete {
-            complete_roots.push(root);
+            complete_roots.push(*root);
         } else {
             // The manifest remains useful for additions and updates, but a
             // changing directory is not a complete snapshot and must not
@@ -233,6 +277,12 @@ async fn scan_roots_scoped_inner(
             );
         }
     }
+    // Never walked, but still fully reconciled: any entry already
+    // catalogued under a redundant root's `{label}/` prefix is guaranteed
+    // absent from this scan's manifest (that root was never walked) and so
+    // is correctly marked missing below — self-healing pre-existing
+    // duplicates from before the overlap was recognized.
+    complete_roots.extend(redundant_roots.iter().copied());
     let total = library.scan_manifest_count(scan_id).await?;
     let known_in_scope = if multi_root_namespace {
         let mut count = 0usize;

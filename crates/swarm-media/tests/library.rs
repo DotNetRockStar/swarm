@@ -870,6 +870,121 @@ async fn scoped_rescan_reconciles_only_the_selected_multi_root() {
     );
 }
 
+/// Real bug (#72): a root nested inside (or identical to) another already-
+/// configured root — e.g. a dedicated mount added for one show's folder on
+/// top of an existing umbrella "TV Shows" root — got walked a second time
+/// under its own `{label}/` prefix, silently duplicating every entry under
+/// the overlap even though there was exactly one copy of each file on disk.
+/// The outer root's own recursive walk already covers everything under the
+/// nested one, so the nested root must always be the one skipped —
+/// regardless of which order the two were configured in.
+#[tokio::test]
+async fn overlapping_roots_are_scanned_once_regardless_of_configuration_order() {
+    for outer_first in [true, false] {
+        let base = std::env::temp_dir().join(format!(
+            "swarm-lib-overlap-{outer_first}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let tv = base.join("tv");
+        let office = tv.join("The Office");
+        std::fs::create_dir_all(&office).unwrap();
+        let library = Library::open(base.join("library.sqlite").to_str().unwrap())
+            .await
+            .unwrap();
+        write(&tv, "The Office/S01E01.mkv", &[1u8; 16]);
+        write(&tv, "Other Show/S01E01.mkv", &[2u8; 16]);
+
+        let outer = MediaRoot {
+            label: "tv".into(),
+            path: tv.clone(),
+        };
+        let inner = MediaRoot {
+            label: "office".into(),
+            path: office.clone(),
+        };
+        let roots = if outer_first {
+            vec![outer, inner]
+        } else {
+            vec![inner, outer]
+        };
+
+        let report = scan_roots(&library, &roots, None).await.unwrap();
+        assert_eq!(
+            report.added, 2,
+            "outer_first={outer_first}: the nested root's own file must not be counted twice"
+        );
+        let paths = library
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.relative_path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths.len(),
+            2,
+            "outer_first={outer_first}: {paths:?}"
+        );
+        assert!(paths.iter().any(|p| p.ends_with("The Office/S01E01.mkv")));
+        assert!(paths.iter().any(|p| p.ends_with("Other Show/S01E01.mkv")));
+    }
+}
+
+/// Same real bug as above, from the angle of an *already* affected install:
+/// before this fix, two overlapping roots ("tv" and a nested "office" mount)
+/// were both walked, cataloging the exact same on-disk file twice — once
+/// under each root's `{label}/` prefix. Simulate that pre-existing
+/// duplicate row directly (rather than by reverting the fix), then confirm
+/// a normal rescan with the fixed code reconciles it away on its own: the
+/// nested root's stale duplicate must end up unavailable, not just stop
+/// growing further, leaving exactly one available entry for the file.
+#[tokio::test]
+async fn overlapping_root_self_heals_a_pre_existing_duplicate_on_rescan() {
+    let base = std::env::temp_dir().join(format!("swarm-lib-overlap-heal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let tv = base.join("tv");
+    let office = tv.join("The Office");
+    std::fs::create_dir_all(&office).unwrap();
+    let library = Library::open(base.join("library.sqlite").to_str().unwrap())
+        .await
+        .unwrap();
+    write(&tv, "The Office/S01E01.mkv", &[1u8; 16]);
+
+    // Pre-existing duplicate row from before this fix existed: the nested
+    // root's own walk had already catalogued the file under its `office/`
+    // prefix.
+    let stale_key = entry_key("office/S01E01.mkv");
+    library
+        .upsert(&movie_entry(&stale_key, "office/S01E01.mkv", "stale-fp"))
+        .await
+        .unwrap();
+
+    let roots = vec![
+        MediaRoot {
+            label: "office".into(),
+            path: office.clone(),
+        },
+        MediaRoot {
+            label: "tv".into(),
+            path: tv.clone(),
+        },
+    ];
+    scan_roots(&library, &roots, None).await.unwrap();
+
+    let after = library.list().await.unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "the pre-existing duplicate under the redundant root must be reconciled away: {after:?}"
+    );
+    assert!(after[0].relative_path.ends_with("The Office/S01E01.mkv"));
+    assert_ne!(
+        after[0].entry_key, stale_key,
+        "the surviving entry must be the one under the kept \"tv\" root, not the stale duplicate"
+    );
+}
+
 #[tokio::test]
 async fn manual_metadata_overwrites_display_fields_and_leaves_grouping_fields_untouched() {
     let fx = fixture("manual-metadata").await;
