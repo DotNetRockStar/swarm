@@ -794,7 +794,8 @@ extract_followup_metadata() {
         def is_worker_generated_comment:
             (.body // "") | contains("<!-- swarm-issue-worker:");
         def is_completion_comment:
-            (.body // "") | contains("<!-- swarm-issue-worker:commit:");
+            ((.body // "") | contains("<!-- swarm-issue-worker:commit:"))
+            and ((.user.login // "") == $trusted_author);
         (add // [] | sort_by(.id)) as $comments
         | ($comments | map(select(is_completion_comment)) | last) as $completion
         | if $completion == null then empty
@@ -837,6 +838,59 @@ extract_followup_metadata() {
             end
           end
     ' "$comments_file"
+}
+
+extract_completion_metadata() {
+    local comments_file="$1"
+
+    "$JQ_BIN" -c \
+        --arg trusted_author "$TRUSTED_FOLLOWUP_AUTHOR" '
+        (add // [] | sort_by(.id))
+        | map(select(
+            ((.body // "") | contains("<!-- swarm-issue-worker:commit:"))
+            and ((.user.login // "") == $trusted_author)
+        ))
+        | last
+        | if . == null then empty
+          else {
+            commit_sha: (((.body
+                | capture("swarm-issue-worker:commit:(?<sha>[0-9a-f]{40})")?
+                | .sha) // "")),
+            comment_id: .id,
+            author: (.user.login // "unknown")
+          }
+          end
+    ' "$comments_file"
+}
+
+record_completed_issue_from_comments() {
+    local issue_number="$1"
+    local comments_file="$2"
+    local completion_metadata
+    local commit_sha
+    local main_sha
+
+    completion_metadata="$(extract_completion_metadata "$comments_file")"
+    [ -n "$completion_metadata" ] || return 1
+    commit_sha="$(printf '%s' "$completion_metadata" | "$JQ_BIN" -r '.commit_sha')"
+    if ! [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
+        log "Ignoring the trusted completion marker on issue #$issue_number because it has no valid commit SHA."
+        return 1
+    fi
+    main_sha="$(git -C "$REPO_DIR" rev-parse --verify refs/heads/main 2>/dev/null || true)"
+    if [ -z "$main_sha" ] \
+        || ! git -C "$REPO_DIR" cat-file -e "$commit_sha^{commit}" 2>/dev/null \
+        || ! git -C "$REPO_DIR" merge-base --is-ancestor "$commit_sha" "$main_sha"; then
+        log "Issue #$issue_number has a trusted completion marker for $commit_sha, but that commit is not on local main; leaving it pending until the repository is synchronized."
+        return 1
+    fi
+
+    if ! grep -Fxq -- "$issue_number" "$COMPLETED_ISSUES_FILE" 2>/dev/null; then
+        printf '%s\n' "$issue_number" >> "$COMPLETED_ISSUES_FILE"
+    fi
+    clear_in_progress_issue "$issue_number"
+    log "Recognized issue #$issue_number as already completed by commit $commit_sha on main; no AI run is needed."
+    return 0
 }
 
 load_resume_comments() {
@@ -953,6 +1007,27 @@ deliver_pending_email() {
     log "Notification sent; issue #$issue_number is marked completed locally."
 }
 
+render_pending_github_comment() {
+    local output_file="$1"
+    local marker="$2"
+    local completion_verb="$3"
+
+    {
+        printf '%s\n' "$marker"
+        printf '%s by **%s**.\n\n' "$completion_verb" "$("$JQ_BIN" -r '.ai_tool // .ai' "$PENDING_EMAIL_FILE")"
+        printf -- '- Model: `%s`\n' "$("$JQ_BIN" -r '.model // "unknown"' "$PENDING_EMAIL_FILE")"
+        printf -- '- Effort: `%s`\n' "$("$JQ_BIN" -r '.effort // "unknown"' "$PENDING_EMAIL_FILE")"
+        printf -- '- Commit: `%s` — %s\n\n' \
+            "$("$JQ_BIN" -r '.commit_sha' "$PENDING_EMAIL_FILE")" \
+            "$("$JQ_BIN" -r '.commit_message' "$PENDING_EMAIL_FILE")"
+        printf '<details><summary>AI completion summary</summary>\n\n'
+        # Keep the AI response as ordinary Markdown. Prefixing it with four
+        # spaces made GitHub render every heading and bullet as a code block.
+        "$JQ_BIN" -r '.ai_output // "(No captured AI output was available.)"' "$PENDING_EMAIL_FILE"
+        printf '\n</details>\n'
+    } > "$output_file"
+}
+
 post_pending_github_comment() {
     local issue_number
     local commit_sha
@@ -987,19 +1062,7 @@ post_pending_github_comment() {
         if [ "$("$JQ_BIN" -r '.work_type // "initial"' "$PENDING_EMAIL_FILE")" = "followup" ]; then
             completion_verb="Reworked"
         fi
-        {
-            printf '%s\n' "$marker"
-            printf '%s by **%s**.\n\n' "$completion_verb" "$("$JQ_BIN" -r '.ai_tool // .ai' "$PENDING_EMAIL_FILE")"
-            printf -- '- Model: `%s`\n' "$("$JQ_BIN" -r '.model // "unknown"' "$PENDING_EMAIL_FILE")"
-            printf -- '- Effort: `%s`\n' "$("$JQ_BIN" -r '.effort // "unknown"' "$PENDING_EMAIL_FILE")"
-            printf -- '- Commit: `%s` — %s\n\n' \
-                "$commit_sha" \
-                "$("$JQ_BIN" -r '.commit_message' "$PENDING_EMAIL_FILE")"
-            printf '<details><summary>AI completion summary</summary>\n\n'
-            "$JQ_BIN" -r '.ai_output // "(No captured AI output was available.)"' "$PENDING_EMAIL_FILE" \
-                | sed 's/^/    /'
-            printf '\n</details>\n'
-        } > "$GITHUB_COMMENT_FILE"
+        render_pending_github_comment "$GITHUB_COMMENT_FILE" "$marker" "$completion_verb"
 
         log "Posting the AI completion summary to GitHub issue #$issue_number."
         "$GH_BIN" issue comment "$issue_number" \
@@ -1170,6 +1233,36 @@ ASSIGNED_ISSUES_JSON="$("$JQ_BIN" -c \
         | map(select(any(.assignees[]?; .login == $assignee)))
         | sort_by(.created_at)
     ' "$ISSUES_FILE")"
+
+# A trusted completion can be posted outside this worker (for example, an
+# interactive Codex session). Reconcile that GitHub marker before selecting a
+# fresh issue so a valid commit already on main is never sent through an empty
+# recovery loop merely because the local completed-issues file missed it.
+while IFS= read -r completion_candidate; do
+    completed_issue_number="$(printf '%s' "$completion_candidate" | "$JQ_BIN" -r '.number')"
+    COMMENTS_FILE="$(mktemp "$STATE_DIR/github-comments.XXXXXX")"
+    if ! "$GH_BIN" api --method GET --paginate --slurp \
+        "repos/$GITHUB_REPOSITORY/issues/$completed_issue_number/comments" \
+        -F per_page=100 > "$COMMENTS_FILE"; then
+        fail "GitHub comment query failed while reconciling issue #$completed_issue_number."
+    fi
+    if record_completed_issue_from_comments "$completed_issue_number" "$COMMENTS_FILE"; then
+        COMPLETED_JSON="$(printf '%s' "$COMPLETED_JSON" | "$JQ_BIN" -c \
+            --argjson issue_number "$completed_issue_number" \
+            '. + [$issue_number] | unique')"
+        if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" = "$completed_issue_number" ]; then
+            IN_PROGRESS_ISSUE_NUMBER_JSON="null"
+        fi
+    fi
+    rm -f -- "$COMMENTS_FILE"
+    COMMENTS_FILE=""
+done < <(printf '%s' "$ASSIGNED_ISSUES_JSON" | "$JQ_BIN" -c \
+    --argjson completed "$COMPLETED_JSON" \
+    --argjson paused "$PAUSED_ISSUES_JSON" '
+    .[]
+    | select(.number as $number | ($completed | index($number)) == null)
+    | select(.number as $number | ($paused | index($number)) == null)
+')
 
 ISSUE_JSON=""
 if [ "$IN_PROGRESS_ISSUE_NUMBER_JSON" != "null" ]; then
@@ -1439,7 +1532,6 @@ if [ "$SESSION_IS_RESUME" -eq 1 ]; then
     printf '%s\n' \
         "Continue the existing unattended session for GitHub issue #$ISSUE_NUMBER ($ISSUE_TITLE) from exactly where the previous turn stopped when usage became unavailable." \
         "Inspect and preserve the work already present in the repository, finish the implementation and foreground verification, and commit the completed work to main as one commit referencing #$ISSUE_NUMBER. Do not push or ask for interactive input." \
-        "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, solution, and verification without code snippets, diffs, file contents, command transcripts, or step-by-step output." \
         > "$PROMPT_FILE"
     if [ "$(printf '%s' "$RESUME_COMMENTS_JSON" | "$JQ_BIN" -r 'length')" -gt 0 ]; then
         {
@@ -1467,7 +1559,6 @@ else
         "" \
         "This is an unattended autopilot run. Do not ask the user questions, request confirmation, or pause for interactive input. Resolve ambiguity from the issue and repository, make reasonable safe assumptions, and implement the approach you recommend. If several valid approaches exist, choose the best maintainable option yourself. Only report a blocker when required credentials, authority, or external information are genuinely unavailable." \
         "Implement this issue in $REPO_DIR. Follow the repository instructions, run relevant tests, and commit the completed work to main as one commit. Include #$ISSUE_NUMBER in the commit message. Do not push. Run verification commands in the foreground; do not return while tests or builds are still running." \
-        "Your final response is shown in the terminal and posted to GitHub. Keep it concise: summarize the problem, the solution, and verification in one to three short paragraphs or a brief list. Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
         > "$PROMPT_FILE"
 
     if [ "$WORK_TYPE" = "followup" ]; then
@@ -1491,6 +1582,10 @@ else
         } >> "$PROMPT_FILE"
     fi
 fi
+
+printf '%s\n' \
+    "Your final response is shown in the terminal and posted to GitHub as rendered Markdown. Keep it concise and use exactly these headings: '## Summary', '## Changes', '## Verification', and '## Operational notes'. Under Summary, state the outcome and the problem resolved in one short paragraph. Under Changes and Verification, use short bullets. Under Operational notes, state whether the commit was pushed and mention only deployment, restart, migration, or follow-up requirements that actually apply; otherwise write '- None.' Do not include code snippets, diffs, file contents, command transcripts, or step-by-step implementation output." \
+    >> "$PROMPT_FILE"
 
 if [ "$RECOVERY_HAS_DIRTY_WORKTREE" -eq 1 ]; then
     printf '%s\n' \

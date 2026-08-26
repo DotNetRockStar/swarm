@@ -62,6 +62,30 @@ FOLLOWUP_FIXTURE="$(extract_followup_metadata "$COMMENTS_FIXTURE")"
 test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.trigger_comment_id')" = "102"
 test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.followup_comments | length')" = "1"
 test "$(printf '%s' "$FOLLOWUP_FIXTURE" | "$JQ_BIN" -r '.followup_comments[0].body')" = "Please add a disk-usage graph."
+COMPLETION_FIXTURE="$(extract_completion_metadata "$COMMENTS_FIXTURE")"
+test "$(printf '%s' "$COMPLETION_FIXTURE" | "$JQ_BIN" -r '.commit_sha')" = "1111111111111111111111111111111111111111"
+
+# Completion markers are trusted only from the configured issue owner. A
+# valid trusted marker whose commit is already on main repairs both the local
+# completed list and a stale in-progress record without starting an AI.
+UNTRUSTED_COMPLETION_FILE="$TEST_STATE/untrusted-completion.json"
+"$JQ_BIN" -n '[[{
+    id: 200,
+    user: {login: "someone-else"},
+    body: "<!-- swarm-issue-worker:commit:1111111111111111111111111111111111111111 -->"
+}]]' > "$UNTRUSTED_COMPLETION_FILE"
+test -z "$(extract_completion_metadata "$UNTRUSTED_COMPLETION_FILE")"
+
+EXTERNAL_COMPLETION_FILE="$TEST_STATE/external-completion.json"
+"$JQ_BIN" -n --arg commit_sha "$BASE_SHA" '[[{
+    id: 201,
+    user: {login: "DotNetRockStar"},
+    body: ("<!-- swarm-issue-worker:commit:" + $commit_sha + " -->\nCompleted by **Codex**.")
+}]]' > "$EXTERNAL_COMPLETION_FILE"
+printf '{"issue_number":404}\n' > "$IN_PROGRESS_FILE"
+record_completed_issue_from_comments 404 "$EXTERNAL_COMPLETION_FILE"
+grep -Fxq '404' "$COMPLETED_ISSUES_FILE"
+test ! -e "$IN_PROGRESS_FILE"
 
 WORK_TYPE="followup"
 PREVIOUS_AI="Claude"
@@ -270,6 +294,31 @@ FAKE_PGREP_STATUS=0 PGREP_BIN="$FAKE_PGREP" \
 if FAKE_PGREP_STATUS=1 PGREP_BIN="$FAKE_PGREP" \
     bash "$SCRIPT_DIR/install_swarm_issue_cron.sh" --check-transcode-active; then
     printf 'inactive transcode detector reported an active session\n' >&2
+    exit 1
+fi
+
+# GitHub summaries must remain normal Markdown. The former four-space prefix
+# rendered every heading and bullet as a code block.
+"$JQ_BIN" -n '
+    {
+        ai: "Codex",
+        ai_tool: "Codex",
+        model: "test-model",
+        effort: "high",
+        commit_sha: "1111111111111111111111111111111111111111",
+        commit_message: "Test completion (#404)",
+        ai_output: "## Summary\n\nDone.\n\n## Changes\n\n- Fixed it.\n\n## Verification\n\n- Tests passed.\n\n## Operational notes\n\n- Not pushed."
+    }
+' > "$PENDING_EMAIL_FILE"
+RENDERED_COMMENT="$TEST_STATE/rendered-comment.md"
+render_pending_github_comment \
+    "$RENDERED_COMMENT" \
+    '<!-- swarm-issue-worker:commit:1111111111111111111111111111111111111111 -->' \
+    'Completed'
+grep -Fqx '## Summary' "$RENDERED_COMMENT"
+grep -Fqx -- '- Fixed it.' "$RENDERED_COMMENT"
+if grep -Fq '    ## Summary' "$RENDERED_COMMENT"; then
+    printf 'completion summary was rendered as a code block\n' >&2
     exit 1
 fi
 

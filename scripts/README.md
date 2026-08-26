@@ -126,6 +126,12 @@ Only one foreground runner may be active for a state directory; a second
 invocation exits without starting another polling loop. Temporary failures of
 an AI provider's usage-check command are treated as unknown availability, not
 as quota exhaustion, so they do not create pause/resume comments or loops.
+Completion comments are posted as rendered Markdown with consistent Summary,
+Changes, Verification, and Operational notes sections. If an interactive
+Claude/Codex run posts the same trusted `swarm-issue-worker:commit` marker, the
+worker verifies that commit is already on local `main`, repairs its local
+completed state, and skips a redundant AI run. Completion markers from other
+GitHub accounts are ignored.
 
 Useful overrides include `SWARM_REPO_DIR`, `SWARM_GITHUB_REPOSITORY`,
 `SWARM_GITHUB_ASSIGNEE`, `SWARM_TRUSTED_FOLLOWUP_AUTHOR`,
