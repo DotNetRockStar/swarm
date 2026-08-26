@@ -52,6 +52,7 @@ data class LanPairingActivation(
     val activationId: String,
     val pollToken: String,
     val expiresInSeconds: Long,
+    val status: String = "pending",
 )
 
 /**
@@ -183,15 +184,43 @@ class LanDiscoveryManager(context: Context) : Closeable {
         server: LanServer,
         deviceName: String,
         fingerprint: String,
+    ): Result<LanPairingActivation> = beginPairing(
+        server = server,
+        deviceName = deviceName,
+        fingerprint = fingerprint,
+        action = "begin",
+        testingToken = null,
+    )
+
+    suspend fun beginTestingPairing(
+        server: LanServer,
+        deviceName: String,
+        fingerprint: String,
+        testingToken: String?,
+    ): Result<LanPairingActivation> = beginPairing(
+        server = server,
+        deviceName = deviceName,
+        fingerprint = fingerprint,
+        action = "begin_testing",
+        testingToken = testingToken,
+    )
+
+    private suspend fun beginPairing(
+        server: LanServer,
+        deviceName: String,
+        fingerprint: String,
+        action: String,
+        testingToken: String?,
     ): Result<LanPairingActivation> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val response = exchange(
                     server,
                     LanPairRequest(
-                        action = "begin",
+                        action = action,
                         name = deviceName,
                         fingerprint = fingerprint,
+                        testingToken = testingToken,
                     ),
                 )
                 requireSuccessful(response)
@@ -201,6 +230,7 @@ class LanDiscoveryManager(context: Context) : Closeable {
                     activationId = response.activationId ?: error("The media server returned an incomplete activation."),
                     pollToken = response.pollToken ?: error("The media server returned an incomplete activation."),
                     expiresInSeconds = response.expiresInSeconds ?: 300,
+                    status = response.status ?: "pending",
                 )
             }
         }
@@ -218,6 +248,22 @@ class LanDiscoveryManager(context: Context) : Closeable {
                 )
                 requireSuccessful(response)
                 response.status ?: error("The media server returned no activation status.")
+            }
+        }
+
+    suspend fun endTestingPairing(server: LanServer, activation: LanPairingActivation): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val response = exchange(
+                    server,
+                    LanPairRequest(
+                        action = "end_testing",
+                        activationId = activation.activationId,
+                        pollToken = activation.pollToken,
+                    ),
+                )
+                requireSuccessful(response)
+                check(response.status == "ended") { "The media server did not end testing authorization." }
             }
         }
 
@@ -239,6 +285,8 @@ class LanDiscoveryManager(context: Context) : Closeable {
         val message = when (response.error) {
             "not_lan" -> "The media server did not recognize this as a local-network connection."
             "too_many_pending_activations" -> "The media server has too many pending TV approvals. Try again shortly."
+            "testing_unavailable" -> "That media server does not support debug testing mode."
+            "invalid_testing_activation" -> "The media server no longer recognizes this testing session."
             else -> "The media server rejected the LAN activation request."
         }
         error(message)
@@ -252,6 +300,7 @@ private data class LanPairRequest(
     val fingerprint: String? = null,
     @SerialName("activation_id") val activationId: String? = null,
     @SerialName("poll_token") val pollToken: String? = null,
+    @SerialName("testing_token") val testingToken: String? = null,
 )
 
 @Serializable

@@ -18,6 +18,7 @@ import kotlinx.serialization.json.encodeToStream
  */
 class AndroidCatalogCache(context: Context) : CatalogCache {
     private val directory = File(context.filesDir, "catalog_cache")
+    private val testingResidue = context.getSharedPreferences("testing_catalog_residue", Context.MODE_PRIVATE)
 
     @OptIn(ExperimentalSerializationApi::class)
     override suspend fun load(serverId: String): CatalogManifest? {
@@ -47,10 +48,33 @@ class AndroidCatalogCache(context: Context) : CatalogCache {
         }
     }
 
+    fun markTestingServer(serverId: String) {
+        val names = testingResidue.getStringSet("cache_names", emptySet()).orEmpty().toMutableSet()
+        names += cacheName(serverId)
+        testingResidue.edit().putStringSet("cache_names", names).commit()
+    }
+
+    fun remove(serverId: String) {
+        AtomicFile(cacheFile(serverId)).delete()
+        val names = testingResidue.getStringSet("cache_names", emptySet()).orEmpty().toMutableSet()
+        names -= cacheName(serverId)
+        testingResidue.edit().putStringSet("cache_names", names).commit()
+    }
+
+    /** Removes derived data from a testing session that ended by process death. */
+    fun clearTestingResidue() {
+        testingResidue.getStringSet("cache_names", emptySet()).orEmpty().forEach { name ->
+            AtomicFile(File(directory, "$name.json")).delete()
+        }
+        testingResidue.edit().clear().commit()
+    }
+
     private fun cacheFile(serverId: String): File {
-        val safeName = MessageDigest.getInstance("SHA-256")
+        return File(directory, "${cacheName(serverId)}.json")
+    }
+
+    private fun cacheName(serverId: String): String =
+        MessageDigest.getInstance("SHA-256")
             .digest(serverId.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
-        return File(directory, "$safeName.json")
-    }
 }

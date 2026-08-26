@@ -25,10 +25,11 @@ evidence is a guess"):
   because a real crash on real hardware took measurably longer than a naive
   short sleep to surface (see `swarm-real-device-debugging`).
 - **`lan_closed_loop_catalog`** — after launch, the suite sends **no D-pad
-  input at all** and instead waits up to 20s for the client's own automatic
-  startup reconnect (`SwarmViewModel.restoreSession()` → `openCatalog()`) to
-  either succeed or fail on its own, then reads the result straight from
-  logcat:
+  input at all**. It explicitly arms the debug client for a non-persistent
+  10-minute testing session through already-authorized adb; the client uses
+  an isolated testing certificate, discovers the real media server, performs
+  the real LAN activation exchange, and opens the catalog. The suite then
+  reads the result straight from logcat:
   - `browseCatalog() refresh done: entries=N unreachable=M` — the server
     answered and the client parsed a real manifest. `unreachable=0` is a
     PASS; a nonzero `unreachable` alongside this line is a FAIL (the
@@ -36,13 +37,14 @@ evidence is a guess"):
   - `reconnect to already-paired LAN server ... failed` / `could not probe
     the saved LAN server during startup` — the client tried and the server
     didn't answer: FAIL.
-  - Neither line appears — this TV has no saved LAN connection to reconnect
-    to. That's a SKIP, not a FAIL: exercising first-time pairing would mean
-    driving the passcode/D-pad UI blind, which `swarm-real-device-debugging`
-    documents as carrying real risk (a stray `BACK` on this app's root
-    screen has landed on a live Prime Video subscription checkout screen on
-    real hardware). Pair the TV once by hand via the media server's Swarm
-    page, and subsequent runs pick it up automatically.
+  - Neither line appears within 40 seconds — FAIL: debug pairing or the real
+    catalog round-trip did not complete. First-time pairing is no longer a
+    manual prerequisite and is no longer reported as SKIP.
+- **`testing_mode_cleanup`** — the suite disables testing mode through adb
+  after the catalog assertion and requires the client's structured cleanup
+  confirmation. That cleanup closes the QUIC route, deletes derived catalog
+  cache, destroys the testing certificate, and explicitly asks the server to
+  revoke the exact ephemeral grant.
 
 This is why entries/unreachable counts are recorded as evidence in the
 report rather than used as a hard pass bar on their own — an intentionally
@@ -111,9 +113,15 @@ where noted.
   This is just turning the screen on, not UI navigation, so it carries none
   of the real-hardware risk documented below for pairing.
 - Building, installing (in place, no wipe), force-stopping, and launching
-  the debug client on every discovered device.
-- Waiting for and reading the automatic LAN-reconnect/catalog-refresh
-  result from logcat, with no D-pad input sent.
+  the debug client on every discovered device with testing mode explicitly
+  armed for that process.
+- Creating a high-entropy per-run automation token in the host-only
+  `.run/tv-e2e-control.json` file. The visible code is deliberately fixed at
+  `00000000`, but that code alone never authorizes unattended enrollment:
+  release servers reject the testing action, and the debug server requires
+  the secret token for automatic approval.
+- Pairing an isolated, non-persistent testing certificate; waiting for the
+  catalog refresh; then disabling the mode and verifying cleanup from logcat.
 - Compiling and filing the findings report to GitHub.
 
 **Genuinely manual, one-time per TV, and not going to be automated:**
@@ -127,17 +135,6 @@ where noted.
   connecting side. Do this once per TV (`deploy_fire_tv.sh` will also
   print this instruction the first time it hits an unauthorized device);
   every run after that reconnects automatically.
-- **Each TV must be paired with the local media server once, by hand,
-  through the app's own D-pad UI** (Swarm page → enter the passcode the
-  media server's dashboard displays) before `lan_closed_loop_catalog` can
-  produce PASS/FAIL instead of SKIP. The suite deliberately never drives
-  this itself: it would mean sending blind D-pad input on a device signed
-  into a real Amazon account, and a stray `BACK` on this app's root screen
-  has landed on a live Prime Video subscription checkout screen on real
-  hardware (see `swarm-real-device-debugging`). Until a TV is paired, its
-  `lan_closed_loop_catalog` row will keep reporting SKIP — that's expected,
-  not a bug, and is exactly what the evidence-based reporting above is
-  designed to surface rather than hide.
 - **The local media server must already be running** (`./scripts/run_now.sh`)
   before invoking the suite. This suite only health-checks
   `http://127.0.0.1:$SWARM_STUN_PORT/health` and never starts, stops, or
@@ -145,3 +142,25 @@ where noted.
   be serving real traffic (see `swarm-local-testing`). Starting the GUI
   itself isn't something an unattended script should do on someone's
   machine on its own initiative.
+
+The media server must have been started by the current `run_now.sh`, which
+passes the debug-only control-file path into the GUI process. A server process
+started before this testing-mode support was built must be restarted once;
+the suite still never performs that lifecycle change itself.
+
+## Testing-mode security invariants
+
+- The UI toggle and `00000000` behavior are reachable only in the Android
+  debug build. A release media server rejects `begin_testing` outright.
+- `00000000` is a visible test indicator, not an automation credential. The
+  automation path also requires a random 256-bit token delivered to the TV by
+  authorized adb and read by the server from a permission-restricted local
+  control file.
+- Test trust never enters the TV's Room connection history or the server's
+  `local_peer` SQLite table. `AllowedPeers` tracks ephemeral grants separately
+  so roster refresh cannot erase them and their cleanup cannot erase durable
+  user trust.
+- Testing uses a separate AndroidKeyStore identity. Startup and disable both
+  delete its private key and any journaled derived catalog cache; the server
+  independently expires its grant after 10 minutes even if the TV loses power
+  before explicit cleanup.

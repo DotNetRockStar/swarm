@@ -29,7 +29,14 @@ import javax.security.auth.x500.X500Principal
 
 private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 private const val KEY_ALIAS = "swarm_device_identity"
+private const val TESTING_KEY_ALIAS = "swarm_testing_identity"
 private val VALIDITY_YEARS = 20L
+
+data class ClientIdentity(
+    val fingerprint: String,
+    val certificate: X509Certificate,
+    val privateKey: PrivateKey,
+)
 
 object AndroidDeviceIdentity {
     /** Loads (or generates, on first run) the device identity and returns its fingerprint. */
@@ -48,23 +55,51 @@ object AndroidDeviceIdentity {
      */
     fun privateKey(): PrivateKey = keyStore().getKey(KEY_ALIAS, null) as PrivateKey
 
+    /**
+     * Creates a separate process-scoped identity for debug testing. The alias
+     * is deleted on every application startup and whenever testing mode ends,
+     * so an expired server-side grant cannot be reused by a later app session.
+     */
+    fun testingIdentity(): ClientIdentity {
+        val keyStore = keyStore()
+        if (!keyStore.containsAlias(TESTING_KEY_ALIAS)) {
+            generateKeyPair(TESTING_KEY_ALIAS, "swarm-testing-device")
+        }
+        val certificate = keyStore().getCertificate(TESTING_KEY_ALIAS) as X509Certificate
+        val fingerprint = MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded)
+            .joinToString(separator = "") { "%02x".format(it) }
+        return ClientIdentity(
+            fingerprint = fingerprint,
+            certificate = certificate,
+            privateKey = keyStore.getKey(TESTING_KEY_ALIAS, null) as PrivateKey,
+        )
+    }
+
+    fun clearTestingIdentity() {
+        retryTransientKeystoreFailure {
+            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            if (keyStore.containsAlias(TESTING_KEY_ALIAS)) keyStore.deleteEntry(TESTING_KEY_ALIAS)
+        }
+    }
+
     private fun keyStore(): KeyStore = retryTransientKeystoreFailure {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         if (!keyStore.containsAlias(KEY_ALIAS)) {
-            generateKeyPair()
+            generateKeyPair(KEY_ALIAS, "swarm-device")
         }
         keyStore
     }
 
-    private fun generateKeyPair() {
+    private fun generateKeyPair(alias: String, commonName: String) {
         val notBefore = Date()
         val notAfter = Date(notBefore.time + VALIDITY_YEARS * 365 * 24 * 60 * 60 * 1000)
         val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            alias,
             KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
         )
             .setDigests(KeyProperties.DIGEST_SHA256)
-            .setCertificateSubject(X500Principal("CN=swarm-device"))
+            .setCertificateSubject(X500Principal("CN=$commonName"))
             .setCertificateSerialNumber(BigInteger.ONE)
             .setKeyValidityStart(notBefore)
             .setKeyValidityEnd(notAfter)

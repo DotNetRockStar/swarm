@@ -38,10 +38,19 @@ need to know the implementation term STUN. The legacy account/swarm/join-code
 web UI remains a compatibility fallback, not the first-run path.
 
 For a same-LAN connection, the TV lists **Servers on LAN** automatically. Click
-the server, choose **Pair a client** on the media-server Swarm page, and enter
-its six-digit code on the TV. LAN transport takes precedence when the same
+the server, ask it to show an activation code, and enter that eight-digit code
+in the media-server Swarm page. LAN transport takes precedence when the same
 server is also available through its swarm and does not require the internet
 rendezvous service after trust is established.
+
+Debug APKs expose a **Testing** tab in TV Settings. Its explicit toggle enables
+a non-persistent 10-minute session, shows a red banner on every screen, and
+uses visible code `00000000`. Manual use still requires entering that code in
+the desktop UI. `tv_e2e_suite.sh` uses the safer unattended path: an
+authorized-adb launch extra plus a random host-only control token auto-approves
+an isolated testing certificate. Turning the mode off removes the connection;
+startup destroys any leftover testing key, and the server grant independently
+expires. This capability is not available in release builds.
 
 ## LAN URL and VPN diagnosis
 

@@ -50,7 +50,7 @@ toolchain version-skew bug, not a real finding (`compileDebugKotlin` and
   `android.hardware.touchscreen` explicitly not required,
   `android.software.leanback` required, no Google-Play-Services dependency.
   Screens: connection landing page (automatically discovered LAN servers,
-  first-time 6-digit LAN pairing, plus short-lived SWARM activation) and a
+  first-time 8-digit LAN pairing, plus short-lived SWARM activation) and a
   swarm dashboard (server roster with online/offline status,
   resync button). A saved STUN session takes startup priority; otherwise the
   most recently connected LAN server is restored directly to the dashboard,

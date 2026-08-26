@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(debug_assertions)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use swarm_p2p::pin::AllowedPeers;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +23,8 @@ use tokio::sync::Mutex;
 
 pub const SERVICE_TYPE: &str = "_swarm-peer._udp.local.";
 const ACTIVATION_TTL: Duration = Duration::from_secs(5 * 60);
+const TESTING_MODE_TTL: Duration = Duration::from_secs(10 * 60);
+const TESTING_PAIRING_CODE: &str = "00000000";
 const MAX_PENDING_ACTIVATIONS: usize = 32;
 const MAX_PAIR_REQUEST: usize = 4096;
 
@@ -28,12 +32,15 @@ const MAX_PAIR_REQUEST: usize = 4096;
 pub struct LanPairingApproval {
     pub name: String,
     pub fingerprint: String,
+    pub testing: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LanPairingError {
     #[error("No pending LAN TV uses that code, or the code has expired.")]
     InvalidCode,
+    #[error("More than one testing TV is waiting for code 00000000; use automated pairing or leave only one testing TV pending.")]
+    AmbiguousTestingCode,
     #[error("Could not save the LAN TV approval: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -48,6 +55,7 @@ struct PendingActivation {
     requester_ip: IpAddr,
     expires_at: Instant,
     approved: bool,
+    testing: bool,
 }
 
 #[derive(Default)]
@@ -61,6 +69,15 @@ struct ActivationStarted {
     poll_token: String,
     code: String,
     expires_in_seconds: u64,
+    fingerprint: String,
+    approved: bool,
+    testing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationKind {
+    Normal,
+    Testing { auto_approve: bool },
 }
 
 impl PairingState {
@@ -75,10 +92,14 @@ impl PairingState {
         name: String,
         fingerprint: String,
         requester_ip: IpAddr,
+        kind: ActivationKind,
     ) -> Result<ActivationStarted, &'static str> {
         self.purge_expired();
+        let testing = matches!(kind, ActivationKind::Testing { .. });
         if let Some(existing) = self.activations.iter().find(|activation| {
-            activation.fingerprint == fingerprint && activation.requester_ip == requester_ip
+            activation.fingerprint == fingerprint
+                && activation.requester_ip == requester_ip
+                && activation.testing == testing
         }) {
             return Ok(started_from(existing));
         }
@@ -86,15 +107,25 @@ impl PairingState {
             return Err("too_many_pending_activations");
         }
 
-        let code = loop {
-            let candidate = format!("{:08}", rand::random::<u32>() % 100_000_000);
-            if self
-                .activations
-                .iter()
-                .all(|activation| activation.code != candidate)
-            {
-                break candidate;
+        let code = if testing {
+            TESTING_PAIRING_CODE.to_string()
+        } else {
+            loop {
+                let candidate = format!("{:08}", rand::random::<u32>() % 100_000_000);
+                if candidate != TESTING_PAIRING_CODE
+                    && self
+                        .activations
+                        .iter()
+                        .all(|activation| activation.code != candidate)
+                {
+                    break candidate;
+                }
             }
+        };
+        let ttl = if testing {
+            TESTING_MODE_TTL
+        } else {
+            ACTIVATION_TTL
         };
         let activation = PendingActivation {
             activation_id: hex::encode(rand::random::<[u8; 16]>()),
@@ -103,8 +134,9 @@ impl PairingState {
             name,
             fingerprint,
             requester_ip,
-            expires_at: Instant::now() + ACTIVATION_TTL,
-            approved: false,
+            expires_at: Instant::now() + ttl,
+            approved: matches!(kind, ActivationKind::Testing { auto_approve: true }),
+            testing,
         };
         let started = started_from(&activation);
         self.activations.push(activation);
@@ -134,6 +166,26 @@ impl PairingState {
             })
             .unwrap_or("expired")
     }
+
+    fn end_testing(
+        &mut self,
+        activation_id: &str,
+        poll_token: &str,
+        requester_ip: IpAddr,
+    ) -> Option<(String, String, bool)> {
+        let index = self.activations.iter().position(|activation| {
+            activation.testing
+                && activation.activation_id == activation_id
+                && activation.poll_token == poll_token
+                && activation.requester_ip == requester_ip
+        })?;
+        let activation = self.activations.remove(index);
+        Some((
+            activation.fingerprint,
+            activation.activation_id,
+            activation.approved,
+        ))
+    }
 }
 
 fn started_from(activation: &PendingActivation) -> ActivationStarted {
@@ -146,6 +198,9 @@ fn started_from(activation: &PendingActivation) -> ActivationStarted {
             .saturating_duration_since(Instant::now())
             .as_secs()
             .max(1),
+        fingerprint: activation.fingerprint.clone(),
+        approved: activation.approved,
+        testing: activation.testing,
     }
 }
 
@@ -181,6 +236,7 @@ impl LanService {
         let pairing_port = listener.local_addr()?.port();
         let pairing = Arc::new(Mutex::new(PairingState::default()));
         let listener_pairing = Arc::clone(&pairing);
+        let listener_allowed = allowed.clone();
         tokio::spawn(async move {
             loop {
                 let (socket, remote) = match listener.accept().await {
@@ -191,10 +247,11 @@ impl LanService {
                     }
                 };
                 let state = Arc::clone(&listener_pairing);
+                let request_allowed = listener_allowed.clone();
                 tokio::spawn(async move {
                     match tokio::time::timeout(
                         Duration::from_secs(10),
-                        handle_pair_request(socket, remote, state),
+                        handle_pair_request(socket, remote, state, request_allowed),
                     )
                     .await
                     {
@@ -208,7 +265,12 @@ impl LanService {
             }
         });
 
-        let advertisement = advertise(&server_fingerprint, peer_addr, pairing_port, http_media_port);
+        let advertisement = advertise(
+            &server_fingerprint,
+            peer_addr,
+            pairing_port,
+            http_media_port,
+        );
         Ok(Self {
             pairing,
             state_db,
@@ -299,6 +361,15 @@ struct PairRequest {
     activation_id: Option<String>,
     #[serde(default)]
     poll_token: Option<String>,
+    #[serde(default)]
+    testing_token: Option<String>,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Deserialize)]
+struct TestingControl {
+    token: String,
+    expires_at_unix_seconds: u64,
 }
 
 #[derive(Default, Serialize)]
@@ -322,6 +393,7 @@ async fn handle_pair_request(
     mut socket: TcpStream,
     remote: SocketAddr,
     pairing: Arc<Mutex<PairingState>>,
+    allowed: AllowedPeers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !is_lan_address(remote.ip()) {
         write_response(
@@ -351,7 +423,11 @@ async fn handle_pair_request(
     };
 
     match request.action.as_str() {
-        "begin" => {
+        "begin" | "begin_testing" => {
+            let testing = request.action == "begin_testing";
+            if testing && !cfg!(debug_assertions) {
+                return reject(&mut socket, "testing_unavailable").await;
+            }
             let fingerprint = request
                 .fingerprint
                 .unwrap_or_default()
@@ -365,14 +441,37 @@ async fn handle_pair_request(
             if name.is_empty() || name.len() > 80 {
                 return reject(&mut socket, "invalid_name").await;
             }
+            let kind = if testing {
+                ActivationKind::Testing {
+                    auto_approve: testing_token_is_authorized(request.testing_token.as_deref()),
+                }
+            } else {
+                ActivationKind::Normal
+            };
             let started =
                 pairing
                     .lock()
                     .await
-                    .begin(name.clone(), fingerprint.clone(), remote.ip());
+                    .begin(name.clone(), fingerprint.clone(), remote.ip(), kind);
             match started {
                 Ok(started) => {
-                    tracing::info!(client = %name, fingerprint = %fingerprint, %remote, "created pending LAN TV activation");
+                    if started.testing && started.approved {
+                        authorize_ephemeral_testing_peer(
+                            &allowed,
+                            &started.fingerprint,
+                            &started.activation_id,
+                            Duration::from_secs(started.expires_in_seconds),
+                        );
+                        tracing::warn!(
+                            client = %name,
+                            fingerprint = %fingerprint,
+                            %remote,
+                            expires_in_seconds = started.expires_in_seconds,
+                            "automatically approved ephemeral LAN TV testing activation"
+                        );
+                    } else {
+                        tracing::info!(client = %name, fingerprint = %fingerprint, %remote, testing, "created pending LAN TV activation");
+                    }
                     write_response(
                         &mut socket,
                         PairResponse {
@@ -381,7 +480,11 @@ async fn handle_pair_request(
                             activation_id: Some(started.activation_id),
                             poll_token: Some(started.poll_token),
                             expires_in_seconds: Some(started.expires_in_seconds),
-                            status: Some("pending"),
+                            status: Some(if started.approved {
+                                "approved"
+                            } else {
+                                "pending"
+                            }),
                             ..PairResponse::default()
                         },
                     )
@@ -410,9 +513,81 @@ async fn handle_pair_request(
             )
             .await?;
         }
+        "end_testing" => {
+            let activation_id = request.activation_id.unwrap_or_default();
+            let poll_token = request.poll_token.unwrap_or_default();
+            if activation_id.is_empty() || poll_token.is_empty() {
+                return reject(&mut socket, "invalid_request").await;
+            }
+            let ended = pairing
+                .lock()
+                .await
+                .end_testing(&activation_id, &poll_token, remote.ip());
+            let Some((fingerprint, grant_id, approved)) = ended else {
+                return reject(&mut socket, "invalid_testing_activation").await;
+            };
+            if approved {
+                allowed.remove_ephemeral(&fingerprint, &grant_id);
+            }
+            tracing::info!(%fingerprint, "revoked ephemeral LAN TV testing activation");
+            write_response(
+                &mut socket,
+                PairResponse {
+                    ok: true,
+                    status: Some("ended"),
+                    ..PairResponse::default()
+                },
+            )
+            .await?;
+        }
         _ => reject(&mut socket, "invalid_request").await?,
     }
     Ok(())
+}
+
+fn testing_token_is_authorized(token: Option<&str>) -> bool {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = token;
+        false
+    }
+    #[cfg(debug_assertions)]
+    {
+        let Some(token) = token.filter(|value| value.len() >= 32) else {
+            return false;
+        };
+        let Some(path) = std::env::var_os("SWARM_TV_E2E_CONTROL_FILE") else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok(control) = serde_json::from_slice::<TestingControl>(&bytes) else {
+            return false;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        control.expires_at_unix_seconds > now && control.token == token
+    }
+}
+
+fn authorize_ephemeral_testing_peer(
+    allowed: &AllowedPeers,
+    fingerprint: &str,
+    grant_id: &str,
+    ttl: Duration,
+) {
+    allowed.insert_ephemeral(fingerprint, grant_id);
+    let allowed = allowed.clone();
+    let fingerprint = fingerprint.to_string();
+    let grant_id = grant_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(ttl).await;
+        allowed.remove_ephemeral(&fingerprint, &grant_id);
+        tracing::info!(%fingerprint, "expired ephemeral LAN TV testing activation");
+    });
 }
 
 async fn approve_pending_pairing(
@@ -424,21 +599,44 @@ async fn approve_pending_pairing(
     let normalized_code: String = code.chars().filter(char::is_ascii_digit).collect();
     let mut state = pairing.lock().await;
     state.purge_expired();
-    let activation = state
+    let matching: Vec<usize> = state
         .activations
-        .iter_mut()
-        .find(|activation| activation.code == normalized_code)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, activation)| {
+            (activation.code == normalized_code && !activation.approved).then_some(index)
+        })
+        .collect();
+    if normalized_code == TESTING_PAIRING_CODE && matching.len() > 1 {
+        return Err(LanPairingError::AmbiguousTestingCode);
+    }
+    let index = matching
+        .first()
+        .copied()
         .ok_or(LanPairingError::InvalidCode)?;
-    state_db
-        .save_local_peer(&activation.fingerprint, &activation.name)
-        .await?;
-    allowed.insert(&activation.fingerprint);
+    let activation = &mut state.activations[index];
+    if activation.testing {
+        authorize_ephemeral_testing_peer(
+            allowed,
+            &activation.fingerprint,
+            &activation.activation_id,
+            activation
+                .expires_at
+                .saturating_duration_since(Instant::now()),
+        );
+    } else {
+        state_db
+            .save_local_peer(&activation.fingerprint, &activation.name)
+            .await?;
+        allowed.insert(&activation.fingerprint);
+    }
     activation.approved = true;
     let approval = LanPairingApproval {
         name: activation.name.clone(),
         fingerprint: activation.fingerprint.clone(),
+        testing: activation.testing,
     };
-    tracing::info!(client = %approval.name, fingerprint = %approval.fingerprint, "approved local TV activation");
+    tracing::info!(client = %approval.name, fingerprint = %approval.fingerprint, testing = approval.testing, "approved local TV activation");
     Ok(approval)
 }
 
@@ -502,13 +700,16 @@ mod tests {
 
     async fn exchange(
         pairing: Arc<Mutex<PairingState>>,
+        allowed: AllowedPeers,
         request: serde_json::Value,
     ) -> serde_json::Value {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (socket, remote) = listener.accept().await.unwrap();
-            handle_pair_request(socket, remote, pairing).await.unwrap();
+            handle_pair_request(socket, remote, pairing, allowed)
+                .await
+                .unwrap();
         });
         let mut client = TcpStream::connect(address).await.unwrap();
         client
@@ -536,6 +737,7 @@ mod tests {
 
         let started = exchange(
             Arc::clone(&pairing),
+            allowed.clone(),
             serde_json::json!({
                 "action": "begin",
                 "name": "Living Room TV",
@@ -557,6 +759,7 @@ mod tests {
 
         let polled = exchange(
             Arc::clone(&pairing),
+            allowed.clone(),
             serde_json::json!({
                 "action": "poll",
                 "activation_id": started["activation_id"],
@@ -575,9 +778,59 @@ mod tests {
     fn repeated_begin_for_same_tv_reuses_one_pending_code() {
         let mut state = PairingState::default();
         let ip = "192.168.1.20".parse().unwrap();
-        let first = state.begin("TV".into(), "ab".repeat(32), ip).unwrap();
-        let second = state.begin("TV".into(), "ab".repeat(32), ip).unwrap();
+        let first = state
+            .begin("TV".into(), "ab".repeat(32), ip, ActivationKind::Normal)
+            .unwrap();
+        let second = state
+            .begin("TV".into(), "ab".repeat(32), ip, ActivationKind::Normal)
+            .unwrap();
         assert_eq!(first.code, second.code);
         assert_eq!(state.activations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn testing_activation_uses_fixed_code_without_persisting_trust() {
+        let dir = std::env::temp_dir().join(format!(
+            "swarm-lan-testing-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(StateDb::open(&dir).await.unwrap());
+        let allowed = AllowedPeers::new();
+        let pairing = Arc::new(Mutex::new(PairingState::default()));
+        let fingerprint = "cd".repeat(32);
+        let ip = "192.168.1.21".parse().unwrap();
+        let started = pairing
+            .lock()
+            .await
+            .begin(
+                "Test TV".into(),
+                fingerprint.clone(),
+                ip,
+                ActivationKind::Testing {
+                    auto_approve: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(started.code, TESTING_PAIRING_CODE);
+        let approval = approve_pending_pairing(&pairing, &db, &allowed, TESTING_PAIRING_CODE)
+            .await
+            .unwrap();
+        assert!(approval.testing);
+        assert!(allowed.contains(&fingerprint));
+        assert!(db.local_peers().await.unwrap().is_empty());
+
+        let ended = pairing
+            .lock()
+            .await
+            .end_testing(&started.activation_id, &started.poll_token, ip)
+            .unwrap();
+        allowed.remove_ephemeral(&ended.0, &ended.1);
+        assert!(!allowed.contains(&fingerprint));
+
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

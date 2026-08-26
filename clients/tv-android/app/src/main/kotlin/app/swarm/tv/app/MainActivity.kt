@@ -2,6 +2,7 @@ package app.swarm.tv.app
 
 import app.swarm.tv.BuildConfig
 import android.app.Activity
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
@@ -11,7 +12,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -28,6 +31,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -62,6 +67,7 @@ import app.swarm.tv.app.data.AndroidWatchlistStore
 import app.swarm.tv.app.data.WatchlistKeys
 import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.data.SwarmViewModel
+import app.swarm.tv.app.data.TestingModeStatus
 import app.swarm.tv.app.data.UiState
 import app.swarm.tv.app.data.androidMachineId
 import app.swarm.tv.app.data.resolveDeviceName
@@ -92,6 +98,8 @@ import app.swarm.tv.app.ui.screens.ShowShelfScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
 import app.swarm.tv.app.ui.screens.SwarmSettingsScreen
 import app.swarm.tv.app.ui.theme.SwarmBackground
+import app.swarm.tv.app.ui.theme.SwarmError
+import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.app.ui.theme.SwarmTvTheme
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
@@ -117,8 +125,13 @@ private data class DeviceIdentity(
     val privateKey: PrivateKey,
 )
 
+private const val EXTRA_ENABLE_TESTING_MODE = "app.swarm.tv.extra.ENABLE_TESTING_MODE"
+private const val EXTRA_DISABLE_TESTING_MODE = "app.swarm.tv.extra.DISABLE_TESTING_MODE"
+private const val EXTRA_TESTING_TOKEN = "app.swarm.tv.extra.TESTING_TOKEN"
+
 class MainActivity : ComponentActivity() {
     private var frameJankMonitor: FrameJankMonitor? = null
+    private var activeViewModel: SwarmViewModel? = null
 
     override fun onStart() {
         super.onStart()
@@ -157,6 +170,9 @@ class MainActivity : ComponentActivity() {
         val catalogCache = AndroidCatalogCache(applicationContext)
         val machineId = androidMachineId(applicationContext)
         val defaultDeviceName = resolveDeviceName(applicationContext)
+        val initialTestingToken = intent
+            .takeIf { BuildConfig.DEBUG && it.getBooleanExtra(EXTRA_ENABLE_TESTING_MODE, false) }
+            ?.getStringExtra(EXTRA_TESTING_TOKEN)
 
         setContent {
             SwarmTvTheme {
@@ -173,6 +189,8 @@ class MainActivity : ComponentActivity() {
                     var identity by remember { mutableStateOf<DeviceIdentity?>(null) }
                     LaunchedEffect(Unit) {
                         identity = withContext(Dispatchers.IO) {
+                            catalogCache.clearTestingResidue()
+                            AndroidDeviceIdentity.clearTestingIdentity()
                             DeviceIdentity(
                                 fingerprint = AndroidDeviceIdentity.ensureFingerprint(),
                                 certificate = AndroidDeviceIdentity.certificate(),
@@ -209,10 +227,15 @@ class MainActivity : ComponentActivity() {
                                     catalogCache,
                                     BuildConfig.SWARM_RENDEZVOUS_URL,
                                     AndroidProblemReportDiagnostics(applicationContext),
+                                    testingModeAvailable = BuildConfig.DEBUG,
+                                    initialTestingToken = initialTestingToken,
+                                    testingIdentityProvider = AndroidDeviceIdentity::testingIdentity,
+                                    clearTestingIdentity = AndroidDeviceIdentity::clearTestingIdentity,
                                 ) as T
                         }
                     }
                     val viewModel: SwarmViewModel = viewModel(factory = factory)
+                    activeViewModel = viewModel
                     val toastHostState = rememberClientToastHostState()
                     LaunchedEffect(viewModel) {
                         viewModel.notifications.collect(toastHostState::show)
@@ -233,6 +256,7 @@ class MainActivity : ComponentActivity() {
                     val pairedLanFingerprints by viewModel.pairedLanFingerprints.collectAsState()
                     val pairedLanServers by viewModel.pairedLanServers.collectAsState()
                     val disconnectedServerFingerprints by viewModel.disconnectedServerFingerprints.collectAsState()
+                    val testingMode by viewModel.testingMode.collectAsState()
                     val isLikedCallback: (MergedEntry) -> Boolean = remember(likedFingerprints) {
                         { entry -> entry.entry.fingerprint in likedFingerprints }
                     }
@@ -246,11 +270,15 @@ class MainActivity : ComponentActivity() {
                         pairedLanFingerprints = pairedLanFingerprints,
                         pairedLanServers = pairedLanServers,
                         disconnectedServerFingerprints = disconnectedServerFingerprints,
+                        testingMode = testingMode,
+                        testingModeAvailable = BuildConfig.DEBUG,
                         onConnectLan = viewModel::connectLanServer,
                         onStartLanPairing = viewModel::startLanPairing,
                         onCancelLanPairing = viewModel::cancelLanPairing,
                         onDisconnectServer = viewModel::disconnectSwarmServer,
                         onReconnectServer = viewModel::reconnectSwarmServer,
+                        onEnableTestingMode = viewModel::enableTestingMode,
+                        onDisableTestingMode = viewModel::disableTestingMode,
                         isLiked = isLikedCallback,
                         onToggleLike = viewModel::toggleLike,
                         watchStates = watchStates,
@@ -328,6 +356,19 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (!BuildConfig.DEBUG) return
+        when {
+            intent.getBooleanExtra(EXTRA_DISABLE_TESTING_MODE, false) ->
+                activeViewModel?.disableTestingMode()
+            intent.getBooleanExtra(EXTRA_ENABLE_TESTING_MODE, false) ->
+                intent.getStringExtra(EXTRA_TESTING_TOKEN)?.let {
+                    activeViewModel?.enableTestingModeForAutomation(it)
+                }
+        }
+    }
 }
 
 @Composable
@@ -341,11 +382,15 @@ private fun SwarmApp(
     pairedLanFingerprints: Set<String>,
     pairedLanServers: List<LanServer>,
     disconnectedServerFingerprints: Set<String>,
+    testingMode: TestingModeStatus?,
+    testingModeAvailable: Boolean,
     onConnectLan: (server: LanServer, deviceName: String) -> Unit,
     onStartLanPairing: (server: LanServer, deviceName: String) -> Unit,
     onCancelLanPairing: () -> Unit,
     onDisconnectServer: (SwarmDevice) -> Unit,
     onReconnectServer: (SwarmDevice) -> Unit,
+    onEnableTestingMode: () -> Unit,
+    onDisableTestingMode: () -> Unit,
     isLiked: (MergedEntry) -> Boolean,
     onToggleLike: (MergedEntry) -> Unit,
     watchStates: Map<String, WatchState>,
@@ -712,6 +757,10 @@ private fun SwarmApp(
                     onDisableKidMode = onDisableKidMode,
                     notifications = resolvedProblemNotifications,
                     onDismissNotification = onDismissResolvedProblem,
+                    testingModeAvailable = testingModeAvailable,
+                    testingMode = testingMode,
+                    onEnableTestingMode = onEnableTestingMode,
+                    onDisableTestingMode = onDisableTestingMode,
                 )
             is UiState.Catalog ->
                 CatalogScreen(
@@ -928,6 +977,32 @@ private fun SwarmApp(
                 onDismiss = { showCatalogExitConfirm = false },
             )
         }
+        testingMode?.let {
+            TestingModeBanner(
+                remainingSeconds = it.remainingSeconds,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TestingModeBanner(remainingSeconds: Long, modifier: Modifier = Modifier) {
+    val minutes = remainingSeconds / 60
+    val seconds = remainingSeconds % 60
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(SwarmError)
+            .padding(vertical = 8.dp, horizontal = 24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "TESTING MODE • pairing 00000000 • %d:%02d remaining".format(minutes, seconds),
+            color = SwarmText,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.ExtraBold,
+        )
     }
 }
 

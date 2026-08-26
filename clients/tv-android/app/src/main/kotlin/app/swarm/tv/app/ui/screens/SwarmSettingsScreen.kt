@@ -38,6 +38,7 @@ import androidx.tv.material3.Button
 import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.RatingScale
 import app.swarm.tv.app.data.ResolvedProblemNotification
+import app.swarm.tv.app.data.TestingModeStatus
 import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
@@ -69,6 +70,10 @@ fun SwarmSettingsScreen(
     onDisableKidMode: () -> Unit,
     notifications: List<ResolvedProblemNotification>,
     onDismissNotification: (ResolvedProblemNotification) -> Unit,
+    testingModeAvailable: Boolean,
+    testingMode: TestingModeStatus?,
+    onEnableTestingMode: () -> Unit,
+    onDisableTestingMode: () -> Unit,
 ) {
     var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
     var deviceNameField by remember(deviceName) { mutableStateOf(deviceName) }
@@ -103,6 +108,9 @@ fun SwarmSettingsScreen(
                 section == SettingsSection.NOTIFICATIONS,
                 { section = SettingsSection.NOTIFICATIONS },
             )
+            if (testingModeAvailable) {
+                SettingsTab("Testing", section == SettingsSection.TESTING, { section = SettingsSection.TESTING })
+            }
         }
         Spacer(Modifier.height(16.dp))
 
@@ -169,11 +177,40 @@ fun SwarmSettingsScreen(
                     onDismiss = onDismissNotification,
                 )
             }
+
+            SettingsSection.TESTING -> SettingsPanel(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                Text("Closed-loop testing", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Debug builds can temporarily pair with code 00000000. The mode expires after 10 minutes, is never saved, and removes its ephemeral server connection when disabled.",
+                    color = SwarmMuted,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(16.dp))
+                if (testingMode == null) {
+                    Button(onClick = onEnableTestingMode, colors = swarmActionButtonColors()) {
+                        Text("Enable testing mode", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Text(
+                        "ACTIVE • code ${testingMode.pairingCode} • ${testingMode.remainingSeconds}s remaining",
+                        color = SwarmError,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onDisableTestingMode, colors = swarmActionButtonColors()) {
+                        Text("Disable and remove test connection", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
 }
 
-private enum class SettingsSection { GENERAL, FAMILY, NOTIFICATIONS }
+private enum class SettingsSection { GENERAL, FAMILY, NOTIFICATIONS, TESTING }
 
 @Composable
 private fun NotificationInbox(

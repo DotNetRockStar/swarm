@@ -31,6 +31,7 @@ if [ -d "$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin" ]; then
 fi
 
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
+TV_E2E_CONTROL_FILE="$RUN_DIR/tv-e2e-control.json"
 STUN_PORT="${SWARM_STUN_PORT:-8080}"
 GUI_PEER_PORT="${SWARM_GUI_PEER_PORT:-8544}"
 # The STUN server's own reflector, not otherwise surfaced here — needed so
@@ -40,6 +41,7 @@ REFLECTOR_PORTS="9443 3478"
 export RUST_LOG="${RUST_LOG:-info}"
 
 mkdir -p "$RUN_DIR/stun-data"
+rm -f "$TV_E2E_CONTROL_FILE"
 
 # Prefers a real network interface over a VPN tunnel's virtual address.
 # swarm_p2p::local_addr's routing-table-probe trick (UDP "connect" to a
@@ -129,6 +131,7 @@ cleanup() {
     for port in "$STUN_PORT" "$GUI_PEER_PORT" $REFLECTOR_PORTS; do
         kill_port "$port"
     done
+    rm -f "$TV_E2E_CONTROL_FILE"
 }
 trap cleanup EXIT INT TERM
 
@@ -172,6 +175,7 @@ done
 echo "==> Opening the media server GUI (peer QUIC on 0.0.0.0:$GUI_PEER_PORT) ..."
 SWARM_PEER_BIND="0.0.0.0:$GUI_PEER_PORT" \
 SWARM_RENDEZVOUS_URL="$SWARM_URL" \
+SWARM_TV_E2E_CONTROL_FILE="$TV_E2E_CONTROL_FILE" \
     cargo run -q -p swarm-server &
 pids+=($!)
 

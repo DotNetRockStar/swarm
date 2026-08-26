@@ -25,6 +25,7 @@
 #   JAVA_HOME                default /opt/homebrew/opt/openjdk@17
 #   SWARM_GITHUB_REPOSITORY  where findings are filed (default DotNetRockStar/swarm)
 #   SWARM_E2E_ISSUE_LABEL    label applied to the findings issue (default "Testing")
+#   SWARM_RUN_DIR            shared local run directory (default .run)
 
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,6 +41,8 @@ ADB_PORT=5555
 STUN_PORT="${SWARM_STUN_PORT:-8080}"
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 ISSUE_LABEL="${SWARM_E2E_ISSUE_LABEL:-Testing}"
+RUN_DIR="${SWARM_RUN_DIR:-.run}"
+TV_E2E_CONTROL_FILE="$RUN_DIR/tv-e2e-control.json"
 
 NO_ISSUE=0
 SKIP_INSTALL=0
@@ -51,6 +54,21 @@ for arg in "$@"; do
         *) TARGETS+=("$arg") ;;
     esac
 done
+
+# A known display code is not the automation credential. The media server's
+# debug-only path also requires this high-entropy, per-run token from a
+# permission-restricted host file and the TV receives it only through an
+# already-authorized adb session. Release builds reject begin_testing.
+mkdir -p "$RUN_DIR"
+TESTING_TOKEN="$(openssl rand -hex 32)"
+TESTING_EXPIRES_AT="$(( $(date +%s) + 600 ))"
+(umask 077 && printf '{"token":"%s","expires_at_unix_seconds":%s}\n' \
+    "$TESTING_TOKEN" "$TESTING_EXPIRES_AT" > "$TV_E2E_CONTROL_FILE")
+chmod 600 "$TV_E2E_CONTROL_FILE"
+cleanup_testing_control() {
+    rm -f "$TV_E2E_CONTROL_FILE"
+}
+trap cleanup_testing_control EXIT INT TERM
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 REPORT_DIR="$REPO_ROOT/.run/tv-e2e-reports/$RUN_STAMP"
@@ -181,6 +199,7 @@ else
         if [ "$STATE" != "device" ]; then
             record "$SERIAL" "$NAME" "install_and_launch" "FAIL" "adb state=$STATE (not ready/authorized)"
             record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "SKIP" "skipped: device was not reachable over adb"
+            record "$SERIAL" "$NAME" "testing_mode_cleanup" "SKIP" "skipped: device was not reachable over adb"
             continue
         fi
 
@@ -200,14 +219,17 @@ else
             if ! (cd clients/tv-android && ANDROID_SERIAL="$SERIAL" ./gradlew :app:installDebug); then
                 record "$SERIAL" "$NAME" "install_and_launch" "FAIL" "gradlew :app:installDebug failed"
                 record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "SKIP" "skipped: install failed"
+                record "$SERIAL" "$NAME" "testing_mode_cleanup" "SKIP" "skipped: install failed"
                 continue
             fi
         fi
 
-        echo "==> [$NAME] force-stopping, clearing logcat, launching ..."
+        echo "==> [$NAME] force-stopping, clearing logcat, launching in ephemeral testing mode ..."
         "$ADB" -s "$SERIAL" shell am force-stop "$PACKAGE"
         "$ADB" -s "$SERIAL" logcat -c
-        "$ADB" -s "$SERIAL" shell am start -n "$ACTIVITY" >/dev/null
+        "$ADB" -s "$SERIAL" shell am start -n "$ACTIVITY" \
+            --ez app.swarm.tv.extra.ENABLE_TESTING_MODE true \
+            --es app.swarm.tv.extra.TESTING_TOKEN "$TESTING_TOKEN" >/dev/null
 
         echo "==> [$NAME] polling up to 16s to confirm it stays up ..."
         CRASH=""
@@ -223,15 +245,16 @@ else
         if [ -n "$CRASH" ] || [ -z "$PID" ]; then
             record "$SERIAL" "$NAME" "install_and_launch" "FAIL" "$(echo "$CRASH" | head -1 | tr -d '\t' || echo 'process did not stay running')"
             record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "SKIP" "skipped: app did not launch cleanly"
+            record "$SERIAL" "$NAME" "testing_mode_cleanup" "SKIP" "skipped: app did not launch cleanly"
             continue
         fi
         record "$SERIAL" "$NAME" "install_and_launch" "PASS" "pid $PID stable for 16s"
         echo "OK: [$NAME] $PACKAGE is running (pid $PID)."
 
-        echo "==> [$NAME] waiting up to 20s for the automatic LAN reconnect + catalog refresh (no D-pad input sent) ..."
+        echo "==> [$NAME] waiting up to 40s for automated ephemeral pairing + catalog refresh (no D-pad input sent) ..."
         REFRESH_LINE=""
         FAIL_LINE=""
-        for _ in $(seq 1 10); do
+        for _ in $(seq 1 20); do
             sleep 2
             DUMP="$("$ADB" -s "$SERIAL" logcat -d)"
             REFRESH_LINE="$(grep "browseCatalog() refresh done: entries=" <<< "$DUMP" | tail -1 || true)"
@@ -251,7 +274,23 @@ else
         elif [ -n "$FAIL_LINE" ]; then
             record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "FAIL" "$(echo "$FAIL_LINE" | tr -d '\t')"
         else
-            record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "SKIP" "no saved LAN connection observed on this device within 20s (pair it first via the media server's Swarm page; this suite does not drive first-time D-pad pairing, see swarm-real-device-debugging)"
+            record "$SERIAL" "$NAME" "lan_closed_loop_catalog" "FAIL" "debug testing mode did not complete pairing and a real catalog round-trip within 40s"
+        fi
+
+        echo "==> [$NAME] disabling testing mode and verifying ephemeral cleanup ..."
+        "$ADB" -s "$SERIAL" shell am start -n "$ACTIVITY" \
+            --ez app.swarm.tv.extra.DISABLE_TESTING_MODE true >/dev/null
+        CLEANUP_LINE=""
+        for _ in $(seq 1 5); do
+            sleep 1
+            CLEANUP_LINE="$("$ADB" -s "$SERIAL" logcat -d | grep 'TV_E2E_TEST_MODE disabled ephemeral_connection_removed=true' | tail -1 || true)"
+            [ -n "$CLEANUP_LINE" ] && break
+        done
+        "$ADB" -s "$SERIAL" logcat -d > "$DEVICE_LOG" || true
+        if [ -n "$CLEANUP_LINE" ]; then
+            record "$SERIAL" "$NAME" "testing_mode_cleanup" "PASS" "testing identity and ephemeral server connection removed"
+        else
+            record "$SERIAL" "$NAME" "testing_mode_cleanup" "FAIL" "no confirmed testing-mode cleanup within 5s"
         fi
     done
 fi

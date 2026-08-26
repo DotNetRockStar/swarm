@@ -17,15 +17,19 @@ shipped.
 
 In `scripts/tv_e2e_suite.sh`:
 
-- Which test cases run (`install_and_launch`, `lan_closed_loop_catalog`, and
-  any later addition made under explicit user direction).
+- Which test cases run (`install_and_launch`, `lan_closed_loop_catalog`,
+  `testing_mode_cleanup`, and any later addition made under explicit user
+  direction).
 - Their pass/fail/skip thresholds and the log lines/exit codes they key on.
 - The fan-out behavior (discover every reachable Amazon Fire TV, run every
   test case against each one, never silently narrow to a subset).
 - That it never starts, stops, or restarts the media server itself (GUI-owned
   lifecycle — see `swarm-local-testing`) and never drives first-time D-pad
   pairing (real navigation risk on a device with a real Amazon account behind
-  it — see `swarm-real-device-debugging`).
+  it — see `swarm-real-device-debugging`). First-time pairing is instead
+  exercised through the explicitly-authorized debug testing mode added for
+  issue #81: isolated certificate, 10-minute maximum, no persistence, and an
+  adb/control-file secret in addition to visible code `00000000`.
 - That every run compiles and files its findings to GitHub as an issue (see
   `swarm-closed-loop-tv-testing`), rather than only printing to a terminal.
 

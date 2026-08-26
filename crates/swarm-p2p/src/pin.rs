@@ -14,7 +14,7 @@ use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, Crypt
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Live set of fingerprints allowed to connect — the accepting side's swarm
@@ -22,7 +22,18 @@ use std::sync::{Arc, RwLock};
 /// immediately.
 #[derive(Clone, Default)]
 pub struct AllowedPeers {
-    inner: Arc<RwLock<HashSet<String>>>,
+    inner: Arc<RwLock<AllowedPeerSets>>,
+}
+
+#[derive(Default)]
+struct AllowedPeerSets {
+    persistent: HashSet<String>,
+    /// Short-lived grants are keyed by an activation/run id so expiry of an
+    /// older grant cannot accidentally revoke a newer grant for the same
+    /// certificate. They are intentionally kept separate from [persistent]
+    /// so roster refreshes cannot erase a live test session and test cleanup
+    /// cannot erase a real saved pairing.
+    ephemeral: HashMap<String, HashSet<String>>,
 }
 
 impl AllowedPeers {
@@ -31,23 +42,62 @@ impl AllowedPeers {
     }
 
     pub fn replace(&self, fingerprints: impl IntoIterator<Item = String>) {
-        *self.inner.write().unwrap() = fingerprints.into_iter().collect();
+        self.inner.write().unwrap().persistent = fingerprints.into_iter().collect();
     }
 
     pub fn insert(&self, fingerprint: &str) {
-        self.inner.write().unwrap().insert(fingerprint.to_string());
+        self.inner
+            .write()
+            .unwrap()
+            .persistent
+            .insert(fingerprint.to_string());
     }
 
     pub fn remove(&self, fingerprint: &str) {
-        self.inner.write().unwrap().remove(fingerprint);
+        self.inner.write().unwrap().persistent.remove(fingerprint);
+    }
+
+    /// Add one explicitly-scoped, non-persistent authorization grant.
+    pub fn insert_ephemeral(&self, fingerprint: &str, grant_id: &str) {
+        self.inner
+            .write()
+            .unwrap()
+            .ephemeral
+            .entry(fingerprint.to_string())
+            .or_default()
+            .insert(grant_id.to_string());
+    }
+
+    /// Revoke exactly one ephemeral grant without disturbing permanent trust
+    /// or another overlapping ephemeral grant for the same certificate.
+    pub fn remove_ephemeral(&self, fingerprint: &str, grant_id: &str) {
+        let mut inner = self.inner.write().unwrap();
+        let remove_fingerprint = inner
+            .ephemeral
+            .get_mut(fingerprint)
+            .map(|grants| {
+                grants.remove(grant_id);
+                grants.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_fingerprint {
+            inner.ephemeral.remove(fingerprint);
+        }
     }
 
     pub fn contains(&self, fingerprint: &str) -> bool {
-        self.inner.read().unwrap().contains(fingerprint)
+        let inner = self.inner.read().unwrap();
+        inner.persistent.contains(fingerprint) || inner.ephemeral.contains_key(fingerprint)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().unwrap().len()
+        let inner = self.inner.read().unwrap();
+        inner
+            .persistent
+            .iter()
+            .chain(inner.ephemeral.keys())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -56,7 +106,13 @@ impl AllowedPeers {
 
     /// A point-in-time copy of the set, for status/diagnostics display.
     pub fn snapshot(&self) -> HashSet<String> {
-        self.inner.read().unwrap().clone()
+        let inner = self.inner.read().unwrap();
+        inner
+            .persistent
+            .iter()
+            .cloned()
+            .chain(inner.ephemeral.keys().cloned())
+            .collect()
     }
 }
 
@@ -145,7 +201,7 @@ pub struct RosterClientVerifier {
 impl std::fmt::Debug for AllowedPeers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AllowedPeers")
-            .field("count", &self.inner.read().unwrap().len())
+            .field("count", &self.len())
             .finish()
     }
 }
@@ -219,5 +275,43 @@ impl ClientCertVerifier for RosterClientVerifier {
         self.provider
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AllowedPeers;
+
+    #[test]
+    fn ephemeral_grants_survive_roster_replace_and_expire_independently() {
+        let allowed = AllowedPeers::new();
+        allowed.replace(["permanent".to_string()]);
+        allowed.insert_ephemeral("testing", "run-a");
+        allowed.insert_ephemeral("testing", "run-b");
+
+        allowed.replace(["replacement".to_string()]);
+        assert!(!allowed.contains("permanent"));
+        assert!(allowed.contains("replacement"));
+        assert!(allowed.contains("testing"));
+
+        allowed.remove_ephemeral("testing", "run-a");
+        assert!(allowed.contains("testing"));
+        allowed.remove_ephemeral("testing", "run-b");
+        assert!(!allowed.contains("testing"));
+    }
+
+    #[test]
+    fn ephemeral_cleanup_never_revokes_persistent_trust() {
+        let allowed = AllowedPeers::new();
+        allowed.insert("same");
+        allowed.insert_ephemeral("same", "test-run");
+        assert_eq!(allowed.len(), 1);
+
+        allowed.remove_ephemeral("same", "test-run");
+        assert!(allowed.contains("same"));
+        assert_eq!(
+            allowed.snapshot(),
+            ["same".to_string()].into_iter().collect()
+        );
     }
 }

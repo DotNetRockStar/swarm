@@ -1,6 +1,7 @@
 package app.swarm.tv.app.data
 
 import android.util.Log
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.swarm.tv.core.catalog.ArtistGroup
@@ -53,10 +54,17 @@ enum class ClientNotificationKind { SUCCESS, WARNING, ERROR }
 private const val BROWSE_PREVIEW_DURATION_SECS = 30L
 private const val DASHBOARD_PRESENCE_REFRESH_MS = 10_000L
 const val CONNECTION_SETUP_SWARM_ID = "connection-setup"
+const val TESTING_PAIRING_CODE = "00000000"
+private const val TESTING_MODE_DURATION_MS = 10 * 60 * 1000L
 
 data class ClientNotification(
     val message: String,
     val kind: ClientNotificationKind,
+)
+
+data class TestingModeStatus(
+    val remainingSeconds: Long,
+    val pairingCode: String = TESTING_PAIRING_CODE,
 )
 
 /** One inline browse preview negotiated through the normal,
@@ -256,9 +264,9 @@ private fun UiState.embeddedCatalog(): UiState.Catalog? = when (this) {
 class SwarmViewModel(
     private val tokenStore: TokenStore,
     private val machineId: String,
-    private val certFingerprint: String,
-    private val clientCertificate: X509Certificate,
-    private val clientKey: PrivateKey,
+    primaryCertFingerprint: String,
+    primaryClientCertificate: X509Certificate,
+    primaryClientKey: PrivateKey,
     private val watchStateStore: WatchStateStore,
     private val watchlistStore: AndroidWatchlistStore,
     private val connectionStore: AndroidConnectionStore,
@@ -271,13 +279,29 @@ class SwarmViewModel(
     private val catalogCache: AndroidCatalogCache,
     private val rendezvousUrl: String,
     private val problemReportDiagnostics: ProblemReportDiagnostics,
+    private val testingModeAvailable: Boolean = false,
+    private val initialTestingToken: String? = null,
+    private val testingIdentityProvider: (() -> ClientIdentity)? = null,
+    private val clearTestingIdentity: () -> Unit = {},
 ) : ViewModel() {
+    private val primaryIdentity = ClientIdentity(
+        primaryCertFingerprint,
+        primaryClientCertificate,
+        primaryClientKey,
+    )
+    private var activeIdentity = primaryIdentity
+    private val certFingerprint: String get() = activeIdentity.fingerprint
+    private val clientCertificate: X509Certificate get() = activeIdentity.certificate
+    private val clientKey: PrivateKey get() = activeIdentity.privateKey
     private val _state = MutableStateFlow<UiState>(UiState.Loading)
     private val logTag = "SwarmViewModel"
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private val _notifications = MutableSharedFlow<ClientNotification>(extraBufferCapacity = 32)
     val notifications: SharedFlow<ClientNotification> = _notifications.asSharedFlow()
+
+    private val _testingMode = MutableStateFlow<TestingModeStatus?>(null)
+    val testingMode: StateFlow<TestingModeStatus?> = _testingMode.asStateFlow()
 
     private fun notify(message: String, kind: ClientNotificationKind) {
         _notifications.tryEmit(ClientNotification(message, kind))
@@ -343,6 +367,11 @@ class SwarmViewModel(
     private var signaling: SignalingClient? = null
     private var activationJob: Job? = null
     private var lanPairingJob: Job? = null
+    private var testingModeTimerJob: Job? = null
+    private var testingPairingJob: Job? = null
+    private var testingToken: String? = null
+    private var testingActivation: Pair<LanServer, LanPairingActivation>? = null
+    private val testingAttemptedFingerprints = mutableSetOf<String>()
     /** Serializes play/skip/autoplay negotiation so repeated callbacks cannot reserve duplicate server sessions. */
     private var playbackNegotiationJob: Job? = null
     /** Invalidates a negotiation without cancelling its server response, allowing a
@@ -400,7 +429,12 @@ class SwarmViewModel(
         // those already-visible entries.
         viewModelScope.launch {
             _kidModeSettings.value = kidModeStore.get()
-            restoreSession()
+            if (testingModeAvailable && initialTestingToken != null) {
+                _state.value = connectionSetupDashboard()
+                enableTestingModeInternal(initialTestingToken)
+            } else {
+                restoreSession()
+            }
         }
         viewModelScope.launch {
             lanDiscovery.servers.collect { discovered ->
@@ -409,6 +443,7 @@ class SwarmViewModel(
                 activeLanRoutes.entries.removeAll { (_, route) -> route.fingerprint !in discoveredFingerprints }
                 refreshActiveLocalServer(discovered)
                 refreshDashboardLanRoutes()
+                maybeStartTestingPairing()
             }
         }
         viewModelScope.launch {
@@ -652,12 +687,174 @@ class SwarmViewModel(
      * even runs (see [startLanPairing]), which would otherwise make every
      * caller look "already trusted" by the time it could check.
      */
+    fun enableTestingMode() {
+        if (!testingModeAvailable) return
+        viewModelScope.launch { enableTestingModeInternal(testingToken = null) }
+    }
+
+    fun enableTestingModeForAutomation(token: String) {
+        if (!testingModeAvailable || token.length < 32) return
+        viewModelScope.launch { enableTestingModeInternal(testingToken = token) }
+    }
+
+    private suspend fun enableTestingModeInternal(testingToken: String?) {
+        val identityProvider = testingIdentityProvider ?: return
+        if (_testingMode.value != null) return
+        val identity = withContext(Dispatchers.IO) {
+            clearTestingIdentity()
+            identityProvider()
+        }
+        settingsReturnDashboard?.devices?.forEach { catalogSession.disconnect(it.deviceId) }
+        activeLocalServer?.let { catalogSession.disconnect(it.asSwarmDevice().deviceId) }
+        activeIdentity = identity
+        this.testingToken = testingToken
+        testingAttemptedFingerprints.clear()
+        testingActivation = null
+        localSession = false
+        activeLocalServer = null
+        settingsReturnDashboard = null
+        _state.value = connectionSetupDashboard()
+
+        val expiresAt = SystemClock.elapsedRealtime() + TESTING_MODE_DURATION_MS
+        _testingMode.value = TestingModeStatus(TESTING_MODE_DURATION_MS / 1_000)
+        Log.w(logTag, "TV_E2E_TEST_MODE enabled expires_in=600 pairing_code=$TESTING_PAIRING_CODE")
+        notify("Testing mode enabled for 10 minutes.", ClientNotificationKind.WARNING)
+        testingModeTimerJob?.cancel()
+        testingModeTimerJob = viewModelScope.launch {
+            while (true) {
+                val remainingMs = expiresAt - SystemClock.elapsedRealtime()
+                if (remainingMs <= 0) break
+                _testingMode.value = TestingModeStatus((remainingMs + 999) / 1_000)
+                delay(1_000)
+            }
+            testingModeTimerJob = null
+            disableTestingModeInternal()
+        }
+        maybeStartTestingPairing()
+    }
+
+    fun disableTestingMode() {
+        viewModelScope.launch { disableTestingModeInternal() }
+    }
+
+    private suspend fun disableTestingModeInternal() {
+        if (_testingMode.value == null && activeIdentity == primaryIdentity) return
+        testingModeTimerJob?.cancel()
+        testingModeTimerJob = null
+        testingPairingJob?.cancel()
+        testingPairingJob = null
+        lanPairingJob?.cancel()
+        lanPairingJob = null
+        val activeTesting = testingActivation
+        testingActivation = null
+        if (activeTesting != null) {
+            val (server, activation) = activeTesting
+            lanDiscovery.endTestingPairing(server, activation)
+                .onFailure { Log.w(logTag, "could not explicitly revoke testing activation; server TTL remains the fallback", it) }
+            val deviceId = server.asSwarmDevice().deviceId
+            catalogSession.disconnect(deviceId)
+            catalogCache.remove(deviceId)
+            _pairedLanFingerprints.value = _pairedLanFingerprints.value - normalizeFingerprint(server.certFingerprint)
+            _pairedLanServers.value = _pairedLanServers.value.filterNot {
+                normalizeFingerprint(it.certFingerprint) == normalizeFingerprint(server.certFingerprint)
+            }
+        }
+        _lanPairingActivation.value = null
+        _lanPairingBusy.value = false
+        _lanError.value = null
+        activeLocalServer = null
+        localSession = false
+        activeIdentity = primaryIdentity
+        testingToken = null
+        testingAttemptedFingerprints.clear()
+        withContext(Dispatchers.IO) { clearTestingIdentity() }
+        _testingMode.value = null
+        _state.value = connectionSetupDashboard()
+        Log.w(logTag, "TV_E2E_TEST_MODE disabled ephemeral_connection_removed=true")
+        notify("Testing mode disabled; its server connection was removed.", ClientNotificationKind.SUCCESS)
+    }
+
+    private fun maybeStartTestingPairing() {
+        if (_testingMode.value == null || testingActivation != null || testingPairingJob?.isActive == true) return
+        val candidates = latestLanServers.filter {
+            normalizeFingerprint(it.certFingerprint) !in testingAttemptedFingerprints
+        }
+        if (candidates.isEmpty()) return
+        testingPairingJob = viewModelScope.launch {
+            try {
+                for (server in candidates) {
+                    if (_testingMode.value == null) return@launch
+                    val fingerprint = normalizeFingerprint(server.certFingerprint)
+                    testingAttemptedFingerprints += fingerprint
+                    _lanPairingBusy.value = true
+                    _lanError.value = null
+                    val started = lanDiscovery.beginTestingPairing(
+                        server = server,
+                        deviceName = deviceName ?: "Fire TV testing",
+                        fingerprint = certFingerprint,
+                        testingToken = testingToken,
+                    )
+                    if (started.isFailure) {
+                        Log.i(logTag, "testing pairing rejected by ${server.name}; trying the next discovered server")
+                        continue
+                    }
+                    val activation = started.getOrThrow()
+                    _lanPairingActivation.value = activation
+                    var status = activation.status
+                    while (status == "pending" && _testingMode.value != null) {
+                        delay(1_000)
+                        status = lanDiscovery.pollPairing(server, activation).getOrElse {
+                            Log.w(logTag, "testing pairing poll failed for ${server.name}", it)
+                            "failed"
+                        }
+                    }
+                    if (status != "approved") continue
+                    testingActivation = server to activation
+                    rememberPairedLanServer(server)
+                    catalogCache.markTestingServer(server.asSwarmDevice().deviceId)
+                    Log.w(
+                        logTag,
+                        "TV_E2E_TEST_PAIRING approved server=${server.name} fingerprint=${server.certFingerprint}",
+                    )
+                    var connected = false
+                    while (!connected && _testingMode.value != null) {
+                        connected = connectLanServerNow(
+                            server = server,
+                            clientName = deviceName ?: "Fire TV testing",
+                            knownPaired = true,
+                            persistConnection = false,
+                        )
+                        if (!connected && _testingMode.value != null) {
+                            Log.w(logTag, "testing-mode catalog connection failed; retrying ${server.name}")
+                            delay(1_000)
+                        }
+                    }
+                    return@launch
+                }
+                _lanPairingBusy.value = false
+                val message = "No discovered media server accepted debug testing mode."
+                _lanError.value = message
+                notify(message, ClientNotificationKind.ERROR)
+            } finally {
+                testingPairingJob = null
+            }
+        }
+    }
+
     fun connectLanServer(server: LanServer, deviceName: String) {
+        if (_testingMode.value != null) {
+            maybeStartTestingPairing()
+            return
+        }
         val knownPaired = normalizeFingerprint(server.certFingerprint) in _pairedLanFingerprints.value
         viewModelScope.launch { connectLanServerNow(server, deviceName, knownPaired) }
     }
 
     fun startLanPairing(server: LanServer, deviceName: String) {
+        if (_testingMode.value != null) {
+            maybeStartTestingPairing()
+            return
+        }
         val trimmedName = deviceName.ifBlank { "Fire TV" }
         lanPairingJob?.cancel()
         lanPairingJob = viewModelScope.launch {
@@ -726,7 +923,12 @@ class SwarmViewModel(
         _lanError.value = null
     }
 
-    private suspend fun connectLanServerNow(server: LanServer, clientName: String, knownPaired: Boolean) {
+    private suspend fun connectLanServerNow(
+        server: LanServer,
+        clientName: String,
+        knownPaired: Boolean,
+        persistConnection: Boolean = true,
+    ): Boolean {
         _lanPairingBusy.value = true
         _lanError.value = null
         val name = clientName.ifBlank { "Fire TV" }
@@ -782,13 +984,13 @@ class SwarmViewModel(
             } else {
                 Log.w(logTag, "reconnect to already-paired LAN server ${server.name} failed; leaving it unreachable for this attempt")
             }
-            return
+            return false
         }
         deviceId = deviceId ?: "lan-client-${certFingerprint.take(16)}"
         deviceName = name
         syncResolutionNotifications(listOf(device))
         lastKnownGenres = result.entries.flatMap { it.entry.genres }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
-        saveLanConnection(server, name)
+        if (persistConnection) saveLanConnection(server, name) else rememberPairedLanServer(server)
         val fingerprint = normalizeFingerprint(server.certFingerprint)
         if (swarmDashboard != null) {
             localSession = false
@@ -803,6 +1005,7 @@ class SwarmViewModel(
         }
         notify("Connected to ${server.name} over the local network.", ClientNotificationKind.SUCCESS)
         browseCatalog()
+        return true
     }
 
     /** Disconnects one server from this TV only; the shared roster remains unchanged for every other device. */
@@ -2583,6 +2786,7 @@ class SwarmViewModel(
             normalizeFingerprint(device.certFingerprint) !in _disconnectedServerFingerprints.value
 
     override fun onCleared() {
+        clearTestingIdentity()
         lanDiscovery.close()
         signaling?.close()
         catalogSession.close()
