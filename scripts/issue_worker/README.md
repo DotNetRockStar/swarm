@@ -17,6 +17,44 @@ The issue worker is implemented in Python:
 The Python implementation reads all existing shell-worker state files, so an
 active or quota-paused attempt survives the migration.
 
+### TL;DR: set up and run
+
+From the repository root, create and install both GitHub Apps once:
+
+```bash
+./scripts/issue_worker/setup.sh
+./scripts/issue_worker/github_app_auth.py check --provider claude
+./scripts/issue_worker/github_app_auth.py check --provider codex
+```
+
+The app setup defaults to `DotNetRockStar/swarm` and writes the required app
+IDs, installation IDs, bot identities, and PEM paths to
+`~/.config/swarm/github-apps.json`. No app parameter is required afterward
+when that default location and repository are used.
+
+For the recommended bot-authored branch/PR/auto-merge workflow, run:
+
+```bash
+./scripts/issue_worker/install_swarm_issue_cron.py \
+  --require-bot-auth \
+  --delivery-mode pull-request \
+  --auto-merge \
+  --smtp-credentials-file /path/to/smtp-settings
+```
+
+The only required runtime choice is notification handling: pass
+`--smtp-credentials-file PATH` to enable email, or replace that option with
+`--no-email`. The scheduler otherwise uses the defaults listed below. It runs
+in the terminal, processes issues back to back, waits 600 seconds while idle,
+and stops cleanly with Ctrl+C. Add `--once` for one scheduler iteration, or
+`--dry-run --no-email --once` to preview issue selection without making
+changes.
+
+Prerequisites are `python3`, `git`, `gh`, `claude`, and `codex` on
+`PATH`; the Claude and Codex CLIs must already be authenticated. Use
+`worker.env.example` or the parameter tables below only when overriding the
+built-in defaults.
+
 ### What happens during a run
 
 1. Retry any pending GitHub completion comment, label, or email.
