@@ -8,8 +8,7 @@ package app.swarm.tv.app.ui.components
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
@@ -26,16 +25,16 @@ import app.swarm.tv.R
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import coil.compose.AsyncImage
 
-private const val STARTUP_HERO_ASPECT_RATIO = 518f / 550f
-
-/** The supplied startup hero, shown alone and fitted without cropping. */
+/** The supplied startup hero, filling the screen edge to edge — matches
+ * launch_screen.xml's full-bleed treatment so there's no size change at the
+ * handoff from the native splash to this composable. */
 @Composable
 fun SwarmStartupImage(modifier: Modifier = Modifier) {
     Image(
         painter = painterResource(R.drawable.swarm_hero_portrait),
         contentDescription = null,
-        contentScale = ContentScale.Fit,
-        modifier = modifier.fillMaxHeight(0.82f).aspectRatio(STARTUP_HERO_ASPECT_RATIO),
+        contentScale = ContentScale.Crop,
+        modifier = modifier.fillMaxSize(),
     )
 }
 

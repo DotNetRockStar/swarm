@@ -6,11 +6,10 @@
         </shape>
     </item>
     <!-- Android draws the same supplied hero used by Compose before
-         MainActivity exists, eliminating a blank or mismatched startup frame. -->
-    <item
-        android:width="414.4dp"
-        android:height="440dp"
-        android:gravity="center">
+         MainActivity exists, eliminating a blank or mismatched startup frame.
+         No width/height here: an item with no explicit size fills the whole
+         window, and the bitmap's own fill gravity stretches edge to edge. -->
+    <item>
         <bitmap
             android:gravity="fill"
             android:src="@drawable/swarm_hero_portrait" />
