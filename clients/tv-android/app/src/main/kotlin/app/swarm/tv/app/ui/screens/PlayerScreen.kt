@@ -832,7 +832,15 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .focusable()
-                .onKeyEvent { playerView.dispatchKeyEvent(it.nativeKeyEvent) },
+                .onKeyEvent {
+                    val event = it.nativeKeyEvent
+                    // Let Back bubble up to [BackHandler] instead of handing it to
+                    // Media3's PlayerView — its embedded PlayerControlView can
+                    // swallow the key itself (e.g. while its transport bar is
+                    // visible/settling), which silently ate the first Back press
+                    // and made pause-on-Back need two clicks every time.
+                    if (event.keyCode == KeyEvent.KEYCODE_BACK) false else playerView.dispatchKeyEvent(event)
+                },
             factory = { playerView },
             // Real bug, found live: autoplaying the next episode creates a
             // new active ExoPlayer (either freshly created or promoted from
