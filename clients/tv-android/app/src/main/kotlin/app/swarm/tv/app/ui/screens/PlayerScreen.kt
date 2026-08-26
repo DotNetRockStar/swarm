@@ -7,15 +7,15 @@
  * plain OkHttp client in `PeerQuicClientInteropTest`), so this screen is
  * mechanical: point it at the local proxy URL like any other HTTP stream.
  *
- * Resume/watched state: seeks to [resumePositionSecs] on prepare, and
- * reports the final position back via [onPositionUpdate] when the screen
- * is disposed (back pressed, or navigated away from) — this screen itself
- * knows nothing about persistence, `SwarmViewModel` owns deciding what to
- * do with that report. Deliberately save-on-exit only, not a periodic
- * save while playing — simpler, and the only gap it leaves is losing the
- * position on a crash mid-playback rather than on a normal exit, which
- * isn't worth a repeating timer tied to Compose lifecycle for a first
- * version.
+ * Resume/watched state: seeks to [resumePositionSecs] on prepare, reports
+ * position back via [onPositionUpdate] periodically while playing, and
+ * again on final disposal (back pressed, or navigated away from) — this
+ * screen itself knows nothing about persistence, `SwarmViewModel` owns
+ * deciding what to do with that report. The periodic save exists because
+ * disposal never fires if the process dies outright — e.g. a TV switched
+ * off mid-stream (#77) — so without it the resume point would silently
+ * stay wherever it was at the last normal exit instead of near the true
+ * last-watched position.
  *
  * Continue/autoplay: when [hasNext] is true and playback reaches
  * `Player.STATE_ENDED` naturally (not on back-press/manual exit — those
@@ -134,6 +134,7 @@ private const val CONTINUE_COUNTDOWN_SECS = 8
 private const val SERVER_OFFLINE_RETRY_DELAY_MS = 2_000L
 private const val SKIP_INTRO_OFFER_MS = 10_000L
 private const val INTRO_POSITION_POLL_MS = 250L
+private const val PERIODIC_POSITION_SAVE_MS = 15_000L
 
 /** D-pad left/right rewind/fast-forward step. Android's own key-repeat
  * mechanism redelivers ACTION_DOWN with an incrementing repeatCount while a
@@ -689,6 +690,21 @@ fun PlayerScreen(
                 enabled = true
             }
         }.getOrNull()
+    }
+
+    // Flush the resume position on a heartbeat, not just on dispose: if the
+    // TV loses power outright (#77) or the process is otherwise killed, the
+    // Compose disposal in the DisposableEffect below never runs, so without
+    // this the persisted position would stay stuck wherever it was at the
+    // last normal exit rather than near the true last-watched point.
+    LaunchedEffect(player, entry.fingerprint) {
+        while (true) {
+            delay(PERIODIC_POSITION_SAVE_MS)
+            if (!player.isPlaying) continue
+            val positionSecs = positionOffsetSecs + player.currentPosition / 1000.0
+            val durationSecs = player.duration.takeIf { it != C.TIME_UNSET }?.let { positionOffsetSecs + it / 1000.0 } ?: 0.0
+            onPositionUpdate(positionSecs, durationSecs)
+        }
     }
 
     DisposableEffect(player) {
