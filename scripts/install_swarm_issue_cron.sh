@@ -17,6 +17,7 @@ CARGO_TARGET_MAX_GIB="${SWARM_CARGO_TARGET_MAX_GIB:-1}"
 ISSUE_COMPLETED_EXIT_CODE=10
 QUOTA_PAUSED_EXIT_CODE=11
 CRONTAB_BIN="${CRONTAB_BIN:-$(command -v crontab || true)}"
+PGREP_BIN="${PGREP_BIN:-$(command -v pgrep || true)}"
 BEGIN_MARKER="# BEGIN SWARM ISSUE WORKER"
 END_MARKER="# END SWARM ISSUE WORKER"
 
@@ -43,8 +44,24 @@ remove_legacy_cron() {
 }
 
 usage() {
-    printf 'Usage: %s [--remove]\n' "$0" >&2
+    printf 'Usage: %s [--remove|--check-transcode-active]\n' "$0" >&2
 }
+
+swarm_hls_transcode_active() {
+    [ -n "$PGREP_BIN" ] && [ -x "$PGREP_BIN" ] \
+        && "$PGREP_BIN" -f '[f]fmpeg .* -f hls .*app[.]swarm[.]server/transcodes/' >/dev/null 2>&1
+}
+
+if [ "${1:-}" = "--check-transcode-active" ]; then
+    if [ "$#" -ne 1 ]; then
+        usage
+        exit 2
+    fi
+    if swarm_hls_transcode_active; then
+        exit 0
+    fi
+    exit 1
+fi
 
 if [ "${1:-}" = "--remove" ]; then
     if [ "$#" -ne 1 ]; then
@@ -161,6 +178,11 @@ log "Live output is also appended to $LOG_PATH. Press Ctrl+C to stop."
 
 while true; do
     log "Starting a worker run."
+    if swarm_hls_transcode_active; then
+        log "A SWARM media transcode is active; deferring AI and build work for $INTERVAL_SECONDS seconds."
+        sleep "$INTERVAL_SECONDS"
+        continue
+    fi
     # Run an immutable snapshot so editing or updating the repository while a
     # worker is active cannot change the script underneath Bash's read offset.
     /bin/cp "$WORKER_PATH" "$WORKER_SNAPSHOT_PATH"

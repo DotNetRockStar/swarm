@@ -19,6 +19,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const AUDIO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIEW_DURATION_SECS: u64 = 32;
+const MAX_HLS_VIDEO_RENDITIONS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct TranscodeConfig {
@@ -87,6 +88,12 @@ struct Rendition {
     average_video_bps: u64,
     peak_video_bps: u64,
     audio_bps: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoEncoder {
+    VideoToolbox,
+    Libx264 { threads_per_rendition: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -265,8 +272,31 @@ fn video_variants(
             .take(1)
             .collect()
     } else {
-        LADDER.iter().filter(eligible).copied().collect()
+        let mut variants: Vec<Rendition> = LADDER.iter().filter(eligible).copied().collect();
+        // Preserve both ends of the adaptive range. When every rung is
+        // eligible, 480p is the least valuable intermediate step: retaining
+        // 1080p/720p/360p saves one simultaneous encoder while keeping the
+        // best picture and the low-bandwidth escape hatch. Lower-resolution
+        // sources and tighter bandwidth limits still retain all eligible
+        // rungs up to this cap.
+        while variants.len() > MAX_HLS_VIDEO_RENDITIONS {
+            variants.remove(variants.len() - 2);
+        }
+        variants
     }
+}
+
+fn software_threads_per_rendition(available_threads: usize, rendition_count: usize) -> usize {
+    let total_video_budget = (available_threads / 2).max(1);
+    (total_video_budget / rendition_count.max(1)).max(1)
+}
+
+fn encoder_listing_has_videotoolbox(listing: &[u8]) -> bool {
+    String::from_utf8_lossy(listing).lines().any(|line| {
+        let mut fields = line.split_ascii_whitespace();
+        fields.next().is_some_and(|flags| flags.starts_with('V'))
+            && fields.next() == Some("h264_videotoolbox")
+    })
 }
 
 #[derive(Debug)]
@@ -386,6 +416,8 @@ pub struct TranscodeManager {
     upload_budget_enabled: std::sync::atomic::AtomicBool,
     state: Mutex<State>,
     global_rate_limiter: Arc<SessionRateLimiter>,
+    video_toolbox_available: tokio::sync::OnceCell<bool>,
+    video_toolbox_failed: std::sync::atomic::AtomicBool,
 }
 
 impl TranscodeManager {
@@ -399,6 +431,8 @@ impl TranscodeManager {
             upload_budget_enabled: std::sync::atomic::AtomicBool::new(true),
             state: Mutex::new(State::default()),
             global_rate_limiter,
+            video_toolbox_available: tokio::sync::OnceCell::new(),
+            video_toolbox_failed: std::sync::atomic::AtomicBool::new(false),
         });
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&manager);
@@ -790,6 +824,7 @@ impl TranscodeManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_ffmpeg(
         &self,
         entry: &EntryRecord,
@@ -800,25 +835,6 @@ impl TranscodeManager {
         directory: &Path,
         preview: bool,
     ) -> Result<Child, TranscodeError> {
-        let log_path = directory.join("ffmpeg.log");
-        let log = std::fs::File::create(&log_path).map_err(TranscodeError::Workspace)?;
-        let mut command = Command::new(&self.config.ffmpeg_path);
-        command
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("warning")
-            .arg("-nostdin")
-            .arg("-y");
-        if start_position_secs > 0 {
-            command.arg("-ss").arg(start_position_secs.to_string());
-        }
-        command.arg("-i").arg(media_path);
-        if preview {
-            // The client displays 30 seconds. Stop the encoder shortly after
-            // that window instead of racing through the remainder of a movie.
-            command.arg("-t").arg(PREVIEW_DURATION_SECS.to_string());
-        }
-
         let has_audio = entry.audio.is_some();
         // Audio language is routing metadata, not part of the codec summary
         // retained at scan time. Resolve every embedded audio stream (not
@@ -850,6 +866,121 @@ impl TranscodeManager {
             .unwrap_or_default();
             audio_map_entries(options)
         };
+
+        let encoder = self.preferred_video_encoder(variants.len()).await;
+        let attempt = self
+            .spawn_ffmpeg_attempt(
+                media_path,
+                start_position_secs,
+                variants,
+                reserved_bps,
+                directory,
+                preview,
+                has_audio,
+                &audio_tracks,
+                encoder,
+            )
+            .await;
+        if attempt.is_ok() || encoder != VideoEncoder::VideoToolbox {
+            return attempt;
+        }
+
+        // An encoder can be advertised by FFmpeg but unavailable at runtime
+        // (for example, a temporarily exhausted VideoToolbox session pool).
+        // Remember the failure for this server process, preserve its log, and
+        // retry the same session with the bounded portable encoder.
+        self.video_toolbox_failed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        reset_hls_attempt(directory)?;
+        self.spawn_ffmpeg_attempt(
+            media_path,
+            start_position_secs,
+            variants,
+            reserved_bps,
+            directory,
+            preview,
+            has_audio,
+            &audio_tracks,
+            self.software_video_encoder(variants.len()),
+        )
+        .await
+    }
+
+    async fn preferred_video_encoder(&self, rendition_count: usize) -> VideoEncoder {
+        if rendition_count > 0
+            && cfg!(target_os = "macos")
+            && !self
+                .video_toolbox_failed
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let available = self
+                .video_toolbox_available
+                .get_or_init(|| async {
+                    let output = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        Command::new(&self.config.ffmpeg_path)
+                            .args(["-hide_banner", "-encoders"])
+                            .output(),
+                    )
+                    .await;
+                    matches!(
+                        output,
+                        Ok(Ok(output)) if output.status.success()
+                            && encoder_listing_has_videotoolbox(&output.stdout)
+                    )
+                })
+                .await;
+            if *available {
+                return VideoEncoder::VideoToolbox;
+            }
+        }
+        self.software_video_encoder(rendition_count)
+    }
+
+    fn software_video_encoder(&self, rendition_count: usize) -> VideoEncoder {
+        let available_threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(2);
+        VideoEncoder::Libx264 {
+            threads_per_rendition: software_threads_per_rendition(
+                available_threads,
+                rendition_count,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_ffmpeg_attempt(
+        &self,
+        media_path: &Path,
+        start_position_secs: u64,
+        variants: &[Rendition],
+        reserved_bps: u64,
+        directory: &Path,
+        preview: bool,
+        has_audio: bool,
+        audio_tracks: &[AudioMapEntry],
+        encoder: VideoEncoder,
+    ) -> Result<Child, TranscodeError> {
+        let log_path = directory.join("ffmpeg.log");
+        let log = std::fs::File::create(&log_path).map_err(TranscodeError::Workspace)?;
+        let mut command = Command::new(&self.config.ffmpeg_path);
+        command
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("warning")
+            .arg("-nostdin")
+            .arg("-y");
+        if start_position_secs > 0 {
+            command.arg("-ss").arg(start_position_secs.to_string());
+        }
+        command.arg("-i").arg(media_path);
+        if preview {
+            // The client displays 30 seconds. Stop the encoder shortly after
+            // that window instead of racing through the remainder of a movie.
+            command.arg("-t").arg(PREVIEW_DURATION_SECS.to_string());
+        }
+
         let output_pattern = directory.join("v%v/index.m3u8");
         let segment_pattern = directory.join("v%v/segment_%06d.m4s");
 
@@ -877,7 +1008,7 @@ impl TranscodeManager {
             // writing into it, same as the per-rendition video directories
             // created by the caller (start_hls) — ffmpeg's hls muxer does
             // not create intermediate directories itself.
-            for audio in &audio_tracks {
+            for audio in audio_tracks {
                 std::fs::create_dir_all(directory.join(format!("v{}", audio.name)))
                     .map_err(TranscodeError::Workspace)?;
             }
@@ -892,32 +1023,48 @@ impl TranscodeManager {
                 ));
             }
             filter.pop();
-            command.arg("-filter_complex").arg(filter);
+            command
+                .arg("-filter_complex_threads")
+                .arg("2")
+                .arg("-filter_complex")
+                .arg(filter);
             for (index, rendition) in variants.iter().enumerate() {
                 command.arg("-map").arg(format!("[v{index}]"));
+                command.arg(format!("-c:v:{index}")).arg(match encoder {
+                    VideoEncoder::VideoToolbox => "h264_videotoolbox",
+                    VideoEncoder::Libx264 { .. } => "libx264",
+                });
+                if let VideoEncoder::Libx264 {
+                    threads_per_rendition,
+                } = encoder
+                {
+                    command
+                        .arg(format!("-preset:v:{index}"))
+                        .arg(if preview { "ultrafast" } else { "veryfast" })
+                        .arg(format!("-threads:v:{index}"))
+                        .arg(threads_per_rendition.to_string());
+                    if preview {
+                        command.arg(format!("-tune:v:{index}")).arg("zerolatency");
+                    }
+                }
                 command
-                    .arg(format!("-c:v:{index}"))
-                    .arg("libx264")
-                    .arg(format!("-preset:v:{index}"))
-                    .arg(if preview { "ultrafast" } else { "veryfast" })
                     .arg(format!("-profile:v:{index}"))
                     .arg("high")
                     .arg(format!("-level:v:{index}"))
                     .arg("4.1")
                     .arg(format!("-pix_fmt:v:{index}"))
                     .arg("yuv420p");
-                if preview {
-                    command.arg(format!("-tune:v:{index}")).arg("zerolatency");
-                }
                 command
                     .arg(format!("-b:v:{index}"))
                     .arg(rendition.average_video_bps.to_string())
                     .arg(format!("-maxrate:v:{index}"))
                     .arg(rendition.peak_video_bps.to_string())
                     .arg(format!("-bufsize:v:{index}"))
-                    .arg((rendition.peak_video_bps * 2).to_string())
-                    .arg(format!("-sc_threshold:v:{index}"))
-                    .arg("0")
+                    .arg((rendition.peak_video_bps * 2).to_string());
+                if matches!(encoder, VideoEncoder::Libx264 { .. }) {
+                    command.arg(format!("-sc_threshold:v:{index}")).arg("0");
+                }
+                command
                     .arg(format!("-force_key_frames:v:{index}"))
                     .arg(if preview {
                         "expr:gte(t,n_forced*1)"
@@ -1023,7 +1170,7 @@ impl TranscodeManager {
                 return Err(TranscodeError::Ffmpeg(detail.trim().to_string()));
             }
             if started.elapsed() >= STARTUP_TIMEOUT {
-                let _ = child.start_kill();
+                let _ = child.kill().await;
                 return Err(TranscodeError::StartupTimeout);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1084,6 +1231,32 @@ impl Drop for TranscodeManager {
             }
         }
     }
+}
+
+fn reset_hls_attempt(directory: &Path) -> Result<(), TranscodeError> {
+    let log_path = directory.join("ffmpeg.log");
+    let hardware_log_path = directory.join("ffmpeg-videotoolbox.log");
+    if hardware_log_path.exists() {
+        std::fs::remove_file(&hardware_log_path).map_err(TranscodeError::Workspace)?;
+    }
+    if log_path.exists() {
+        std::fs::rename(&log_path, &hardware_log_path).map_err(TranscodeError::Workspace)?;
+    }
+
+    for entry in std::fs::read_dir(directory).map_err(TranscodeError::Workspace)? {
+        let entry = entry.map_err(TranscodeError::Workspace)?;
+        let path = entry.path();
+        if path == hardware_log_path {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(TranscodeError::Workspace)?;
+            std::fs::create_dir_all(&path).map_err(TranscodeError::Workspace)?;
+        } else {
+            std::fs::remove_file(path).map_err(TranscodeError::Workspace)?;
+        }
+    }
+    Ok(())
 }
 
 async fn cleanup_loop(manager: Weak<TranscodeManager>) {
@@ -1371,6 +1544,50 @@ mod tests {
         let variants = video_variants(1080, &prefs, u64::MAX);
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].name, "preview-480p");
+    }
+
+    #[test]
+    fn full_hd_ladder_uses_three_spread_out_renditions() {
+        let variants = video_variants(1080, &preferences(), u64::MAX);
+
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.name)
+                .collect::<Vec<_>>(),
+            vec!["1080p", "720p", "360p"]
+        );
+    }
+
+    #[test]
+    fn lower_resolution_sources_keep_their_intermediate_rendition() {
+        let variants = video_variants(480, &preferences(), u64::MAX);
+
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.name)
+                .collect::<Vec<_>>(),
+            vec!["480p", "360p"]
+        );
+    }
+
+    #[test]
+    fn software_encoder_shares_half_the_host_threads_across_renditions() {
+        assert_eq!(software_threads_per_rendition(8, 3), 1);
+        assert_eq!(software_threads_per_rendition(16, 3), 2);
+        assert_eq!(software_threads_per_rendition(4, 1), 2);
+        assert_eq!(software_threads_per_rendition(1, 3), 1);
+    }
+
+    #[test]
+    fn videotoolbox_detection_matches_an_encoder_field_only() {
+        assert!(encoder_listing_has_videotoolbox(
+            b" V....D h264_videotoolbox VideoToolbox H.264 Encoder\n"
+        ));
+        assert!(!encoder_listing_has_videotoolbox(
+            b"description mentions h264_videotoolbox, but it is not an encoder field\n"
+        ));
     }
 
     #[test]

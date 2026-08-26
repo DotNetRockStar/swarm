@@ -117,6 +117,11 @@ and test builds use compact line-table debug information with incremental
 compilation disabled. After each worker run, the runner also uses `cargo clean`
 when the shared `target` directory exceeds 1 GiB and no Cargo or Rust compiler
 process is active; override that limit with `SWARM_CARGO_TARGET_MAX_GIB`.
+Before each worker run, the runner also checks for an active SWARM HLS FFmpeg
+process and defers AI/build work for the normal polling interval so background
+verification cannot compete with playback. Use
+`./scripts/install_swarm_issue_cron.sh --check-transcode-active` to inspect that
+preflight result (`0` means active, `1` means idle).
 Only one foreground runner may be active for a state directory; a second
 invocation exits without starting another polling loop. Temporary failures of
 an AI provider's usage-check command are treated as unknown availability, not

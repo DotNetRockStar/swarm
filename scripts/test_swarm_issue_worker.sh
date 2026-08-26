@@ -259,4 +259,18 @@ RUNNER_OUTPUT="$(
 )"
 printf '%s' "$RUNNER_OUTPUT" | grep -Fq 'Another foreground SWARM issue runner is already active'
 
+# The foreground runner must defer before launching an AI when SWARM's own
+# HLS ffmpeg process is active. Exercise the same detector through its small
+# diagnostic entry point with a deterministic pgrep replacement.
+FAKE_PGREP="$TEST_DIR/fake-pgrep"
+printf '%s\n' '#!/bin/sh' 'exit "${FAKE_PGREP_STATUS:-1}"' > "$FAKE_PGREP"
+chmod +x "$FAKE_PGREP"
+FAKE_PGREP_STATUS=0 PGREP_BIN="$FAKE_PGREP" \
+    bash "$SCRIPT_DIR/install_swarm_issue_cron.sh" --check-transcode-active
+if FAKE_PGREP_STATUS=1 PGREP_BIN="$FAKE_PGREP" \
+    bash "$SCRIPT_DIR/install_swarm_issue_cron.sh" --check-transcode-active; then
+    printf 'inactive transcode detector reported an active session\n' >&2
+    exit 1
+fi
+
 printf 'swarm issue worker state tests passed\n'
