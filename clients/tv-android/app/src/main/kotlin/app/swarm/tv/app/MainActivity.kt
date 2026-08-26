@@ -65,7 +65,7 @@ import app.swarm.tv.app.data.SwarmViewModel
 import app.swarm.tv.app.data.UiState
 import app.swarm.tv.app.data.androidMachineId
 import app.swarm.tv.app.data.resolveDeviceName
-import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
+import app.swarm.tv.app.ui.components.SwarmStartupImage
 import app.swarm.tv.app.ui.components.ClientToastHost
 import app.swarm.tv.app.ui.components.rememberClientToastHostState
 import app.swarm.tv.app.ui.screens.AlbumScreen
@@ -183,7 +183,7 @@ class MainActivity : ComponentActivity() {
                     val resolvedIdentity = identity
                     if (resolvedIdentity == null) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
+                            SwarmStartupImage()
                         }
                         return@Box
                     }
@@ -666,7 +666,7 @@ private fun SwarmApp(
         when (state) {
             is UiState.Loading ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
+                    SwarmStartupImage()
                 }
             is UiState.PlaybackLoading ->
                 Box(Modifier.fillMaxSize().background(Color.Black)) {

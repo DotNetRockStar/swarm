@@ -5,14 +5,14 @@
             <solid android:color="@color/swarm_bg" />
         </shape>
     </item>
-    <!-- Android draws this before MainActivity/Compose exists, eliminating
-         the blank window while the client restores its saved connection. -->
+    <!-- Android draws the same supplied hero used by Compose before
+         MainActivity exists, eliminating a blank or mismatched startup frame. -->
     <item
-        android:width="160dp"
-        android:height="160dp"
+        android:width="414.4dp"
+        android:height="440dp"
         android:gravity="center">
         <bitmap
             android:gravity="fill"
-            android:src="@drawable/mascot" />
+            android:src="@drawable/swarm_hero_portrait" />
     </item>
 </layer-list>

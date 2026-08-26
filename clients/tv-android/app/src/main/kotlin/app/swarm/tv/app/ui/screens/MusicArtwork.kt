@@ -78,7 +78,8 @@ internal fun ArtworkImage(
     var retryCount by remember(primaryUrl, fallbackUrl) { mutableIntStateOf(0) }
     val resolvedFallback = fallbackUrl?.takeUnless { it == primaryUrl }
     val url = if (useFallback) resolvedFallback else primaryUrl
-    val placeholderLabel = if (placeholderType == "Movie" || placeholderType == "Show") label else placeholderType
+    val isVideoPlaceholder = placeholderType == "Movie" || placeholderType == "Show"
+    val placeholderLabel = if (isVideoPlaceholder) label else placeholderType
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Coil dedupes by request identity, not URL equality: re-passing the same URL string
@@ -94,7 +95,9 @@ internal fun ArtworkImage(
         contentAlignment = Alignment.Center,
     ) {
         Image(
-            painter = painterResource(R.drawable.mascot),
+            painter = painterResource(
+                if (isVideoPlaceholder) R.drawable.movie_placeholder else R.drawable.mascot,
+            ),
             contentDescription = null,
             modifier = Modifier.fillMaxWidth(0.48f).aspectRatio(1f),
         )

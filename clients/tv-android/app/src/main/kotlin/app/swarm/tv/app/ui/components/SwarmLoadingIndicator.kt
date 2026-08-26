@@ -1,13 +1,15 @@
 /**
- * The mascot-pulse loading GIF plus a randomized cute caption underneath for
- * app startup and catalog loading. Playback intentionally does not use this
- * full-screen treatment: video buffering is reported through the shared
- * toast surface so the last frame remains visible.
+ * Loading artwork used by the startup and in-app waiting states. Playback
+ * intentionally does not use a full-screen treatment: video buffering is
+ * reported through the shared toast surface so the last frame remains visible.
  */
 package app.swarm.tv.app.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
@@ -15,12 +17,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.swarm.tv.R
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import coil.compose.AsyncImage
+
+private const val STARTUP_HERO_ASPECT_RATIO = 518f / 550f
+
+/** The supplied startup hero, shown alone and fitted without cropping. */
+@Composable
+fun SwarmStartupImage(modifier: Modifier = Modifier) {
+    Image(
+        painter = painterResource(R.drawable.swarm_hero_portrait),
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = modifier.fillMaxHeight(0.82f).aspectRatio(STARTUP_HERO_ASPECT_RATIO),
+    )
+}
 
 /** One picked at random each time this composable enters composition — ties the wait back to the mascot/"swarm" theme instead of a bare spinner. */
 private val LOADING_MESSAGES = listOf(
