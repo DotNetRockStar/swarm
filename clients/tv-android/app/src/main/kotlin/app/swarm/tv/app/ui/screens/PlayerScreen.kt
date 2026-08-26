@@ -140,7 +140,7 @@ private const val INTRO_POSITION_POLL_MS = 250L
  * mechanism redelivers ACTION_DOWN with an incrementing repeatCount while a
  * hardware button stays held, so consuming every one of those (not just the
  * first) is what makes holding the button keep seeking. */
-private const val DPAD_SEEK_STEP_MS = 60_000L
+internal const val PLAYBACK_SEEK_STEP_MS = 60_000L
 
 /** Returns the [kind] IntroDB marker covering [positionMs], using IntroDB's
  * null-start convention for a segment that begins with the episode.
@@ -795,7 +795,7 @@ fun PlayerScreen(
                     (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
                 ) {
                     if (event.action == KeyEvent.ACTION_DOWN) {
-                        val deltaMs = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) DPAD_SEEK_STEP_MS else -DPAD_SEEK_STEP_MS
+                        val deltaMs = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) PLAYBACK_SEEK_STEP_MS else -PLAYBACK_SEEK_STEP_MS
                         controllerPlayer.seekTo((controllerPlayer.currentPosition + deltaMs).coerceAtLeast(0L))
                     }
                     return@onPreviewKeyEvent true

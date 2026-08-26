@@ -19,6 +19,7 @@
  */
 package app.swarm.tv.app.ui.screens
 
+import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -56,6 +57,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +76,16 @@ import app.swarm.tv.core.catalog.parseSyncedLyrics
 import app.swarm.tv.core.peer.TrackLyrics
 import coil.compose.AsyncImage
 
+/** Music has no embedded Media3 controller, so its full-screen surface owns
+ * D-pad seek gestures in addition to the transport-button mapping shared with
+ * video. Keeping this mapping pure makes Fire TV's emitted key codes testable
+ * without a device or Compose instrumentation. */
+internal fun musicPlaybackAction(keyCode: Int): RemotePlaybackAction? = when (keyCode) {
+    KeyEvent.KEYCODE_DPAD_LEFT -> RemotePlaybackAction.SEEK_BACK
+    KeyEvent.KEYCODE_DPAD_RIGHT -> RemotePlaybackAction.SEEK_FORWARD
+    else -> remotePlaybackAction(keyCode)
+}
+
 @Composable
 fun MusicPlayerScreen(
     entry: MergedEntry,
@@ -87,6 +99,10 @@ fun MusicPlayerScreen(
     lyrics: TrackLyrics?,
     positionMs: Long,
     onTogglePlayPause: () -> Unit,
+    onPlay: () -> Unit,
+    onPause: () -> Unit,
+    onSeekBack: () -> Unit,
+    onSeekForward: () -> Unit,
     onToggleShuffle: () -> Unit,
     onToggleLike: () -> Unit,
     onSkipNext: () -> Unit,
@@ -114,7 +130,36 @@ fun MusicPlayerScreen(
         label = "now-playing-scale",
     )
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onPreviewKeyEvent { composeEvent ->
+                val event = composeEvent.nativeKeyEvent
+                val action = musicPlaybackAction(event.keyCode) ?: return@onPreviewKeyEvent false
+                if (action == RemotePlaybackAction.SHOW_CONTROLS) return@onPreviewKeyEvent false
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    when (action) {
+                        RemotePlaybackAction.TOGGLE_PLAY_PAUSE -> onTogglePlayPause()
+                        RemotePlaybackAction.PLAY -> onPlay()
+                        RemotePlaybackAction.PAUSE -> onPause()
+                        RemotePlaybackAction.SEEK_FORWARD -> onSeekForward()
+                        RemotePlaybackAction.SEEK_BACK -> onSeekBack()
+                        RemotePlaybackAction.SHOW_CONTROLS -> Unit
+                    }
+                }
+                // Match video playback's direct left/right gesture while
+                // still allowing Compose to move focus between the visible
+                // buttons. A held D-pad direction repeats ACTION_DOWN, so it
+                // continues seeking in the same 60-second steps as video.
+                if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    return@onPreviewKeyEvent false
+                }
+                // Consume key-up as well so a transport-key release cannot
+                // activate whichever Compose button currently owns focus.
+                true
+            },
+    ) {
         if (visualUrl != null) {
             AsyncImage(
                 model = visualUrl,
@@ -192,12 +237,18 @@ fun MusicPlayerScreen(
                 ) {
                     Text(if (shuffleEnabled) "🔀 Shuffle on" else "🔀 Shuffle", fontSize = 13.sp)
                 }
+                Button(onClick = onSeekBack, colors = swarmActionButtonColors()) {
+                    Text("↶ 60s", fontSize = 13.sp)
+                }
                 Button(
                     onClick = onTogglePlayPause,
                     modifier = Modifier.focusRequester(playFocusRequester),
                     colors = swarmActionButtonColors(),
                 ) {
                     Text(if (isLoading) "Buffering…" else if (isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
+                }
+                Button(onClick = onSeekForward, colors = swarmActionButtonColors()) {
+                    Text("60s ↷", fontSize = 13.sp)
                 }
                 Button(onClick = onSkipNext, colors = swarmActionButtonColors()) {
                     Text("Skip ⏭", fontSize = 13.sp)

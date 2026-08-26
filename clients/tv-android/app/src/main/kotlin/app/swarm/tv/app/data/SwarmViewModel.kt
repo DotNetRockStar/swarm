@@ -1646,15 +1646,14 @@ class SwarmViewModel(
     )
 
     /**
-     * Seeks a movie/episode to an absolute position in the original media.
-     * Direct play is handled inside ExoPlayer; this path is used when a
-     * progressively generated HLS playlist has not reached the requested
+     * Seeks media to an absolute position in the original asset. Direct play
+     * is handled inside ExoPlayer; this path is used when a progressively
+     * generated HLS playlist (video or music) has not reached the requested
      * position yet. A fresh authenticated HLS session starts ffmpeg at the
      * requested point, so the seek is not limited by the current buffer.
      */
     fun seekPlayback(positionSecs: Double) {
         val current = _state.value as? UiState.Player ?: return
-        if (current.entry.entry.kind == MediaKind.TRACK) return
         val catalog = current.previous.embeddedCatalog() ?: return
         val duration = current.mediaDurationSecs?.takeIf { it.isFinite() && it > 0.0 }
         val target = if (duration == null) {

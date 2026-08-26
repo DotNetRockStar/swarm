@@ -74,11 +74,13 @@ import app.swarm.tv.app.ui.screens.MusicPlayerScreen
 import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
+import app.swarm.tv.app.ui.screens.PLAYBACK_SEEK_STEP_MS
 import app.swarm.tv.app.ui.screens.isServerOfflineLoadError
 import app.swarm.tv.app.ui.screens.playbackErrorContext
 import app.swarm.tv.app.ui.screens.playbackHttpResponseCode
 import app.swarm.tv.app.ui.screens.serverOfflineMediaSourceFactory
 import app.swarm.tv.app.ui.screens.shouldRecoverExpiredPlaybackSession
+import app.swarm.tv.app.ui.screens.shouldRestartHlsPlaybackForSeek
 import app.swarm.tv.app.ui.screens.SeasonScreen
 import app.swarm.tv.app.ui.screens.ShowShelfScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
@@ -91,6 +93,7 @@ import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
+import app.swarm.tv.core.peer.PlaybackMode
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
 import java.io.IOException
@@ -455,6 +458,36 @@ private fun SwarmApp(
     var musicPausedForPreview by remember(musicPlayer) { mutableStateOf(false) }
     var musicServerOffline by remember(musicPlayer) { mutableStateOf(false) }
 
+    val seekMusicBy: (Long) -> Unit = { deltaMs ->
+        val session = activeMusicSession
+        val player = musicPlayer
+        if (session != null && player != null) {
+            val offsetMs = (session.positionOffsetSecs * 1000.0).toLong()
+            val absolutePositionMs = offsetMs + player.currentPosition.coerceAtLeast(0L)
+            val durationMs = session.mediaDurationSecs
+                ?.takeIf { it.isFinite() && it > 0.0 }
+                ?.let { (it * 1000.0).toLong() }
+            val targetMs = durationMs
+                ?.let { (absolutePositionMs + deltaMs).coerceIn(0L, (it - 500L).coerceAtLeast(0L)) }
+                ?: (absolutePositionMs + deltaMs).coerceAtLeast(0L)
+            val relativeTargetMs = targetMs - offsetMs
+
+            // A progressively generated HLS session may not include the
+            // requested part of the track yet (and cannot seek before its
+            // resume offset). Renegotiate at the absolute target in that
+            // case; ordinary direct play and in-window HLS seeks stay local
+            // and immediate.
+            if (
+                session.playbackMode == PlaybackMode.HLS &&
+                shouldRestartHlsPlaybackForSeek(relativeTargetMs, player.duration)
+            ) {
+                onSeekPlayback(targetMs / 1000.0)
+            } else {
+                player.seekTo(relativeTargetMs.coerceAtLeast(0L))
+            }
+        }
+    }
+
     // Inline previews intentionally include audio. If music was already
     // playing in the minimized bar, pause it for the preview and restore it
     // afterward; never mix two unrelated soundtracks together.
@@ -792,6 +825,10 @@ private fun SwarmApp(
                         lyrics = state.lyrics,
                         positionMs = musicPositionMs,
                         onTogglePlayPause = { musicPlayer?.let { it.playWhenReady = !it.playWhenReady } },
+                        onPlay = { musicPlayer?.play() },
+                        onPause = { musicPlayer?.pause() },
+                        onSeekBack = { seekMusicBy(-PLAYBACK_SEEK_STEP_MS) },
+                        onSeekForward = { seekMusicBy(PLAYBACK_SEEK_STEP_MS) },
                         onToggleShuffle = onToggleShuffle,
                         onToggleLike = { onToggleLike(state.entry) },
                         onSkipNext = onPlayNext,

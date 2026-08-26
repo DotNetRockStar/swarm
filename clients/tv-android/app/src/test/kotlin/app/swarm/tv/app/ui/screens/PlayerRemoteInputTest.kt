@@ -27,4 +27,12 @@ class PlayerRemoteInputTest {
         assertNull(remotePlaybackAction(KeyEvent.KEYCODE_DPAD_CENTER))
         assertNull(remotePlaybackAction(KeyEvent.KEYCODE_ENTER))
     }
+
+    @Test
+    fun `music maps D-pad directions and transport buttons to seeking`() {
+        assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT))
+        assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_MEDIA_REWIND))
+        assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD))
+    }
 }
