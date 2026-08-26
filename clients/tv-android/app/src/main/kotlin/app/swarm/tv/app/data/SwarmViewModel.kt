@@ -105,9 +105,9 @@ sealed class UiState {
     data object Loading : UiState()
     /**
      * A media session is being replaced (next episode, an out-of-buffer
-     * seek, or recovery after an extended pause). This is deliberately
-     * separate from [Loading]: the branded SWARM screen belongs only to app
-     * startup, while playback handoffs use the player's mascot loader.
+     * seek, or recovery after an extended pause). This stays separate from
+     * [Loading] so playback handoffs can keep a plain video backdrop while
+     * their progress is reported through the shared toast surface.
      */
     data object PlaybackLoading : UiState()
     data object RequestingActivation : UiState()
@@ -1887,8 +1887,8 @@ class SwarmViewModel(
         if (playbackNegotiationJob?.isActive == true) return
         if (replaceSession != null) {
             // Drop the client-side reader before doing any network cleanup.
-            // For a full-screen player, the playback-specific mascot loader
-            // occupies the brief handoff; for a minimized player, removing
+            // For a full-screen player, the black video surface and buffering
+            // toast occupy the brief handoff; for a minimized player, removing
             // the mini-session disposes the same hoisted ExoPlayer immediately.
             // No old song continues while `/stop` reconnects or the next
             // `/play` is negotiated.
@@ -2069,6 +2069,13 @@ class SwarmViewModel(
         } else {
             notify("Playback quality restored.", ClientNotificationKind.SUCCESS)
         }
+    }
+
+    /** Keeps transient playback waits on the shared toast surface instead of
+     * covering the video with a separate loading screen. */
+    fun reportPlaybackBuffering() {
+        if (_state.value !is UiState.Player && _state.value != UiState.PlaybackLoading) return
+        notify("Buffering video…", ClientNotificationKind.WARNING)
     }
 
     /**

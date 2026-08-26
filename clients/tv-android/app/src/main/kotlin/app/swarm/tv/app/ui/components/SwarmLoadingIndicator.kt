@@ -1,29 +1,8 @@
 /**
- * The mascot-pulse loading GIF plus a randomized cute caption underneath —
- * originally built for [app.swarm.tv.app.ui.screens.PlayerScreen]'s
- * "negotiated, now buffering the first segment(s)" wait, pulled out here so
- * [app.swarm.tv.app.ui.screens.CatalogScreen]'s own "Browse Library" load
- * (merging every reachable server's catalog) can show the exact same
- * animation/caption treatment instead of a bare spinner — same wait, same
- * feeling, same charm either place a real network round trip makes the user
- * sit and watch nothing happen for a moment.
- *
- * Same mascot, same 20-frame pulse animation, same caption pool either way —
- * [onBlackBackground] only swaps which pre-baked GIF asset plays, since this
- * app can't do real per-pixel GIF transparency (see `loading.gif`'s own doc
- * history) and each backdrop this indicator sits on needs its background
- * pixels to actually match: [R.drawable.loading]'s flat navy matches
- * `SwarmBackground` (`CatalogScreen`'s browse-loading state, the cold-start
- * [app.swarm.tv.app.data.SwarmViewModel.UiState.Loading] screen), while
- * [R.drawable.loading_black]'s flat black matches [PlayerScreen]'s own pure-
- * black backdrop.
- *
- * [useBufferingSpinner] swaps the mascot out entirely for
- * [R.drawable.loading_buffering], a plain yellow ring spinner on the same
- * flat-black backdrop as [onBlackBackground]'s player variant — the mascot's
- * whimsy reads fine for a cold app-start or catalog merge, but popping it up
- * mid-movie every time the stream stalls was real, reported feedback: a
- * plain spinner reads as "buffering," not "something broke."
+ * The mascot-pulse loading GIF plus a randomized cute caption underneath for
+ * app startup and catalog loading. Playback intentionally does not use this
+ * full-screen treatment: video buffering is reported through the shared
+ * toast surface so the last frame remains visible.
  */
 package app.swarm.tv.app.ui.components
 
@@ -36,7 +15,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -101,20 +79,12 @@ private val LOADING_MESSAGES = listOf(
 @Composable
 fun SwarmLoadingIndicator(
     modifier: Modifier = Modifier,
-    onBlackBackground: Boolean = false,
-    useBufferingSpinner: Boolean = false,
     messageOverride: String? = null,
-    messageColor: Color = SwarmMuted,
 ) {
     val loadingMessage = remember(messageOverride) { messageOverride ?: LOADING_MESSAGES.random() }
-    val gif = when {
-        useBufferingSpinner -> R.drawable.loading_buffering
-        onBlackBackground -> R.drawable.loading_black
-        else -> R.drawable.loading
-    }
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        AsyncImage(model = gif, contentDescription = null, modifier = Modifier.size(160.dp))
+        AsyncImage(model = R.drawable.loading, contentDescription = null, modifier = Modifier.size(160.dp))
         Spacer(Modifier.height(14.dp))
-        Text(loadingMessage, color = messageColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(loadingMessage, color = SwarmMuted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
     }
 }

@@ -109,7 +109,6 @@ import app.swarm.tv.app.data.episodeNumberLabel
 import app.swarm.tv.app.data.pauseRecommendationTitle
 import app.swarm.tv.app.data.PreparedEpisodePlayback
 import app.swarm.tv.app.ui.components.SelectableChip
-import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
@@ -516,6 +515,7 @@ fun PlayerScreen(
     onServerOffline: (context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
+    onPlaybackBuffering: () -> Unit,
 ) {
     val context = LocalContext.current
     var showContinuePrompt by remember(sessionId) { mutableStateOf(false) }
@@ -541,10 +541,6 @@ fun PlayerScreen(
         )
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
-    // Distinguishes a mid-playback bandwidth stall (viewer already saw a
-    // frame; show "Buffering…" in the warm accent color) from the initial
-    // negotiate-and-buffer wait above, which keeps its randomized caption.
-    var isRebuffering by remember(sessionId) { mutableStateOf(false) }
     var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
     var lastVideoHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
@@ -559,6 +555,14 @@ fun PlayerScreen(
     var sectionLabel by remember(sessionId) { mutableStateOf<String?>(null) }
     var trackAvailability by remember(sessionId) {
         mutableStateOf(trackAvailability(player.currentTracks))
+    }
+
+    // Keep the video surface visible while Media3 waits for data. The global
+    // toast host is layered above this screen, so each transition into a
+    // loading state reports buffering without replacing the picture with a
+    // second, full-screen loading experience.
+    LaunchedEffect(sessionId, isLoading) {
+        if (isLoading) onPlaybackBuffering()
     }
 
     // Negotiation finishes asynchronously during the Continue countdown.
@@ -704,9 +708,8 @@ fun PlayerScreen(
                             "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
                     )
                 }
-                // Let the buffered picture continue uninterrupted. The
-                // loading overlay appears only once playback actually runs
-                // out of buffered media and transitions to BUFFERING.
+                // Let the buffered picture continue uninterrupted. Report
+                // buffering only once playback actually runs out of media.
                 if (player.playbackState == Player.STATE_BUFFERING) isLoading = true
             }
 
@@ -742,7 +745,6 @@ fun PlayerScreen(
                 // so onRenderedFirstFrame below would never fire for them).
                 if (playbackState == Player.STATE_READY) {
                     isLoading = false
-                    isRebuffering = false
                     hasStartedPlayback = true
                 }
                 if (playbackState == Player.STATE_BUFFERING && serverOffline) {
@@ -750,12 +752,10 @@ fun PlayerScreen(
                 }
                 // A stall after the viewer already saw a frame is a real
                 // mid-playback rebuffer (almost always the bandwidth running
-                // out from under the current rendition) rather than the
-                // initial negotiate-and-buffer wait — flag it so the overlay
-                // below shows "Buffering…" instead of the cold-start caption.
+                // out from under the current rendition). Keep the last frame
+                // visible and let the loading-state effect surface the toast.
                 if (playbackState == Player.STATE_BUFFERING && hasStartedPlayback && !showPauseOverlay) {
                     isLoading = true
-                    isRebuffering = true
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     showPauseOverlay = false
@@ -777,7 +777,6 @@ fun PlayerScreen(
             // dead frame between "ready" and pixels actually landing.
             override fun onRenderedFirstFrame() {
                 isLoading = false
-                isRebuffering = false
                 hasStartedPlayback = true
             }
 
@@ -924,17 +923,6 @@ fun PlayerScreen(
                 if (showPauseOverlay) view.hideController()
             },
         )
-
-        if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                SwarmLoadingIndicator(
-                    onBlackBackground = true,
-                    useBufferingSpinner = true,
-                    messageOverride = if (isRebuffering) "Buffering…" else null,
-                    messageColor = if (isRebuffering) SwarmAccentHot else SwarmMuted,
-                )
-            }
-        }
 
         if (showContinuePrompt) {
             ContinueOverlay(

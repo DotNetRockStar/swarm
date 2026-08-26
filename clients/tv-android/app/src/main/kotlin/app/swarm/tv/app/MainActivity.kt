@@ -294,6 +294,7 @@ class MainActivity : ComponentActivity() {
                         onServerOffline = viewModel::reportServerOffline,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
                         onPlaybackQualityChanged = viewModel::reportPlaybackQualityChanged,
+                        onPlaybackBuffering = viewModel::reportPlaybackBuffering,
                         onOpenSettings = viewModel::openSettings,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
                         onUpdateDeviceName = viewModel::updateDeviceName,
@@ -388,6 +389,7 @@ private fun SwarmApp(
     onServerOffline: (sessionId: String, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
+    onPlaybackBuffering: () -> Unit,
     onOpenSettings: () -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
@@ -638,11 +640,10 @@ private fun SwarmApp(
                     SwarmLoadingIndicator(messageOverride = "Stream Whatever, Anywhere — Remote Media")
                 }
             is UiState.PlaybackLoading ->
-                Box(
-                    Modifier.fillMaxSize().background(Color.Black),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    SwarmLoadingIndicator(onBlackBackground = true)
+                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                    LaunchedEffect(Unit) {
+                        onPlaybackBuffering()
+                    }
                 }
             is UiState.RequestingActivation ->
                 ActivationRequestScreen(onCancel = onCancelActivation)
@@ -882,6 +883,7 @@ private fun SwarmApp(
                         onServerOffline = { context -> onServerOffline(state.sessionId, context) },
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
                         onPlaybackQualityChanged = onPlaybackQualityChanged,
+                        onPlaybackBuffering = onPlaybackBuffering,
                     )
                 }
         }
