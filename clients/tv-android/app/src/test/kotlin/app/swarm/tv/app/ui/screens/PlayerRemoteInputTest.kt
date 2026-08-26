@@ -29,6 +29,55 @@ class PlayerRemoteInputTest {
     }
 
     @Test
+    fun `bare playing video maps D-pad seek and select shortcuts`() {
+        assertEquals(
+            RemotePlaybackAction.SEEK_BACK,
+            videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT, playWhenReady = true, controlsVisible = false),
+        )
+        assertEquals(
+            RemotePlaybackAction.SEEK_FORWARD,
+            videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT, playWhenReady = true, controlsVisible = false),
+        )
+        assertEquals(
+            RemotePlaybackAction.PAUSE,
+            videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_CENTER, playWhenReady = true, controlsVisible = false),
+        )
+        assertEquals(
+            RemotePlaybackAction.PAUSE,
+            videoSurfacePlaybackAction(KeyEvent.KEYCODE_ENTER, playWhenReady = true, controlsVisible = false),
+        )
+    }
+
+    @Test
+    fun `paused video and visible controls retain normal D-pad behavior`() {
+        assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT, playWhenReady = false, controlsVisible = false))
+        assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT, playWhenReady = false, controlsVisible = false))
+        assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_CENTER, playWhenReady = false, controlsVisible = false))
+        assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT, playWhenReady = true, controlsVisible = true))
+        assertNull(videoSurfacePlaybackAction(KeyEvent.KEYCODE_DPAD_CENTER, playWhenReady = true, controlsVisible = true))
+    }
+
+    @Test
+    fun `Back dismisses playback controls before pausing or exiting`() {
+        assertEquals(
+            PlaybackBackAction.HIDE_CONTROLS,
+            playbackBackAction(showPauseOverlay = false, showContinuePrompt = false, controlsVisible = true),
+        )
+        assertEquals(
+            PlaybackBackAction.PAUSE,
+            playbackBackAction(showPauseOverlay = false, showContinuePrompt = false, controlsVisible = false),
+        )
+        assertEquals(
+            PlaybackBackAction.EXIT,
+            playbackBackAction(showPauseOverlay = true, showContinuePrompt = false, controlsVisible = false),
+        )
+        assertEquals(
+            PlaybackBackAction.EXIT,
+            playbackBackAction(showPauseOverlay = false, showContinuePrompt = true, controlsVisible = true),
+        )
+    }
+
+    @Test
     fun `music maps D-pad directions and transport buttons to seeking`() {
         assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT))
         assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT))

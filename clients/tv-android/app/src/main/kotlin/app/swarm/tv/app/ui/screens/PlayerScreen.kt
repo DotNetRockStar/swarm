@@ -174,6 +174,12 @@ internal enum class RemotePlaybackAction {
     SHOW_CONTROLS,
 }
 
+internal enum class PlaybackBackAction {
+    EXIT,
+    HIDE_CONTROLS,
+    PAUSE,
+}
+
 /** Fire TV remotes send these as activity key events, rather than invoking
  * Media3 commands out of band. Keep the mapping independent of focus so the
  * transport buttons still work while a Compose pause/continue overlay owns
@@ -195,6 +201,37 @@ internal fun remotePlaybackAction(keyCode: Int): RemotePlaybackAction? = when (k
     KeyEvent.KEYCODE_MEDIA_TOP_MENU,
     -> RemotePlaybackAction.SHOW_CONTROLS
     else -> null
+}
+
+/** D-pad shortcuts belong to the bare playing video surface. Once playback
+ * is paused, Compose owns the keys for pause-screen navigation; once Media3's
+ * controller is visible, it owns them for moving between and activating its
+ * controls. */
+internal fun videoSurfacePlaybackAction(
+    keyCode: Int,
+    playWhenReady: Boolean,
+    controlsVisible: Boolean,
+): RemotePlaybackAction? {
+    if (!playWhenReady || controlsVisible) return null
+    return when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_LEFT -> RemotePlaybackAction.SEEK_BACK
+        KeyEvent.KEYCODE_DPAD_RIGHT -> RemotePlaybackAction.SEEK_FORWARD
+        KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_ENTER,
+        KeyEvent.KEYCODE_NUMPAD_ENTER,
+        -> RemotePlaybackAction.PAUSE
+        else -> null
+    }
+}
+
+internal fun playbackBackAction(
+    showPauseOverlay: Boolean,
+    showContinuePrompt: Boolean,
+    controlsVisible: Boolean,
+): PlaybackBackAction = when {
+    showPauseOverlay || showContinuePrompt -> PlaybackBackAction.EXIT
+    controlsVisible -> PlaybackBackAction.HIDE_CONTROLS
+    else -> PlaybackBackAction.PAUSE
 }
 
 private data class PlaybackPlayerConfig(
@@ -512,17 +549,7 @@ fun PlayerScreen(
     var lastVideoHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
-    // First Back pauses instead of leaving outright — a real complaint from
-    // live use, since the old unconditional-exit behavior threw away the
-    // playhead's context the instant Back was pressed. Once paused (or if
-    // playback had already ended into the Continue prompt), Back falls
-    // through to the normal exit, which always returns to [UiState.Player
-    // .previous] — the exact screen/card Play was invoked from.
-    BackHandler(
-        onBack = {
-            if (showPauseOverlay || showContinuePrompt) onBack() else player.pause()
-        },
-    )
+    var consumeSurfaceSelectKeyUp by remember(sessionId) { mutableStateOf(false) }
     var offeredIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
     var dismissedIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
     // Netflix-style "which section is this" label — Recap/Credits get a
@@ -616,6 +643,27 @@ fun PlayerScreen(
             applySwarmPlaybackControlColors(this)
         }
     }
+    // Back dismisses the native playback controls before it affects the
+    // video. From the bare playing surface it pauses; from the Compose pause
+    // or Continue overlay it exits to the screen/card playback came from.
+    BackHandler(
+        onBack = {
+            when (
+                playbackBackAction(
+                    showPauseOverlay = showPauseOverlay,
+                    showContinuePrompt = showContinuePrompt,
+                    controlsVisible = playerView.isControllerFullyVisible,
+                )
+            ) {
+                PlaybackBackAction.EXIT -> onBack()
+                PlaybackBackAction.HIDE_CONTROLS -> {
+                    playerView.hideController()
+                    playerView.requestFocus()
+                }
+                PlaybackBackAction.PAUSE -> player.pause()
+            }
+        },
+    )
     val skipIntroFocusRequester = remember(sessionId) { FocusRequester() }
     LaunchedEffect(playerView, showPauseOverlay, showContinuePrompt, offeredIntro) {
         if (offeredIntro != null && !showPauseOverlay && !showContinuePrompt) {
@@ -785,18 +833,37 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { composeEvent ->
                 val event = composeEvent.nativeKeyEvent
-                // D-pad left/right seek directly during active playback,
-                // ahead of Media3's own controller (which would otherwise
-                // treat them as focus-navigation between its transport
-                // buttons) — real feedback from live use asking for an
-                // immediate rewind/fast-forward gesture that doesn't first
-                // require bringing up the controller bar.
-                if (!showPauseOverlay && !showContinuePrompt &&
-                    (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
-                ) {
+                val isSelectKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                    event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                    event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                // pause() updates playWhenReady immediately, before this
+                // gesture's key-up arrives. Remember the matching key-up so
+                // it cannot land on the newly focused Resume button and
+                // instantly undo the pause.
+                if (isSelectKey && consumeSurfaceSelectKeyUp) {
+                    if (event.action == KeyEvent.ACTION_UP) consumeSurfaceSelectKeyUp = false
+                    return@onPreviewKeyEvent true
+                }
+                val surfaceAction = videoSurfacePlaybackAction(
+                    keyCode = event.keyCode,
+                    playWhenReady = player.playWhenReady && !showPauseOverlay && !showContinuePrompt,
+                    controlsVisible = playerView.isControllerFullyVisible,
+                )
+                if (surfaceAction != null) {
                     if (event.action == KeyEvent.ACTION_DOWN) {
-                        val deltaMs = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) PLAYBACK_SEEK_STEP_MS else -PLAYBACK_SEEK_STEP_MS
-                        controllerPlayer.seekTo((controllerPlayer.currentPosition + deltaMs).coerceAtLeast(0L))
+                        when (surfaceAction) {
+                            RemotePlaybackAction.SEEK_FORWARD -> controllerPlayer.seekTo(
+                                controllerPlayer.currentPosition + PLAYBACK_SEEK_STEP_MS,
+                            )
+                            RemotePlaybackAction.SEEK_BACK -> controllerPlayer.seekTo(
+                                (controllerPlayer.currentPosition - PLAYBACK_SEEK_STEP_MS).coerceAtLeast(0L),
+                            )
+                            RemotePlaybackAction.PAUSE -> {
+                                consumeSurfaceSelectKeyUp = true
+                                player.pause()
+                            }
+                            else -> Unit
+                        }
                     }
                     return@onPreviewKeyEvent true
                 }
