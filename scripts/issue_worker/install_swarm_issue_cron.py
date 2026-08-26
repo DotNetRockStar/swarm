@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Run the SWARM issue worker continuously in the foreground.
+
+The historical filename says "cron", but this is a foreground scheduler. It
+also removes the legacy crontab block installed by older SWARM versions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import datetime as dt
+import getpass
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
+
+
+ISSUE_COMPLETED_EXIT_CODE = 10
+QUOTA_PAUSED_EXIT_CODE = 11
+BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
+END_MARKER = "# END SWARM ISSUE WORKER"
+
+
+def timestamp() -> str:
+    return dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+
+
+def env_value(name: str, fallback: str) -> str:
+    return os.environ.get(name, fallback)
+
+
+def positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+class Runner:
+    def __init__(self, args: argparse.Namespace, worker_arguments: Sequence[str]) -> None:
+        self.args = args
+        self.worker_arguments = list(worker_arguments)
+        self.script_dir = Path(__file__).resolve().parent
+        self.state_dir = Path(args.state_dir).expanduser().resolve()
+        self.log_path = (
+            Path(args.log_path).expanduser().resolve()
+            if args.log_path
+            else self.state_dir / "cron.log"
+        )
+        self.lock_dir = self.state_dir / "runner.lock"
+        self.worker = Path(args.worker).expanduser().resolve()
+        self.snapshot = self.state_dir / "swarm_issue_worker.snapshot.py"
+        self.acquired_lock = False
+        self.stop_requested = False
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, message: str) -> None:
+        line = f"[{timestamp()}] {message}"
+        print(line, flush=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+
+    def remove_legacy_cron(self) -> None:
+        if not self.args.crontab_bin:
+            return
+        current = subprocess.run(
+            [self.args.crontab_bin, "-l"], text=True, capture_output=True, check=False
+        ).stdout
+        if BEGIN_MARKER not in current.splitlines():
+            return
+        filtered: list[str] = []
+        removing = False
+        for line in current.splitlines():
+            if line == BEGIN_MARKER:
+                removing = True
+                continue
+            if line == END_MARKER:
+                removing = False
+                continue
+            if not removing:
+                filtered.append(line)
+        payload = "\n".join(filtered) + ("\n" if filtered else "")
+        result = subprocess.run(
+            [self.args.crontab_bin, "-"], input=payload, text=True, capture_output=True, check=False
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Could not remove legacy crontab block: {result.stderr.strip()}")
+        self.log("Removed the legacy SWARM issue worker crontab entry.")
+
+    def acquire_lock(self) -> bool:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.lock_dir.mkdir()
+        except FileExistsError:
+            pid_path = self.lock_dir / "pid"
+            try:
+                owner = int(pid_path.read_text().strip())
+                os.kill(owner, 0)
+            except (OSError, ValueError):
+                pid_path.unlink(missing_ok=True)
+                try:
+                    self.lock_dir.rmdir()
+                except OSError:
+                    pass
+                try:
+                    self.lock_dir.mkdir()
+                except FileExistsError:
+                    self.log("Another foreground runner acquired the lock during stale-lock recovery; exiting.")
+                    return False
+            else:
+                self.log(f"Another foreground SWARM issue runner is already active as pid {owner}; exiting.")
+                return False
+        (self.lock_dir / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        self.acquired_lock = True
+        return True
+
+    def release_lock(self) -> None:
+        if not self.acquired_lock:
+            return
+        (self.lock_dir / "pid").unlink(missing_ok=True)
+        try:
+            self.lock_dir.rmdir()
+        except OSError:
+            pass
+        self.acquired_lock = False
+
+    def transcode_active(self) -> bool:
+        if not self.args.pgrep_bin:
+            return False
+        result = subprocess.run(
+            [
+                self.args.pgrep_bin,
+                "-f",
+                self.args.transcode_pattern,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def prune_cargo_target(self) -> None:
+        target = (
+            Path(self.args.cargo_target_dir).expanduser().resolve()
+            if self.args.cargo_target_dir
+            else Path(self.args.repo_dir).expanduser().resolve() / "target"
+        )
+        if not target.is_dir():
+            return
+        size = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
+        limit = self.args.cargo_target_max_gib * 1024**3
+        if size <= limit:
+            return
+        for process in ("cargo", "rustc"):
+            if self.args.pgrep_bin and subprocess.run(
+                [self.args.pgrep_bin, "-x", process],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode == 0:
+                self.log(
+                    f"Cargo target exceeds {self.args.cargo_target_max_gib} GiB, but a Rust build is active; cleanup deferred."
+                )
+                return
+        if not self.args.cargo_bin:
+            self.log(
+                f"Cargo target exceeds {self.args.cargo_target_max_gib} GiB, but cargo is unavailable; cleanup deferred."
+            )
+            return
+        self.log(
+            f"Cargo target exceeds {self.args.cargo_target_max_gib} GiB; removing generated build artifacts."
+        )
+        result = subprocess.run([self.args.cargo_bin, "clean"], cwd=self.args.repo_dir, check=False)
+        self.log(
+            "Cargo build-artifact cleanup completed."
+            if result.returncode == 0
+            else "Warning: Cargo build-artifact cleanup failed; it will be retried later."
+        )
+
+    def run_worker(self, smtp_password: str) -> int:
+        shutil.copy2(self.worker, self.snapshot)
+        environment = os.environ.copy()
+        environment["SWARM_SMTP_PASSWORD"] = smtp_password
+        environment["SWARM_REPO_DIR"] = str(Path(self.args.repo_dir).expanduser().resolve())
+        environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(self.state_dir)
+        environment["SWARM_ISSUE_WORKER_SCRIPT_DIR"] = str(self.script_dir)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(self.script_dir), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        command = [self.args.python_bin, str(self.snapshot), *self.worker_arguments]
+        process = subprocess.Popen(
+            command,
+            cwd=self.args.repo_dir,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout
+        with process.stdout, self.log_path.open("a", encoding="utf-8") as log_stream:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log_stream.write(line)
+                log_stream.flush()
+        return process.wait()
+
+    def sleep(self) -> None:
+        deadline = time.monotonic() + self.args.interval_seconds
+        while not self.stop_requested and time.monotonic() < deadline:
+            time.sleep(min(1, deadline - time.monotonic()))
+
+    def run(self) -> int:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.remove_legacy_cron()
+        if self.args.remove:
+            self.log("The SWARM issue worker is not running from this terminal.")
+            return 0
+        if self.args.check_transcode_active:
+            return 0 if self.transcode_active() else 1
+        if not self.worker.is_file():
+            raise RuntimeError(f"Worker was not found: {self.worker}")
+        if not self.acquire_lock():
+            return 0
+        atexit.register(self.release_lock)
+
+        def stop(_signum: int, _frame: object) -> None:
+            self.stop_requested = True
+
+        signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGTERM, stop)
+        smtp_password = os.environ.pop("SWARM_SMTP_PASSWORD", "")
+        if not self.args.no_email and not smtp_password:
+            if not sys.stdin.isatty():
+                raise RuntimeError("Run in a terminal so the SMTP password can be entered securely, or use --no-email")
+            smtp_password = getpass.getpass("SMTP password: ")
+        if not self.args.no_email and not smtp_password:
+            raise RuntimeError("An SMTP password is required unless --no-email is used")
+        if self.args.no_email and "--no-email" not in self.worker_arguments:
+            self.worker_arguments.append("--no-email")
+
+        self.log(
+            "Running the SWARM issue worker in this terminal. Queued issues run back to back; "
+            f"idle checks occur every {self.args.interval_seconds} seconds."
+        )
+        self.log(f"Live output is also appended to {self.log_path}. Press Ctrl+C to stop.")
+        try:
+            while not self.stop_requested:
+                self.log("Starting a worker run.")
+                if self.transcode_active():
+                    self.log(
+                        f"A SWARM media transcode is active; deferring AI and build work for "
+                        f"{self.args.interval_seconds} seconds."
+                    )
+                    if self.args.once:
+                        return 0
+                    self.sleep()
+                    continue
+                status = self.run_worker(smtp_password)
+                self.prune_cargo_target()
+                if status == ISSUE_COMPLETED_EXIT_CODE:
+                    self.log("Issue completed successfully; checking the queue again immediately.")
+                    if self.args.once:
+                        return status
+                    continue
+                if status == QUOTA_PAUSED_EXIT_CODE:
+                    self.log(
+                        "The active AI session was safely shelved for usage; checking immediately for another ready issue."
+                    )
+                    if self.args.once:
+                        return status
+                    continue
+                if status:
+                    self.log(
+                        f"Worker exited with status {status}; it will retry after {self.args.interval_seconds} seconds."
+                    )
+                else:
+                    self.log(
+                        f"No issue can be worked now; checking again in {self.args.interval_seconds} seconds."
+                    )
+                if self.args.once:
+                    return status
+                self.sleep()
+        finally:
+            self.release_lock()
+        self.log("Ctrl+C received; stopped the SWARM issue worker.")
+        return 130 if self.stop_requested else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    script_dir = Path(__file__).resolve().parent
+    home = Path.home()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--remove", action="store_true")
+    parser.add_argument("--check-transcode-active", action="store_true")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--no-email", action="store_true")
+    parser.add_argument(
+        "--interval-seconds",
+        type=positive_integer,
+        default=positive_integer(env_value("SWARM_ISSUE_WORKER_INTERVAL_SECONDS", "600")),
+    )
+    parser.add_argument(
+        "--cargo-target-max-gib",
+        type=positive_integer,
+        default=positive_integer(env_value("SWARM_CARGO_TARGET_MAX_GIB", "5")),
+    )
+    parser.add_argument("--repo-dir", default=env_value("SWARM_REPO_DIR", str(script_dir.parent.parent)))
+    parser.add_argument(
+        "--state-dir",
+        default=env_value("SWARM_ISSUE_WORKER_STATE_DIR", str(home / ".local/state/swarm-issue-worker")),
+    )
+    parser.add_argument(
+        "--worker", default=env_value("SWARM_ISSUE_WORKER_PATH", str(script_dir / "swarm_issue_worker.py"))
+    )
+    parser.add_argument("--python-bin", default=env_value("PYTHON_BIN", shutil.which("python3") or "python3"))
+    parser.add_argument("--crontab-bin", default=env_value("CRONTAB_BIN", shutil.which("crontab") or ""))
+    parser.add_argument("--pgrep-bin", default=env_value("PGREP_BIN", shutil.which("pgrep") or ""))
+    parser.add_argument("--cargo-bin", default=env_value("CARGO_BIN", shutil.which("cargo") or ""))
+    parser.add_argument("--log-path", default=env_value("SWARM_ISSUE_WORKER_LOG_PATH", ""))
+    parser.add_argument("--cargo-target-dir", default=env_value("SWARM_CARGO_TARGET_DIR", ""))
+    parser.add_argument(
+        "--transcode-pattern",
+        default=env_value(
+            "SWARM_TRANSCODE_PROCESS_PATTERN",
+            r"[f]fmpeg .* -f hls .*app[.]swarm[.]server/transcodes/",
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args, worker_arguments = parser.parse_known_args(argv)
+    if args.remove and args.check_transcode_active:
+        parser.error("--remove and --check-transcode-active are mutually exclusive")
+    return Runner(args, worker_arguments).run()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)

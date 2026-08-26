@@ -1,0 +1,16 @@
+{
+  "claude": {
+    "app_id": 123456,
+    "installation_id": 23456789,
+    "private_key_path": "/Users/your-name/.config/swarm/swarm-claude-bot.pem",
+    "bot_login": "swarm-claude-bot[bot]",
+    "bot_name": "Swarm Claude Bot"
+  },
+  "codex": {
+    "app_id": 345678,
+    "installation_id": 45678901,
+    "private_key_path": "/Users/your-name/.config/swarm/swarm-codex-bot.pem",
+    "bot_login": "swarm-codex-bot[bot]",
+    "bot_name": "Swarm Codex Bot"
+  }
+}
