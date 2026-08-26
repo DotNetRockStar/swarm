@@ -94,12 +94,54 @@ follow-up comment on the same issue and, if the earlier title's totals are
 now misleading, `gh issue edit --title`; don't leave a known-wrong report as
 the only artifact.
 
-## Preconditions this suite deliberately does not automate
+## What's required to run this, and what's automated vs. manual
 
-- The local media server must already be running (`./scripts/run_now.sh`) —
-  this suite only health-checks `http://127.0.0.1:$SWARM_STUN_PORT/health`
-  and never starts/stops/restarts it, since it's GUI-owned and may already
-  be serving real traffic (see `swarm-local-testing`).
-- Each Fire TV must have ADB debugging enabled and already be
-  authorized/paired at least once by a human, for the same reasons
-  `deploy_fire_tv.sh` and `swarm-real-device-debugging` document.
+Everything below is either already automated by the suite or is a one-time
+human step that can't be safely automated — there is no third category of
+"manual today, could be scripted later but nobody's gotten to it," except
+where noted.
+
+**Automated by the suite, every run, no human involved:**
+
+- Discovering every reachable Amazon Fire TV on the LAN (already-connected
+  `adb` devices first, then a ping/nc scan) and fanning out across all of
+  them — see "Fan-out discovery" above.
+- Waking a discovered TV if it's asleep (`dumpsys power` shows
+  `mWakefulness` other than `Awake` → a single `KEYCODE_WAKEUP` keyevent).
+  This is just turning the screen on, not UI navigation, so it carries none
+  of the real-hardware risk documented below for pairing.
+- Building, installing (in place, no wipe), force-stopping, and launching
+  the debug client on every discovered device.
+- Waiting for and reading the automatic LAN-reconnect/catalog-refresh
+  result from logcat, with no D-pad input sent.
+- Compiling and filing the findings report to GitHub.
+
+**Genuinely manual, one-time per TV, and not going to be automated:**
+
+- **ADB debugging must be enabled on the TV, and the very first connection
+  from this Mac must be authorized by tapping "Allow" on the TV's own
+  on-screen trust prompt.** This is an Android security control, not a
+  workflow gap — `adb` is designed so a computer can't grant itself
+  debugging access to a device without a human physically confirming it on
+  that device. There's no `adb` command that accepts this prompt from the
+  connecting side. Do this once per TV (`deploy_fire_tv.sh` will also
+  print this instruction the first time it hits an unauthorized device);
+  every run after that reconnects automatically.
+- **Each TV must be paired with the local media server once, by hand,
+  through the app's own D-pad UI** (Swarm page → enter the passcode the
+  media server's dashboard displays) before `lan_closed_loop_catalog` can
+  produce PASS/FAIL instead of SKIP. The suite deliberately never drives
+  this itself: it would mean sending blind D-pad input on a device signed
+  into a real Amazon account, and a stray `BACK` on this app's root screen
+  has landed on a live Prime Video subscription checkout screen on real
+  hardware (see `swarm-real-device-debugging`). Until a TV is paired, its
+  `lan_closed_loop_catalog` row will keep reporting SKIP — that's expected,
+  not a bug, and is exactly what the evidence-based reporting above is
+  designed to surface rather than hide.
+- **The local media server must already be running** (`./scripts/run_now.sh`)
+  before invoking the suite. This suite only health-checks
+  `http://127.0.0.1:$SWARM_STUN_PORT/health` and never starts, stops, or
+  restarts it, since the server's lifecycle is GUI-owned and it may already
+  be serving real traffic (see `swarm-local-testing`). Starting the GUI
+  itself isn't something an unattended script should do on someone's
+  machine on its own initiative.

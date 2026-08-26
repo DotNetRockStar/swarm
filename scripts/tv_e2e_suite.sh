@@ -184,6 +184,17 @@ else
             continue
         fi
 
+        # Wake the TV if it's asleep. This is a single KEYCODE_WAKEUP, not
+        # UI navigation, so it carries none of the real-hardware risk that
+        # keeps this suite from driving first-time D-pad pairing (see
+        # swarm-real-device-debugging) — it only turns the screen on.
+        WAKEFULNESS="$("$ADB" -s "$SERIAL" shell dumpsys power </dev/null 2>/dev/null | grep -m1 'mWakefulness=' | sed -E 's/.*mWakefulness=([A-Za-z]+).*/\1/')"
+        if [ "$WAKEFULNESS" != "Awake" ]; then
+            echo "==> [$NAME] device is asleep (mWakefulness=${WAKEFULNESS:-unknown}); waking it ..."
+            "$ADB" -s "$SERIAL" shell input keyevent KEYCODE_WAKEUP </dev/null >/dev/null 2>&1 || true
+            sleep 1
+        fi
+
         if [ "$SKIP_INSTALL" -eq 0 ]; then
             echo "==> [$NAME] installing (in place, no wipe) ..."
             if ! (cd clients/tv-android && ANDROID_SERIAL="$SERIAL" ./gradlew :app:installDebug); then
