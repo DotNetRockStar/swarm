@@ -472,7 +472,9 @@ pub struct Settings {
     #[serde(default)]
     pub opensubtitles_api_key: Option<String>,
     /// Applies the measured upload budget to internet playback. LAN
-    /// playback always bypasses it regardless of this setting.
+    /// playback always bypasses it regardless of this setting. Missing-field
+    /// (pre-toggle settings.json) default only — see the `Default` impl
+    /// below for the brand-new-install default, which deliberately differs.
     #[serde(default = "default_streaming_upload_budget_enabled")]
     pub streaming_upload_budget_enabled: bool,
     /// Copy requested artwork into app data before serving it, avoiding
@@ -537,6 +539,13 @@ fn default_auto_library_watch_enabled() -> bool {
 // that simply predates this field (going through serde's per-field
 // `#[serde(default = "default_mcp_port")]`) — a derived `Default` would
 // silently disagree (`u16::default()` is `0`, not `default_mcp_port()`).
+//
+// `streaming_upload_budget_enabled` is the deliberate exception: a
+// brand-new install has never run unthrottled, so it starts off (opt-in)
+// rather than inheriting the `true` that only exists to keep upgrading
+// installs' already-running behavior unchanged — see
+// `default_streaming_upload_budget_enabled` and
+// `older_settings_keep_the_upload_budget_enabled`.
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -544,7 +553,7 @@ impl Default for Settings {
             media_root: None,
             tmdb_api_key: None,
             opensubtitles_api_key: None,
-            streaming_upload_budget_enabled: true,
+            streaming_upload_budget_enabled: false,
             artwork_disk_cache_enabled: false,
             local_transcription_enabled: false,
             transcription_pause_while_streaming: true,
@@ -618,6 +627,15 @@ mod tests {
         assert_eq!(loaded.mcp_access_token, None);
         assert!(loaded.auto_library_watch_enabled);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_install_defaults_the_upload_budget_off() {
+        let dir =
+            std::env::temp_dir().join(format!("swarm-settings-test-{}", rand::random::<u64>()));
+        // No settings.json written at all — a genuinely first-ever run.
+        let loaded = load(&dir);
+        assert!(!loaded.streaming_upload_budget_enabled);
     }
 
     #[test]

@@ -297,7 +297,6 @@ class MainActivity : ComponentActivity() {
                         onRecoverExpiredPlaybackSession = viewModel::recoverExpiredPlaybackSession,
                         onServerOffline = viewModel::reportServerOffline,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
-                        onPlaybackQualityChanged = viewModel::reportPlaybackQualityChanged,
                         onPlaybackBuffering = viewModel::reportPlaybackBuffering,
                         onOpenSettings = viewModel::openSettings,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
@@ -392,7 +391,6 @@ private fun SwarmApp(
     onRecoverExpiredPlaybackSession: (sessionId: String, positionSecs: Double, context: String?) -> Unit,
     onServerOffline: (sessionId: String, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
-    onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
     onPlaybackBuffering: () -> Unit,
     onOpenSettings: () -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
@@ -894,6 +892,7 @@ private fun SwarmApp(
                         artworkUrl = artworkUrl,
                         hasNext = state.nextEntry != null,
                         nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
+                        nextArtworkUrl = state.nextEntry?.let(artworkUrl),
                         preloadedNext = state.preloadedNext,
                         startPaused = state.startPaused,
                         onBack = onStopPlayback,
@@ -913,7 +912,6 @@ private fun SwarmApp(
                         },
                         onServerOffline = { context -> onServerOffline(state.sessionId, context) },
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
-                        onPlaybackQualityChanged = onPlaybackQualityChanged,
                         onPlaybackBuffering = onPlaybackBuffering,
                     )
                 }

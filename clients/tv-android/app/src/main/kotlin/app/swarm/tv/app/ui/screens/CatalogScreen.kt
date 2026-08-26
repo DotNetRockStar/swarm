@@ -141,6 +141,12 @@ private const val MAX_CONTINUE_WATCHING = 6
  * its own row — fewer reads as a scraping gap, not a real category. */
 private const val MIN_GENRE_SHELF_SIZE = 6
 
+/** How many genre sub-shelves each kind (Movies/Shows/Music) shows on the
+ * browse page — trimmed down from 5 (the previous cap) per live feedback
+ * asking for a shorter, less repetitive scroll to reach the actual
+ * Movies/Shows/Music rows. */
+private const val MAX_GENRE_SHELVES = 3
+
 private enum class QuickAccessKind { MOVIE, EPISODE, SHOW }
 
 private data class QuickAccessItem(
@@ -248,6 +254,18 @@ internal fun CatalogScreen(
     var likedOnly by remember { mutableStateOf(initialBrowseState.likedOnly) }
     var filterRailExpanded by remember { mutableStateOf(false) }
     var filterRailHasFocus by remember { mutableStateOf(false) }
+    // Every return trip to this screen (from a detail screen, a "Browse
+    // All" shelf browsed without picking anything, anywhere) recomposes
+    // CatalogScreen fresh, and Compose can briefly hand initial D-pad focus
+    // to the filter rail — the first focusable thing in layout order —
+    // before content (a restored card, or the normal first-card fallback)
+    // has actually been composed/focused. Real bug seen live: that
+    // transient default landed on the rail and [FilterRail]'s own onExpand
+    // treated it as an intentional LEFT press, so the rail was left
+    // expanded and focused after simply going back. Suppress onExpand
+    // until content has genuinely taken focus at least once per mount;
+    // after that, a real LEFT press should expand it normally.
+    var contentHasSettledFocus by remember { mutableStateOf(false) }
     var automaticInitialFocusEnabled by remember { mutableStateOf(true) }
     var initialSelectionRestorePending by remember(
         initialFocusMovieKey,
@@ -363,14 +381,12 @@ internal fun CatalogScreen(
     Row(modifier = Modifier.fillMaxSize()) {
         FilterRail(
             expanded = filterRailExpanded,
-            // On return from a detail screen Compose can briefly assign
-            // focus to the first focusable item in layout order (the rail)
-            // before the off-screen selected card has been composed. Do not
-            // interpret that transient focus as an intentional LEFT press;
-            // doing so expands the rail and cancels the card restoration.
+            // See contentHasSettledFocus's own doc comment above: don't
+            // treat the transient default-focus-on-mount as an intentional
+            // LEFT press until content has focused at least once.
             onExpand = {
                 filterRailHasFocus = true
-                if (!initialSelectionRestorePending) filterRailExpanded = true
+                if (!initialSelectionRestorePending && contentHasSettledFocus) filterRailExpanded = true
             },
             firstFocusRequester = filterRailFocusRequester,
             onLeave = leaveFilterRail,
@@ -405,6 +421,7 @@ internal fun CatalogScreen(
                         filterRailHasFocus = false
                         initialSelectionRestorePending = false
                         filterRailExpanded = false
+                        contentHasSettledFocus = true
                     }
                 },
         ) {
@@ -945,7 +962,7 @@ private fun CatalogControls(
     }
 }
 
-/** Ranks [entries]' genres by how many entries in this specific kind carry each one (descending), keeps only genres whose *grouped* asset count reaches [MIN_GENRE_SHELF_SIZE] (a scraping gap, not a real category, otherwise), takes the top 5 of those (or fewer, if fewer qualify), and groups each genre's matching subset via [group] — [ShowGroup]/[ArtistGroup] for Shows/Music, the identity function for the already-flat Movies list. */
+/** Ranks [entries]' genres by how many entries in this specific kind carry each one (descending), keeps only genres whose *grouped* asset count reaches [MIN_GENRE_SHELF_SIZE] (a scraping gap, not a real category, otherwise), takes the top [MAX_GENRE_SHELVES] of those (or fewer, if fewer qualify), and groups each genre's matching subset via [group] — [ShowGroup]/[ArtistGroup] for Shows/Music, the identity function for the already-flat Movies list. */
 private fun <T> topGenreShelves(entries: List<MergedEntry>, group: (List<MergedEntry>) -> List<T>): List<Pair<String, List<T>>> =
     entries.flatMap { it.entry.genres }
         .groupingBy { it }
@@ -954,7 +971,7 @@ private fun <T> topGenreShelves(entries: List<MergedEntry>, group: (List<MergedE
         .sortedByDescending { it.value }
         .map { (genre, _) -> genre to group(entries.filter { it.entry.genres.contains(genre) }) }
         .filter { (_, grouped) -> grouped.size >= MIN_GENRE_SHELF_SIZE }
-        .take(5)
+        .take(MAX_GENRE_SHELVES)
 
 /** Highest rated/reviewed first within each asset category — falls back to
  * `-1.0` for anything IntroDB/TMDb never scored, so unrated titles sink to
@@ -1888,6 +1905,7 @@ private fun GroupCard(
                             shouldPlay = isPreviewExpanded,
                             onFinished = onPreviewFinished,
                             modifier = Modifier.fillMaxSize().alpha(previewAlpha),
+                            hasVideo = previewEntry?.entry?.kind != MediaKind.TRACK,
                         )
                     }
                 }

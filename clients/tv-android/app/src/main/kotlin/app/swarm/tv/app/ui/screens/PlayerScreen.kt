@@ -20,10 +20,10 @@
  * Continue/autoplay: when [hasNext] is true and playback reaches
  * `Player.STATE_ENDED` naturally (not on back-press/manual exit — those
  * still go straight through [onBack] as before), a brief overlay offers
- * to play [nextTitle] next, auto-confirming after a few seconds unless
- * cancelled. Manual-exit resume/position-save is untouched either way —
- * [onDispose] always fires the same report regardless of which path led
- * to disposal.
+ * to play [nextTitle] next (with [nextArtworkUrl]'s box art above the
+ * button), auto-confirming after a few seconds unless cancelled.
+ * Manual-exit resume/position-save is untouched either way — [onDispose]
+ * always fires the same report regardless of which path led to disposal.
  */
 package app.swarm.tv.app.ui.screens
 
@@ -325,9 +325,9 @@ private const val LOOPBACK_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 1_000
 
 // Media3's own default (AdaptiveTrackSelection.DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS
 // = 10_000) let quality bounce back up after only ten seconds of recovered
-// bandwidth, which was spamming onPlaybackQualityChanged (#67) whenever the
-// estimate hovered near a rendition boundary. Widening the hold to 30s only
-// gates *increases* — a further downgrade is never delayed, since that path
+// bandwidth, rapidly reselecting renditions whenever the estimate hovered
+// near a rendition boundary (#67). Widening the hold to 30s only gates
+// *increases* — a further downgrade is never delayed, since that path
 // reacts to the current bandwidth estimate rather than this cooldown.
 private const val QUALITY_INCREASE_HOLD_MS = 30_000
 
@@ -500,6 +500,7 @@ fun PlayerScreen(
     artworkUrl: (MergedEntry) -> String?,
     hasNext: Boolean,
     nextTitle: String?,
+    nextArtworkUrl: String?,
     preloadedNext: PreparedEpisodePlayback?,
     /** Opens straight into [PauseOverlay] instead of autoplaying — set for
      * "Continue Watching" taps, so the viewer sees where they left off (cast,
@@ -515,7 +516,6 @@ fun PlayerScreen(
     onPlaybackSessionExpired: (positionSecs: Double, context: String?) -> Unit,
     onServerOffline: (context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
-    onPlaybackQualityChanged: (downgraded: Boolean) -> Unit,
     onPlaybackBuffering: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -543,7 +543,6 @@ fun PlayerScreen(
     }
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
     var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
-    var lastVideoHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
     var serverOffline by remember(sessionId) { mutableStateOf(false) }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
     var consumeSurfaceSelectKeyUp by remember(sessionId) { mutableStateOf(false) }
@@ -738,22 +737,6 @@ fun PlayerScreen(
                 if (player.playbackState == Player.STATE_READY) isLoading = false
             }
 
-            // Only fires more than once per session for an adaptive HLS
-            // ladder (see TranscodeManager's multi-rendition master
-            // playlist) — a direct-play or single-rendition source selects
-            // its one format once and never triggers this again, so
-            // playbackQualityChange's null-on-first-format guard keeps this
-            // silent for those.
-            override fun onVideoInputFormatChanged(
-                eventTime: AnalyticsListener.EventTime,
-                format: Format,
-                decoderReuseEvaluation: DecoderReuseEvaluation?,
-            ) {
-                val newHeight = format.height
-                if (newHeight <= 0) return
-                playbackQualityChange(lastVideoHeight, newHeight)?.let(onPlaybackQualityChanged)
-                lastVideoHeight = newHeight
-            }
         }
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -943,6 +926,7 @@ fun PlayerScreen(
         if (showContinuePrompt) {
             ContinueOverlay(
                 nextTitle = nextTitle,
+                nextArtworkUrl = nextArtworkUrl,
                 onPlayNow = { showContinuePrompt = false; onContinue() },
                 onCancel = { showContinuePrompt = false; onBack() },
             )
@@ -1292,22 +1276,6 @@ private fun durationLabel(durationSecs: Double): String {
 internal fun shouldRecoverExpiredPlaybackSession(errorCode: Int, responseCode: Int?): Boolean =
     errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && responseCode == 404
 
-/** ExoPlayer's adaptive track selector free-switches between the HLS
- * renditions `TranscodeManager` laddered server-side as its own bandwidth
- * estimate rises and falls — this only classifies the resulting
- * [AnalyticsListener.onVideoInputFormatChanged] height change so the caller
- * can notify the viewer. `null` for the first format of a session (nothing
- * to compare against yet) and for a same-height reselect (audio-only
- * re-muxing, not a quality change). */
-internal fun playbackQualityChange(previousHeight: Int?, newHeight: Int): Boolean? {
-    if (previousHeight == null || previousHeight <= 0 || newHeight <= 0) return null
-    return when {
-        newHeight < previousHeight -> true
-        newHeight > previousHeight -> false
-        else -> null
-    }
-}
-
 /**
  * Gives Media3's stock TV controller an absolute, full-length timeline even
  * when the underlying HLS EVENT playlist currently contains only the first
@@ -1450,7 +1418,7 @@ private fun applySwarmPlaybackControlColors(root: ViewGroup) {
 }
 
 @Composable
-private fun ContinueOverlay(nextTitle: String?, onPlayNow: () -> Unit, onCancel: () -> Unit) {
+private fun ContinueOverlay(nextTitle: String?, nextArtworkUrl: String?, onPlayNow: () -> Unit, onCancel: () -> Unit) {
     var secondsLeft by remember { mutableStateOf(CONTINUE_COUNTDOWN_SECS) }
     LaunchedEffect(Unit) {
         while (secondsLeft > 0) {
@@ -1467,6 +1435,13 @@ private fun ContinueOverlay(nextTitle: String?, onPlayNow: () -> Unit, onCancel:
             Text("Up next", color = SwarmMuted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             Text(nextTitle ?: "Next episode", color = SwarmText, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            ArtworkImage(
+                label = nextTitle ?: "Next episode",
+                placeholderType = "Show",
+                primaryUrl = nextArtworkUrl,
+                modifier = Modifier.width(140.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(4.dp)),
+            )
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(

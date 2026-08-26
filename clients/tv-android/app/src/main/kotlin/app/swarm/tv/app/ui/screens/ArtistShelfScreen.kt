@@ -10,12 +10,10 @@ package app.swarm.tv.app.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -31,15 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
-import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
-import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 
@@ -54,13 +49,16 @@ fun ArtistShelfScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    // Alphabetical, not the rating order the shelf row that opened this
+    // screen sorts by — see [browseAllSortKey].
+    val sortedArtists = remember(artists) { artists.sortedBy { browseAllSortKey(it.artist) } }
     val firstCardFocusRequester = remember { FocusRequester() }
     val gridState = rememberLazyGridState()
-    val focusIndex = remember(artists, initialFocusKey) {
-        initialFocusKey?.let { key -> artists.indexOfFirst { it.artist == key }.takeIf { it >= 0 } } ?: 0
+    val focusIndex = remember(sortedArtists, initialFocusKey) {
+        initialFocusKey?.let { key -> sortedArtists.indexOfFirst { it.artist == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(artists, focusIndex) {
-        if (artists.isNotEmpty()) {
+    LaunchedEffect(sortedArtists, focusIndex) {
+        if (sortedArtists.isNotEmpty()) {
             gridState.scrollToItem(focusIndex)
             withFrameNanos {}
             firstCardFocusRequester.requestFocus()
@@ -68,7 +66,7 @@ fun ArtistShelfScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
-        if (artists.isEmpty()) {
+        if (sortedArtists.isEmpty()) {
             Text("No music in the catalog yet.", color = SwarmMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 40.dp))
         } else {
             // top = 32.dp — see MovieShelfScreen's identical comment on why.
@@ -79,7 +77,7 @@ fun ArtistShelfScreen(
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
-                itemsIndexed(artists) { index, artist ->
+                itemsIndexed(sortedArtists) { index, artist ->
                     val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     val artwork = remember(artist, artworkUrl, artistPhotoUrl) {
                         artist.artworkUrls(artworkUrl, artistPhotoUrl)
@@ -89,18 +87,13 @@ fun ArtistShelfScreen(
                         colors = CardDefaults.colors(containerColor = SwarmSurface),
                         modifier = focusModifier.fillMaxWidth(),
                     ) {
-                        Column(Modifier.padding(16.dp)) {
-                            ArtworkImage(
-                                label = artist.artist,
-                                placeholderType = "Artist",
-                                primaryUrl = artwork.artistPhoto,
-                                fallbackUrl = artwork.albumCoverFallback,
-                                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(8.dp)),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Text(artist.artist, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
-                            Text("${artist.albums.size} album" + if (artist.albums.size == 1) "" else "s", color = SwarmMuted, fontSize = 11.sp)
-                        }
+                        ArtworkImage(
+                            label = artist.artist,
+                            placeholderType = "Artist",
+                            primaryUrl = artwork.artistPhoto,
+                            fallbackUrl = artwork.albumCoverFallback,
+                            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(8.dp)),
+                        )
                     }
                 }
             }

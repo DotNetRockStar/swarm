@@ -53,7 +53,15 @@ internal fun PreviewLoadingIndicator(modifier: Modifier = Modifier) {
 
 /** Inline video preview with its original audio. `Player.stop()` cancels every media request after the
  * preview window; the catalog then fades this layer away and collapses the
- * still-focused card back to its box art. */
+ * still-focused card back to its box art.
+ *
+ * [hasVideo] `false` is the music-track case: there is no video track, so
+ * Media3's `onRenderedFirstFrame` never fires and the loading spinner used
+ * to spin forever even though audio was already playing fine — real bug,
+ * found live. Rather than wait on a signal that never arrives, an
+ * audio-only preview skips the opaque black backing and spinner entirely
+ * and lets the card's own album-cover artwork (already composed underneath
+ * this layer at every call site) show through instead. */
 @OptIn(UnstableApi::class)
 @Composable
 internal fun BrowsePreviewPlayer(
@@ -61,6 +69,7 @@ internal fun BrowsePreviewPlayer(
     shouldPlay: Boolean,
     onFinished: (sessionId: String) -> Unit,
     modifier: Modifier = Modifier,
+    hasVideo: Boolean = true,
 ) {
     val context = LocalContext.current
     var renderedFirstFrame by remember(preview.sessionId) { mutableStateOf(false) }
@@ -139,6 +148,11 @@ internal fun BrowsePreviewPlayer(
     // overlay empty so the card's artwork remains visible instead of replacing
     // it with a black rectangle. A successfully rendered final frame remains.
     if (failedBeforeFirstFrame) return
+
+    // Audio-only: the player above is already driving sound, but there is no
+    // video surface or first frame to wait for, so render nothing and let
+    // the card's own album-cover artwork underneath keep showing.
+    if (!hasVideo) return
 
     Box(modifier = modifier.background(Color.Black).focusProperties { canFocus = false }) {
         AndroidView(

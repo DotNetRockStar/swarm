@@ -13,11 +13,9 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -33,14 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
-import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 
 @Composable
@@ -53,13 +49,18 @@ fun MovieShelfScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    // Alphabetical, not the rating order the shelf row that opened this
+    // screen sorts by — see [browseAllSortKey].
+    val sortedMovies = remember(movies) {
+        movies.sortedBy { browseAllSortKey(it.entry.scrapedTitle ?: it.entry.title) }
+    }
     val firstCardFocusRequester = remember { FocusRequester() }
     val gridState = rememberLazyGridState()
-    val focusIndex = remember(movies, initialFocusKey) {
-        initialFocusKey?.let { key -> movies.indexOfFirst { it.entry.entryKey == key }.takeIf { it >= 0 } } ?: 0
+    val focusIndex = remember(sortedMovies, initialFocusKey) {
+        initialFocusKey?.let { key -> sortedMovies.indexOfFirst { it.entry.entryKey == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(movies, focusIndex) {
-        if (movies.isNotEmpty()) {
+    LaunchedEffect(sortedMovies, focusIndex) {
+        if (sortedMovies.isNotEmpty()) {
             gridState.scrollToItem(focusIndex)
             withFrameNanos {}
             firstCardFocusRequester.requestFocus()
@@ -67,7 +68,7 @@ fun MovieShelfScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
-        if (movies.isEmpty()) {
+        if (sortedMovies.isEmpty()) {
             Text("No movies in the catalog yet.", color = SwarmMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 40.dp))
         } else {
             // top = 32.dp (not the flat 12.dp every other edge gets): without
@@ -85,34 +86,18 @@ fun MovieShelfScreen(
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
                 itemsIndexed(
-                    items = movies,
+                    items = sortedMovies,
                     key = { _, movie -> movie.entry.entryKey },
                     contentType = { _, _ -> "movie" },
                 ) { index, movie ->
                     val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenMovie(movie) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
-                        Column {
-                            ArtworkImage(
-                                label = movie.entry.scrapedTitle ?: movie.entry.title,
-                                placeholderType = "Movie",
-                                primaryUrl = artworkUrl(movie),
-                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                            )
-                            Column(Modifier.padding(14.dp)) {
-                                Text(
-                                    movie.entry.scrapedTitle ?: movie.entry.title,
-                                    color = SwarmText,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    minLines = 2,
-                                    maxLines = 2,
-                                )
-                                movie.entry.year?.let { year ->
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(year.toString(), color = SwarmMuted, fontSize = 11.sp)
-                                }
-                            }
-                        }
+                        ArtworkImage(
+                            label = movie.entry.scrapedTitle ?: movie.entry.title,
+                            placeholderType = "Movie",
+                            primaryUrl = artworkUrl(movie),
+                            modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                        )
                     }
                 }
             }

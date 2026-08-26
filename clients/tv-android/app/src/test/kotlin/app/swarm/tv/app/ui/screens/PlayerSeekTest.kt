@@ -94,23 +94,4 @@ class PlayerSeekTest {
         assertFalse(isServerOfflineLoadError(IOException("malformed media")))
     }
 
-    @Test
-    fun `dropping to a lower HLS rendition is reported as a downgrade`() {
-        assertEquals(true, playbackQualityChange(previousHeight = 1080, newHeight = 480))
-    }
-
-    @Test
-    fun `rising back to a higher HLS rendition is reported as an upgrade`() {
-        assertEquals(false, playbackQualityChange(previousHeight = 480, newHeight = 1080))
-    }
-
-    @Test
-    fun `the first format selected for a session is not a change`() {
-        assertEquals(null, playbackQualityChange(previousHeight = null, newHeight = 1080))
-    }
-
-    @Test
-    fun `reselecting the same rendition height is not a change`() {
-        assertEquals(null, playbackQualityChange(previousHeight = 720, newHeight = 720))
-    }
 }

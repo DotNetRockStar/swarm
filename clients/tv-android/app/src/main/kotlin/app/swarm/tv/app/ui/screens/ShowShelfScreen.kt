@@ -9,12 +9,10 @@ package app.swarm.tv.app.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -30,14 +28,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
-import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
 
@@ -51,13 +47,16 @@ fun ShowShelfScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    // Alphabetical, not the rating order the shelf row that opened this
+    // screen sorts by — see [browseAllSortKey].
+    val sortedShows = remember(shows) { shows.sortedBy { browseAllSortKey(it.show) } }
     val firstCardFocusRequester = remember { FocusRequester() }
     val gridState = rememberLazyGridState()
-    val focusIndex = remember(shows, initialFocusKey) {
-        initialFocusKey?.let { key -> shows.indexOfFirst { it.show == key }.takeIf { it >= 0 } } ?: 0
+    val focusIndex = remember(sortedShows, initialFocusKey) {
+        initialFocusKey?.let { key -> sortedShows.indexOfFirst { it.show == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(shows, focusIndex) {
-        if (shows.isNotEmpty()) {
+    LaunchedEffect(sortedShows, focusIndex) {
+        if (sortedShows.isNotEmpty()) {
             gridState.scrollToItem(focusIndex)
             withFrameNanos {}
             firstCardFocusRequester.requestFocus()
@@ -65,7 +64,7 @@ fun ShowShelfScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp)) {
-        if (shows.isEmpty()) {
+        if (sortedShows.isEmpty()) {
             Text("No shows in the catalog yet.", color = SwarmMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 40.dp))
         } else {
             // top = 32.dp — see MovieShelfScreen's identical comment on why.
@@ -77,26 +76,19 @@ fun ShowShelfScreen(
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 32.dp, bottom = 12.dp),
             ) {
                 itemsIndexed(
-                    items = shows,
+                    items = sortedShows,
                     key = { _, show -> show.show },
                     contentType = { _, _ -> "show" },
                 ) { index, show ->
                     val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
                     val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                     Card(onClick = { onOpenShow(show) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
-                        Column {
-                            ArtworkImage(
-                                label = show.show,
-                                placeholderType = "Show",
-                                primaryUrl = representative?.let(artworkUrl),
-                                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                            )
-                            Column(Modifier.padding(14.dp)) {
-                                Text(show.show, color = SwarmText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2)
-                                Spacer(Modifier.height(6.dp))
-                                Text("${show.seasons.size} season" + if (show.seasons.size == 1) "" else "s", color = SwarmMuted, fontSize = 11.sp)
-                            }
-                        }
+                        ArtworkImage(
+                            label = show.show,
+                            placeholderType = "Show",
+                            primaryUrl = representative?.let(artworkUrl),
+                            modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
+                        )
                     }
                 }
             }
