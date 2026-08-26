@@ -5,6 +5,11 @@ description: Use when the Fire TV client crashes, misbehaves, has unreachable UI
 
 # Debugging real-Fire-TV-only failures
 
+For the automated, repeatable version of "run this against a real Fire TV
+and check what actually happened" — including the fan-out-across-every-TV
+and D-pad-driving-risk reasoning below — see `swarm-closed-loop-tv-testing`
+and its change policy `swarm-e2e-suite-lockdown`.
+
 Real hardware finds bugs nothing else in this repo can: no emulator is
 set up, and every automated test either runs in a JVM (`:core:test`) or
 against real *Rust* subprocesses (`:core:interopTest`) — neither touches

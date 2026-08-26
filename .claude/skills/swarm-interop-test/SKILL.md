@@ -1,6 +1,6 @@
 ---
 name: swarm-interop-test
-description: Use when writing integration tests across the SWARM service, native GUI-owned ServerCore, Rust QUIC stack, or Kotlin TV client. Covers in-process Rust fixtures, real subprocess boundaries, readiness/cleanup, timing traps, and the removed headless media-server fixture.
+description: Use when writing integration tests across the SWARM service, native GUI-owned ServerCore, Rust QUIC stack, or Kotlin TV client. Covers in-process Rust fixtures, real subprocess boundaries, readiness/cleanup, timing traps, and the removed headless media-server fixture. For a real-Fire-TV-hardware closed loop instead of an in-process/subprocess boundary, see swarm-closed-loop-tv-testing.
 ---
 
 # Testing real SWARM interoperability

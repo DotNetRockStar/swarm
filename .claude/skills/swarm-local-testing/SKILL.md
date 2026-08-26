@@ -1,6 +1,6 @@
 ---
 name: swarm-local-testing
-description: Use when manually testing SWARM end to end in the desktop media-server GUI and a real Fire TV. Covers run_now.sh, GUI-owned server lifecycle, managed activation and LAN pairing flows, deploy_fire_tv.sh/logs, LAN URL and VPN pitfalls, persisted state, and debug-only cleartext networking.
+description: Use when manually testing SWARM end to end in the desktop media-server GUI and a real Fire TV. Covers run_now.sh, GUI-owned server lifecycle, managed activation and LAN pairing flows, deploy_fire_tv.sh/logs, LAN URL and VPN pitfalls, persisted state, and debug-only cleartext networking. For the automated, fanned-out version of this same real-hardware loop, see swarm-closed-loop-tv-testing (and its change policy, swarm-e2e-suite-lockdown).
 ---
 
 # Running SWARM locally on a real TV

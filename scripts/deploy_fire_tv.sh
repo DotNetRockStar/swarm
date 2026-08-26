@@ -121,14 +121,20 @@ scan_lan_for_fire_tvs() {
             "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
             continue
         fi
-        manufacturer="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.manufacturer 2>/dev/null | tr -d '\r')"
+        # </dev/null on every `adb shell` call here: without it, `adb shell`
+        # reads from this loop's own input stream (the `<<<` below), so the
+        # first device's shell call silently swallows every remaining IP and
+        # only device #1 is ever reported — confirmed live against 3 real
+        # Fire TVs, all found by the ping/nc scan above but only one
+        # surviving to the manufacturer check without this redirect.
+        manufacturer="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.manufacturer </dev/null 2>/dev/null | tr -d '\r')"
         if [[ "$manufacturer" != *[Aa]mazon* ]]; then
             "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
             continue
         fi
-        name="$("$ADB" -s "$ip:$ADB_PORT" shell settings get global device_name 2>/dev/null | tr -d '\r')"
+        name="$("$ADB" -s "$ip:$ADB_PORT" shell settings get global device_name </dev/null 2>/dev/null | tr -d '\r')"
         if [ -z "$name" ] || [ "$name" = "null" ]; then
-            name="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
+            name="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.model </dev/null 2>/dev/null | tr -d '\r')"
         fi
         printf '%s\t%s\n' "${name:-Fire TV}" "$ip"
         "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
