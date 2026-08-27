@@ -41,10 +41,16 @@ class WorkerTestCase(unittest.TestCase):
         self.git("add", "tracked.txt")
         self.git("commit", "-q", "-m", "base")
         self.base_sha = self.git("rev-parse", "HEAD")
+        self.remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-q", "-u", "origin", "main")
         args = build_parser().parse_args(
             [
                 "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
                 "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "",
+                "--delivery-mode", "local-main", "--no-auto-approve", "--no-auto-merge",
+                "--no-require-bot-auth",
             ]
         )
         self.worker = Worker(Config.from_args(args))
@@ -57,6 +63,17 @@ class WorkerTestCase(unittest.TestCase):
             ["git", "-C", str(self.repo), *args], text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
         ).stdout.strip()
+
+    def pr_worker(self) -> Worker:
+        args = build_parser().parse_args(
+            [
+                "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
+                "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "",
+                "--delivery-mode", "pull-request", "--auto-approve", "--auto-merge",
+                "--no-require-bot-auth",
+            ]
+        )
+        return Worker(Config.from_args(args))
 
     def paused_state(self, issue_number: int = 101) -> dict[str, object]:
         return {
@@ -145,6 +162,148 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(candidate, run_start)
         self.assertEqual(self.worker.read_state()["candidate_sha"], run_start)
 
+    def test_pr_state_exists_before_branch_creation_and_recreates_interrupted_branch(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(401, "Transactional branch", "", [], "https://example.invalid/401")
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        original_git = worker.git
+
+        def interrupt_branch_creation(*arguments: str, **kwargs: object) -> str:
+            if arguments[:2] == ("switch", "-c"):
+                raise RuntimeError("simulated interruption")
+            return original_git(*arguments, **kwargs)
+
+        with mock.patch.object(worker, "git", side_effect=interrupt_branch_creation):
+            with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                worker.prepare_repository()
+        state = worker.read_state()
+        self.assertEqual(state["branch_name"], "swarm/codex/issue-401")
+        self.assertEqual(state["base_sha"], self.git("rev-parse", "main"))
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+
+        run_start, recovery, candidate, dirty = worker.prepare_repository()
+        self.assertTrue(recovery)
+        self.assertFalse(candidate)
+        self.assertFalse(dirty)
+        self.assertEqual(run_start, state["base_sha"])
+        self.assertEqual(self.git("branch", "--show-current"), "swarm/codex/issue-401")
+
+    def test_fresh_pr_branch_fast_forwards_main_before_branching(self) -> None:
+        updater = self.root / "updater"
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", "main", str(self.remote), str(updater)], check=True
+        )
+        subprocess.run(["git", "-C", str(updater), "config", "user.name", "updater"], check=True)
+        subprocess.run(
+            ["git", "-C", str(updater), "config", "user.email", "updater@example.invalid"], check=True
+        )
+        (updater / "remote.txt").write_text("new main work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(updater), "add", "remote.txt"], check=True)
+        subprocess.run(["git", "-C", str(updater), "commit", "-q", "-m", "remote update"], check=True)
+        subprocess.run(["git", "-C", str(updater), "push", "-q", "origin", "main"], check=True)
+        remote_main = subprocess.run(
+            ["git", "-C", str(updater), "rev-parse", "HEAD"], text=True,
+            stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+
+        worker = self.pr_worker()
+        worker.issue = IssueContext(402, "Fresh base", "", [], "https://example.invalid/402")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, recovery, _, _ = worker.prepare_repository()
+        self.assertFalse(recovery)
+        self.assertEqual(run_start, remote_main)
+        self.assertEqual(self.git("rev-parse", "main"), remote_main)
+        self.assertEqual(self.git("branch", "--show-current"), "swarm/claude/issue-402")
+
+    def test_worker_commits_uncommitted_completed_work(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(403, "Commit completed files", "", [], "https://example.invalid/403")
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        run_start, _, _, _ = worker.prepare_repository()
+        (self.repo / "completed.txt").write_text("done\n", encoding="utf-8")
+        committed = worker.commit_completed_work(run_start)
+        self.assertNotEqual(committed, run_start)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertIn("#403", self.git("log", "-1", "--format=%B"))
+
+    def test_opposite_provider_approves_pull_request(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(404, "Approval", "", [], "https://example.invalid/404")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        with mock.patch.object(worker.github, "gh", return_value="") as github:
+            reviewer = worker.approve_pull_request("https://example.invalid/pull/404")
+        self.assertEqual(reviewer, "codex")
+        self.assertEqual(github.call_args.args[1], "codex")
+        self.assertIn("--approve", github.call_args.args[0])
+
+    def test_followup_uses_a_new_comment_specific_branch(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(
+            404,
+            "Follow-up",
+            "",
+            [],
+            "https://example.invalid/404",
+            work_type="followup",
+            trigger_comment_id=9876,
+        )
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        self.assertEqual(worker.expected_branch(), "swarm/codex/issue-404-followup-9876")
+
+    def test_pr_completion_returns_clean_checkout_to_updated_main(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(405, "Return to main", "", [], "https://example.invalid/405")
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        run_start, _, _, _ = worker.prepare_repository()
+        (self.repo / "merged.txt").write_text("merged\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        branch = worker.expected_branch()
+        self.git("push", "-q", "-u", "origin", branch)
+
+        merger = self.root / "merger"
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", "main", str(self.remote), str(merger)], check=True
+        )
+        subprocess.run(["git", "-C", str(merger), "config", "user.name", "merger"], check=True)
+        subprocess.run(
+            ["git", "-C", str(merger), "config", "user.email", "merger@example.invalid"], check=True
+        )
+        subprocess.run(["git", "-C", str(merger), "fetch", "-q", "origin", branch], check=True)
+        subprocess.run(
+            ["git", "-C", str(merger), "merge", "-q", "--no-ff", "FETCH_HEAD", "-m", "merge issue"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(merger), "push", "-q", "origin", "main"], check=True)
+        merged_main = subprocess.run(
+            ["git", "-C", str(merger), "rev-parse", "HEAD"], text=True,
+            stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+
+        synchronized = worker.return_to_synchronized_main(branch)
+        self.assertEqual(synchronized, merged_main)
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertNotIn(branch, self.git("branch", "--format=%(refname:short)").splitlines())
+
+    def test_paused_pr_branch_returns_to_main_and_restores_its_own_branch(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(406, "Paused PR", "", [], "https://example.invalid/406")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session-406")
+        worker.prepare_repository()
+        state = worker.read_state()
+        state.update({"status": "quota_paused", "quota_pause_count": 1})
+        worker.write_state(state)
+        (self.repo / "paused.txt").write_text("paused work\n", encoding="utf-8")
+        worker.suspend_paused()
+        paused_file = worker.paused_dir / "406.json"
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertTrue(paused_file.is_file())
+
+        worker.restore_paused(paused_file)
+        self.assertEqual(self.git("branch", "--show-current"), "swarm/claude/issue-406")
+        self.assertEqual((self.repo / "paused.txt").read_text(), "paused work\n")
+        self.assertTrue(worker.in_progress_file.is_file())
+
     def test_completion_markdown_is_not_indented(self) -> None:
         pending = {
             "ai": "Codex", "ai_tool": "Codex", "model": "test-model", "effort": "high",
@@ -161,7 +320,10 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(args.github_repository, "DotNetRockStar/swarm")
         self.assertEqual(args.assignee, "DotNetRockStar")
         self.assertEqual(args.minimum_remaining_percent, 10)
-        self.assertEqual(args.delivery_mode, "local-main")
+        self.assertEqual(args.delivery_mode, "pull-request")
+        self.assertTrue(args.require_bot_auth)
+        self.assertTrue(args.auto_approve)
+        self.assertTrue(args.auto_merge)
         overridden = build_parser().parse_args(
             ["--github-repository", "example/repo", "--preferred-provider", "codex", "--delivery-mode", "pull-request"]
         )

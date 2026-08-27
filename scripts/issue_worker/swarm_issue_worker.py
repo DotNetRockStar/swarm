@@ -178,6 +178,7 @@ class Config:
     openssl_bin: str
     require_bot_auth: bool
     delivery_mode: str
+    auto_approve: bool
     auto_merge: bool
     branch_prefix: str
     base_branch: str
@@ -218,6 +219,7 @@ class Config:
             openssl_bin=args.openssl_bin,
             require_bot_auth=args.require_bot_auth,
             delivery_mode=args.delivery_mode,
+            auto_approve=args.auto_approve,
             auto_merge=args.auto_merge,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
@@ -641,7 +643,7 @@ class Worker:
         issue_number = int(state["issue_number"])
         base = str(state["base_sha"])
         if not self.git_ok("merge-base", "--is-ancestor", base, current):
-            raise WorkerError(f"Main no longer descends from paused issue #{issue_number}'s saved base commit")
+            raise WorkerError(f"Paused issue #{issue_number}'s branch no longer descends from its saved base commit")
         self.paused_dir.mkdir(parents=True, exist_ok=True)
         paused_file = self.paused_dir / f"{issue_number}.json"
         if paused_file.exists():
@@ -670,6 +672,10 @@ class Worker:
             state["worktree_stash_oid"] = stash_oid
         atomic_write_json(paused_file, state)
         self.in_progress_file.unlink()
+        if self.config.delivery_mode == "pull-request":
+            current_branch = self.git("branch", "--show-current")
+            if current_branch != self.config.base_branch:
+                self.git("switch", self.config.base_branch)
         log(f"Shelved quota-paused issue #{issue_number}; other ready issues may now run.")
 
     def restore_paused(self, paused_file: Path) -> None:
@@ -679,6 +685,18 @@ class Worker:
         self.validate_paused_state(state)
         if self.git("status", "--porcelain"):
             raise WorkerError("Repository must be clean before restoring a quota-paused issue")
+        if self.config.delivery_mode == "pull-request":
+            branch = str(
+                state.get("branch_name")
+                or f"{self.config.branch_prefix}/{str(state['ai_tool']).lower()}/issue-{state['issue_number']}"
+            )
+            if self.git("branch", "--show-current") != branch:
+                if self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
+                    self.git("switch", branch)
+                else:
+                    self.git("switch", "-c", branch, str(state["base_sha"]))
+            state["branch_name"] = branch
+            atomic_write_json(paused_file, state)
         state = self.normalize_recovery_commits(paused_file, self.git("rev-parse", "HEAD"))
         stash_oid = str(state.get("worktree_stash_oid") or "")
         issue_number = int(state["issue_number"])
@@ -841,6 +859,7 @@ class Worker:
                 "issue_title": issue.title,
                 "issue_url": issue.url,
                 "base_sha": base_sha,
+                "branch_name": self.expected_branch(),
                 "work_type": issue.work_type,
                 "previous_commit_sha": issue.previous_commit_sha,
                 "previous_ai": issue.previous_ai,
@@ -1166,8 +1185,8 @@ class Worker:
                     f"Continue the existing unattended session for GitHub issue #{issue.number} "
                     f"({issue.title}) from exactly where the previous turn stopped when usage became unavailable.",
                     "Inspect and preserve work already present in the repository, finish the implementation "
-                    f"and foreground verification, and commit the completed work to {self.expected_branch()} "
-                    f"as one commit referencing #{issue.number}. Do not push or ask for interactive input.",
+                    f"and foreground verification on {self.expected_branch()}. Do not switch branches, push, or "
+                    "ask for interactive input. The worker will commit any completed changes you leave uncommitted.",
                 ]
             )
             if comments:
@@ -1196,8 +1215,9 @@ class Worker:
                     "",
                     AUTOPILOT_INSTRUCTION,
                     f"Implement this issue in {self.config.repo_dir}. Follow repository instructions, run relevant "
-                    f"tests, and commit the completed work to {self.expected_branch()} as one commit. Include "
-                    f"#{issue.number} in the commit message. Do not push. Run verification commands in the "
+                    f"tests, and remain on {self.expected_branch()}. You may commit, but do not push; the worker "
+                    f"will commit any completed changes you leave uncommitted and ensure #{issue.number} is in "
+                    "the commit message. Run verification commands in the "
                     "foreground; do not return while tests or builds are still running.",
                 ]
             )
@@ -1207,7 +1227,7 @@ class Worker:
                         "\nFollow-up rework context:",
                         "This issue was previously worked, but new GitHub comments indicate that it needs another "
                         "pass. Treat them as refinement or defect feedback. Reinspect the implementation, make the "
-                        f"additional fix, verify it, and create a new commit referencing #{issue.number}.",
+                        f"additional fix, and verify it. The worker will create a commit if needed.",
                     ]
                 )
                 if issue.previous_ai and self.choice.name != issue.previous_ai:
@@ -1242,7 +1262,7 @@ class Worker:
                 f"This is a recovery verification run. Commit {recovery_candidate} was created after the original "
                 "attempt began and may already implement this issue. Verify implementation and tests. If complete, "
                 "do not duplicate code or rewrite history; put SWARM_RECOVERY_COMPLETE on its own final line after "
-                "your summary. If incomplete, finish it and create the required commit."
+                "your summary. If incomplete, finish it; the worker will commit any remaining completed changes."
             )
         return "\n".join(lines) + "\n"
 
@@ -1256,8 +1276,15 @@ class Worker:
     def expected_branch(self) -> str:
         if self.config.delivery_mode == "pull-request":
             assert self.issue and self.choice
-            return f"{self.config.branch_prefix}/{self.choice.key}/issue-{self.issue.number}"
+            suffix = ""
+            if self.issue.work_type == "followup" and self.issue.trigger_comment_id:
+                suffix = f"-followup-{self.issue.trigger_comment_id}"
+            return f"{self.config.branch_prefix}/{self.choice.key}/issue-{self.issue.number}{suffix}"
         return self.config.base_branch
+
+    def review_provider(self) -> str:
+        assert self.choice
+        return "codex" if self.choice.key == "claude" else "claude"
 
     def provider_environment(self) -> dict[str, str]:
         assert self.choice
@@ -1353,6 +1380,35 @@ class Worker:
                 break
         return result.returncode
 
+    def synchronize_base_branch(self) -> str:
+        current = self.git("branch", "--show-current")
+        if current != self.config.base_branch:
+            raise WorkerError(
+                f"Cannot synchronize {self.config.base_branch} while checked out on {current or 'detached HEAD'}"
+            )
+        if self.git("status", "--porcelain"):
+            raise WorkerError(f"Cannot synchronize dirty {self.config.base_branch}")
+        self.git("pull", "--ff-only", self.config.remote_name, self.config.base_branch)
+        synchronized = self.git("rev-parse", "HEAD")
+        log(
+            f"Synchronized local {self.config.base_branch} with "
+            f"{self.config.remote_name}/{self.config.base_branch} at {synchronized}."
+        )
+        return synchronized
+
+    def prune_merged_worker_branches(self) -> None:
+        pattern = re.compile(
+            rf"^{re.escape(self.config.branch_prefix)}/(?:claude|codex)/"
+            r"issue-[0-9]+(?:-followup-[0-9]+)?$"
+        )
+        branches = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
+        for branch in branches:
+            if not pattern.fullmatch(branch):
+                continue
+            if self.git_ok("merge-base", "--is-ancestor", branch, self.config.base_branch):
+                self.git("branch", "-D", branch, check=False)
+                log(f"Removed merged local worker branch {branch}.")
+
     def prepare_repository(self) -> tuple[str, bool, str, bool]:
         assert self.issue and self.choice
         if not self.git_ok("rev-parse", "--is-inside-work-tree"):
@@ -1365,19 +1421,45 @@ class Worker:
                 if self.git("status", "--porcelain"):
                     raise WorkerError("Repository has changes on a non-main branch; refusing unattended recovery")
                 self.git("switch", self.config.base_branch)
+            if not state_exists:
+                if self.git("status", "--porcelain"):
+                    log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
+                    raise SystemExit(0)
+                self.synchronize_base_branch()
         elif not state_exists:
             if current_branch != self.config.base_branch:
                 if self.git("status", "--porcelain"):
-                    raise WorkerError("Repository has changes on a non-main branch; refusing to start PR work")
+                    raise WorkerError("Repository has changes on a non-main branch with no recovery state")
                 self.git("switch", self.config.base_branch)
-            self.git("switch", "-c", expected)
-        elif current_branch != expected:
             if self.git("status", "--porcelain"):
-                raise WorkerError(f"Repository must be on saved issue branch {expected} before recovery")
+                log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
+                raise SystemExit(0)
+            base = self.synchronize_base_branch()
+            self.prune_merged_worker_branches()
+            # Persist ownership before creating the branch. If interrupted
+            # between these operations, the next run recreates the branch from
+            # this exact base instead of treating it as orphaned work.
+            self.save_new_state(self.issue, self.choice, base)
             if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
-                self.git("switch", expected)
-            else:
-                self.git("switch", "-c", expected)
+                if self.git_ok("merge-base", "--is-ancestor", expected, self.config.base_branch):
+                    self.git("branch", "-D", expected)
+                else:
+                    raise WorkerError(
+                        f"Existing branch {expected} contains unmerged work; recovery state was preserved"
+                    )
+            self.git("switch", "-c", expected, base)
+            log(f"Created issue branch {expected} from {self.config.base_branch} at {base}.")
+        else:
+            state = self.read_state()
+            expected = str(state.get("branch_name") or expected)
+            if current_branch != expected:
+                if self.git("status", "--porcelain"):
+                    raise WorkerError(f"Repository must be on saved issue branch {expected} before recovery")
+                if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
+                    self.git("switch", expected)
+                else:
+                    self.git("switch", "-c", expected, str(state["base_sha"]))
+                    log(f"Recreated interrupted issue branch {expected} from its saved base.")
 
         run_start = self.git("rev-parse", "HEAD")
         base = run_start
@@ -1393,7 +1475,7 @@ class Worker:
                 raise WorkerError(
                     f"Current branch does not contain previous issue completion {self.issue.previous_commit_sha}"
                 )
-        if self.in_progress_file.exists():
+        if state_exists:
             state = self.normalize_recovery_commits(self.in_progress_file, run_start)
             if int(state["issue_number"]) != self.issue.number:
                 raise WorkerError(
@@ -1416,9 +1498,45 @@ class Worker:
             if self.git("status", "--porcelain"):
                 log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
                 raise SystemExit(0)
-            self.save_new_state(self.issue, self.choice, base)
+            if not self.in_progress_file.exists():
+                self.save_new_state(self.issue, self.choice, base)
         self.update_state(attempt_start_sha=run_start, branch_name=expected)
         return run_start, recovery_mode, candidate, recovery_dirty
+
+    def commit_completed_work(self, run_start: str) -> str:
+        assert self.issue and self.choice
+        if not self.git("status", "--porcelain"):
+            return self.git("rev-parse", "HEAD")
+        self.git("add", "--all")
+        if self.git_ok("diff", "--cached", "--quiet"):
+            raise WorkerError(
+                f"Issue #{self.issue.number} left worktree changes that Git could not stage"
+            )
+        current = self.git("rev-parse", "HEAD")
+        if current == run_start:
+            title = re.sub(r"\s+", " ", self.issue.title).strip()
+            message = f"{title} (#{self.issue.number})"
+        else:
+            message = f"Commit remaining completed work (#{self.issue.number})"
+        run_command(
+            [
+                self.config.git_bin,
+                "-C",
+                self.config.repo_dir,
+                "commit",
+                "--no-verify",
+                "-m",
+                message,
+            ],
+            env=self.provider_environment(),
+        )
+        committed = self.git("rev-parse", "HEAD")
+        if self.git("status", "--porcelain"):
+            raise WorkerError(
+                f"Issue #{self.issue.number} still has uncommitted changes after worker commit"
+            )
+        log(f"Committed completed issue #{self.issue.number} work as {committed}.")
+        return committed
 
     def ensure_issue_reference(self, commit_sha: str, recovered: bool) -> str:
         assert self.issue and self.choice
@@ -1442,6 +1560,39 @@ class Worker:
         amended = self.git("rev-parse", "HEAD")
         log(f"Added issue #{self.issue.number} to the commit message.")
         return amended
+
+    def approve_pull_request(self, pr_url: str) -> str:
+        reviewer = self.review_provider()
+        self.github.gh(
+            [
+                "pr",
+                "review",
+                pr_url,
+                "--repo",
+                self.config.github_repository,
+                "--approve",
+                "--body",
+                "Automated approval after the implementing provider completed verification.",
+            ],
+            reviewer,
+        )
+        log(f"{reviewer.capitalize()} Bot approved {pr_url}.")
+        return reviewer
+
+    def return_to_synchronized_main(self, branch: str) -> str:
+        if self.git("status", "--porcelain"):
+            raise WorkerError("Cannot finish PR delivery while the issue branch is dirty")
+        if self.git("branch", "--show-current") != self.config.base_branch:
+            self.git("switch", self.config.base_branch)
+        synchronized = self.synchronize_base_branch()
+        if branch and branch != self.config.base_branch:
+            self.git("branch", "-D", branch, check=False)
+        if self.git("branch", "--show-current") != self.config.base_branch:
+            raise WorkerError(f"PR delivery did not return the checkout to {self.config.base_branch}")
+        if self.git("status", "--porcelain"):
+            raise WorkerError(f"PR delivery left {self.config.base_branch} dirty")
+        log(f"Returned the clean local checkout to {self.config.base_branch} at {synchronized}.")
+        return synchronized
 
     def deliver_pull_request(self, commit_sha: str) -> tuple[str, str, str]:
         assert self.issue and self.choice
@@ -1470,10 +1621,7 @@ class Worker:
             delivered_sha = str((existing[0].get("mergeCommit") or {}).get("oid") or "")
             if not SHA_RE.fullmatch(delivered_sha):
                 raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
-            if self.git("branch", "--show-current") != self.config.base_branch:
-                self.git("switch", self.config.base_branch)
-            self.git("pull", "--ff-only", self.config.remote_name, self.config.base_branch)
-            self.git("branch", "-D", branch, check=False)
+            self.return_to_synchronized_main(branch)
             log(f"Recovered already-merged pull request {pr_url} for issue #{self.issue.number}.")
             return pr_url, branch, delivered_sha
 
@@ -1538,6 +1686,8 @@ class Worker:
             ).strip()
             pr_url = output.splitlines()[-1]
         delivered_sha = commit_sha
+        if self.config.auto_approve:
+            self.approve_pull_request(pr_url)
         if self.config.auto_merge:
             self.github.gh(
                 [
@@ -1548,6 +1698,8 @@ class Worker:
                     self.config.github_repository,
                     f"--{self.config.merge_method}",
                     "--delete-branch",
+                    "--match-head-commit",
+                    commit_sha,
                 ],
                 self.choice.key,
             )
@@ -1567,13 +1719,9 @@ class Worker:
             ).strip()
             if not SHA_RE.fullmatch(delivered_sha):
                 raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
-            self.git("switch", self.config.base_branch)
             # Fetch through normal user credentials; the local repo already has
             # a configured authenticated origin and this avoids token persistence.
-            self.git(
-                "pull", "--ff-only", self.config.remote_name, self.config.base_branch
-            )
-            self.git("branch", "-D", branch, check=False)
+            self.return_to_synchronized_main(branch)
         return pr_url, branch, delivered_sha
 
     def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
@@ -1702,7 +1850,11 @@ class Worker:
         if self.choice.name == "Codex":
             print("\n--- Codex completion summary ---")
             print(output, end="" if output.endswith("\n") else "\n")
-        after = self.git("rev-parse", "HEAD")
+        if self.git("branch", "--show-current") != self.expected_branch():
+            raise WorkerError(
+                f"{self.choice.name} changed branches; refusing to commit outside {self.expected_branch()}"
+            )
+        after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
         if after != run_start:
@@ -1715,19 +1867,19 @@ class Worker:
             log(f"Accepted commit {completion} as recovered implementation for issue #{self.issue.number}.")
         else:
             raise WorkerError(
-                f"{self.choice.name} finished without creating the required commit. Recovery state was preserved."
+                f"{self.choice.name} finished without producing changes or a new commit. "
+                "Recovery state was preserved."
             )
         if self.git("branch", "--show-current") != self.expected_branch():
             raise WorkerError(f"{self.choice.name} changed branches; commit was not left on {self.expected_branch()}")
         base = str(self.read_state()["base_sha"])
         if not self.git_ok("merge-base", "--is-ancestor", base, after):
             raise WorkerError(f"{self.choice.name} rewrote history instead of adding a descendant commit")
-        if self.git("status", "--porcelain"):
-            log(
-                f"Warning: preserving uncommitted work after accepting issue #{self.issue.number}'s commit; "
-                "new issues will wait for a clean tree."
-            )
         completion = self.ensure_issue_reference(completion, recovered)
+        if self.git("status", "--porcelain"):
+            raise WorkerError(
+                f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
+            )
         self.finalize_issue(completion, output)
         return ISSUE_COMPLETED_EXIT_CODE
 
@@ -1808,14 +1960,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--openssl-bin", default=env_value("OPENSSL_BIN", executable_default("openssl") or "openssl"))
     parser.add_argument(
-        "--require-bot-auth", action="store_true", default=env_bool("SWARM_REQUIRE_BOT_AUTH", False)
+        "--require-bot-auth",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_REQUIRE_BOT_AUTH", True),
     )
     parser.add_argument(
         "--delivery-mode",
         choices=("local-main", "pull-request"),
-        default=env_value("SWARM_DELIVERY_MODE", "local-main"),
+        default=env_value("SWARM_DELIVERY_MODE", "pull-request"),
     )
-    parser.add_argument("--auto-merge", action="store_true", default=env_bool("SWARM_AUTO_MERGE", False))
+    parser.add_argument(
+        "--auto-approve",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_AUTO_APPROVE", True),
+    )
+    parser.add_argument(
+        "--auto-merge",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_AUTO_MERGE", True),
+    )
     parser.add_argument("--branch-prefix", default=env_value("SWARM_BRANCH_PREFIX", "swarm"))
     parser.add_argument("--base-branch", default=env_value("SWARM_BASE_BRANCH", "main"))
     parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
@@ -1834,6 +1997,8 @@ def main(argv: list[str] | None = None) -> int:
         raise WorkerError("--minimum-remaining-percent must be between 0 and 100")
     if args.auto_merge and args.delivery_mode != "pull-request":
         raise WorkerError("--auto-merge requires --delivery-mode pull-request")
+    if args.auto_approve and args.delivery_mode != "pull-request":
+        raise WorkerError("--auto-approve requires --delivery-mode pull-request")
     config = Config.from_args(args)
     return Worker(config).run()
 
