@@ -21,11 +21,17 @@ import androidx.tv.material3.ButtonDefaults
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 
 @Composable
-fun SelectableChip(label: String, isSelected: Boolean, onClick: () -> Unit, focusRequester: FocusRequester? = null) {
+fun SelectableChip(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+    modifier: Modifier = Modifier,
+) {
     val focusModifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
     Button(
         onClick = onClick,
-        modifier = focusModifier,
+        modifier = modifier.then(focusModifier),
         // Real bug, found live: with only containerColor/contentColor set,
         // this button's *focused* state (what's actually visible almost the
         // entire time a user is navigating this list — that's the point of

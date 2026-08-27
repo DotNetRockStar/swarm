@@ -2,9 +2,9 @@ package app.swarm.tv.app.uat
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import app.swarm.tv.app.ui.UatTestTags
 import kotlinx.coroutines.runBlocking
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,9 +15,16 @@ class ShowSeasonsEpisodesWatchlistUatTest : UatTestBase() {
 
     @Test
     fun testSeasonsEpisodesAndWatchlistRoundTrip() {
-        waitForTag(UatTestTags.SHELF_SHOWS)
-        val showTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_SHOW_PREFIX))
-        composeTestRule.onNodeWithTag(showTag).performClick()
+        navigateDownUntilTag(UatTestTags.SHELF_SHOWS)
+        val before = runBlocking { watchlistStore.loadAll() }
+        val showTag = requireNotNull(
+            composeTestRule.allTagsStartingWith(UatTestTags.CARD_SHOW_PREFIX).firstOrNull { tag ->
+                val title = tag.removePrefix(UatTestTags.CARD_SHOW_PREFIX)
+                "show:${title.trim().lowercase(Locale.ROOT)}" !in before
+            },
+        ) { "expected at least one visible show that is not already watchlisted" }
+        navigateDownUntilTag(showTag)
+        selectTagWithDpad(showTag)
         waitForTag(UatTestTags.SEASON_SCREEN_SHOW_TITLE)
 
         val seasonTags = composeTestRule.allTagsStartingWith(UatTestTags.SEASON_CARD_PREFIX)
@@ -31,22 +38,26 @@ class ShowSeasonsEpisodesWatchlistUatTest : UatTestBase() {
             composeTestRule.textUnderTag(seasonTags.first()).isBlank(),
         )
 
-        val before = runBlocking { watchlistStore.loadAll() }
-        composeTestRule.onNodeWithTag(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             runBlocking { watchlistStore.loadAll() }.size == before.size + 1
         }
 
         pressBack()
         waitForTag(UatTestTags.SHELF_SHOWS)
+        // Focus restoration returns to the selected show near the bottom of
+        // the lazy catalog. Move toward the newly-added top row so Compose
+        // materializes it before asserting its presence.
+        navigateUpUntilTag(UatTestTags.ROW_WATCHLIST)
         assertTrue(
             "Watchlist row should be visible after adding the show",
             composeTestRule.allTagsStartingWith(UatTestTags.ROW_WATCHLIST).isNotEmpty(),
         )
 
-        composeTestRule.onNodeWithTag(showTag).performClick()
+        navigateDownUntilTag(showTag)
+        selectTagWithDpad(showTag)
         waitForTag(UatTestTags.SEASON_SCREEN_SHOW_TITLE)
-        composeTestRule.onNodeWithTag(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             runBlocking { watchlistStore.loadAll() }.size == before.size
         }
@@ -61,9 +72,10 @@ class ShowSeasonsEpisodesWatchlistUatTest : UatTestBase() {
         // Re-open the same show and check episode structure: at least one
         // episode, no duplicate entry keys, non-blank displayed text
         // (contains the episode name, per the scenario spec).
-        composeTestRule.onNodeWithTag(showTag).performClick()
+        navigateDownUntilTag(showTag)
+        selectTagWithDpad(showTag)
         waitForTag(UatTestTags.SEASON_SCREEN_SHOW_TITLE)
-        composeTestRule.onNodeWithTag(seasonTags.first()).performClick()
+        selectTagWithDpad(seasonTags.first())
         composeTestRule.waitForTagPrefix(UatTestTags.EPISODE_ITEM_PREFIX)
 
         val episodeTags = composeTestRule.allTagsStartingWith(UatTestTags.EPISODE_ITEM_PREFIX)

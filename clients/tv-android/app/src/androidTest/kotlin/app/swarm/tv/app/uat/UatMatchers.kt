@@ -32,6 +32,9 @@ import androidx.compose.ui.test.onRoot
 private fun SemanticsNode.testTagOrNull(): String? =
     config.firstOrNull { it.key == SemanticsProperties.TestTag }?.value as? String
 
+private fun SemanticsNode.isFocused(): Boolean =
+    config.firstOrNull { it.key == SemanticsProperties.Focused }?.value == true
+
 private fun collectNodes(node: SemanticsNode, into: MutableList<SemanticsNode>) {
     into.add(node)
     node.children.forEach { collectNodes(it, into) }
@@ -51,6 +54,10 @@ fun ComposeTestRule.allTagsStartingWith(prefix: String): List<String> =
 
 /** The tag string (prefix + entry key) of the first matching node, or null if none exist yet. */
 fun ComposeTestRule.firstTagStartingWith(prefix: String): String? = allTagsStartingWith(prefix).firstOrNull()
+
+/** The matching tag that currently owns real TV focus, if focus restoration has settled. */
+fun ComposeTestRule.focusedTagStartingWith(prefix: String): String? =
+    allSemanticsNodes().firstOrNull { it.isFocused() && it.testTagOrNull()?.startsWith(prefix) == true }?.testTagOrNull()
 
 /** How many currently-rendered nodes have a tag starting with [prefix]. */
 fun ComposeTestRule.countNodesWithTagPrefix(prefix: String): Int = allTagsStartingWith(prefix).size

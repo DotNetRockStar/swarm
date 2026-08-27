@@ -32,6 +32,7 @@ object UatTestTags {
 
     // CatalogScreen: top bar.
     const val OPEN_SWARM_BUTTON = "uat_open_swarm_button"
+    const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
     // MovieDetailScreen.
     const val MOVIE_DETAIL_ARTWORK = "uat_movie_detail_artwork"
@@ -55,6 +56,7 @@ object UatTestTags {
     const val TRACK_ROW_PREFIX = "uat_track_row_" // + track entryKey
 
     // PlayerScreen / PauseOverlay.
+    const val PLAYER_SURFACE = "uat_player_surface"
     const val PAUSE_LABEL = "uat_pause_label"
     const val PAUSE_TITLE = "uat_pause_title"
     // NOTE: year/duration/content-rating/community-rating+votes/resolution

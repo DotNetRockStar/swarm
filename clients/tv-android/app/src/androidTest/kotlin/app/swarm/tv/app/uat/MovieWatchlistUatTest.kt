@@ -2,7 +2,6 @@ package app.swarm.tv.app.uat
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import app.swarm.tv.app.ui.UatTestTags
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
@@ -14,13 +13,13 @@ class MovieWatchlistUatTest : UatTestBase() {
 
     @Test
     fun testWatchlistRoundTrip() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
-        composeTestRule.onNodeWithTag(movieTag).performClick()
+        selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
 
         val before = runBlocking { watchlistStore.loadAll() }
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_WATCHLIST_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_WATCHLIST_BUTTON)
         waitForText("Added to Watchlist")
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             runBlocking { watchlistStore.loadAll() }.size == before.size + 1
@@ -31,9 +30,9 @@ class MovieWatchlistUatTest : UatTestBase() {
         val watchlistRow = composeTestRule.allTagsStartingWith(UatTestTags.ROW_WATCHLIST)
         assertTrue("Watchlist row should be visible after adding an item", watchlistRow.isNotEmpty())
 
-        composeTestRule.onNodeWithTag(movieTag).performClick()
+        selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_WATCHLIST_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_WATCHLIST_BUTTON)
         waitForText("Removed from Watchlist")
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             runBlocking { watchlistStore.loadAll() }.size == before.size

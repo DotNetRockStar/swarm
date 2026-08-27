@@ -2,7 +2,6 @@ package app.swarm.tv.app.uat
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import app.swarm.tv.app.ui.UatTestTags
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
@@ -13,21 +12,17 @@ import org.junit.Test
  * Scenarios 7, 8 — a random movie's detail screen renders every required
  * field, and the Like round-trips through the "Liked only" filter.
  *
- * Navigation between screens uses Compose's `performClick()` on the tagged
- * node rather than raw D-pad focus traversal: it invokes the same click
- * handler a real Select press would, and is the standard, robust way to
- * drive Compose UI tests — raw D-pad sequences are reserved for scenarios
- * that are explicitly testing D-pad behavior itself (playback seek, filter
- * expansion), per the other scenario classes.
+ * Navigation and actions use the real TV focus + D-pad Center path through
+ * [UatTestBase.selectTagWithDpad].
  */
 class MovieDetailLikeUatTest : UatTestBase() {
 
     private fun openFirstMovie(): String {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val tag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX)) {
             "no movie card found to open"
         }
-        composeTestRule.onNodeWithTag(tag).performClick()
+        selectTagWithDpad(tag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
         return tag
     }
@@ -53,21 +48,22 @@ class MovieDetailLikeUatTest : UatTestBase() {
         val movieTag = openFirstMovie()
 
         val before = runBlocking { likedEntriesStore.loadAll() }
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_LIKE_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_LIKE_BUTTON)
         waitUntilStoreChanged(before.size + 1) { runBlocking { likedEntriesStore.loadAll() }.size }
         val afterLike = runBlocking { likedEntriesStore.loadAll() }
         assertTrue("liked-entries store should have grown by exactly one", afterLike.size == before.size + 1)
 
         pressBack()
         waitForTag(UatTestTags.SHELF_MOVIES)
-        composeTestRule.onNodeWithTag(UatTestTags.FILTER_LIKED_ONLY).performClick()
+        openFilterRail()
+        selectTagWithDpad(UatTestTags.FILTER_LIKED_ONLY)
 
         waitForTag(movieTag)
         composeTestRule.onNodeWithTag(movieTag).assertIsDisplayed()
 
-        composeTestRule.onNodeWithTag(movieTag).performClick()
+        selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_LIKE_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_LIKE_BUTTON)
         waitUntilStoreChanged(before.size) { runBlocking { likedEntriesStore.loadAll() }.size }
         val afterUnlike = runBlocking { likedEntriesStore.loadAll() }
         assertTrue("liked-entries store should be back to its original size", afterUnlike.size == before.size)

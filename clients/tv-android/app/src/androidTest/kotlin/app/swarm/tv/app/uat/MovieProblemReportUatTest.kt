@@ -3,7 +3,6 @@ package app.swarm.tv.app.uat
 import android.util.Log
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import app.swarm.tv.app.ui.UatTestTags
 import org.junit.Test
 
@@ -24,12 +23,12 @@ import org.junit.Test
 class MovieProblemReportUatTest : UatTestBase() {
 
     private fun submitReportAndAwaitResolve() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
-        composeTestRule.onNodeWithTag(movieTag).performClick()
+        selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
 
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_REPORT_PROBLEM_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_REPORT_PROBLEM_BUTTON)
         waitForText("Problem Report Sent")
 
         // Host-side checkpoint: tv_uat_suite.sh greps logcat for this while
@@ -39,8 +38,11 @@ class MovieProblemReportUatTest : UatTestBase() {
 
         pressBack()
         waitForTag(UatTestTags.SHELF_MOVIES)
-        composeTestRule.onNodeWithTag(UatTestTags.OPEN_SWARM_BUTTON).performClick()
-        composeTestRule.onNodeWithTag(UatTestTags.NOTIFICATIONS_TAB_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.OPEN_SWARM_BUTTON)
+        waitForTag(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
+        selectTagWithDpad(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
+        waitForTag(UatTestTags.NOTIFICATIONS_TAB_BUTTON)
+        selectTagWithDpad(UatTestTags.NOTIFICATIONS_TAB_BUTTON)
 
         // "within 30 seconds" per the scenario spec — covers report submit,
         // the orchestration script's poll-and-resolve round trip, and the
@@ -53,8 +55,8 @@ class MovieProblemReportUatTest : UatTestBase() {
     fun testReportProblemAndDismissNotification() {
         submitReportAndAwaitResolve()
         val rowTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.NOTIFICATION_ROW_PREFIX))
-        composeTestRule.onNodeWithTag(rowTag).performClick()
-        composeTestRule.onNodeWithTag(UatTestTags.NOTIFICATION_DISMISS_BUTTON).performClick()
+        selectTagWithDpad(rowTag)
+        selectTagWithDpad(UatTestTags.NOTIFICATION_DISMISS_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.allTagsStartingWith(rowTag).isEmpty()
         }
