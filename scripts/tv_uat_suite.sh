@@ -129,11 +129,17 @@ fi
 
 mkdir -p "$RUN_DIR"
 TESTING_TOKEN="$(openssl rand -hex 32)"
-TESTING_EXPIRES_AT="$(( $(date +%s) + 600 ))"
-(umask 077 && printf '{"token":"%s","expires_at_unix_seconds":%s}\n' \
-    "$TESTING_TOKEN" "$TESTING_EXPIRES_AT" > "$TV_E2E_CONTROL_FILE")
-chmod 600 "$TV_E2E_CONTROL_FILE"
-cleanup_testing_control() { rm -f "$TV_E2E_CONTROL_FILE"; }
+TESTING_CONTROL_TMP="${TV_E2E_CONTROL_FILE}.tmp.$$"
+refresh_testing_control() {
+    local expires_at
+    expires_at="$(( $(date +%s) + 600 ))"
+    (umask 077 && printf '{"token":"%s","expires_at_unix_seconds":%s}\n' \
+        "$TESTING_TOKEN" "$expires_at" > "$TESTING_CONTROL_TMP")
+    chmod 600 "$TESTING_CONTROL_TMP"
+    mv "$TESTING_CONTROL_TMP" "$TV_E2E_CONTROL_FILE"
+}
+refresh_testing_control
+cleanup_testing_control() { rm -f "$TV_E2E_CONTROL_FILE" "$TESTING_CONTROL_TMP"; }
 trap cleanup_testing_control EXIT INT TERM
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -367,6 +373,13 @@ else
         RAW_LOG="$DEVICE_DIR/instrumentation_raw.txt"
         : > "$RAW_LOG"
 
+        # Installation/discovery and a multi-scenario run can exceed the
+        # control secret's 10-minute authorization window. Refresh that
+        # authorization while the suite owns the control file; each TV-side
+        # testing activation still has its independent hard 10-minute TTL,
+        # and the trap removes authorization as soon as this run exits.
+        refresh_testing_control
+        NEXT_TESTING_CONTROL_REFRESH="$(( $(date +%s) + 300 ))"
         echo "==> [$NAME] running: $RUN_CLASS_SPEC ..."
         "$ADB" -s "$SERIAL" shell am instrument -w -r \
             -e class "$RUN_CLASS_SPEC" \
@@ -387,6 +400,10 @@ else
         RESOLVED_IDS=""
         while kill -0 "$INSTRUMENT_PID" 2>/dev/null; do
             sleep 2
+            if [ "$(date +%s)" -ge "$NEXT_TESTING_CONTROL_REFRESH" ]; then
+                refresh_testing_control
+                NEXT_TESTING_CONTROL_REFRESH="$(( $(date +%s) + 300 ))"
+            fi
             CHECKPOINT="$("$ADB" -s "$SERIAL" logcat -d 2>/dev/null | grep -c 'UAT_AWAITING_SERVER_RESOLVE' || true)"
             if [ "${CHECKPOINT:-0}" -gt 0 ]; then
                 ERROR_ID="$(server_query "$SERVER_LIBRARY_DB" \

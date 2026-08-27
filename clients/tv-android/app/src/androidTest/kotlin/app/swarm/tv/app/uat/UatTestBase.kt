@@ -109,7 +109,11 @@ abstract class UatTestBase {
 
     @Before
     fun waitForIdleBeforeEachTest() {
-        device.waitForIdle()
+        // Testing mode deliberately updates its countdown once per second,
+        // so the device never satisfies UIAutomator's default global-idle
+        // window. Give the activity a bounded settle; waitForCatalogReady
+        // below performs the real readiness check.
+        device.waitForIdle(250)
     }
 
     /**
@@ -146,7 +150,12 @@ abstract class UatTestBase {
     protected fun selectTagWithDpad(tag: String) {
         focusTag(tag)
         pressSelect()
-        device.waitForIdle()
+        // The testing-mode countdown changes the Compose tree every second,
+        // so UIAutomator's default "wait until globally idle" condition is
+        // never reached and burns its full timeout after every real keypress.
+        // A short bounded settle is enough for focus/click dispatch while
+        // leaving the scenario's explicit state waits to prove navigation.
+        device.waitForIdle(250)
     }
 
     /** Gives a tagged TV surface focus without activating it. */

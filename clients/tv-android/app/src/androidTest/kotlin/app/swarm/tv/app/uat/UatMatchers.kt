@@ -62,6 +62,14 @@ fun ComposeTestRule.focusedTagStartingWith(prefix: String): String? =
 /** How many currently-rendered nodes have a tag starting with [prefix]. */
 fun ComposeTestRule.countNodesWithTagPrefix(prefix: String): Int = allTagsStartingWith(prefix).size
 
+/** How many distinct matching tags are rendered beneath the exact tagged parent. */
+fun ComposeTestRule.countDescendantNodesWithTagPrefix(parentTag: String, prefix: String): Int {
+    val parent = allSemanticsNodes().firstOrNull { it.testTagOrNull() == parentTag } ?: return 0
+    val descendants = mutableListOf<SemanticsNode>()
+    parent.children.forEach { collectNodes(it, descendants) }
+    return descendants.mapNotNull { it.testTagOrNull() }.filter { it.startsWith(prefix) }.distinct().size
+}
+
 /**
  * Polls until at least one node's tag starts with [prefix] — the
  * prefix-aware counterpart to [UatTestBase.waitForTag], which only matches

@@ -72,7 +72,10 @@ class BrowseCatalogUatTest : UatTestBase() {
         navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val rowNodes = composeTestRule.allTagsStartingWith(UatTestTags.ROW_CONTINUE_WATCHING)
         if (rowNodes.isEmpty()) return // nothing to assert — no continue-watching assets yet
-        val count = composeTestRule.allTagsStartingWith(UatTestTags.CARD_QUICK_ACCESS_PREFIX).size
+        val count = composeTestRule.countDescendantNodesWithTagPrefix(
+            UatTestTags.ROW_CONTINUE_WATCHING,
+            UatTestTags.CARD_QUICK_ACCESS_PREFIX,
+        )
         assertTrue("Continue Watching should show at most 6 items, saw $count", count <= 6)
     }
 

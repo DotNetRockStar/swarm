@@ -34,10 +34,14 @@ class ShowPlaybackPauseUatTest : UatTestBase() {
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.focusedTagStartingWith(UatTestTags.EPISODE_ITEM_PREFIX) != null
         }
-        val focusedEpisodeTag = requireNotNull(
+        requireNotNull(
             composeTestRule.focusedTagStartingWith(UatTestTags.EPISODE_ITEM_PREFIX),
         )
-        selectTagWithDpad(focusedEpisodeTag) // episodes play immediately on D-pad Center
+        // The grid has already restored focus to this exact card. Reissuing
+        // RequestFocus here can overlap the TV Card's key-input setup on the
+        // first frame; activate the established real focus directly.
+        pressSelect() // episodes play immediately on D-pad Center
+        device.waitForIdle(250)
         waitForTag(UatTestTags.PLAYER_SURFACE)
         focusTag(UatTestTags.PLAYER_SURFACE)
 

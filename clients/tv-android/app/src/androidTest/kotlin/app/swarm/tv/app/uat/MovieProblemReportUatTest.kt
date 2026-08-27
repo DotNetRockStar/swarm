@@ -38,6 +38,7 @@ class MovieProblemReportUatTest : UatTestBase() {
 
         pressBack()
         waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateUpUntilTag(UatTestTags.OPEN_SWARM_BUTTON)
         selectTagWithDpad(UatTestTags.OPEN_SWARM_BUTTON)
         waitForTag(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
         selectTagWithDpad(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
