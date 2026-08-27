@@ -81,6 +81,10 @@ const INFO_TOPICS = {
     icon: "bi-graph-up", title: "Streaming bandwidth",
     body: "Total data actually being sent to every connected client combined, sampled every 5 seconds. The graph keeps the last 60 minutes of history so you can see how usage changes as more clients join.",
   },
+  transcoding: {
+    icon: "bi-cpu", title: "Transcoding",
+    body: "When a client can't play a file directly, the server runs ffmpeg to convert it on the fly (resizing video, re-encoding audio, and burning in the right subtitle track). That work is CPU-heavy. This graph splits the last 60 minutes of CPU use into ffmpeg transcodes and the rest of the server process — which also covers local Whisper subtitle generation — so you can see how streaming and subtitle work translate into load on this machine. The tiles show how many transcodes and direct-play streams are active right now and whether subtitle generation is running.",
+  },
   "artwork-cache": {
     icon: "bi-images", title: "Artwork cache",
     body: "For media on a slower network share, SWARM can copy artwork to this server the first time a client requests it. Later requests use the local copy. The graph distinguishes new cache fills from cache hits and can be filtered to one client. Cached files refresh after 30 days and are immediately superseded when scraping or a manual artwork change creates a new version. Expand “How the artwork cache works” to see its exact folder on this server.",

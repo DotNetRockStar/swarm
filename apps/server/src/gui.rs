@@ -1081,6 +1081,14 @@ async fn get_bandwidth_history(
 }
 
 #[tauri::command]
+async fn get_transcoding_history(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<swarm_server::transcode_activity::TranscodeActivitySample>, String> {
+    Ok(state.core(&app).await?.transcode_activity_history())
+}
+
+#[tauri::command]
 async fn get_artwork_cache_snapshot(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -2248,6 +2256,7 @@ fn main() {
             generate_mcp_access_token,
             get_status,
             get_bandwidth_history,
+            get_transcoding_history,
             get_artwork_cache_snapshot,
             rescan,
             reclassify_library,
