@@ -94,10 +94,6 @@ const INFO_TOPICS = {
     body: "A unique hash of a device's security certificate, used so two devices can verify they're really talking to each other and not an impostor.",
     link: "https://en.wikipedia.org/wiki/Public_key_fingerprint", linkLabel: "Learn about certificate fingerprints",
   },
-  "library-thumbprint": {
-    icon: "bi-upc-scan", title: "Library thumbprint",
-    body: "A single hash summarizing your whole library's contents, so clients can tell at a glance when anything's changed instead of re-checking every file.",
-  },
   "media-roots": {
     icon: "bi-folder2-open", title: "Media roots",
     body: "The folders SWARM scans for movies, shows, and music. Add a local folder or connect an SMB share from a NAS. You can combine more than one root.",

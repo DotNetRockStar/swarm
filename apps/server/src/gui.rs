@@ -509,9 +509,7 @@ async fn record_scrape_result_notification(
                 report.matched, report.not_found, report.failed, report.skipped,
             );
             message.push_str("\n\nIssues:\n");
-            for issue in &report.issues {
-                message.push_str(&format!("• {} — {}\n", issue.title, issue.reason));
-            }
+            message.push_str(&group_scrape_issues_by_kind(core, &report.issues).await);
             let level = if report.failed > 0 {
                 "error"
             } else {
@@ -536,6 +534,46 @@ async fn record_scrape_result_notification(
         }
         _ => {}
     }
+}
+
+/// Renders a scrape report's issue list grouped under `Movies` / `Shows` /
+/// `Music` (and `Other` for anything whose catalog entry can't be resolved),
+/// each heading carrying its own count, so "scrape finished with issues" is
+/// scannable at a glance instead of one flat list. The kind comes from the
+/// catalog entry, not the issue itself — `ScrapeIssue` only carries the
+/// entry key.
+async fn group_scrape_issues_by_kind(
+    core: &ServerCore,
+    issues: &[swarm_media::scrape::ScrapeIssue],
+) -> String {
+    let mut movies = Vec::new();
+    let mut shows = Vec::new();
+    let mut music = Vec::new();
+    let mut other = Vec::new();
+    for issue in issues {
+        let line = format!("  • {} — {}", issue.title, issue.reason);
+        match core.library.get(&issue.entry_key).await {
+            Ok(Some(entry)) => match entry.kind {
+                MediaKind::Movie => movies.push(line),
+                MediaKind::Episode => shows.push(line),
+                MediaKind::Track => music.push(line),
+            },
+            _ => other.push(line),
+        }
+    }
+    let mut out = String::new();
+    for (label, lines) in [
+        ("Movies", &movies),
+        ("Shows", &shows),
+        ("Music", &music),
+        ("Other", &other),
+    ] {
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{} ({}):\n{}\n\n", label, lines.len(), lines.join("\n")));
+    }
+    out.trim_end().to_string()
 }
 
 /// Rejects a new root `path` that names the same filesystem location as an
@@ -1243,6 +1281,87 @@ async fn delete_asset(
     core.delete_asset(&entry_key)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Per-asset artwork/subtitle/lyrics presence for the Media detail page's
+/// "metadata & artwork" completeness checklist, plus the file counts the
+/// delete-asset confirmation modal spells out before anything is removed.
+/// Everything else the checklist shows (title, year, cast, rating, …) is
+/// already on the `EntrySummary` the webview holds, so it is not repeated
+/// here.
+#[derive(serde::Serialize)]
+struct AssetDetail {
+    artwork_present: Vec<String>,
+    subtitle_languages: Vec<String>,
+    has_lyrics: bool,
+    delete_unshared_artwork_count: usize,
+    delete_shared_artwork_count: usize,
+    delete_subtitle_count: usize,
+}
+
+#[tauri::command]
+async fn get_asset_detail(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+) -> Result<AssetDetail, String> {
+    use swarm_media::store::ArtworkKind;
+    let core = state.core(&app).await?;
+    let mut artwork_present = Vec::new();
+    for kind in [
+        ArtworkKind::Poster,
+        ArtworkKind::SeasonPoster,
+        ArtworkKind::Backdrop,
+        ArtworkKind::Cover,
+        ArtworkKind::ArtistPhoto,
+    ] {
+        if core
+            .library
+            .artwork(&entry_key, kind)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            artwork_present.push(kind.route_segment().to_string());
+        }
+    }
+    let subtitle_tracks = core
+        .library
+        .subtitle_tracks(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut subtitle_languages: Vec<String> =
+        subtitle_tracks.iter().map(|t| t.language.clone()).collect();
+    subtitle_languages.sort();
+    subtitle_languages.dedup();
+    let has_lyrics = core
+        .library
+        .track_lyrics(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some();
+    let manifest = core
+        .library
+        .asset_deletion_manifest(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (delete_unshared_artwork_count, delete_shared_artwork_count) = manifest
+        .as_ref()
+        .map(|m| {
+            (
+                m.unshared_artwork_paths.len(),
+                m.artwork_paths.len() - m.unshared_artwork_paths.len(),
+            )
+        })
+        .unwrap_or((0, 0));
+    Ok(AssetDetail {
+        artwork_present,
+        subtitle_languages,
+        has_lyrics,
+        delete_unshared_artwork_count,
+        delete_shared_artwork_count,
+        delete_subtitle_count: subtitle_tracks.len(),
+    })
 }
 
 /// Every distinct genre/category value currently in use anywhere in the
@@ -2262,6 +2381,7 @@ fn main() {
             reclassify_library,
             list_entries,
             delete_asset,
+            get_asset_detail,
             list_categories,
             get_artwork_bytes,
             run_library_maintenance,
