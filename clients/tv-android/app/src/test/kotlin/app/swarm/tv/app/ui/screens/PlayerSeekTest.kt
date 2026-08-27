@@ -34,6 +34,50 @@ class PlayerSeekTest {
     }
 
     @Test
+    fun `skip-intro offer tracks the marker under the playhead`() {
+        val intro = SkipSegment(SkipSegmentKind.INTRO, startMs = null, endMs = 30_000L)
+        val segments = listOf(intro)
+
+        assertEquals(
+            intro,
+            nextIntroOffer(segments, positionMs = 0L, isEpisode = true, current = null, dismissed = null),
+        )
+        assertEquals(
+            null,
+            nextIntroOffer(segments, positionMs = 30_000L, isEpisode = true, current = intro, dismissed = null),
+        )
+        assertEquals(
+            null,
+            nextIntroOffer(segments, positionMs = 5_000L, isEpisode = false, current = null, dismissed = null),
+        )
+    }
+
+    @Test
+    fun `dismissed skip-intro offer stays dismissed for the same marker`() {
+        val intro = SkipSegment(SkipSegmentKind.INTRO, startMs = null, endMs = 30_000L)
+        val segments = listOf(intro)
+
+        assertEquals(
+            null,
+            nextIntroOffer(segments, positionMs = 12_000L, isEpisode = true, current = null, dismissed = intro),
+        )
+    }
+
+    @Test
+    fun `skip-intro offer survives a poll while the marker is still under the playhead`() {
+        // Regression for #102: a rebuffer in an episode's opening seconds used
+        // to null the offer out; the offer must persist as long as the
+        // playhead is still inside the intro.
+        val intro = SkipSegment(SkipSegmentKind.INTRO, startMs = null, endMs = 30_000L)
+        val segments = listOf(intro)
+
+        assertEquals(
+            intro,
+            nextIntroOffer(segments, positionMs = 1_000L, isEpisode = true, current = intro, dismissed = null),
+        )
+    }
+
+    @Test
     fun `seek inside generated HLS window stays in current player`() {
         assertFalse(shouldRestartHlsPlaybackForSeek(relativeTargetMs = 45_000L, availableDurationMs = 60_000L))
     }
