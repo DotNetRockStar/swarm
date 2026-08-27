@@ -166,6 +166,34 @@ internal fun activeSkipSegment(segments: List<SkipSegment>, positionMs: Long, ki
 internal fun activeIntroSegment(segments: List<SkipSegment>, positionMs: Long): SkipSegment? =
     activeSkipSegment(segments, positionMs, SkipSegmentKind.INTRO)
 
+/**
+ * Next value for the on-surface "Skip intro" offer, given the live playhead.
+ *
+ * Deliberately keyed only on the INTRO marker under [positionMs] — NOT on
+ * transient buffering or overlay state (#102). When the next episode is
+ * started from the pause screen there is no preloaded, pre-buffered player,
+ * so its opening seconds are spent rebuffering over the peer proxy; folding
+ * `isLoading` into this decision let each of those stalls null out a valid
+ * offer, and for a short intro that begins at 0:00 (Aqua Teen Hunger Force
+ * being the repro) the offer could churn away before it was ever pressable.
+ * The pause/continue overlays still hide the button at the call site.
+ *
+ * Returns [current] unchanged while the active marker is the one the viewer
+ * already dismissed, so a click or timeout stays dismissed until the
+ * playhead reaches a different marker.
+ */
+internal fun nextIntroOffer(
+    segments: List<SkipSegment>,
+    positionMs: Long,
+    isEpisode: Boolean,
+    current: SkipSegment?,
+    dismissed: SkipSegment?,
+): SkipSegment? {
+    if (!isEpisode) return null
+    val active = activeSkipSegment(segments, positionMs, SkipSegmentKind.INTRO) ?: return null
+    return if (active == dismissed) current else active
+}
+
 // Real complaint from live use: even at max system/TV volume, some content isn't
 // loud enough. LoudnessEnhancer processes the decoded PCM before it reaches the
 // audio sink, so it can boost past what raising system volume alone can reach.
@@ -634,15 +662,17 @@ fun PlayerScreen(
     LaunchedEffect(player, entry.fingerprint) {
         while (true) {
             val segmentsVisible = !isLoading && !showPauseOverlay && !showContinuePrompt
-            val active = if (entry.entry.kind == MediaKind.EPISODE && segmentsVisible) {
-                activeSkipSegment(entry.entry.skipSegments, controllerPlayer.currentPosition, SkipSegmentKind.INTRO)
-            } else {
-                null
-            }
-            when {
-                active == null -> offeredIntro = null
-                active != dismissedIntro -> offeredIntro = active
-            }
+            // Intentionally NOT gated on segmentsVisible: startup rebuffering
+            // must not wipe a still-valid "Skip intro" offer (#102). The
+            // button itself stays hidden behind the pause/continue overlays
+            // at its call site.
+            offeredIntro = nextIntroOffer(
+                segments = entry.entry.skipSegments,
+                positionMs = controllerPlayer.currentPosition,
+                isEpisode = entry.entry.kind == MediaKind.EPISODE,
+                current = offeredIntro,
+                dismissed = dismissedIntro,
+            )
             // Popped the moment playback enters a CREDITS marker, instead of
             // waiting for STATE_ENDED (#80). Guarded on segmentsVisible so it
             // never fires while some other overlay (pause, an already-shown
@@ -670,8 +700,11 @@ fun PlayerScreen(
             delay(INTRO_POSITION_POLL_MS)
         }
     }
-    LaunchedEffect(offeredIntro) {
+    LaunchedEffect(offeredIntro, isLoading) {
         val segment = offeredIntro ?: return@LaunchedEffect
+        // Don't spend the ten-second window while the picture is still
+        // buffering — the countdown restarts once playback is actually up.
+        if (isLoading) return@LaunchedEffect
         delay(SKIP_INTRO_OFFER_MS)
         if (offeredIntro == segment) {
             dismissedIntro = segment
