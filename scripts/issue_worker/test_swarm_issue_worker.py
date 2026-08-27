@@ -214,6 +214,83 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("paused change", (self.repo / "tracked.txt").read_text())
         self.assertEqual((self.repo / "untracked.txt").read_text(), "untracked change\n")
 
+    def test_closed_shelved_pause_is_archived_without_ai_or_quota_check(self) -> None:
+        self.worker.paused_dir.mkdir()
+        paused_file = self.worker.paused_dir / "101.json"
+        self.worker.write_state(self.paused_state(), paused_file)
+
+        with (
+            mock.patch.object(self.worker, "issue_is_closed", return_value=True),
+            mock.patch.object(self.worker, "provider_capacity") as capacity,
+            mock.patch.object(self.worker, "restore_paused") as restore,
+        ):
+            self.assertFalse(self.worker.prepare_paused_resume())
+
+        capacity.assert_not_called()
+        restore.assert_not_called()
+        self.assertFalse(paused_file.exists())
+        archive = self.worker.closed_paused_dir / "101.json"
+        self.assertTrue(archive.is_file())
+        archived_state = self.worker.read_state(archive)
+        self.assertEqual(archived_state["status"], "closed_while_paused")
+        self.assertEqual(archived_state["archived_from"], "101.json")
+
+    def test_closed_in_progress_pause_shelves_work_and_returns_to_main_without_ai(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(102, "Closed pause", "", [], "https://example.invalid/102")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session-102")
+        worker.prepare_repository()
+        worker.update_state(
+            status="quota_paused",
+            quota_pause_count=1,
+            quota_paused_at="2026-08-25T10:00:00-05:00",
+        )
+        (self.repo / "paused.txt").write_text("preserve this work\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(worker, "issue_is_closed", return_value=True),
+            mock.patch.object(worker, "deliver_quota_notifications") as notifications,
+            mock.patch.object(worker, "provider_capacity") as capacity,
+        ):
+            self.assertFalse(worker.prepare_paused_resume())
+
+        notifications.assert_not_called()
+        capacity.assert_not_called()
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertFalse(worker.in_progress_file.exists())
+        archive = worker.closed_paused_dir / "102.json"
+        archived_state = worker.read_state(archive)
+        self.assertEqual(archived_state["status"], "closed_while_paused")
+        self.assertTrue(archived_state["worktree_stash_oid"])
+        self.assertTrue(self.git("cat-file", "-e", archived_state["worktree_stash_oid"] + "^{commit}") == "")
+
+    def test_closed_pause_does_not_prevent_fresh_selection_after_reopen(self) -> None:
+        self.worker.paused_dir.mkdir()
+        paused_file = self.worker.paused_dir / "103.json"
+        self.worker.write_state(self.paused_state(103), paused_file)
+        with mock.patch.object(self.worker, "issue_is_closed", return_value=True):
+            self.assertFalse(self.worker.prepare_paused_resume())
+
+        issue = self.issue_payload(103)
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=[issue]),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 103)
+        self.assertEqual(selected.work_type, "initial")
+
+    def test_issue_is_closed_reads_current_github_state(self) -> None:
+        with mock.patch.object(
+            self.worker.github, "gh", return_value=json.dumps({"number": 104, "state": "closed"})
+        ) as gh:
+            self.assertTrue(self.worker.issue_is_closed(104))
+        gh.assert_called_once_with(
+            ["api", "--method", "GET", "repos/DotNetRockStar/swarm/issues/104"]
+        )
+
     def test_damaged_recovery_sha_is_repaired_by_unique_prefix(self) -> None:
         (self.repo / "tracked.txt").write_text("base\nissue work\n", encoding="utf-8")
         self.git("add", "tracked.txt")

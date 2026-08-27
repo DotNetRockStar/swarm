@@ -404,6 +404,7 @@ class Worker:
         self.pending_file = self.state / "pending-email.json"
         self.in_progress_file = self.state / "in-progress-issue.json"
         self.paused_dir = self.state / "quota-paused-issues"
+        self.closed_paused_dir = self.state / "closed-paused-issues"
         self.ai_output_file = self.state / "last-ai-output.log"
         self.ai_diagnostic_file = self.state / "last-ai-diagnostic.log"
         self.apps = GitHubAppAuth(config.github_apps_config, config.openssl_bin)
@@ -723,6 +724,44 @@ class Worker:
         for path in files:
             self.validate_paused_state(read_json(path))
         return files
+
+    def issue_is_closed(self, issue_number: int) -> bool:
+        issue = json.loads(
+            self.github.gh(
+                ["api", "--method", "GET", f"repos/{self.config.github_repository}/issues/{issue_number}"]
+            )
+        )
+        return str(issue.get("state") or "").lower() == "closed"
+
+    def archive_closed_paused(self, paused_file: Path) -> Path:
+        state = read_json(paused_file)
+        self.validate_paused_state(state)
+        issue_number = int(state["issue_number"])
+        self.closed_paused_dir.mkdir(parents=True, exist_ok=True)
+        archive_file = self.closed_paused_dir / f"{issue_number}.json"
+        if archive_file.exists():
+            suffix = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+            archive_file = self.closed_paused_dir / f"{issue_number}-{suffix}.json"
+        state.update(
+            {
+                "status": "closed_while_paused",
+                "closed_detected_at": iso_timestamp(),
+                "archived_from": paused_file.name,
+            }
+        )
+        atomic_write_json(archive_file, state)
+        paused_file.unlink()
+        log(
+            f"Issue #{issue_number} was closed while quota-paused; archived its saved attempt "
+            "without running AI and continuing to the next eligible issue."
+        )
+        return archive_file
+
+    def skip_closed_in_progress_pause(self) -> None:
+        state = self.read_state()
+        issue_number = int(state["issue_number"])
+        self.suspend_paused()
+        self.archive_closed_paused(self.paused_dir / f"{issue_number}.json")
 
     def mark_quota_paused(self) -> None:
         assert self.choice and self.issue
@@ -1079,37 +1118,57 @@ class Worker:
             state = self.read_state()
             if state.get("status") == "quota_paused":
                 self.validate_paused_state(state)
-                self.issue = IssueContext(
-                    int(state["issue_number"]), str(state["issue_title"]), "", [], str(state["issue_url"])
-                )
-                self.choice = self.choice_from_state(state)
-                if not self.config.dry_run:
-                    self.deliver_quota_notifications()
-                capacity = self.provider_capacity(self.choice.name)
-                if capacity != 0:
+                issue_number = int(state["issue_number"])
+                if self.issue_is_closed(issue_number):
                     if self.config.dry_run:
-                        log(f"Dry run: issue #{self.issue.number} remains quota-paused on {self.choice.name}.")
+                        log(
+                            f"Dry run: issue #{issue_number} is closed; would archive its quota-paused "
+                            "attempt without running AI."
+                        )
                         return True
-                    self.suspend_paused()
-                    raise SystemExit(QUOTA_PAUSED_EXIT_CODE)
-                if self.config.dry_run:
-                    log(
-                        f"Dry run: would resume {self.choice.name} session {self.choice.session_id} "
-                        f"for issue #{self.issue.number}."
+                    self.skip_closed_in_progress_pause()
+                else:
+                    self.issue = IssueContext(
+                        int(state["issue_number"]), str(state["issue_title"]), "", [], str(state["issue_url"])
                     )
-                    return True
-                self.update_state(status="active", quota_resumed_at=iso_timestamp())
-                self.choice.resume = True
-                self.quota_resume_ready = True
-                log(
-                    f"{self.choice.name} usage is available again; preparing to resume session "
-                    f"{self.choice.session_id} for issue #{self.issue.number}."
-                )
-                return False
+                    self.choice = self.choice_from_state(state)
+                    if not self.config.dry_run:
+                        self.deliver_quota_notifications()
+                    capacity = self.provider_capacity(self.choice.name)
+                    if capacity != 0:
+                        if self.config.dry_run:
+                            log(f"Dry run: issue #{self.issue.number} remains quota-paused on {self.choice.name}.")
+                            return True
+                        self.suspend_paused()
+                        raise SystemExit(QUOTA_PAUSED_EXIT_CODE)
+                    if self.config.dry_run:
+                        log(
+                            f"Dry run: would resume {self.choice.name} session {self.choice.session_id} "
+                            f"for issue #{self.issue.number}."
+                        )
+                        return True
+                    self.update_state(status="active", quota_resumed_at=iso_timestamp())
+                    self.choice.resume = True
+                    self.quota_resume_ready = True
+                    log(
+                        f"{self.choice.name} usage is available again; preparing to resume session "
+                        f"{self.choice.session_id} for issue #{self.issue.number}."
+                    )
+                    return False
 
         if not self.in_progress_file.exists():
             for paused_file in self.paused_files():
                 state = read_json(paused_file)
+                issue_number = int(state["issue_number"])
+                if self.issue_is_closed(issue_number):
+                    if self.config.dry_run:
+                        log(
+                            f"Dry run: issue #{issue_number} is closed; would archive its quota-paused "
+                            "attempt without running AI."
+                        )
+                        continue
+                    self.archive_closed_paused(paused_file)
+                    continue
                 provider = str(state["ai_tool"])
                 if self.provider_capacity(provider) != 0:
                     continue

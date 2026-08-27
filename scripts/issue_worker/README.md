@@ -55,9 +55,12 @@ built-in defaults.
 ### What happens during a run
 
 1. Retry any pending GitHub completion comment, label, or email.
-2. Check saved quota-paused sessions. A recovered provider resumes its exact
-   model and session; unavailable sessions remain shelved and do not block
-   other issues.
+2. Check saved quota-paused sessions. The worker checks each issue's current
+   GitHub state before checking quota or restoring work. A closed issue is
+   archived as `closed_while_paused` without a comment or AI run, and the
+   worker continues to the next eligible issue. Otherwise, a recovered
+   provider resumes its exact model and session; unavailable sessions remain
+   shelved and do not block other issues.
 3. Fetch open issues assigned to the configured assignee.
 4. Reconcile trusted completion markers whose commits are already on local
    `main`.
@@ -283,6 +286,10 @@ Important state files:
   crash between posting and saving state from creating duplicate comments.
 - `quota-paused-issues/N.json` — shelved sessions that must resume with their
   original provider.
+- `closed-paused-issues/N.json` — recovery metadata and any stash reference for
+  an issue that was closed while paused. This is an audit/recovery archive, not
+  a completion marker. If the issue is reopened, it is eligible for a fresh
+  branch and AI session.
 - `pending-email.json` — a successful commit whose GitHub or email bookkeeping
   still needs retrying.
 - `completed-issues` — issue numbers completed locally.
