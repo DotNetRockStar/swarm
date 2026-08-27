@@ -56,6 +56,7 @@ class Runner:
         self.lock_dir = self.state_dir / "runner.lock"
         self.worker = Path(args.worker).expanduser().resolve()
         self.snapshot = self.state_dir / "swarm_issue_worker.snapshot.py"
+        self.in_progress_file = self.state_dir / "in-progress-issue.json"
         self.acquired_lock = False
         self.stop_requested = False
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,6 +185,57 @@ class Runner:
             else "Warning: Cargo build-artifact cleanup failed; it will be retried later."
         )
 
+    def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.args.git_bin, "-C", self.args.repo_dir, *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def synchronize_repository(self) -> bool:
+        if not self.args.git_bin:
+            self.log("Git is unavailable; deferring the worker until the repository can be synchronized.")
+            return False
+        if self.git("rev-parse", "--is-inside-work-tree").returncode != 0:
+            self.log(f"Worker repository is not a Git checkout: {self.args.repo_dir}; deferring this run.")
+            return False
+        branch = self.git("branch", "--show-current").stdout.strip()
+        if self.in_progress_file.exists():
+            self.log(
+                f"Saved issue work owns {branch or 'the current checkout'}; repository synchronization "
+                "will occur after the worker returns to main."
+            )
+            return True
+        if self.git("status", "--porcelain").stdout.strip():
+            self.log("Repository has uncommitted work with no saved issue owner; deferring synchronization and AI.")
+            return False
+        if branch != self.args.base_branch:
+            switched = self.git("switch", self.args.base_branch)
+            if switched.returncode != 0:
+                detail = switched.stderr.strip() or switched.stdout.strip() or "git switch failed"
+                self.log(f"Could not return to {self.args.base_branch}: {detail}; deferring this run.")
+                return False
+            self.log(f"Returned the idle checkout to {self.args.base_branch} before synchronization.")
+        before = self.git("rev-parse", "HEAD").stdout.strip()
+        pulled = self.git("pull", "--ff-only", self.args.remote_name, self.args.base_branch)
+        if pulled.returncode != 0:
+            detail = pulled.stderr.strip() or pulled.stdout.strip() or "git pull failed"
+            self.log(
+                f"Could not fast-forward {self.args.base_branch} from {self.args.remote_name}: "
+                f"{detail}; deferring this run."
+            )
+            return False
+        after = self.git("rev-parse", "HEAD").stdout.strip()
+        if after != before:
+            self.log(
+                f"Fast-forwarded {self.args.base_branch} from {self.args.remote_name} "
+                f"({before[:8]} -> {after[:8]}); the next worker snapshot uses the updated code."
+            )
+        else:
+            self.log(f"Local {self.args.base_branch} is synchronized with {self.args.remote_name}.")
+        return True
+
     def run_worker(self, smtp_password: str) -> int:
         shutil.copy2(self.worker, self.snapshot)
         environment = os.environ.copy()
@@ -191,6 +243,9 @@ class Runner:
         environment["SWARM_REPO_DIR"] = str(Path(self.args.repo_dir).expanduser().resolve())
         environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(self.state_dir)
         environment["SWARM_ISSUE_WORKER_SCRIPT_DIR"] = str(self.script_dir)
+        environment["GIT_BIN"] = self.args.git_bin
+        environment["SWARM_BASE_BRANCH"] = self.args.base_branch
+        environment["SWARM_GIT_REMOTE"] = self.args.remote_name
         environment["PYTHONPATH"] = os.pathsep.join(
             [str(self.script_dir), environment.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
@@ -262,6 +317,11 @@ class Runner:
                         return 0
                     self.sleep()
                     continue
+                if not self.synchronize_repository():
+                    if self.args.once:
+                        return 0
+                    self.sleep()
+                    continue
                 status = self.run_worker(smtp_password)
                 self.prune_cargo_target()
                 if status == ISSUE_COMPLETED_EXIT_CODE:
@@ -323,6 +383,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crontab-bin", default=env_value("CRONTAB_BIN", shutil.which("crontab") or ""))
     parser.add_argument("--pgrep-bin", default=env_value("PGREP_BIN", shutil.which("pgrep") or ""))
     parser.add_argument("--cargo-bin", default=env_value("CARGO_BIN", shutil.which("cargo") or ""))
+    parser.add_argument("--git-bin", default=env_value("GIT_BIN", shutil.which("git") or ""))
+    parser.add_argument("--base-branch", default=env_value("SWARM_BASE_BRANCH", "main"))
+    parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
     parser.add_argument("--log-path", default=env_value("SWARM_ISSUE_WORKER_LOG_PATH", ""))
     parser.add_argument("--cargo-target-dir", default=env_value("SWARM_CARGO_TARGET_DIR", ""))
     parser.add_argument(
