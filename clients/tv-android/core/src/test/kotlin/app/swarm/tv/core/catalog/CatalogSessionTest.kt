@@ -114,6 +114,56 @@ class CatalogSessionTest {
     }
 
     @Test
+    fun `refresh abandons a stalled manifest fetch and recovers on the next attempt`() = runBlocking {
+        // Regression coverage for #100: the initial Browse load failed with a
+        // hard "loading timed out" while an immediate manual retry succeeded.
+        // A manifest fetch that stalls on a live connection used to consume
+        // the whole outer catalog budget; refresh() now bounds each attempt
+        // so its own retry loop reconnects and completes.
+        val manifest = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(
+                CatalogEntry(
+                    entryKey = "movie-1",
+                    fingerprint = "media-fingerprint",
+                    kind = MediaKind.MOVIE,
+                    title = "Recovered",
+                    size = 1_024,
+                ),
+            ),
+        )
+        val stalling = StallingCatalogConnection()
+        val healthy = CatalogConnection(manifest)
+        val connectionAttempts = AtomicInteger()
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                if (connectionAttempts.incrementAndGet() == 1) stalling else healthy
+            },
+            manifestFetchTimeoutMs = 200L,
+        ).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            assertTrue(result.unreachable.isEmpty())
+            assertEquals(listOf("Recovered"), result.entries.map { it.entry.title })
+            assertTrue(connectionAttempts.get() >= 2)
+            assertTrue(stalling.wasClosed())
+        }
+        proxy.close()
+    }
+
+    @Test
     fun `interrupted playback reconnect becomes 503 then reconnects on a later request`() = runBlocking {
         val manifest = CatalogManifest(thumbprint = "catalog-v1", entries = emptyList())
         val connection = InterruptingCatalogConnection(manifest)
@@ -226,6 +276,37 @@ class CatalogSessionTest {
                 ByteArrayInputStream(body),
             )
         }
+    }
+
+    /** Blocks every request until [close] is called, then reports the
+     * connection as dropped — models a peer that accepts the QUIC handshake
+     * but never answers the catalog request. */
+    private class StallingCatalogConnection : PeerConnection, AutoCloseable {
+        private val gate = Object()
+        private var closed = false
+
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            synchronized(gate) {
+                while (!closed) gate.wait()
+            }
+            throw IOException("connection closed")
+        }
+
+        override fun close() {
+            synchronized(gate) {
+                closed = true
+                gate.notifyAll()
+            }
+        }
+
+        fun wasClosed(): Boolean = synchronized(gate) { closed }
     }
 
     private class MediaConnection(private val content: String) : PeerConnection {
