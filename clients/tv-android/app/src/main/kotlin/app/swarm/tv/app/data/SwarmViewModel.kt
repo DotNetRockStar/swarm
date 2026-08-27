@@ -53,6 +53,16 @@ enum class ClientNotificationKind { SUCCESS, WARNING, ERROR }
 
 private const val BROWSE_PREVIEW_DURATION_SECS = 30L
 private const val DASHBOARD_PRESENCE_REFRESH_MS = 10_000L
+
+/**
+ * Whole-operation ceiling for [SwarmViewModel.browseCatalog]'s network
+ * refresh. `CatalogSession.refresh` already bounds each individual
+ * connect and each manifest-fetch attempt and retries a few times, so this
+ * is only the final backstop against the entire sequence hanging. Raised
+ * from 30s (issue #100): 30s could expire mid-way through the retry loop on
+ * a slow first connect, turning a blip that a manual retry cleared
+ * instantly into a hard error. */
+private const val CATALOG_LOAD_TIMEOUT_MS = 45_000L
 const val CONNECTION_SETUP_SWARM_ID = "connection-setup"
 const val TESTING_PAIRING_CODE = "00000000"
 private const val TESTING_MODE_DURATION_MS = 10 * 60 * 1000L
@@ -1431,13 +1441,15 @@ class SwarmViewModel(
             // very slow — a real library can now be thousands of entries,
             // far past anything tested on real hardware before) hung here
             // forever with `loading` never flipping back to false: an
-            // infinite spinner with no visible error. `withTimeoutOrNull`
-            // turns that into the same "server(s) not reachable" state the
-            // UI already renders for a normal per-device failure, rather
-            // than a wholly new error path. 30s is a starting estimate,
-            // not measured against a real large-catalog transfer — revisit
-            // once real hardware timing is known.
-            val result = withTimeoutOrNull(30_000) {
+            // infinite spinner with no visible error. refresh() now bounds
+            // each manifest-fetch attempt itself (see
+            // CatalogSession.MANIFEST_FETCH_TIMEOUT_MS, issue #100) so a
+            // single stall converts into a fast per-attempt failure its
+            // retry loop can recover from; CATALOG_LOAD_TIMEOUT_MS stays as
+            // the whole-sequence backstop, mapping to the same "server(s)
+            // not reachable" state the UI already renders for a normal
+            // per-device failure rather than a wholly new error path.
+            val result = withTimeoutOrNull(CATALOG_LOAD_TIMEOUT_MS) {
                 withContext(Dispatchers.IO) {
                     catalogSession.refresh(connectionDevices, clientCertificate, clientKey)
                 }
@@ -1448,7 +1460,7 @@ class SwarmViewModel(
                 servers.forEach { server ->
                     reportClientError(
                         device = server,
-                        message = "Catalog loading timed out after 30 seconds.",
+                        message = "Catalog loading timed out after ${CATALOG_LOAD_TIMEOUT_MS / 1000} seconds.",
                         context = catalogFailureContext(server, servers.size, "timeout"),
                     )
                 }
