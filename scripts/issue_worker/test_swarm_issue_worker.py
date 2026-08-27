@@ -23,6 +23,7 @@ from swarm_issue_worker import (
     build_parser,
     extract_completion_metadata,
     extract_followup_metadata,
+    is_worker_comment,
 )
 
 
@@ -303,6 +304,57 @@ class WorkerTestCase(unittest.TestCase):
         self.assertNotEqual(committed, run_start)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertIn("#403", self.git("log", "-1", "--format=%B"))
+
+    def test_start_comment_is_posted_once_by_selected_provider(self) -> None:
+        self.worker.issue = IssueContext(407, "Start notice", "", [], "https://example.invalid/407")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+            self.worker.post_started_comment()
+        github.assert_called_once()
+        arguments, provider, body = github.call_args.args
+        self.assertEqual(provider, "codex")
+        self.assertIn("issue", arguments)
+        self.assertIn("**Codex Bot** started working on this issue", body)
+        self.assertIn("- Model: `test-model`", body)
+        self.assertIn("- Branch: `main`", body)
+        self.assertTrue(is_worker_comment({"body": body}))
+        self.assertTrue(self.worker.read_state()["started_comment_posted"])
+
+    def test_existing_start_marker_repairs_state_without_duplicate_comment(self) -> None:
+        self.worker.issue = IssueContext(408, "Crash-safe notice", "", [], "https://example.invalid/408")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        marker = self.worker.started_comment_marker()
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[{"body": marker}]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        github.assert_not_called()
+        self.assertTrue(self.worker.read_state()["started_comment_posted"])
+
+    def test_dry_run_does_not_post_start_comment(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
+                "--dry-run", "--no-require-bot-auth", "--gh-bin", "/usr/bin/false",
+                "--claude-bin", "", "--codex-bin", "",
+            ]
+        )
+        worker = Worker(Config.from_args(args))
+        worker.issue = IssueContext(409, "Dry run", "", [], "https://example.invalid/409")
+        with (
+            mock.patch.object(worker, "claude_capacity", return_value=0),
+            mock.patch.object(worker, "codex_capacity", return_value=0),
+            mock.patch.object(worker, "post_started_comment") as start_comment,
+        ):
+            self.assertEqual(worker.run_selected_issue(), 0)
+        start_comment.assert_not_called()
 
     def test_opposite_provider_approves_pull_request(self) -> None:
         worker = self.pr_worker()

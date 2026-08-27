@@ -67,8 +67,10 @@ built-in defaults.
    For a new issue, prefer Claude by default. Both choices honor quota checks.
 7. Fast-forward local `main`, save recovery ownership, and create a clean
    provider branch from that exact commit.
-8. Run Claude or Codex non-interactively. The worker commits any completed
-   changes the AI leaves uncommitted and ensures the issue is referenced.
+8. Post one concise provider-bot comment with the model and branch so observers
+   can see that work started, then run Claude or Codex non-interactively. The
+   worker commits any completed changes the AI leaves uncommitted and ensures
+   the issue is referenced.
 9. Push the branch, create a PR against `main`, approve it with the opposite
    bot, merge it, delete the branch, and return the clean local checkout to
    synchronized `main`.
@@ -276,7 +278,9 @@ Important state files:
 
 - `in-progress-issue.json` — active provider, model, session, exact synchronized
   base, branch ownership, and recovery commits. It is written before branch
-  creation so Ctrl+C cannot create an unowned issue branch.
+  creation so Ctrl+C cannot create an unowned issue branch. It also records
+  whether the start notice was posted; the hidden notice marker prevents a
+  crash between posting and saving state from creating duplicate comments.
 - `quota-paused-issues/N.json` — shelved sessions that must resume with their
   original provider.
 - `pending-email.json` — a successful commit whose GitHub or email bookkeeping
