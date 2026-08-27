@@ -95,6 +95,36 @@ function openDeleteAssetModal(entryKey) {
   document.getElementById("deleteAssetModalBody").textContent =
     `The ${kind} file and its metadata, artwork, subtitles, generated images, and other server-managed data will be permanently deleted.`;
   document.getElementById("deleteAssetModalPath").textContent = entry.relative_path;
+
+  // Spell out exactly what goes — a generic list right away, then refine the
+  // artwork/subtitle lines with real counts once get_asset_detail returns.
+  const items = document.getElementById("deleteAssetModalItems");
+  const line = (icon, text) => `<li><i class="bi ${icon}"></i>${esc(text)}</li>`;
+  items.innerHTML =
+    line("bi-file-earmark-play", `The ${kind} file on disk`) +
+    line("bi-card-text", "All scraped and manually edited metadata") +
+    line("bi-image", "Poster, backdrop, and other artwork stored for this asset") +
+    line("bi-badge-cc", "Downloaded and Whisper-generated subtitles") +
+    line("bi-crop", "Generated thumbnails and other server-managed files");
+  invoke("get_asset_detail", { entryKey })
+    .then(detail => {
+      if (pendingDeleteEntryKey !== entryKey || !detail) return;
+      const artworkCount = (detail.delete_unshared_artwork_count || 0);
+      const shared = (detail.delete_shared_artwork_count || 0);
+      const subs = (detail.delete_subtitle_count || 0);
+      items.innerHTML =
+        line("bi-file-earmark-play", `The ${kind} file on disk`) +
+        line("bi-card-text", "All scraped and manually edited metadata") +
+        line("bi-image", artworkCount
+          ? `${artworkCount} artwork file${artworkCount === 1 ? "" : "s"} used only by this asset${shared ? ` (${shared} shared file${shared === 1 ? "" : "s"} kept)` : ""}`
+          : "No artwork files are stored only for this asset") +
+        line("bi-badge-cc", subs
+          ? `${subs} subtitle track${subs === 1 ? "" : "s"}`
+          : "No stored subtitle tracks") +
+        line("bi-crop", "Generated thumbnails and other server-managed files");
+    })
+    .catch(() => {});
+
   deleteAssetModalBackdrop.classList.remove("d-none");
   document.getElementById("deleteAssetModalConfirm").focus();
 }
@@ -533,7 +563,19 @@ function renderBrowseRoot(body) {
   const emptyMessage = searchQuery.trim() || kindFilter !== "all" || categoryFilter !== "all" || completenessFilter !== "all"
     ? "No matches for the current search/filter."
     : "No movies, music, or shows found yet.";
+  // "Entries" and "Library size" totals live here on the browse page (they
+  // used to be a Status panel on the Details tab) — see GitHub issue #63.
+  // Shown only for the unfiltered library so the numbers always mean "your
+  // whole library", never "whatever the current filter matched".
+  const filtering = Boolean(searchQuery.trim()) || kindFilter !== "all" || categoryFilter !== "all" || completenessFilter !== "all";
+  const totalGb = libraryEntries.reduce((sum, e) => sum + (e.size || 0), 0) / 1073741824;
+  const summary = filtering ? "" : `
+    <div class="grid browse-summary">
+      ${stat("Entries", libraryEntries.length, false, "entries")}
+      ${stat("Library size", `${totalGb.toFixed(2)} GB`, false, "library-size")}
+    </div>`;
   body.innerHTML = `
+    ${summary}
     ${movies.length ? `<div class="shelf-section"><h2 style="margin-top:0">Movies</h2><div class="media-grid">${movieCards}</div></div>` : ""}
     ${shows.size ? `<div class="shelf-section"><h2>Shows</h2><div class="media-grid">${showCards}</div></div>` : ""}
     ${tracks.size ? `<div class="shelf-section"><h2>Music</h2><div class="media-grid">${artistCards}</div></div>` : ""}
@@ -583,8 +625,62 @@ function detailView(entry, backCrumbs) {
           </p>
         </div>
       </div>
+      <div id="assetChecklist" class="asset-checklist"><span class="muted">Checking metadata &amp; artwork…</span></div>
       <div id="detailManage"></div>
     </div>`;
+}
+
+// The "what's here / what's missing" checklist on a movie or episode detail
+// page (issue #63). Presence of most fields is already known from the
+// EntrySummary the browse view holds; artwork-by-kind, subtitle tracks, and
+// lyrics come from get_asset_detail. Rendered after the fact into
+// #assetChecklist so the synchronous detailView() render isn't blocked on
+// an IPC round trip.
+async function populateAssetChecklist(entry) {
+  const container = document.getElementById("assetChecklist");
+  if (!container) return;
+  let detail = {};
+  try {
+    detail = await invoke("get_asset_detail", { entryKey: entry.entry_key }) || {};
+  } catch {
+    // Non-critical panel — leave the "checking…" text rather than a toast.
+  }
+  const artwork = new Set(detail.artwork_present || []);
+  const isTrack = entry.kind === "track";
+  const isEpisode = entry.kind === "episode";
+  const items = [];
+  const add = (label, present) => items.push({ label, present: Boolean(present) });
+
+  add("Title", entry.scraped_title);
+  if (!isTrack) {
+    add("Description / synopsis", entry.overview);
+    add("Content rating", entry.rating);
+    add("Cast", (entry.cast || []).length);
+  }
+  add(isTrack ? "Genre" : "Genres / categories", (entry.genres || []).length);
+  add("Release year", entry.year != null);
+  add("Community rating", entry.community_rating != null);
+  if (isTrack) {
+    add("Track duration", entry.duration_secs != null);
+    add("Cover art", artwork.has("cover"));
+    add("Artist photo", artwork.has("artist"));
+    add("Lyrics", detail.has_lyrics);
+  } else {
+    add("Poster", artwork.has("poster"));
+    if (isEpisode) add("Season poster", artwork.has("season"));
+    add("Backdrop", artwork.has("backdrop"));
+    add("Subtitles", (detail.subtitle_languages || []).length);
+  }
+
+  const have = items.filter(item => item.present).length;
+  container.innerHTML = `
+    <h2><i class="bi bi-check2-square"></i>Metadata &amp; artwork <span class="muted">(${have} of ${items.length} present)</span></h2>
+    <ul class="asset-checklist-list">
+      ${items.map(item => `
+        <li class="${item.present ? "checklist-have" : "checklist-missing"}">
+          <i class="bi ${item.present ? "bi-check-circle-fill" : "bi-circle"}"></i>${esc(item.label)}
+        </li>`).join("")}
+    </ul>`;
 }
 
 function wireDetailManage(entry) {
@@ -618,6 +714,7 @@ function renderMovieDetail(body, entryKey) {
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
   wireDetailManage(entry);
+  populateAssetChecklist(entry);
   body.querySelectorAll("[data-filter-category]").forEach(el => el.addEventListener("click", () => {
     categoryFilter = el.dataset.filterCategory;
     browsePath = { kind: "root" };
@@ -876,6 +973,7 @@ function renderEpisodeDetail(body, entryKey) {
   body.innerHTML = detailView(entry, crumbs);
   wireBreadcrumb(body, crumbs);
   wireDetailManage(entry);
+  populateAssetChecklist(entry);
   body.querySelectorAll("[data-filter-category]").forEach(el => el.addEventListener("click", () => {
     categoryFilter = el.dataset.filterCategory;
     browsePath = { kind: "root" };

@@ -557,7 +557,13 @@ impl Default for Settings {
             artwork_disk_cache_enabled: false,
             local_transcription_enabled: false,
             transcription_pause_while_streaming: true,
-            transcription_skip_if_subtitles_exist: false,
+            // Fresh-install default: a brand-new library has never had bulk
+            // Whisper scanning run over it, so start in the conservative
+            // "leave anything that already has a subtitle alone" mode. An
+            // existing settings.json keeps whatever it had (serde
+            // missing-field default below stays `false`) — same split as
+            // `streaming_upload_budget_enabled` above.
+            transcription_skip_if_subtitles_exist: true,
             mcp_enabled: false,
             mcp_port: default_mcp_port(),
             mcp_access_token: None,
@@ -636,6 +642,10 @@ mod tests {
         // No settings.json written at all — a genuinely first-ever run.
         let loaded = load(&dir);
         assert!(!loaded.streaming_upload_budget_enabled);
+        // Whisper generation itself is opt-in, and a fresh library also
+        // starts out skipping anything that already has subtitles.
+        assert!(!loaded.local_transcription_enabled);
+        assert!(loaded.transcription_skip_if_subtitles_exist);
     }
 
     #[test]

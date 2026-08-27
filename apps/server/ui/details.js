@@ -1,7 +1,7 @@
-// ---- Details tab: status + media-root configuration ------------------------
+// ---- Details tab: bandwidth/transcoding/cache panels + media-root config ---
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
+  await Promise.all([refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
 }
 
 async function refreshTmdbKeyField() {
@@ -97,7 +97,7 @@ document.getElementById("uploadBudgetEnabledCheck").addEventListener("change", a
   const enabled = event.currentTarget.checked;
   try {
     await invoke("set_streaming_upload_budget_enabled", { enabled });
-    await refreshStatus();
+    await refreshBandwidth();
     showToast(enabled ? "Internet streaming budget enabled." : "Internet streaming budget disabled.", "success");
   } catch (err) {
     event.currentTarget.checked = !enabled;
@@ -155,32 +155,12 @@ document.getElementById("saveOpenSubtitlesKeyBtn").addEventListener("click", asy
   }
 });
 
-async function refreshStatus() {
-  const grid = document.getElementById("statusGrid");
-  try {
-    const status = await invoke("get_status");
-    const totalGb = (await invoke("list_entries").catch(() => []))
-      .reduce((sum, e) => sum + e.size, 0) / 1073741824;
-    // "Media roots" used to be a stat tile here too, joining every root
-    // path into one comma-separated string — the exact "word wrapped
-    // panel" complaint real use surfaced, since a tile sized for a short
-    // label/value pair isn't a reasonable place for one or more full
-    // filesystem paths. It's dropped: the "Media roots" card right below
-    // this one already lists every root in full, with room to breathe.
-    grid.innerHTML =
-      stat("Entries", status.entry_count, false, "entries") +
-      stat("Library size", totalGb.toFixed(2) + " GB", false, "library-size") +
-      stat("Streaming upload budget", status.streaming_upload_budget_enabled ? (status.streaming_upload_budget_bps / 1000000).toFixed(1) + " Mbps" : "Unlimited", false, "upload-budget") +
-      stat("Active playback sessions", status.active_playback_sessions, false, "active-sessions") +
-      stat("Device fingerprint", status.fingerprint, true, "device-fingerprint") +
-      stat("Library thumbprint", status.thumbprint.slice(0, 24) + "…", true, "library-thumbprint");
-  } catch (err) {
-    grid.innerHTML = `<p class="muted">Unable to load status.</p>`;
-    showToast(String(err), "error");
-  }
-}
-
 // ---- Streaming bandwidth: live graph + "now" panel --------------------
+// The "Entries" and "Library size" totals that used to live in a separate
+// Status panel here moved to the Media (browse) tab; "Active playback
+// sessions" and the upload-budget limit moved into this panel; the device
+// fingerprint / library thumbprint tiles were dropped outright — see
+// GitHub issue #63.
 
 /// Renders the whole chart from scratch every call (data update or hover
 /// frame alike) — the dataset is at most 720 points, so a full redraw stays
@@ -189,8 +169,11 @@ let bandwidthChartState = null;
 
 async function refreshBandwidth() {
   try {
-    const samples = await invoke("get_bandwidth_history");
-    renderBandwidthStatus(samples);
+    const [samples, status] = await Promise.all([
+      invoke("get_bandwidth_history"),
+      invoke("get_status").catch(() => null),
+    ]);
+    renderBandwidthStatus(samples, status);
     drawBandwidthChart(samples, null);
   } catch (err) {
     // Best-effort background poll (every 5s) — a transient failure isn't
@@ -198,10 +181,23 @@ async function refreshBandwidth() {
   }
 }
 
-function renderBandwidthStatus(samples) {
+function renderBandwidthStatus(samples, status) {
   const grid = document.getElementById("bandwidthStatusGrid");
   const currentMbps = samples.length ? samples[samples.length - 1].bps / 1_000_000 : 0;
-  grid.innerHTML = stat("Current streaming bandwidth", formatMbps(currentMbps), false, "streaming-bandwidth");
+  let tiles = stat("Current streaming bandwidth", formatMbps(currentMbps), false, "streaming-bandwidth");
+  if (status) {
+    tiles +=
+      stat("Active playback sessions", status.active_playback_sessions, false, "active-sessions") +
+      stat(
+        "Streaming upload budget",
+        status.streaming_upload_budget_enabled ? (status.streaming_upload_budget_bps / 1_000_000).toFixed(1) + " Mbps" : "Unlimited",
+        false,
+        "upload-budget",
+      );
+    const check = document.getElementById("uploadBudgetEnabledCheck");
+    if (check) check.checked = status.streaming_upload_budget_enabled;
+  }
+  grid.innerHTML = tiles;
 }
 
 function formatMbps(mbps) {

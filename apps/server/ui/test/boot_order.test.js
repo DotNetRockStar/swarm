@@ -288,8 +288,20 @@ async function main() {
   if (dom.window.getComputedStyle(document.body).visibility !== "visible") {
     failures.push("Expected document.body to be revealed (visibility: visible) after boot, but it was still hidden.");
   }
-  if (document.getElementById("statusGrid").textContent.includes("Listening (QUIC)")) {
-    failures.push("Expected the Listening (QUIC) status panel to be removed.");
+  if (document.getElementById("statusGrid")) {
+    failures.push("Expected the standalone Status panel to be removed from the Details tab.");
+  }
+  await dom.window.refreshBandwidth();
+  const bandwidthGrid = document.getElementById("bandwidthStatusGrid").textContent;
+  if (!bandwidthGrid.includes("Active playback sessions") || !bandwidthGrid.includes("Streaming upload budget")) {
+    failures.push(`Expected active sessions and the upload budget to move into the Streaming bandwidth panel, got: ${bandwidthGrid}.`);
+  }
+  if (!document.getElementById("uploadBudgetEnabledCheck")) {
+    failures.push("Expected the internet streaming limit toggle to live in the Streaming bandwidth panel.");
+  }
+  if (document.getElementById("bandwidthStatusGrid").textContent.includes("fingerprint")
+      || document.getElementById("bandwidthStatusGrid").textContent.includes("thumbprint")) {
+    failures.push("Expected device fingerprint / library thumbprint tiles to be gone.");
   }
   await dom.window.refreshArtworkCache();
   if (!document.getElementById("artworkCacheStatusGrid").textContent.includes("1.5 KB")) {

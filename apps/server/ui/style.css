@@ -429,6 +429,25 @@ td.mono {
 .detail-body:has(.art-placeholder.detail-backdrop) { margin-top: 0; }
 .detail-poster { width: 130px; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; border: 3px solid var(--surface); background: var(--surface-muted); flex: 0 0 auto; }
 
+/* Browse root: "Entries" / "Library size" totals (issue #63). */
+.browse-summary { margin-bottom: 20px; }
+
+/* Movie/episode detail: metadata & artwork completeness checklist (issue #63). */
+.asset-checklist {
+  margin: 18px 4px 0; padding: 14px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--surface-muted);
+}
+.asset-checklist h2 { margin: 0 0 10px; }
+.asset-checklist-list {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 6px 16px;
+}
+.asset-checklist-list li { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
+.asset-checklist-list li i { flex: 0 0 auto; }
+.asset-checklist-list .checklist-have i { color: var(--green); }
+.asset-checklist-list .checklist-missing { color: var(--muted); }
+.asset-checklist-list .checklist-missing i { color: var(--muted); }
+
 /* AI tab: example-prompt "console" — a mock terminal/chat transcript, not a
    real input (there's nothing to submit to from this webview), just a
    markdown-code-fence-style dark block that shows literal example questions
@@ -549,6 +568,12 @@ td.mono {
   margin-top: 12px; padding: 9px 10px; border-radius: 8px; background: var(--surface-muted);
   font-size: .75rem; overflow-wrap: anywhere;
 }
+.delete-asset-modal-items {
+  list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px;
+  font-size: .82rem; color: var(--text); text-align: left;
+}
+.delete-asset-modal-items li { display: flex; align-items: flex-start; gap: 8px; }
+.delete-asset-modal-items i { color: var(--muted); margin-top: 2px; flex: 0 0 auto; }
 .delete-asset-warning { margin-top: 14px; color: #ff8db4; font-size: .82rem; font-weight: 700; }
 .delete-asset-warning i { margin-right: 7px; }
 .delete-asset-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }

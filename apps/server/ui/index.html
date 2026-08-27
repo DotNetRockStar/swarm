@@ -77,13 +77,6 @@
 
   <div id="tabPanel-details" class="d-none">
     <div class="card">
-      <h2>Status</h2>
-      <div class="grid" id="statusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
-      <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="uploadBudgetEnabledCheck"> Limit internet streaming to the measured upload budget</label>
-      <p class="muted compact-help">LAN streaming is never throttled. Turn this off to let internet streams use all available upload bandwidth.</p>
-    </div>
-
-    <div class="card">
       <div class="card-head">
         <h2 class="info-trigger" data-info="artwork-cache" tabindex="0" role="button"><i class="bi bi-images heading-icon"></i>Artwork cache <i class="bi bi-info-circle info-affordance"></i></h2>
         <label class="checkbox-label transcription-toggle"><input type="checkbox" id="artworkDiskCacheEnabledCheck"> Cache requested artwork</label>
@@ -124,6 +117,8 @@
         <div id="bandwidthTooltip" class="bandwidth-tooltip d-none"></div>
       </div>
       <p class="muted compact-help">Bytes actually being sent to every connected client combined, sampled every 5 seconds.</p>
+      <label class="checkbox-label upload-budget-toggle"><input type="checkbox" id="uploadBudgetEnabledCheck"> Limit internet streaming to the measured upload budget</label>
+      <p class="muted compact-help">LAN streaming is never throttled. Turn this off to let internet streams use all available upload bandwidth.</p>
     </div>
 
     <div class="card">
@@ -493,6 +488,7 @@
     <h2 id="deleteAssetModalTitle">Delete asset?</h2>
     <p id="deleteAssetModalBody" class="muted"></p>
     <p id="deleteAssetModalPath" class="mono muted delete-asset-modal-path"></p>
+    <ul id="deleteAssetModalItems" class="delete-asset-modal-items"></ul>
     <p class="delete-asset-warning"><i class="bi bi-exclamation-triangle-fill"></i>This cannot be undone.</p>
     <div class="delete-asset-modal-actions">
       <button id="deleteAssetModalCancel" class="secondary">Cancel</button>
