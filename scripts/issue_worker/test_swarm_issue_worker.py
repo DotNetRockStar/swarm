@@ -83,6 +83,7 @@ class WorkerTestCase(unittest.TestCase):
             "work_type": "initial", "previous_commit_sha": "", "previous_completion_comment": None,
             "followup_comments": [], "trigger_comment_id": None, "ai_tool": "Claude",
             "model": "test-model", "effort": "high", "session_id": f"session-{issue_number}",
+            "session_started": True,
             "session_comment_id": 0, "status": "quota_paused", "quota_pause_count": 1,
             "quota_paused_at": "2026-08-25T10:00:00-05:00", "attempt_start_sha": self.base_sha,
         }
@@ -117,6 +118,28 @@ class WorkerTestCase(unittest.TestCase):
         assert choice is not None
         self.assertEqual(choice.name, "Claude")
         self.assertTrue(choice.session_id)
+
+    def test_choice_from_state_does_not_resume_a_session_that_never_started(self) -> None:
+        # prepare_repository persists a freshly-generated Claude session_id
+        # before run_ai ever invokes `claude` with it (e.g. so a retry after
+        # post_started_comment fails still knows which ID to assign). A
+        # crash in that window must not make the next attempt think there's
+        # a real session to --resume — regression test for that exact bug.
+        state = {
+            "ai_tool": "Claude", "model": "test-model", "effort": "high",
+            "session_id": "never-actually-started",
+        }
+        choice = self.worker.choice_from_state(state)
+        self.assertEqual(choice.session_id, "never-actually-started")
+        self.assertFalse(choice.resume)
+
+    def test_choice_from_state_resumes_once_session_started_is_recorded(self) -> None:
+        state = {
+            "ai_tool": "Claude", "model": "test-model", "effort": "high",
+            "session_id": "genuinely-running", "session_started": True,
+        }
+        choice = self.worker.choice_from_state(state)
+        self.assertTrue(choice.resume)
 
     @staticmethod
     def issue_payload(number: int) -> dict[str, object]:
