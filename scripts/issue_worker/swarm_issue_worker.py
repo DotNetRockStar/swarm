@@ -828,6 +828,48 @@ class Worker:
             self.send_notification(state, "quota-paused")
             self.update_state(quota_email_sent=True)
 
+    def started_comment_marker(self) -> str:
+        assert self.issue and self.choice
+        return (
+            f"<!-- swarm-issue-worker:started:issue:{self.issue.number};"
+            f"provider:{self.choice.key};branch:{self.expected_branch()} -->"
+        )
+
+    def post_started_comment(self) -> None:
+        assert self.issue and self.choice
+        state = self.read_state()
+        if state.get("started_comment_posted"):
+            return
+        marker = self.started_comment_marker()
+        already_posted = any(
+            marker in str(comment.get("body") or "")
+            for comment in self.comments(self.issue.number)
+        )
+        if not already_posted:
+            action = "started follow-up work on" if self.issue.work_type == "followup" else "started working on"
+            body = (
+                f"{marker}\n🤖 **{self.choice.name} Bot** {action} this issue.\n\n"
+                f"- Model: `{self.choice.model}`\n"
+                f"- Branch: `{self.expected_branch()}`\n"
+            )
+            self.github.gh(
+                [
+                    "issue",
+                    "comment",
+                    str(self.issue.number),
+                    "--repo",
+                    self.config.github_repository,
+                    "--body-file",
+                    "-",
+                ],
+                self.choice.key,
+                body,
+            )
+            log(f"Posted {self.choice.name} Bot start notice to issue #{self.issue.number}.")
+        else:
+            log(f"Issue #{self.issue.number} already has this work-round start notice.")
+        self.update_state(started_comment_posted=True)
+
     def ai_failure_is_quota(self) -> bool:
         combined = ""
         for path in (self.ai_output_file, self.ai_diagnostic_file):
@@ -1823,6 +1865,7 @@ class Worker:
             return 0
 
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
+        self.post_started_comment()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         ai_status = self.run_ai(prompt)
         if ai_status != 0 or not self.ai_output_file.exists() or self.ai_output_file.stat().st_size == 0:
