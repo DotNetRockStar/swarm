@@ -27,7 +27,8 @@
 #   ./scripts/tv_uat_suite.sh --device 192.168.0.148  # test only this device (IP or adb device_name)
 #   ./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest            # run one scenario class
 #   ./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # run one scenario method
-#   ./scripts/tv_uat_suite.sh --no-issue              # write the report locally; skip posting it to GitHub
+#   ./scripts/tv_uat_suite.sh --github-issue           # opt in to filing a GitHub issue when failures occur
+#   ./scripts/tv_uat_suite.sh --no-issue               # explicit local-only mode (the default; retained for compatibility)
 #   ./scripts/tv_uat_suite.sh --skip-install          # smoke-test whatever build is already installed; no rebuild/reinstall
 #
 # Env vars:
@@ -86,14 +87,17 @@ ALL_TEST_CLASSES=(
 )
 
 ALL_MODE=0
-NO_ISSUE=0
+POST_GITHUB_ISSUE=0
+GITHUB_ISSUE_FLAG=0
+NO_ISSUE_FLAG=0
 SKIP_INSTALL=0
 DEVICE_ARG=""
 TEST_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --all) ALL_MODE=1 ;;
-        --no-issue) NO_ISSUE=1 ;;
+        --github-issue) POST_GITHUB_ISSUE=1; GITHUB_ISSUE_FLAG=1 ;;
+        --no-issue) POST_GITHUB_ISSUE=0; NO_ISSUE_FLAG=1 ;;
         --skip-install) SKIP_INSTALL=1 ;;
         --device) shift; DEVICE_ARG="${1:-}" ;;
         --test) shift; TEST_ARG="${1:-}" ;;
@@ -101,6 +105,11 @@ while [ $# -gt 0 ]; do
     esac
     shift || true
 done
+
+if [ "$GITHUB_ISSUE_FLAG" -eq 1 ] && [ "$NO_ISSUE_FLAG" -eq 1 ]; then
+    echo "--github-issue and --no-issue cannot be used together." >&2
+    exit 2
+fi
 
 if [ -n "$TEST_ARG" ]; then
     # Accept a bare class name or "Class#method"; qualify with the UAT
@@ -473,15 +482,21 @@ cat "$REPORT_DIR/report.md"
 echo
 echo "==> Report written to $REPORT_DIR/report.md"
 
-if [ "$NO_ISSUE" -eq 0 ] && [ "$FAIL_COUNT" -gt 0 ] && command -v gh >/dev/null 2>&1; then
-    TITLE="TV UAT suite: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ($RUN_STAMP)"
-    if ISSUE_URL="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$REPORT_DIR/report.md" --label "$ISSUE_LABEL" 2>&1)"; then
-        echo "==> Findings posted: $ISSUE_URL"
+if [ "$POST_GITHUB_ISSUE" -eq 1 ]; then
+    if [ "$FAIL_COUNT" -eq 0 ]; then
+        echo "==> No failures — nothing to file. GitHub issues are only opened when FAIL_COUNT > 0."
+    elif ! command -v gh >/dev/null 2>&1; then
+        echo "Could not post findings to GitHub because gh is unavailable (report is still saved locally)." >&2
     else
-        echo "Could not post findings to GitHub (report is still saved locally): $ISSUE_URL" >&2
+        TITLE="TV UAT suite: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ($RUN_STAMP)"
+        if ISSUE_URL="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$REPORT_DIR/report.md" --label "$ISSUE_LABEL" 2>&1)"; then
+            echo "==> Findings posted: $ISSUE_URL"
+        else
+            echo "Could not post findings to GitHub (report is still saved locally): $ISSUE_URL" >&2
+        fi
     fi
-elif [ "$NO_ISSUE" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ]; then
-    echo "==> No failures — nothing to file. GitHub issues are only opened when FAIL_COUNT > 0."
+else
+    echo "==> GitHub issue reporting is disabled; use --github-issue to opt in."
 fi
 
 [ "$FAIL_COUNT" -eq 0 ]
