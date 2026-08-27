@@ -137,10 +137,12 @@ class PlayerRemoteInputTest {
     }
 
     @Test
-    fun `music maps D-pad directions and transport buttons to seeking`() {
-        assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT))
-        assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT))
-        assertEquals(RemotePlaybackAction.SEEK_BACK, musicPlaybackAction(KeyEvent.KEYCODE_MEDIA_REWIND))
-        assertEquals(RemotePlaybackAction.SEEK_FORWARD, musicPlaybackAction(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD))
+    fun `D-pad left and right are never a playback action`() {
+        // The music screen relies on remotePlaybackAction returning null for
+        // the D-pad so Compose keeps left/right for focus navigation instead
+        // of fast-forward / rewind (#96); video's D-pad seek lives in
+        // videoSurfacePlaybackAction, not here.
+        assertNull(remotePlaybackAction(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertNull(remotePlaybackAction(KeyEvent.KEYCODE_DPAD_RIGHT))
     }
 }
