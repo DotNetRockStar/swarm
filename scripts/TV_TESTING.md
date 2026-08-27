@@ -56,10 +56,11 @@ run looks like:
   report — see [Failure evidence](#failure-evidence-tv_uat_suitesh) below;
   nothing extra is written for a clean PASS run beyond the report and
   per-device logcat.
-- **GitHub issue:** filed automatically (`gh issue create`, label `Testing`)
-  **only when at least one test failed** — a clean PASS run never files
-  anything, it just prints "no failures — nothing to file." `--no-issue`
-  suppresses filing even on a FAIL, if you want the local report only.
+- **GitHub issue:** `tv_uat_suite.sh` is local-only by default. Pass
+  `--github-issue` to opt in to `gh issue create` with the `Testing` label when
+  at least one test failed; a clean PASS run never files anything.
+  `--no-issue` remains an explicit local-only compatibility flag. The older
+  `tv_e2e_suite.sh` retains its existing reporting behavior.
 - **No Fire TV found:** both suites treat this as a *finding*, not a hard
   failure — they'll say so in the report/console (`FAIL_COUNT` stays `0` if
   nothing else failed) rather than erroring out, since running on a network
@@ -180,7 +181,8 @@ needed to debug without touching real hardware again:
 ./scripts/tv_uat_suite.sh --device 192.168.0.148 # one device, by IP or device_name
 ./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest            # one scenario class
 ./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # one scenario method
-./scripts/tv_uat_suite.sh --no-issue             # skip filing a GitHub issue
+./scripts/tv_uat_suite.sh --github-issue          # opt in to filing findings on GitHub
+./scripts/tv_uat_suite.sh --no-issue              # explicit local-only mode (the default)
 ./scripts/tv_uat_suite.sh --skip-install         # smoke-test an already-installed build
 ```
 
