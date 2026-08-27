@@ -1,0 +1,82 @@
+package app.swarm.tv.app.uat
+
+import android.view.KeyEvent
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import app.swarm.tv.app.ui.UatTestTags
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Scenario 12: movie playback and the pause overlay.
+ *
+ * Two known deviations from the literal scenario wording, confirmed in the
+ * plan and the swarm-tv-uat-suite skill:
+ *  - "reviews" doesn't exist as a field — [UatTestTags.PAUSE_METADATA] is
+ *    one joined text line (year, duration, content rating, community
+ *    rating+votes, resolution); this test asserts against that line rather
+ *    than a nonexistent reviews field.
+ *  - A movie's pause overlay correctly has NO Next Episode button (the app
+ *    only shows it for episodes — see [ShowPlaybackPauseUatTest] for that
+ *    assertion) — this test asserts its absence here.
+ *
+ * "Settings" has no dedicated pause-overlay control in the app today; the
+ * closest real affordance is the audio/subtitle track picker, which this
+ * test exercises in its place (see the skill for the full rationale).
+ */
+class MoviePlaybackPauseUatTest : UatTestBase() {
+
+    @Test
+    fun testPlaybackAndPauseOverlay() {
+        waitForTag(UatTestTags.SHELF_MOVIES)
+        val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
+        composeTestRule.onNodeWithTag(movieTag).performClick()
+        waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
+        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON).performClick()
+
+        // Plays for the first 30 seconds, per the scenario spec.
+        Thread.sleep(30_000)
+
+        pressDpadRight() // fast-forward
+        Thread.sleep(1_000)
+        pressDpadLeft() // rewind
+        Thread.sleep(1_000)
+
+        pressSelect() // opens the pause overlay
+        waitForTag(UatTestTags.PAUSE_LABEL)
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_TITLE).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_METADATA).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_GENRES).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_CAST).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_DESCRIPTION).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_AUDIO_TRACK_PICKER).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_SUBTITLE_TRACK_PICKER).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_RESUME_BUTTON).assertIsDisplayed()
+        assertTrue(
+            "a movie's pause overlay should have no Next Episode button",
+            composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_NEXT_EPISODE_BUTTON).isEmpty(),
+        )
+
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_RESUME_BUTTON).performClick()
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isEmpty()
+        }
+
+        device.pressKeyCode(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+        waitForTag(UatTestTags.PAUSE_LABEL)
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_RESUME_BUTTON).performClick()
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isEmpty()
+        }
+
+        pressSelect()
+        waitForTag(UatTestTags.PAUSE_LABEL)
+        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_AUDIO_TRACK_PICKER).performClick()
+        pressBack()
+        waitForTag(UatTestTags.PAUSE_LABEL)
+
+        pressBack() // out of the player entirely
+        waitForTag(UatTestTags.SHELF_MOVIES)
+    }
+}

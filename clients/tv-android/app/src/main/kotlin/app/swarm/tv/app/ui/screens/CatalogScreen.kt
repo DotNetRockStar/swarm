@@ -80,6 +80,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.TextUnit
@@ -96,6 +97,7 @@ import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.PrefetchArtworkRow
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmLike
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -929,7 +931,7 @@ private fun CatalogControls(
                 onClick = onOpenSwarm,
                 colors = swarmActionButtonColors(),
                 contentPadding = PaddingValues(10.dp),
-                modifier = Modifier.size(44.dp),
+                modifier = Modifier.size(44.dp).testTag(UatTestTags.OPEN_SWARM_BUTTON),
             ) {
                 Icon(
                     painter = painterResource(R.drawable.ic_settings),
@@ -1201,6 +1203,7 @@ private fun FilterRail(
             .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
             .background(SwarmSurface)
             .padding(horizontal = if (expanded) 10.dp else 4.dp, vertical = 8.dp)
+            .testTag(UatTestTags.FILTER_RAIL)
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
                     onLeave()
@@ -1256,13 +1259,19 @@ private fun FilterRail(
                         label = kind.label,
                         isSelected = kindFilter == kind,
                         onClick = { onKindSelect(kind) },
+                        testTag = UatTestTags.FILTER_KIND_PREFIX + kind.name,
                     )
                 }
             }
 
             Spacer(Modifier.height(14.dp))
             FilterRailSection("Favorites") {
-                FilterRailOption("♥  Liked only", isSelected = likedOnly, onClick = onLikedOnlyToggle)
+                FilterRailOption(
+                    "♥  Liked only",
+                    isSelected = likedOnly,
+                    onClick = onLikedOnlyToggle,
+                    testTag = UatTestTags.FILTER_LIKED_ONLY,
+                )
             }
 
             if (genres.isNotEmpty()) {
@@ -1270,7 +1279,12 @@ private fun FilterRail(
                 FilterRailSection("Genre") {
                     FilterRailOption("All genres", isSelected = genreFilter == null, onClick = { onGenreSelect(null) })
                     for (genre in genres) {
-                        FilterRailOption(genre, isSelected = genre == genreFilter, onClick = { onGenreSelect(genre) })
+                        FilterRailOption(
+                            genre,
+                            isSelected = genre == genreFilter,
+                            onClick = { onGenreSelect(genre) },
+                            testTag = UatTestTags.FILTER_GENRE_PREFIX + genre,
+                        )
                     }
                 }
             }
@@ -1280,7 +1294,12 @@ private fun FilterRail(
                 FilterRailSection("Content rating") {
                     FilterRailOption("Any rating", isSelected = ratingFilter == null, onClick = { onRatingSelect(null) })
                     for (rating in ratings) {
-                        FilterRailOption(rating, isSelected = rating == ratingFilter, onClick = { onRatingSelect(rating) })
+                        FilterRailOption(
+                            rating,
+                            isSelected = rating == ratingFilter,
+                            onClick = { onRatingSelect(rating) },
+                            testTag = UatTestTags.FILTER_RATING_PREFIX + rating,
+                        )
                     }
                 }
             }
@@ -1318,11 +1337,12 @@ private fun FilterRailSection(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun FilterRailOption(label: String, isSelected: Boolean, onClick: () -> Unit) {
+private fun FilterRailOption(label: String, isSelected: Boolean, onClick: () -> Unit, testTag: String? = null) {
     var isFocused by remember { mutableStateOf(false) }
     Button(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth().height(36.dp).onFocusChanged { isFocused = it.isFocused },
+        modifier = Modifier.fillMaxWidth().height(36.dp).onFocusChanged { isFocused = it.isFocused }
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
         colors = ButtonDefaults.colors(
             containerColor = if (isSelected) SwarmAccent else SwarmSurfaceMuted,
@@ -1462,7 +1482,8 @@ private fun QuickAccessRow(
         defaultFocusRequester = defaultFocusRequester,
         requestInitialFocus = requestInitialFocus,
     )
-    Column {
+    val rowTag = if (title == "Continue Watching") UatTestTags.ROW_CONTINUE_WATCHING else UatTestTags.ROW_WATCHLIST
+    Column(modifier = Modifier.testTag(rowTag)) {
         ShelfHeader(title, fontSize = TOP_LEVEL_TITLE_SIZE)
         Spacer(Modifier.height(TOP_LEVEL_TITLE_SPACING))
         LazyRow(
@@ -1487,6 +1508,7 @@ private fun QuickAccessRow(
                     subtitle = item.subtitle,
                     progress = item.progress,
                     placeholderType = if (item.kind == QuickAccessKind.MOVIE) "Movie" else "Show",
+                    testTag = UatTestTags.CARD_QUICK_ACCESS_PREFIX + item.key,
                 )
             }
         }
@@ -1525,7 +1547,7 @@ private fun MovieRow(
         defaultFocusRequester,
         requestInitialFocus,
     )
-    Column {
+    Column(modifier = if (isTopLevel) Modifier.testTag(UatTestTags.SHELF_MOVIES) else Modifier) {
         ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         // contentPadding, not just the Column's own outer padding: tv-material3's
@@ -1552,6 +1574,7 @@ private fun MovieRow(
                     expandedPreviewEntryKey = expandedPreviewEntryKey,
                     onPreviewFocusChanged = onPreviewFocusChanged,
                     onPreviewFinished = onPreviewFinished,
+                    testTag = UatTestTags.CARD_MOVIE_PREFIX + entry.entry.entryKey,
                 )
             }
             if (showBrowseAllTile) {
@@ -1604,7 +1627,7 @@ private fun ShowShelfRow(
         defaultFocusRequester,
         requestInitialFocus,
     )
-    Column {
+    Column(modifier = if (isTopLevel) Modifier.testTag(UatTestTags.SHELF_SHOWS) else Modifier) {
         ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
@@ -1625,6 +1648,7 @@ private fun ShowShelfRow(
                     expandedPreviewEntryKey = expandedPreviewEntryKey,
                     onPreviewFocusChanged = onPreviewFocusChanged,
                     onPreviewFinished = onPreviewFinished,
+                    testTag = UatTestTags.CARD_SHOW_PREFIX + show.show,
                 )
             }
             if (showBrowseAllTile) {
@@ -1676,7 +1700,7 @@ private fun ArtistShelfRow(
         defaultFocusRequester,
         requestInitialFocus,
     )
-    Column {
+    Column(modifier = if (isTopLevel) Modifier.testTag(UatTestTags.SHELF_MUSIC) else Modifier) {
         ShelfHeader(title, if (isTopLevel) TOP_LEVEL_TITLE_SIZE else GENRE_TITLE_SIZE)
         Spacer(Modifier.height(if (isTopLevel) TOP_LEVEL_TITLE_SPACING else GENRE_TITLE_SPACING))
         LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
@@ -1702,6 +1726,7 @@ private fun ArtistShelfRow(
                     expandedPreviewEntryKey = expandedPreviewEntryKey,
                     onPreviewFocusChanged = onPreviewFocusChanged,
                     onPreviewFinished = onPreviewFinished,
+                    testTag = UatTestTags.CARD_ARTIST_PREFIX + artist.artist,
                 )
             }
             if (showBrowseAllTile) {
@@ -1745,6 +1770,7 @@ private fun CatalogCard(
     progress: Float? = null,
     placeholderType: String = "Movie",
     onNavigateDown: (() -> Unit)? = null,
+    testTag: String? = null,
 ) {
     var isFocused by remember(merged.entry.entryKey) { mutableStateOf(false) }
     val isPreviewExpanded = isFocused && expandedPreviewEntryKey == merged.entry.entryKey
@@ -1773,12 +1799,14 @@ private fun CatalogCard(
         onClick = onClick,
         colors = CardDefaults.colors(containerColor = SwarmSurface),
         scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-        modifier = focusModifier.then(resolvedWidth).onFocusChanged { focusState ->
-            if (isFocused != focusState.isFocused) {
-                isFocused = focusState.isFocused
-                onPreviewFocusChanged?.invoke(merged, focusState.isFocused)
-            }
-        },
+        modifier = focusModifier.then(resolvedWidth)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .onFocusChanged { focusState ->
+                if (isFocused != focusState.isFocused) {
+                    isFocused = focusState.isFocused
+                    onPreviewFocusChanged?.invoke(merged, focusState.isFocused)
+                }
+            },
     ) {
         Column {
             Box(modifier = Modifier.fillMaxWidth().height(CARD_MEDIA_HEIGHT).clip(RoundedCornerShape(4.dp))) {
@@ -1863,6 +1891,7 @@ private fun GroupCard(
     expandedPreviewEntryKey: String? = null,
     onPreviewFocusChanged: ((MergedEntry, Boolean) -> Unit)? = null,
     onPreviewFinished: (String) -> Unit = {},
+    testTag: String? = null,
 ) {
     var isFocused by remember(title, previewEntry?.entry?.entryKey) { mutableStateOf(false) }
     val previewEnabled = previewEntry != null && onPreviewFocusChanged != null
@@ -1878,12 +1907,14 @@ private fun GroupCard(
         onClick = onClick,
         colors = CardDefaults.colors(containerColor = SwarmSurface),
         scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-        modifier = focusModifier.then(resolvedWidth).onFocusChanged { focusState ->
-            if (isFocused != focusState.isFocused) {
-                isFocused = focusState.isFocused
-                previewEntry?.let { onPreviewFocusChanged?.invoke(it, focusState.isFocused) }
-            }
-        },
+        modifier = focusModifier.then(resolvedWidth)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .onFocusChanged { focusState ->
+                if (isFocused != focusState.isFocused) {
+                    isFocused = focusState.isFocused
+                    previewEntry?.let { onPreviewFocusChanged?.invoke(it, focusState.isFocused) }
+                }
+            },
     ) {
         Column {
             if (previewEnabled) {

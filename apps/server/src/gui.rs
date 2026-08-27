@@ -82,6 +82,61 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
+/// Installs the process-wide `tracing` subscriber. Nothing did this before
+/// (every `tracing::info!/warn!/error!` call in this crate silently went
+/// nowhere, with no subscriber ever attached) — this is what makes
+/// `<app data dir>/logs/server.log` exist at all, which the closed-loop TV
+/// UAT suite's failure-evidence bundles depend on. Mirrors
+/// `apps/stun-server/src/main.rs`'s explicit (not auto-detected) subscriber
+/// setup: same reasoning applies here — see that file's comment.
+///
+/// The returned `WorkerGuard` must stay alive for the life of the process
+/// (dropping it stops flushing the non-blocking writer) but nothing else in
+/// this file holds long-lived globals like this, so it's deliberately
+/// leaked rather than threaded through `AppState` for a single `main`-scoped
+/// value.
+fn init_logging(app: &tauri::AppHandle) {
+    let dir = match app_data_dir(app) {
+        Ok(dir) => dir.join("logs"),
+        Err(err) => {
+            eprintln!("could not determine app data dir for logging: {err}");
+            return;
+        }
+    };
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        eprintln!("could not create log directory {}: {err}", dir.display());
+        return;
+    }
+
+    let file_appender = tracing_appender::rolling::daily(&dir, "server.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    Box::leak(Box::new(guard));
+
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info,sqlx=warn".into())
+    };
+
+    use std::io::IsTerminal;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(env_filter())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(std::io::stdout().is_terminal())
+                .with_writer(std::io::stdout),
+        )
+        .init();
+
+    tracing::info!(log_dir = %dir.display(), "logging initialized");
+}
+
 fn configured_rendezvous_url() -> Option<String> {
     std::env::var("SWARM_RENDEZVOUS_URL")
         .ok()
@@ -2146,6 +2201,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            init_logging(app.handle());
             install_tray(app)?;
             Ok(())
         })

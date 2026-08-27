@@ -30,6 +30,13 @@ android {
             .replace("\\", "\\\\")
             .replace("\"", "\\\"")
         buildConfigField("String", "SWARM_RENDEZVOUS_URL", "\"$rendezvousUrl\"")
+
+        // Instrumented UAT suite (androidTest) — see scripts/tv_uat_suite.sh
+        // and the swarm-tv-uat-suite skill. Only the debug build carries the
+        // testing-mode extras MainActivity reads (BuildConfig.DEBUG-gated),
+        // so this suite only ever runs against debug installs, same as
+        // tv_e2e_suite.sh.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures { buildConfig = true }
@@ -137,6 +144,19 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit.jupiter)
+
+    // Instrumented UAT suite (androidTest only) — see
+    // clients/tv-android/app/src/androidTest/kotlin/app/swarm/tv/app/uat/
+    // and the swarm-tv-uat-suite skill. Deliberately JUnit4 (not
+    // junit-jupiter above): androidx.test's AndroidJUnitRunner and
+    // Compose's createAndroidComposeRule are both JUnit4-only APIs.
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.uiautomator)
 }
 
 tasks.withType<Test>().configureEach { useJUnitPlatform() }

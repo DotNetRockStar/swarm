@@ -77,6 +77,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -114,6 +115,7 @@ import app.swarm.tv.app.PausePlayerWhenAppBackgrounded
 import app.swarm.tv.app.data.episodeNumberLabel
 import app.swarm.tv.app.data.pauseRecommendationTitle
 import app.swarm.tv.app.data.PreparedEpisodePlayback
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
@@ -1194,20 +1196,45 @@ private fun PauseOverlay(
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 28.dp)) {
             Row(modifier = Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(36.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Paused", color = SwarmAccent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Paused",
+                        color = SwarmAccent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.testTag(UatTestTags.PAUSE_LABEL),
+                    )
                     Spacer(Modifier.height(5.dp))
-                    Text(title, color = SwarmText, fontSize = 28.sp, fontWeight = FontWeight.Black, maxLines = 2)
+                    Text(
+                        title,
+                        color = SwarmText,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 2,
+                        modifier = Modifier.testTag(UatTestTags.PAUSE_TITLE),
+                    )
                     episodeNumberLabel(entry)?.let { episodeLabel ->
                         Spacer(Modifier.height(4.dp))
                         Text(episodeLabel, color = SwarmText, fontSize = 15.sp, maxLines = 1)
                     }
                     if (metadata.isNotEmpty()) {
                         Spacer(Modifier.height(7.dp))
-                        Text(metadata.joinToString("  •  "), color = SwarmMuted, fontSize = 13.sp, maxLines = 1)
+                        Text(
+                            metadata.joinToString("  •  "),
+                            color = SwarmMuted,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            modifier = Modifier.testTag(UatTestTags.PAUSE_METADATA),
+                        )
                     }
                     if (media.genres.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
-                        Text(media.genres.take(4).joinToString("  •  "), color = SwarmAccent, fontSize = 12.sp, maxLines = 1)
+                        Text(
+                            media.genres.take(4).joinToString("  •  "),
+                            color = SwarmAccent,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            modifier = Modifier.testTag(UatTestTags.PAUSE_GENRES),
+                        )
                     }
                     if (media.cast.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
@@ -1217,6 +1244,7 @@ private fun PauseOverlay(
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag(UatTestTags.PAUSE_CAST),
                         )
                     }
                     media.overview?.takeIf(String::isNotBlank)?.let { overview ->
@@ -1228,19 +1256,25 @@ private fun PauseOverlay(
                             lineHeight = 18.sp,
                             maxLines = 3,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag(UatTestTags.PAUSE_DESCRIPTION),
                         )
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = onResume,
-                            modifier = Modifier.focusRequester(resumeFocusRequester),
+                            modifier = Modifier.focusRequester(resumeFocusRequester)
+                                .testTag(UatTestTags.PAUSE_RESUME_BUTTON),
                             colors = swarmActionButtonColors(),
                         ) {
                             Text("▶  Resume", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
                         }
                         if (hasNextEpisode) {
-                            Button(onClick = onNextEpisode, colors = swarmActionButtonColors()) {
+                            Button(
+                                onClick = onNextEpisode,
+                                colors = swarmActionButtonColors(),
+                                modifier = Modifier.testTag(UatTestTags.PAUSE_NEXT_EPISODE_BUTTON),
+                            ) {
                                 Text("Next Episode  ⏭", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
                             }
                         }
@@ -1252,6 +1286,7 @@ private fun PauseOverlay(
                         choices = audioTracks,
                         emptyLabel = "None reported",
                         onSelect = onSelectAudioTrack,
+                        testTag = UatTestTags.PAUSE_AUDIO_TRACK_PICKER,
                     )
                     Spacer(Modifier.height(18.dp))
                     TrackPickerBlock(
@@ -1259,6 +1294,7 @@ private fun PauseOverlay(
                         choices = subtitleTracks,
                         emptyLabel = "None available",
                         onSelect = onSelectSubtitleTrack,
+                        testTag = UatTestTags.PAUSE_SUBTITLE_TRACK_PICKER,
                     )
                 }
             }
@@ -1291,14 +1327,19 @@ private fun TrackPickerBlock(
     choices: List<TrackChoice>,
     emptyLabel: String,
     onSelect: (TrackChoice) -> Unit,
+    testTag: String? = null,
 ) {
     Text(heading, color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     Spacer(Modifier.height(5.dp))
     if (choices.isEmpty()) {
-        Text(emptyLabel, color = SwarmText, fontSize = 13.sp)
+        Text(emptyLabel, color = SwarmText, fontSize = 13.sp, modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier)
         return
     }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier,
+    ) {
         for (choice in choices) {
             SelectableChip(choice.label, isSelected = choice.isSelected, onClick = { onSelect(choice) })
         }

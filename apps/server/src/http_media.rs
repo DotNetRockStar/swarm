@@ -38,6 +38,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tower_http::trace::TraceLayer;
 use swarm_core::peer::{
     ByteRange, ClientErrorReport, LikeToggle, PeerRequest, PlaybackPreferences,
 };
@@ -343,7 +344,23 @@ pub async fn start(
             require_bearer,
         ));
 
-    let app = pairing_routes.merge(media_routes).with_state(state);
+    // Debug-build-only, loopback-only automation hook mirroring the desktop
+    // GUI's "Resolve" button for a client-reported problem — see
+    // `resolve_client_error_debug`'s doc comment. Not merged into a release
+    // binary at all (`cfg(debug_assertions)`), and never behind
+    // `require_bearer`: it isn't reachable by a TV client, only by the
+    // closed-loop TV UAT suite running on this same machine.
+    let mut app = pairing_routes.merge(media_routes);
+    #[cfg(debug_assertions)]
+    {
+        app = app.merge(Router::new().route("/errors/{id}/resolve", post(resolve_client_error_debug)));
+    }
+
+    // Logs method/path/status/latency for every request. Every authenticated
+    // route additionally logs the calling device's name via
+    // `resolve_and_respond`'s own `tracing::info!`, since `AuthenticatedDevice`
+    // isn't resolved yet at the point this layer runs.
+    let app = app.layer(TraceLayer::new_for_http()).with_state(state);
 
     let listener = TcpListener::bind(bind).await?;
     let local_addr = listener.local_addr()?;
@@ -535,6 +552,49 @@ async fn toggle_like(
     resolve_and_respond(&state, &request, addr.ip(), &device.0).await
 }
 
+#[cfg(debug_assertions)]
+#[derive(serde::Deserialize, Default)]
+struct ResolveClientErrorRequest {
+    #[serde(default)]
+    comments: Option<String>,
+}
+
+/// Debug-build-only automation hook mirroring the desktop GUI's "Resolve"
+/// button (the `resolve_client_error` Tauri command in `gui.rs`) so the
+/// closed-loop TV UAT suite can drive a report -> resolve -> TV-notification
+/// round trip unattended (see scenario 11 of that suite). Never compiled
+/// into a release binary, and — unlike every other `/errors/*` route —
+/// deliberately not behind `require_bearer`: this is a host-local automation
+/// surface for a script running on the same machine as the server, not
+/// something a TV client should ever reach, so it's restricted to loopback
+/// callers at runtime instead in case a debug build is ever reachable from
+/// `http_media_bind`'s `0.0.0.0` default.
+#[cfg(debug_assertions)]
+async fn resolve_client_error_debug(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    AxumPath(id): AxumPath<i64>,
+    body: Option<Json<ResolveClientErrorRequest>>,
+) -> StatusCode {
+    if !addr.ip().is_loopback() {
+        return StatusCode::FORBIDDEN;
+    }
+    let comments = body.and_then(|Json(req)| req.comments);
+    match state
+        .service
+        .library()
+        .resolve_client_error(id, comments.as_deref())
+        .await
+    {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(err) => {
+            tracing::error!(%err, "debug resolve_client_error failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 /// Shared by every non-`/play`, non-`/pair` route (`/stream/{id}/media`,
 /// `/media/{entry_key}`, `/hls/{id}/{rendition}/{file}`, `/catalog/*`,
 /// `/art/{entry_key}/{kind}`) — every one of these is just an opaque path
@@ -600,6 +660,7 @@ async fn resolve_and_respond(
     client: &str,
 ) -> Response {
     let is_lan = is_lan_ip(remote_ip);
+    tracing::info!(device = %client, path = %request.path, %remote_ip, is_lan, "http media request");
     let resolved = state
         .service
         .resolve_for_client(request, is_lan, client)

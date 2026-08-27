@@ -113,6 +113,15 @@ fn gzip_json_response(status: u16, value: &impl serde::Serialize) -> Resolved {
 }
 
 impl MediaService {
+    /// Exposes the underlying library for host-local automation hooks (see
+    /// `apps/server/src/http_media.rs`'s debug-build-only resolve route,
+    /// used by the closed-loop TV UAT suite) — not used by any peer-facing
+    /// request path, which always goes through `resolve_for_network`/
+    /// `resolve_for_client` instead.
+    pub fn library(&self) -> &Arc<Library> {
+        &self.library
+    }
+
     pub fn new(library: Arc<Library>, media_root: PathBuf) -> Self {
         let config = TranscodeConfig::disabled(std::env::temp_dir().join("swarm-hls-disabled"));
         Self::with_transcoding(library, media_root, config)

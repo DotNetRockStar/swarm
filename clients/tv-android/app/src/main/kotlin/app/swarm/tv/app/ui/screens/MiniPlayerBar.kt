@@ -25,10 +25,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmSurface
@@ -52,7 +54,7 @@ fun MiniPlayerBar(
     ) {
         Card(
             onClick = onReopen,
-            modifier = Modifier.width(52.dp).height(52.dp),
+            modifier = Modifier.width(52.dp).height(52.dp).testTag(UatTestTags.MINI_PLAYER_REOPEN),
             colors = CardDefaults.colors(containerColor = SwarmSurface),
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -76,7 +78,7 @@ fun MiniPlayerBar(
         }
         Card(
             onClick = onStop,
-            modifier = Modifier.width(46.dp).height(46.dp),
+            modifier = Modifier.width(46.dp).height(46.dp).testTag(UatTestTags.MINI_PLAYER_CLOSE_BUTTON),
             colors = CardDefaults.colors(
                 containerColor = Color.White,
                 focusedContainerColor = SwarmAccent,

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# See scripts/TV_TESTING.md for the TL;DR on running this suite alongside
+# scripts/tv_uat_suite.sh, and what a completed run looks like.
+#
 # Closed-loop end-to-end test suite: local media server <-> real Amazon Fire
 # TV(s) on the same network. "Closed loop" means every assertion here is
 # evidence a real device actually observed, not a mock or an emulator — see
@@ -14,10 +17,19 @@
 # only checks that one is reachable before running.
 #
 # Usage:
-#   ./scripts/tv_e2e_suite.sh                    # LAN-scan; fan out across every discovered Amazon Fire TV
-#   ./scripts/tv_e2e_suite.sh 192.168.0.148       # test only these device(s) (repeat the arg for more than one)
+#   ./scripts/tv_e2e_suite.sh                    # preferred device (scripts/tv_test_device.local.json) if configured, else full LAN fan-out
+#   ./scripts/tv_e2e_suite.sh --all               # force full fan-out across every discovered Fire TV, ignoring the preferred-device config
+#   ./scripts/tv_e2e_suite.sh --device 192.168.0.148       # test only this device, by IP or adb device_name (repeatable)
+#   ./scripts/tv_e2e_suite.sh 192.168.0.148       # same as --device, positional form kept for backward compatibility
 #   ./scripts/tv_e2e_suite.sh --no-issue          # write the report locally; skip posting it to GitHub
 #   ./scripts/tv_e2e_suite.sh --skip-install      # smoke-test whatever build is already installed; no rebuild/reinstall
+#
+# Device targeting precedence — see scripts/TV_TESTING.md: explicit
+# --device/positional target(s) > preferred device from
+# scripts/tv_test_device.local.json (gitignored; shared with
+# tv_uat_suite.sh) > every already-adb-connected Amazon device > full LAN
+# scan fan-out. This default-to-preferred-device behavior (and --all/--device)
+# was added under explicit user direction — see swarm-e2e-suite-lockdown.
 #
 # Env vars:
 #   SWARM_STUN_PORT          local rendezvous HTTP port to health-check (default 8080)
@@ -43,16 +55,21 @@ GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 ISSUE_LABEL="${SWARM_E2E_ISSUE_LABEL:-Testing}"
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
 TV_E2E_CONTROL_FILE="$RUN_DIR/tv-e2e-control.json"
+PREFERRED_DEVICE_FILE="scripts/tv_test_device.local.json"
 
 NO_ISSUE=0
 SKIP_INSTALL=0
+ALL_MODE=0
 TARGETS=()
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-issue) NO_ISSUE=1 ;;
         --skip-install) SKIP_INSTALL=1 ;;
-        *) TARGETS+=("$arg") ;;
+        --all) ALL_MODE=1 ;;
+        --device) shift; TARGETS+=("${1:-}") ;;
+        *) TARGETS+=("$1") ;;
     esac
+    shift || true
 done
 
 # A known display code is not the automation credential. The media server's
@@ -134,17 +151,58 @@ scan_lan_for_fire_tvs() {
     done <<< "$open_ips"
 }
 
+PREFERRED_NAME=""
+if [ -f "$PREFERRED_DEVICE_FILE" ]; then
+    PREFERRED_NAME="$(grep -o '"preferred_device_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$PREFERRED_DEVICE_FILE" \
+        | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | head -1)"
+fi
+
 SERIALS=()
 NAMES=()
 if [ "${#TARGETS[@]}" -gt 0 ]; then
+    # Each target may be an IP or an adb device_name — resolve names via a
+    # LAN scan (only performed once, even for several name targets).
+    SCANNED=""
     for t in "${TARGETS[@]}"; do
-        [[ "$t" == *:* ]] || t="$t:$ADB_PORT"
-        "$ADB" connect "$t" >/dev/null 2>&1 || true
-        SERIALS+=("$t")
-        NAMES+=("$t")
+        if [[ "$t" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+            [[ "$t" == *:* ]] || t="$t:$ADB_PORT"
+            "$ADB" connect "$t" >/dev/null 2>&1 || true
+            SERIALS+=("$t")
+            NAMES+=("$t")
+        else
+            if [ -z "$SCANNED" ]; then
+                echo "==> Looking for named device(s) on the LAN ..."
+                SCANNED="$(scan_lan_for_fire_tvs)"
+            fi
+            found=0
+            while IFS=$'\t' read -r name ip; do
+                [ -n "$ip" ] || continue
+                if [ "$name" = "$t" ]; then
+                    SERIALS+=("$ip:$ADB_PORT"); NAMES+=("$name"); found=1; break
+                fi
+            done <<< "$SCANNED"
+            [ "$found" -eq 1 ] || echo "No Fire TV named \"$t\" found on the LAN." >&2
+        fi
     done
-else
-    echo "==> No explicit target given; checking already-connected devices ..."
+elif [ "$ALL_MODE" -eq 0 ] && [ -n "$PREFERRED_NAME" ]; then
+    echo "==> Preferred device configured (\"$PREFERRED_NAME\", from $PREFERRED_DEVICE_FILE); looking for it on the LAN ..."
+    while IFS=$'\t' read -r name ip; do
+        [ -n "$ip" ] || continue
+        if [ "$name" = "$PREFERRED_NAME" ]; then
+            SERIALS+=("$ip:$ADB_PORT"); NAMES+=("$name"); break
+        fi
+    done < <(scan_lan_for_fire_tvs)
+    if [ "${#SERIALS[@]}" -eq 0 ]; then
+        echo "Preferred device \"$PREFERRED_NAME\" not found on the LAN right now; falling back to full fan-out across every discovered Fire TV." >&2
+    fi
+fi
+
+if [ "${#SERIALS[@]}" -eq 0 ] && [ "${#TARGETS[@]}" -eq 0 ]; then
+    if [ "$ALL_MODE" -eq 1 ]; then
+        echo "==> --all: fanning out across every discovered Amazon Fire TV ..."
+    else
+        echo "==> No preferred/explicit device; checking already-connected devices ..."
+    fi
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         serial="$(awk '{print $1}' <<< "$line")"
@@ -174,7 +232,7 @@ if [ "${#SERIALS[@]}" -eq 0 ]; then
     echo "" >> "$REPORT_DIR/report.md"
     echo "This is reported as a finding rather than a hard failure: the suite requires real hardware on the same network as the machine running it." >> "$REPORT_DIR/report.md"
 else
-    echo "==> Fanning out across ${#SERIALS[@]} device(s): ${NAMES[*]}"
+    echo "==> Running against ${#SERIALS[@]} device(s): ${NAMES[*]}"
 
     if [ "$SKIP_INSTALL" -eq 0 ]; then
         echo "==> Building debug APK ..."
@@ -328,13 +386,15 @@ cat "$REPORT_DIR/report.md"
 echo
 echo "==> Report written to $REPORT_DIR/report.md"
 
-if [ "$NO_ISSUE" -eq 0 ] && command -v gh >/dev/null 2>&1; then
+if [ "$NO_ISSUE" -eq 0 ] && [ "$FAIL_COUNT" -gt 0 ] && command -v gh >/dev/null 2>&1; then
     TITLE="TV closed-loop E2E suite: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ($RUN_STAMP)"
     if ISSUE_URL="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$REPORT_DIR/report.md" --label "$ISSUE_LABEL" 2>&1)"; then
         echo "==> Findings posted: $ISSUE_URL"
     else
         echo "Could not post findings to GitHub (report is still saved locally): $ISSUE_URL" >&2
     fi
+elif [ "$NO_ISSUE" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ]; then
+    echo "==> No failures — nothing to file. GitHub issues are only opened when FAIL_COUNT > 0."
 fi
 
 [ "$FAIL_COUNT" -eq 0 ]

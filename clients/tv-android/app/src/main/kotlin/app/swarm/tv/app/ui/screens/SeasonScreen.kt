@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.Button
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.app.ui.theme.SwarmMuted
@@ -112,9 +114,14 @@ private fun SeasonList(
                     fontWeight = FontWeight.Black,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 16.dp),
+                    modifier = Modifier.weight(1f).padding(end = 16.dp)
+                        .testTag(UatTestTags.SEASON_SCREEN_SHOW_TITLE),
                 )
-                Button(onClick = onToggleWatchlist, colors = swarmActionButtonColors()) {
+                Button(
+                    onClick = onToggleWatchlist,
+                    colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON),
+                ) {
                     Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
                 }
             }
@@ -130,7 +137,8 @@ private fun SeasonList(
                 onClick = { onOpenSeason(season) },
                 colors = CardDefaults.colors(containerColor = SwarmSurface),
                 scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-                modifier = focusModifier.fillMaxWidth(),
+                modifier = focusModifier.fillMaxWidth()
+                    .testTag(UatTestTags.SEASON_CARD_PREFIX + (season.season ?: -1)),
             ) {
                 Column {
                     ArtworkImage(
@@ -177,7 +185,8 @@ private fun EpisodeGrid(
                 onClick = { onPlayEpisode(episode) },
                 colors = CardDefaults.colors(containerColor = SwarmSurface),
                 scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-                modifier = focusModifier.fillMaxWidth(),
+                modifier = focusModifier.fillMaxWidth()
+                    .testTag(UatTestTags.EPISODE_ITEM_PREFIX + episode.entry.entryKey),
             ) {
                 Column {
                     ArtworkImage(

@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,6 +40,7 @@ import app.swarm.tv.app.data.KidModeSettings
 import app.swarm.tv.app.data.RatingScale
 import app.swarm.tv.app.data.ResolvedProblemNotification
 import app.swarm.tv.app.data.TestingModeStatus
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.NumberPadEntry
 import app.swarm.tv.app.ui.components.SelectableChip
 import app.swarm.tv.app.ui.components.TvOutlinedTextField
@@ -107,6 +109,7 @@ fun SwarmSettingsScreen(
                 if (notifications.isEmpty()) "Notifications" else "Notifications (${notifications.size})",
                 section == SettingsSection.NOTIFICATIONS,
                 { section = SettingsSection.NOTIFICATIONS },
+                modifier = Modifier.testTag(UatTestTags.NOTIFICATIONS_TAB_BUTTON),
             )
             if (testingModeAvailable) {
                 SettingsTab("Testing", section == SettingsSection.TESTING, { section = SettingsSection.TESTING })
@@ -239,7 +242,7 @@ private fun NotificationInbox(
     notifications.forEach { notification ->
         Button(
             onClick = { selectedKey = notification.key },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(UatTestTags.NOTIFICATION_ROW_PREFIX + notification.key),
             colors = swarmActionButtonColors(),
         ) {
             Column(Modifier.fillMaxWidth()) {
@@ -273,6 +276,7 @@ private fun NotificationInbox(
                 onDismiss(notification)
             },
             colors = swarmActionButtonColors(),
+            modifier = Modifier.testTag(UatTestTags.NOTIFICATION_DISMISS_BUTTON),
         ) {
             Text("Dismiss notification")
         }

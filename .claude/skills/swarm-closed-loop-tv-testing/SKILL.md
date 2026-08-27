@@ -1,6 +1,6 @@
 ---
 name: swarm-closed-loop-tv-testing
-description: Use when running, extending, or explaining scripts/tv_e2e_suite.sh — the automated closed-loop suite that tests the real desktop media server against real Amazon Fire TV(s) on the same LAN and fans out across every TV found, filing its findings to GitHub as an issue. Covers what "closed loop" means here, why each test case is evidence-based rather than UI-driven, and how fan-out discovery works. Change policy for this suite lives in swarm-e2e-suite-lockdown — read that before editing test logic.
+description: Use when running, extending, or explaining scripts/tv_e2e_suite.sh — the automated closed-loop suite that tests the real desktop media server against real Amazon Fire TV(s) on the same LAN, targeting a configured preferred device by default (or fanning out across every TV found), filing its findings to GitHub as an issue. Covers what "closed loop" means here, why each test case is evidence-based rather than UI-driven, and how device targeting/fan-out discovery works. Change policy for this suite lives in swarm-e2e-suite-lockdown — read that before editing test logic.
 ---
 
 # Closed-loop real-hardware testing: local media server <-> real Fire TV(s)
@@ -53,16 +53,28 @@ what proves the loop closed is the log line appearing at all.
 
 ## Fan-out discovery
 
-No manual device selection — this suite is meant to run unattended. Target
-selection, in order:
+Meant to run unattended, with an optional device preference for fast local
+iteration — added under explicit user direction alongside the identical
+change to `tv_uat_suite.sh` (see `swarm-tv-uat-suite`'s "Device targeting"
+section). Target selection, in order:
 
-1. Explicit IP(s) passed as arguments.
-2. Every already-`adb`-connected device reporting `ro.product.manufacturer`
-   containing "Amazon".
-3. Otherwise, a LAN ping/nc scan for port 5555, same technique
+1. Explicit `--device <ip-or-name>` (or a bare positional IP/name argument,
+   kept for backward compatibility — repeatable for more than one target).
+2. Otherwise, if `--all` was not passed and `scripts/tv_test_device.local.json`
+   (gitignored, shared with `tv_uat_suite.sh`) names a `preferred_device_name`
+   found on the LAN, that device alone.
+3. Otherwise (including whenever `--all` is passed, or the preferred device
+   isn't found), every already-`adb`-connected device reporting
+   `ro.product.manufacturer` containing "Amazon".
+4. Otherwise, a LAN ping/nc scan for port 5555, same technique
    `deploy_fire_tv.sh` uses (intentionally duplicated, not shared, so this
    frozen suite's discovery can't change out from under it if that script is
    edited later).
+
+Steps 3–4 are the full fan-out — every test case still runs against every
+device selected there, exactly as before; only the *default* now narrows to
+one preferred device when configured, which is itself part of the frozen
+contract (see `swarm-e2e-suite-lockdown`), not a loosening of it.
 
 **Known sharp edge, already hit and fixed once:** any `while read` loop
 whose input comes from a pipe (`<<<`, `< <(...)`) and whose body calls
@@ -85,9 +97,12 @@ tooling can't catch any other way.
 ## Reporting findings to GitHub
 
 Every run compiles a Markdown table (device, test, PASS/FAIL/SKIP, one-line
-evidence) and files it as an issue via `gh issue create` (label `Testing`,
-repo from `SWARM_GITHUB_REPOSITORY`, default `DotNetRockStar/swarm`) unless
-run with `--no-issue`. Full per-device logcat captures are kept locally
+evidence). It's filed as an issue via `gh issue create` (label `Testing`,
+repo from `SWARM_GITHUB_REPOSITORY`, default `DotNetRockStar/swarm`) only
+when the run had at least one FAIL — a clean PASS run writes the local
+report and prints "no failures — nothing to file," without opening an issue.
+`--no-issue` suppresses filing even when there was a failure, if you only
+want the local report. Full per-device logcat captures are kept locally
 under `.run/tv-e2e-reports/<timestamp>/` (gitignored, not attached to the
 issue) so a human can pull the raw log for anything the one-line evidence
 doesn't fully explain. If a run's own results are found to be wrong after
@@ -105,9 +120,10 @@ where noted.
 
 **Automated by the suite, every run, no human involved:**
 
-- Discovering every reachable Amazon Fire TV on the LAN (already-connected
-  `adb` devices first, then a ping/nc scan) and fanning out across all of
-  them — see "Fan-out discovery" above.
+- Selecting target device(s) — a configured preferred device if found, else
+  every reachable Amazon Fire TV on the LAN (already-connected `adb` devices
+  first, then a ping/nc scan), fanning out across all of them — see
+  "Fan-out discovery" above.
 - Waking a discovered TV if it's asleep (`dumpsys power` shows
   `mWakefulness` other than `Awake` → a single `KEYCODE_WAKEUP` keyevent).
   This is just turning the screen on, not UI navigation, so it carries none

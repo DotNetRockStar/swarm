@@ -40,12 +40,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import app.swarm.tv.app.ui.theme.SwarmBorder
@@ -98,7 +100,11 @@ private fun AlbumGrid(
             ) { index, album ->
                 val focusModifier = if (index == 0) Modifier.focusRequester(firstCardFocusRequester) else Modifier
                 val cover = remember(album, artworkUrl) { album.coverArtworkUrl(artworkUrl) }
-                Card(onClick = { onOpenAlbum(album) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
+                Card(
+                    onClick = { onOpenAlbum(album) },
+                    colors = CardDefaults.colors(containerColor = SwarmSurface),
+                    modifier = focusModifier.fillMaxWidth().testTag(UatTestTags.ALBUM_CARD_PREFIX + album.album),
+                ) {
                     Column {
                         ArtworkImage(
                             label = album.album,
@@ -170,7 +176,7 @@ private fun TrackRow(track: MergedEntry, focusModifier: Modifier, onClick: () ->
             pressedBorder = Border(BorderStroke(2.dp, SwarmAccentHot), shape = rowShape),
         ),
         shape = CardDefaults.shape(rowShape, rowShape, rowShape),
-        modifier = focusModifier.fillMaxWidth(),
+        modifier = focusModifier.fillMaxWidth().testTag(UatTestTags.TRACK_ROW_PREFIX + track.entry.entryKey),
     ) {
         Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             Text(track.entry.trackNumber?.toString() ?: "–", color = SwarmMuted, fontSize = 14.sp, modifier = Modifier.width(24.dp))

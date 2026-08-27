@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import app.swarm.tv.R
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
@@ -169,7 +171,8 @@ fun MusicPlayerScreen(
                             model = visualUrl,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.width(if (lyrics == null) 280.dp else 240.dp).aspectRatio(1f).scale(pulseScale).clip(RoundedCornerShape(16.dp)),
+                            modifier = Modifier.width(if (lyrics == null) 280.dp else 240.dp).aspectRatio(1f).scale(pulseScale)
+                                .clip(RoundedCornerShape(16.dp)).testTag(UatTestTags.MUSIC_PLAYER_COVER),
                         )
                     } else {
                         // No cover art, no artist photo — never a truly blank
@@ -199,6 +202,7 @@ fun MusicPlayerScreen(
                 fontWeight = FontWeight.Black,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_TITLE),
             )
             val subtitle = listOfNotNull(entry.entry.artist, entry.entry.album).joinToString("  •  ")
             if (subtitle.isNotEmpty()) {
@@ -207,7 +211,14 @@ fun MusicPlayerScreen(
             }
             if (nextTitle != null) {
                 Spacer(Modifier.height(6.dp))
-                Text("Up next: $nextTitle", color = SwarmMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "Up next: $nextTitle",
+                    color = SwarmMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_UP_NEXT),
+                )
             }
 
             Spacer(Modifier.height(20.dp))
@@ -215,26 +226,37 @@ fun MusicPlayerScreen(
                 Button(
                     onClick = onToggleShuffle,
                     colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON),
                 ) {
                     Text(if (shuffleEnabled) "🔀 Shuffle on" else "🔀 Shuffle", fontSize = 13.sp)
                 }
                 Button(
                     onClick = onTogglePlayPause,
-                    modifier = Modifier.focusRequester(playFocusRequester),
+                    modifier = Modifier.focusRequester(playFocusRequester)
+                        .testTag(UatTestTags.MUSIC_PLAYER_PLAY_PAUSE_BUTTON),
                     colors = swarmActionButtonColors(),
                 ) {
                     Text(if (isLoading) "Buffering…" else if (isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
                 }
-                Button(onClick = onSkipNext, colors = swarmActionButtonColors()) {
+                Button(
+                    onClick = onSkipNext,
+                    colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_SKIP_BUTTON),
+                ) {
                     Text("Skip ⏭", fontSize = 13.sp)
                 }
                 Button(
                     onClick = onToggleLike,
                     colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON),
                 ) {
                     Text(if (isLiked) "♥ Liked" else "♡ Like", fontSize = 13.sp)
                 }
-                Button(onClick = onClose, colors = swarmActionButtonColors()) {
+                Button(
+                    onClick = onClose,
+                    colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_CLOSE_BUTTON),
+                ) {
                     Text("Close ✕", fontSize = 13.sp)
                 }
             }

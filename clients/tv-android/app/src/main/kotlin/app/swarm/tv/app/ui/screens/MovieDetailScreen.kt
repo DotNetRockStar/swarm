@@ -42,11 +42,13 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmMuted
@@ -102,7 +104,8 @@ fun MovieDetailScreen(
                     label = entry.entry.scrapedTitle ?: entry.entry.title,
                     placeholderType = "Movie",
                     primaryUrl = artworkUrl(entry),
-                    modifier = Modifier.width(170.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)),
+                    modifier = Modifier.width(170.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp))
+                        .testTag(UatTestTags.MOVIE_DETAIL_ARTWORK),
                 )
                 Spacer(Modifier.width(32.dp))
                 Column(Modifier.weight(1f)) {
@@ -116,7 +119,13 @@ fun MovieDetailScreen(
                     val meta = listOfNotNull(entry.entry.year?.toString())
                     if (meta.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
-                        Text(meta.joinToString("  •  "), color = SwarmMuted, fontSize = 14.sp, maxLines = 1)
+                        Text(
+                            meta.joinToString("  •  "),
+                            color = SwarmMuted,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_YEAR),
+                        )
                     }
                     // Categories = genres — same field TMDb auto-populates at scrape
                     // time and the media server's category picker lets a user hand-
@@ -125,7 +134,10 @@ fun MovieDetailScreen(
                     // concept they are, not just descriptive text.
                     if (entry.entry.genres.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_GENRES),
+                        ) {
                             for (genre in entry.entry.genres.take(4)) {
                                 CategoryChip(genre)
                             }
@@ -135,7 +147,8 @@ fun MovieDetailScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = { onPlay(entry) },
-                            modifier = Modifier.focusRequester(playFocusRequester),
+                            modifier = Modifier.focusRequester(playFocusRequester)
+                                .testTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON),
                             colors = swarmActionButtonColors(),
                         ) {
                             Text("Play", fontWeight = FontWeight.Bold)
@@ -143,12 +156,14 @@ fun MovieDetailScreen(
                         Button(
                             onClick = onToggleLike,
                             colors = swarmActionButtonColors(),
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_LIKE_BUTTON),
                         ) {
                             Text(if (isLiked) "♥ Liked" else "♡ Like", fontSize = 13.sp)
                         }
                         Button(
                             onClick = onToggleWatchlist,
                             colors = swarmActionButtonColors(),
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_WATCHLIST_BUTTON),
                         ) {
                             Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
                         }
@@ -164,6 +179,7 @@ fun MovieDetailScreen(
                             onClick = { onReportProblem(entry); problemReported = true },
                             enabled = !problemReported,
                             colors = swarmActionButtonColors(),
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_REPORT_PROBLEM_BUTTON),
                         ) {
                             Text(if (problemReported) "Reported ✓" else "Report a problem", fontSize = 13.sp)
                         }
@@ -178,6 +194,7 @@ fun MovieDetailScreen(
                             fontSize = 13.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag(UatTestTags.MOVIE_DETAIL_CAST),
                         )
                     }
                 }
@@ -197,7 +214,8 @@ fun MovieDetailScreen(
                     lineHeight = 20.sp,
                     maxLines = 5,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth().height(100.dp),
+                    modifier = Modifier.fillMaxWidth().height(100.dp)
+                        .testTag(UatTestTags.MOVIE_DETAIL_DESCRIPTION),
                 )
             }
         }
