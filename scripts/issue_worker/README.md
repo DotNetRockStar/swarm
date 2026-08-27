@@ -61,8 +61,8 @@ built-in defaults.
 3. Fetch open issues assigned to the configured assignee.
 4. Reconcile trusted completion markers whose commits are already on local
    `main`.
-5. Prefer the oldest trusted follow-up comment; otherwise select the oldest
-   unprocessed assigned issue.
+5. Build one queue of ready initial and follow-up work and select the lowest
+   numeric issue number. For example, issue #50 is always chosen before #55.
 6. For a follow-up, prefer the provider that did not perform the previous pass.
    For a new issue, prefer Claude by default. Both choices honor quota checks.
 7. Fast-forward local `main`, save recovery ownership, and create a clean

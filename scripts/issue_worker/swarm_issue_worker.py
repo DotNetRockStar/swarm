@@ -913,7 +913,7 @@ class Worker:
                     for assignee in issue.get("assignees", [])
                 )
             ],
-            key=lambda issue: str(issue.get("created_at") or ""),
+            key=lambda issue: int(issue["number"]),
         )
 
     def record_completed_from_comments(self, issue_number: int, comments: list[dict[str, Any]]) -> bool:
@@ -974,13 +974,13 @@ class Worker:
             assert saved_state is not None
             return self.issue_from_state(saved_state, remote)
 
-        fresh = next(
-            (item for item in issues if int(item["number"]) not in completed | paused), None
-        )
-        followup: tuple[str, dict[str, Any], dict[str, Any]] | None = None
+        ready: list[tuple[int, str, dict[str, Any], dict[str, Any] | None]] = []
         for candidate in issues:
             number = int(candidate["number"])
-            if number not in completed or number in paused:
+            if number in paused:
+                continue
+            if number not in completed:
+                ready.append((number, "initial", candidate, None))
                 continue
             metadata = extract_followup_metadata(
                 self.comments(number), self.trusted_followup_authors, self.completion_authors
@@ -991,12 +991,19 @@ class Worker:
                 raise WorkerError(
                     f"Latest completion on issue #{number} has no valid completion commit"
                 )
-            item = (str(metadata["trigger_created_at"]), candidate, metadata)
-            if followup is None or item[0] < followup[0]:
-                followup = item
+            ready.append((number, "followup", candidate, metadata))
 
-        if followup:
-            _, remote, metadata = followup
+        if ready:
+            _, work_type, remote, metadata = min(ready, key=lambda item: item[0])
+            if work_type == "initial":
+                return IssueContext(
+                    number=int(remote["number"]),
+                    title=str(remote["title"]),
+                    body=str(remote.get("body") or ""),
+                    labels=[str(label["name"]) for label in remote.get("labels", [])],
+                    url=str(remote["html_url"]),
+                )
+            assert metadata is not None
             return IssueContext(
                 number=int(remote["number"]),
                 title=str(remote["title"]),
@@ -1009,14 +1016,6 @@ class Worker:
                 previous_completion_comment=metadata["previous_completion_comment"],
                 followup_comments=metadata["followup_comments"],
                 trigger_comment_id=int(metadata["trigger_comment_id"]),
-            )
-        if fresh:
-            return IssueContext(
-                number=int(fresh["number"]),
-                title=str(fresh["title"]),
-                body=str(fresh.get("body") or ""),
-                labels=[str(label["name"]) for label in fresh.get("labels", [])],
-                url=str(fresh["html_url"]),
             )
         if paused:
             log("No other issue can be worked now; quota-paused issues remain safely shelved.")
