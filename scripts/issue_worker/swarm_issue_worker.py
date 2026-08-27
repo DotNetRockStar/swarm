@@ -1105,12 +1105,20 @@ class Worker:
         return None
 
     def choice_from_state(self, state: dict[str, Any]) -> ProviderChoice:
+        # `session_id` for Claude is generated and persisted (in
+        # save_new_state, via prepare_repository) before the `claude`
+        # process is ever actually invoked in run_ai — so its mere presence
+        # doesn't mean a resumable session exists yet. `session_started` is
+        # only set (in run_ai) once that first invocation genuinely happens;
+        # gating resume on both prevents a crash between those two points
+        # (e.g. post_started_comment failing) from producing a retry that
+        # tries to --resume a session ID that was never actually started.
         return ProviderChoice(
             name=str(state["ai_tool"]),
             model=str(state["model"]),
             effort=str(state["effort"]),
             session_id=str(state.get("session_id") or ""),
-            resume=bool(state.get("session_id")),
+            resume=bool(state.get("session_id")) and bool(state.get("session_started")),
         )
 
     def prepare_paused_resume(self) -> bool:
@@ -1427,6 +1435,10 @@ class Worker:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            # The process now genuinely owns self.choice.session_id (created
+            # via --session-id, or attached via --resume) — from here on a
+            # retry may legitimately --resume it. See choice_from_state.
+            self.update_state(session_started=True)
             assert process.stdin and process.stdout
             process.stdin.write(prompt)
             process.stdin.close()
@@ -1476,7 +1488,7 @@ class Worker:
                 continue
             if event.get("type") == "thread.started" and event.get("thread_id"):
                 self.choice.session_id = str(event["thread_id"])
-                self.update_state(session_id=self.choice.session_id)
+                self.update_state(session_id=self.choice.session_id, session_started=True)
                 break
         return result.returncode
 
