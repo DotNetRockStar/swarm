@@ -117,6 +117,84 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(choice.name, "Claude")
         self.assertTrue(choice.session_id)
 
+    @staticmethod
+    def issue_payload(number: int) -> dict[str, object]:
+        return {
+            "number": number,
+            "title": f"Issue {number}",
+            "body": "",
+            "labels": [],
+            "assignees": [{"login": "DotNetRockStar"}],
+            "html_url": f"https://example.invalid/{number}",
+            "created_at": f"2026-08-{number % 28 + 1:02d}T00:00:00Z",
+        }
+
+    def test_assigned_issues_are_sorted_by_number_not_api_or_timestamp_order(self) -> None:
+        issues = [self.issue_payload(55), self.issue_payload(50), self.issue_payload(53)]
+        with mock.patch.object(self.worker.github, "api_list", return_value=issues):
+            selected = self.worker.assigned_issues()
+        self.assertEqual([int(issue["number"]) for issue in selected], [50, 53, 55])
+
+    def test_lower_fresh_issue_beats_higher_followup_issue(self) -> None:
+        self.worker.completed_file.write_text("55\n", encoding="utf-8")
+        issues = [self.issue_payload(55), self.issue_payload(50)]
+        followup_comments = [
+            {
+                "id": 100,
+                "created_at": "2026-08-20T00:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "<!-- swarm-issue-worker:commit:" + "1" * 40 + " -->\nCompleted by **Codex**.",
+            },
+            {
+                "id": 101,
+                "created_at": "2026-08-21T00:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "Please revisit this.",
+            },
+        ]
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(
+                self.worker,
+                "comments",
+                side_effect=lambda number: followup_comments if number == 55 else [],
+            ),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 50)
+        self.assertEqual(selected.work_type, "initial")
+
+    def test_lower_followup_issue_beats_higher_fresh_issue(self) -> None:
+        self.worker.completed_file.write_text("50\n", encoding="utf-8")
+        issues = [self.issue_payload(55), self.issue_payload(50)]
+        followup_comments = [
+            {
+                "id": 200,
+                "created_at": "2026-08-20T00:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "<!-- swarm-issue-worker:commit:" + "2" * 40 + " -->\nCompleted by **Claude**.",
+            },
+            {
+                "id": 201,
+                "created_at": "2026-08-21T00:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "Please revisit this first.",
+            },
+        ]
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(
+                self.worker,
+                "comments",
+                side_effect=lambda number: followup_comments if number == 50 else [],
+            ),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 50)
+        self.assertEqual(selected.work_type, "followup")
+
     def test_pause_shelves_and_restore_preserves_newer_commit(self) -> None:
         self.worker.write_state(self.paused_state())
         (self.repo / "tracked.txt").write_text("base\npaused change\n", encoding="utf-8")
