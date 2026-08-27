@@ -32,13 +32,10 @@ IDs, installation IDs, bot identities, and PEM paths to
 `~/.config/swarm/github-apps.json`. No app parameter is required afterward
 when that default location and repository are used.
 
-For the recommended bot-authored branch/PR/auto-merge workflow, run:
+The bot-authored branch/PR/approval/merge workflow is now the default. Run:
 
 ```bash
 ./scripts/issue_worker/install_swarm_issue_cron.py \
-  --require-bot-auth \
-  --delivery-mode pull-request \
-  --auto-merge \
   --smtp-credentials-file /path/to/smtp-settings
 ```
 
@@ -68,10 +65,15 @@ built-in defaults.
    unprocessed assigned issue.
 6. For a follow-up, prefer the provider that did not perform the previous pass.
    For a new issue, prefer Claude by default. Both choices honor quota checks.
-7. Run Claude or Codex non-interactively and require a descendant commit whose
-   message references the issue.
-8. Post the structured completion summary, add `Ready For Testing`, send the
-   email, and update local state.
+7. Fast-forward local `main`, save recovery ownership, and create a clean
+   provider branch from that exact commit.
+8. Run Claude or Codex non-interactively. The worker commits any completed
+   changes the AI leaves uncommitted and ensures the issue is referenced.
+9. Push the branch, create a PR against `main`, approve it with the opposite
+   bot, merge it, delete the branch, and return the clean local checkout to
+   synchronized `main`.
+10. Post the structured completion summary, add `Ready For Testing`, send the
+    email, and update local state.
 
 The prompt explicitly tells both agents that the invocation is unattended:
 they must not ask questions or wait for confirmation. They should make safe,
@@ -92,7 +94,9 @@ Defaults remain the same as the former shell worker:
 - Completion label: `Ready For Testing`
 - Poll interval: 600 seconds
 - Cargo cleanup threshold: 5 GiB
-- Delivery: a local commit on `main`; no push
+- Bot authentication: required
+- Delivery: provider branch, PR against `main`, opposite-bot approval, and
+  automatic merge
 - State: `~/.local/state/swarm-issue-worker`
 
 Run a read-only selection preview:
@@ -138,9 +142,10 @@ documents the generated app-credential schema without containing usable credenti
 | `--email-to` | `SWARM_EMAIL_TO` | `mr_jerrodh@hotmail.com` |
 | `--smtp-credentials-file` | `SWARM_SMTP_CREDENTIALS_FILE` | unset |
 | `--github-apps-config` | `SWARM_GITHUB_APPS_CONFIG` | `~/.config/swarm/github-apps.json` |
-| `--require-bot-auth` | `SWARM_REQUIRE_BOT_AUTH` | disabled during migration |
-| `--delivery-mode` | `SWARM_DELIVERY_MODE` | `local-main` |
-| `--auto-merge` | `SWARM_AUTO_MERGE` | disabled |
+| `--[no-]require-bot-auth` | `SWARM_REQUIRE_BOT_AUTH` | enabled |
+| `--delivery-mode` | `SWARM_DELIVERY_MODE` | `pull-request` |
+| `--[no-]auto-approve` | `SWARM_AUTO_APPROVE` | enabled |
+| `--[no-]auto-merge` | `SWARM_AUTO_MERGE` | enabled |
 | `--branch-prefix` | `SWARM_BRANCH_PREFIX` | `swarm` |
 | `--base-branch` | `SWARM_BASE_BRANCH` | `main` |
 | `--remote-name` | `SWARM_GIT_REMOTE` | `origin` |
@@ -236,27 +241,31 @@ Then enforce bot attribution:
   --smtp-credentials-file /path/to/smtp-settings
 ```
 
-Without `--require-bot-auth`, an unconfigured provider falls back to the
-existing `gh` login. This compatibility default prevents an interrupted
-migration from stranding a saved worker session.
+Use `--no-require-bot-auth` only when intentionally allowing an unconfigured
+provider to fall back to the existing `gh` login.
 
 ### Pull-request delivery
 
-The default remains local `main` commits with no push. To isolate every issue
-on a provider-specific branch, create a PR, and merge it automatically:
+Every issue now uses a provider-specific branch, PR, approval, and merge by
+default:
 
 ```bash
 ./scripts/issue_worker/install_swarm_issue_cron.py \
-  --require-bot-auth \
-  --delivery-mode pull-request \
-  --auto-merge \
   --smtp-credentials-file /path/to/smtp-settings
 ```
 
-Branches are named `swarm/claude/issue-N` or `swarm/codex/issue-N`. The agent
-commits but never pushes directly; the worker obtains a short-lived app token,
-pushes without persisting credentials, creates the PR, merges it, deletes the
-remote branch, and fast-forwards local `main`.
+Initial branches are named `swarm/claude/issue-N` or
+`swarm/codex/issue-N`; follow-up passes add `-followup-COMMENT_ID` so a prior
+merged PR cannot be mistaken for the new round. Before branching, the worker
+fast-forwards local `main` and writes recovery state. The agent never pushes
+directly; after it finishes, the worker commits any remaining changes with that
+provider's identity, obtains a short-lived app token, pushes without persisting
+credentials, and creates the PR. The opposite bot approves the PR, the
+implementing bot merges it, the remote and local issue branches are deleted,
+and the checkout returns to clean, synchronized `main`.
+
+The legacy `--delivery-mode local-main` remains available only as an explicit
+override and must be paired with `--no-auto-approve --no-auto-merge`.
 
 ### State and recovery
 
@@ -265,8 +274,9 @@ directory. PID-directory locks recover automatically after a crash.
 
 Important state files:
 
-- `in-progress-issue.json` — active provider, model, session, base, branch, and
-  recovery commits.
+- `in-progress-issue.json` — active provider, model, session, exact synchronized
+  base, branch ownership, and recovery commits. It is written before branch
+  creation so Ctrl+C cannot create an unowned issue branch.
 - `quota-paused-issues/N.json` — shelved sessions that must resume with their
   original provider.
 - `pending-email.json` — a successful commit whose GitHub or email bookkeeping
