@@ -1,7 +1,7 @@
 // ---- Details tab: status + media-root configuration ------------------------
 
 async function refreshDetails() {
-  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshArtworkCache()]);
+  await Promise.all([refreshStatus(), refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
 }
 
 async function refreshTmdbKeyField() {
@@ -379,6 +379,7 @@ bandwidthCanvas.addEventListener("mouseleave", () => {
 
 window.addEventListener("resize", () => {
   if (bandwidthChartState) drawBandwidthChart(bandwidthChartState.samples, null);
+  if (transcodingSamples) drawTranscodingChart(transcodingSamples, null);
   if (artworkCacheSnapshot) drawArtworkCacheChart(artworkCacheSnapshot, null);
 });
 
@@ -389,9 +390,189 @@ setInterval(() => {
   const panel = document.getElementById("tabPanel-details");
   if (panel && !panel.classList.contains("d-none")) {
     refreshBandwidth();
+    refreshTranscoding();
     refreshArtworkCache();
   }
 }, 5000);
+
+// ---- Transcoding: CPU cost of ffmpeg + local subtitles ---------------
+
+/// Full redraw every call (data tick or hover frame). At most 720 samples,
+/// two stacked series — same cheap-full-redraw approach as the bandwidth
+/// chart above, no cached layer.
+let transcodingSamples = null;
+let transcodingChartState = null;
+
+async function refreshTranscoding() {
+  try {
+    const samples = await invoke("get_transcoding_history");
+    transcodingSamples = Array.isArray(samples) ? samples : [];
+    renderTranscodingStatus(transcodingSamples);
+    drawTranscodingChart(transcodingSamples, null);
+  } catch (err) {
+    // Best-effort background poll (every 5s); the next tick retries.
+  }
+}
+
+function formatPercent(value) {
+  return `${Math.round(value)}%`;
+}
+
+function renderTranscodingStatus(samples) {
+  const grid = document.getElementById("transcodingStatusGrid");
+  const latest = samples.length ? samples[samples.length - 1] : null;
+  const subtitles = !latest
+    ? "—"
+    : latest.subtitle_active
+      ? "Running"
+      : latest.subtitle_queued > 0
+        ? `${latest.subtitle_queued} queued`
+        : "Idle";
+  const cpuNow = latest ? latest.transcode_cpu_percent + latest.server_cpu_percent : 0;
+  grid.innerHTML =
+    stat("Active transcodes", latest ? latest.transcode_sessions : 0, false, "transcoding") +
+    stat("Direct-play streams", latest ? latest.direct_sessions : 0, false, "transcoding") +
+    stat("Subtitle generation", subtitles, false, "transcoding") +
+    stat("CPU in use", formatPercent(cpuNow), false, "transcoding");
+}
+
+function drawTranscodingChart(samples, hoverIndex) {
+  const canvas = document.getElementById("transcodingChart");
+  document.getElementById("transcodingChartEmpty").classList.toggle("d-none", samples.length > 0);
+  const ctx = canvas.getContext("2d");
+  if (!samples.length) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    transcodingChartState = null;
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const height = canvas.clientHeight || 130;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const padding = { top: 10, right: 44, bottom: 20, left: 4 };
+  const plotW = Math.max(width - padding.left - padding.right, 1);
+  const plotH = Math.max(height - padding.top - padding.bottom, 1);
+  const minMs = samples[0].timestamp_ms;
+  const maxMs = samples[samples.length - 1].timestamp_ms;
+  const spanMs = Math.max(maxMs - minMs, 1);
+  const totals = samples.map((s) => s.transcode_cpu_percent + s.server_cpu_percent);
+  const maxPct = niceMax(Math.max(5, ...totals));
+
+  const x = (ms) => padding.left + ((ms - minMs) / spanMs) * plotW;
+  const y = (pct) => padding.top + plotH - (Math.min(pct, maxPct) / maxPct) * plotH;
+
+  const styles = getComputedStyle(document.documentElement);
+  const border = styles.getPropertyValue("--border").trim();
+  const muted = styles.getPropertyValue("--muted").trim();
+  const accent = styles.getPropertyValue("--accent").trim();
+  const green = styles.getPropertyValue("--green").trim();
+  const text = styles.getPropertyValue("--text").trim();
+
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = muted;
+  [0, maxPct / 2, maxPct].forEach((value) => {
+    const yy = Math.round(y(value)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, yy);
+    ctx.lineTo(padding.left + plotW, yy);
+    ctx.stroke();
+    ctx.textAlign = "left";
+    ctx.fillText(formatPercent(value), padding.left + plotW + 6, yy);
+  });
+
+  // Stacked bands: ffmpeg transcoding (0 → a), then the rest of the server
+  // process stacked on top (a → a+b).
+  const base = padding.top + plotH;
+  const lowerTop = samples.map((s) => [x(s.timestamp_ms), y(s.transcode_cpu_percent)]);
+  const upperTop = samples.map((s) => [x(s.timestamp_ms), y(s.transcode_cpu_percent + s.server_cpu_percent)]);
+  const flatBase = lowerTop.map(([px]) => [px, base]);
+
+  const fillBand = (topPts, bottomPts, color) => {
+    ctx.beginPath();
+    topPts.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+    for (let i = bottomPts.length - 1; i >= 0; i--) ctx.lineTo(bottomPts[i][0], bottomPts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = hexToRgba(color, 0.16);
+    ctx.fill();
+  };
+  fillBand(lowerTop, flatBase, accent);
+  fillBand(upperTop, lowerTop, green);
+
+  [[lowerTop, accent], [upperTop, green]].forEach(([pts, color]) => {
+    ctx.beginPath();
+    pts.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+  });
+
+  const last = samples[samples.length - 1];
+  const [lastPx, lastPy] = upperTop[upperTop.length - 1];
+  ctx.fillStyle = text;
+  ctx.font = "700 11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(formatPercent(last.transcode_cpu_percent + last.server_cpu_percent), lastPx + 8, lastPy);
+
+  ctx.fillStyle = muted;
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(formatClock(minMs), padding.left, padding.top + plotH + 14);
+  ctx.textAlign = "right";
+  ctx.fillText(formatClock(maxMs), padding.left + plotW, padding.top + plotH + 14);
+
+  if (hoverIndex != null && upperTop[hoverIndex]) {
+    const [px] = upperTop[hoverIndex];
+    ctx.beginPath();
+    ctx.moveTo(px, padding.top);
+    ctx.lineTo(px, padding.top + plotH);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  transcodingChartState = { samples, padding, plotW, minMs, spanMs };
+}
+
+const transcodingCanvas = document.getElementById("transcodingChart");
+const transcodingTooltip = document.getElementById("transcodingTooltip");
+
+transcodingCanvas.addEventListener("mousemove", (event) => {
+  if (!transcodingChartState) return;
+  const { samples, padding, plotW, minMs, spanMs } = transcodingChartState;
+  const rect = transcodingCanvas.getBoundingClientRect();
+  const ratio = Math.min(Math.max((event.clientX - rect.left - padding.left) / plotW, 0), 1);
+  const targetMs = minMs + ratio * spanMs;
+  let index = 0;
+  let best = Infinity;
+  samples.forEach((sample, i) => {
+    const distance = Math.abs(sample.timestamp_ms - targetMs);
+    if (distance < best) {
+      best = distance;
+      index = i;
+    }
+  });
+  const sample = samples[index];
+  drawTranscodingChart(samples, index);
+  const total = sample.transcode_cpu_percent + sample.server_cpu_percent;
+  transcodingTooltip.innerHTML = `<strong>${esc(formatPercent(total))} CPU</strong><span>${esc(`${sample.transcode_sessions} transcoding · ${formatClock(sample.timestamp_ms)}`)}</span>`;
+  transcodingTooltip.style.left = `${padding.left + ((sample.timestamp_ms - minMs) / spanMs) * plotW}px`;
+  transcodingTooltip.classList.remove("d-none");
+});
+
+transcodingCanvas.addEventListener("mouseleave", () => {
+  transcodingTooltip.classList.add("d-none");
+  if (transcodingChartState) drawTranscodingChart(transcodingChartState.samples, null);
+});
 
 // ---- Artwork cache: activity by client + disk usage -------------------
 

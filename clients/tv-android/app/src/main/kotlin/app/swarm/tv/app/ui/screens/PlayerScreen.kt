@@ -985,6 +985,7 @@ fun PlayerScreen(
             // play/pause, seek, and settings buttons can receive navigation.
             modifier = Modifier
                 .fillMaxSize()
+                .testTag(UatTestTags.PLAYER_SURFACE)
                 .focusable()
                 .onKeyEvent {
                     val event = it.nativeKeyEvent
@@ -1371,10 +1372,14 @@ private fun TrackPickerBlock(
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier,
     ) {
-        for (choice in choices) {
-            SelectableChip(choice.label, isSelected = choice.isSelected, onClick = { onSelect(choice) })
+        for ((index, choice) in choices.withIndex()) {
+            SelectableChip(
+                choice.label,
+                isSelected = choice.isSelected,
+                onClick = { onSelect(choice) },
+                modifier = if (index == 0 && testTag != null) Modifier.testTag(testTag) else Modifier,
+            )
         }
     }
 }

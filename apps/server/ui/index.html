@@ -128,6 +128,25 @@
 
     <div class="card">
       <div class="card-head">
+        <h2 class="info-trigger" data-info="transcoding" tabindex="0" role="button"><i class="bi bi-cpu heading-icon"></i>Transcoding <i class="bi bi-info-circle info-affordance"></i></h2>
+      </div>
+      <div class="grid" id="transcodingStatusGrid"><div class="stat"><div class="label">Loading…</div></div></div>
+      <div class="cache-chart-controls">
+        <div class="cache-chart-legend" aria-label="Transcoding chart legend">
+          <span><i class="cache-legend-dot cache-legend-fill"></i>Transcoding (ffmpeg)</span>
+          <span><i class="cache-legend-dot cache-legend-hit"></i>Server &amp; subtitles</span>
+        </div>
+      </div>
+      <div class="bandwidth-chart-wrap">
+        <canvas id="transcodingChart" class="bandwidth-chart" aria-label="CPU used by transcoding and subtitle generation over the last 60 minutes"></canvas>
+        <div id="transcodingChartEmpty" class="muted bandwidth-chart-empty d-none">No transcoding activity in the last 60 minutes.</div>
+        <div id="transcodingTooltip" class="bandwidth-tooltip d-none"></div>
+      </div>
+      <p class="muted compact-help">CPU spent on ffmpeg transcodes versus the rest of the server process (which includes Whisper subtitle generation), as a share of this machine, sampled every 5 seconds.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2 class="info-trigger" data-info="local-subtitles" tabindex="0" role="button"><i class="bi bi-badge-cc-fill heading-icon"></i>Local subtitles <i class="bi bi-info-circle info-affordance"></i></h2>
         <label class="checkbox-label transcription-toggle"><input type="checkbox" id="localTranscriptionEnabledCheck"> <i class="bi bi-cpu"></i>Generate with Whisper</label>
       </div>

@@ -3,7 +3,6 @@ package app.swarm.tv.app.uat
 import android.view.KeyEvent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import app.swarm.tv.app.ui.UatTestTags
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -29,11 +28,13 @@ class MoviePlaybackPauseUatTest : UatTestBase() {
 
     @Test
     fun testPlaybackAndPauseOverlay() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
-        composeTestRule.onNodeWithTag(movieTag).performClick()
+        selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
-        composeTestRule.onNodeWithTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+        waitForTag(UatTestTags.PLAYER_SURFACE)
+        focusTag(UatTestTags.PLAYER_SURFACE)
 
         // Plays for the first 30 seconds, per the scenario spec.
         Thread.sleep(30_000)
@@ -58,25 +59,26 @@ class MoviePlaybackPauseUatTest : UatTestBase() {
             composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_NEXT_EPISODE_BUTTON).isEmpty(),
         )
 
-        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_RESUME_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.PAUSE_RESUME_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isEmpty()
         }
 
         device.pressKeyCode(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
         waitForTag(UatTestTags.PAUSE_LABEL)
-        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_RESUME_BUTTON).performClick()
+        selectTagWithDpad(UatTestTags.PAUSE_RESUME_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isEmpty()
         }
 
         pressSelect()
         waitForTag(UatTestTags.PAUSE_LABEL)
-        composeTestRule.onNodeWithTag(UatTestTags.PAUSE_AUDIO_TRACK_PICKER).performClick()
-        pressBack()
+        selectTagWithDpad(UatTestTags.PAUSE_AUDIO_TRACK_PICKER)
         waitForTag(UatTestTags.PAUSE_LABEL)
 
-        pressBack() // out of the player entirely
+        pressBack() // pause overlay/player -> movie detail
+        waitForTag(UatTestTags.MOVIE_DETAIL_ARTWORK)
+        pressBack() // movie detail -> browse
         waitForTag(UatTestTags.SHELF_MOVIES)
     }
 }

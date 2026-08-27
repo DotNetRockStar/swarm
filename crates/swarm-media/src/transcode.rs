@@ -407,6 +407,17 @@ impl SessionRateLimiter {
     }
 }
 
+/// See [`TranscodeManager::activity`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct TranscodeActivity {
+    /// HLS sessions with a live ffmpeg process right now.
+    pub transcode_sessions: usize,
+    /// Direct-play sessions (a bandwidth reservation, no ffmpeg process).
+    pub direct_sessions: usize,
+    /// Upload bandwidth reserved across every session, bits/sec.
+    pub reserved_bps: u64,
+}
+
 pub struct TranscodeManager {
     config: TranscodeConfig,
     /// Overrides `config.max_upload_bps` once a real measurement lands —
@@ -513,6 +524,32 @@ impl TranscodeManager {
 
     pub fn global_rate_limiter(&self) -> Arc<SessionRateLimiter> {
         Arc::clone(&self.global_rate_limiter)
+    }
+
+    /// A point-in-time summary of what the transcoder is doing right now,
+    /// for the dashboard's live "Transcoding" graph (see
+    /// `apps/server`'s `transcode_activity` module). `transcode_sessions`
+    /// counts only sessions with a live ffmpeg process — a completed HLS
+    /// job that still serves its generated segments, and every direct-play
+    /// session, are excluded from it (direct play is reported separately).
+    pub fn activity(&self) -> TranscodeActivity {
+        let mut state = self.state.lock().unwrap();
+        let transcode_sessions = active_hls_processes(&mut state);
+        let direct_sessions = state
+            .sessions
+            .values()
+            .filter(|session| matches!(session.kind, SessionKind::Direct { .. }))
+            .count();
+        let reserved_bps = state
+            .sessions
+            .values()
+            .map(|session| session.reserved_bps)
+            .sum();
+        TranscodeActivity {
+            transcode_sessions,
+            direct_sessions,
+            reserved_bps,
+        }
     }
 
     /// Select direct play when both the device and the shared uplink can
@@ -1662,6 +1699,40 @@ mod tests {
             2_128_000
         );
         manager.finish_use(&second);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn activity_snapshot_separates_direct_sessions_from_transcodes() {
+        let root = std::env::temp_dir().join(format!("swarm-activity-test-{}", session_id()));
+        let manager = TranscodeManager::new(TranscodeConfig {
+            enabled: false,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.clone(),
+            max_upload_bps: 20_000_000,
+            reserve_percent: 0,
+            max_sessions: 3,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+        });
+        assert_eq!(manager.activity(), TranscodeActivity::default());
+
+        manager
+            .reserve(
+                SessionKind::Direct {
+                    entry_key: "a".into(),
+                },
+                3_000_000,
+                true,
+                false,
+            )
+            .unwrap();
+        let activity = manager.activity();
+        assert_eq!(activity.direct_sessions, 1);
+        assert_eq!(activity.transcode_sessions, 0);
+        assert_eq!(activity.reserved_bps, 3_000_000);
+
         drop(manager);
         let _ = std::fs::remove_dir_all(root);
     }

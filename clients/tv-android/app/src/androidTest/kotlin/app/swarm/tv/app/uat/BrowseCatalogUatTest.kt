@@ -1,6 +1,7 @@
 package app.swarm.tv.app.uat
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import app.swarm.tv.app.ui.UatTestTags
 import org.junit.Assert.assertTrue
@@ -17,24 +18,24 @@ class BrowseCatalogUatTest : UatTestBase() {
     /** Scenario 1: browse opens automatically after pairing, no extra click needed. */
     @Test
     fun testBrowseAutoOpensWithoutClickingLibrary() {
-        waitForTag(UatTestTags.SHELF_MOVIES, timeoutMs = 20_000)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES, timeoutMs = 20_000)
         composeTestRule.onNodeWithTag(UatTestTags.FILTER_RAIL).assertIsDisplayed()
     }
 
     /** Scenario 2: movies, shows, and music all load real entries. */
     @Test
     fun testMoviesShowsMusicLoad() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
-        waitForTag(UatTestTags.SHELF_SHOWS)
-        waitForTag(UatTestTags.SHELF_MUSIC)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         assertTrue(
             "expected at least one movie card",
             composeTestRule.allTagsStartingWith(UatTestTags.CARD_MOVIE_PREFIX).isNotEmpty(),
         )
+        navigateDownUntilTag(UatTestTags.SHELF_SHOWS)
         assertTrue(
             "expected at least one show card",
             composeTestRule.allTagsStartingWith(UatTestTags.CARD_SHOW_PREFIX).isNotEmpty(),
         )
+        navigateDownUntilTag(UatTestTags.SHELF_MUSIC)
         assertTrue(
             "expected at least one music artist card",
             composeTestRule.allTagsStartingWith(UatTestTags.CARD_ARTIST_PREFIX).isNotEmpty(),
@@ -44,13 +45,20 @@ class BrowseCatalogUatTest : UatTestBase() {
     /** Scenarios 3, 4, 5: box art renders for at least one movie, show, and artist. */
     @Test
     fun testBoxArtLoadsForMovieShowAndArtist() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
+        focusTag(movieTag)
+        composeTestRule.onAllNodesWithTag(movieTag)[0].assertIsDisplayed()
+
+        navigateDownUntilTagPrefix(UatTestTags.CARD_SHOW_PREFIX)
         val showTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_SHOW_PREFIX))
+        focusTag(showTag)
+        composeTestRule.onAllNodesWithTag(showTag)[0].assertIsDisplayed()
+
+        navigateDownUntilTagPrefix(UatTestTags.CARD_ARTIST_PREFIX)
         val artistTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_ARTIST_PREFIX))
-        composeTestRule.onNodeWithTag(movieTag).assertIsDisplayed()
-        composeTestRule.onNodeWithTag(showTag).assertIsDisplayed()
-        composeTestRule.onNodeWithTag(artistTag).assertIsDisplayed()
+        focusTag(artistTag)
+        composeTestRule.onAllNodesWithTag(artistTag)[0].assertIsDisplayed()
         // Note: this asserts the tile composable (which hosts the artwork
         // image) is laid out and on-screen — Compose semantics has no
         // "decoded bitmap arrived" signal for a Coil AsyncImage, so this is
@@ -61,7 +69,7 @@ class BrowseCatalogUatTest : UatTestBase() {
     /** Scenario 6: Continue Watching never shows more than 6 items, when present at all. */
     @Test
     fun testContinueWatchingCapAtSix() {
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
         val rowNodes = composeTestRule.allTagsStartingWith(UatTestTags.ROW_CONTINUE_WATCHING)
         if (rowNodes.isEmpty()) return // nothing to assert — no continue-watching assets yet
         val count = composeTestRule.allTagsStartingWith(UatTestTags.CARD_QUICK_ACCESS_PREFIX).size
@@ -72,6 +80,7 @@ class BrowseCatalogUatTest : UatTestBase() {
     @Test
     fun testFilterBarMediaTypesAndGenre() {
         waitForTag(UatTestTags.FILTER_RAIL)
+        openFilterRail()
         for (kind in listOf("ALL", "MOVIES", "SHOWS", "MUSIC")) {
             composeTestRule.onNodeWithTag(UatTestTags.FILTER_KIND_PREFIX + kind).assertIsDisplayed()
         }

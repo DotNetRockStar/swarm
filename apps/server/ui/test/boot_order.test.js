@@ -83,6 +83,31 @@ function invokeStub(command, args) {
           { timestamp_ms: Date.now() - 4_000, client: "Bedroom TV", kind: "served_from_cache" },
         ],
       };
+    case "get_transcoding_history":
+      return [
+        {
+          timestamp_ms: Date.now() - 10_000,
+          transcode_sessions: 1,
+          direct_sessions: 0,
+          reserved_bps: 8_000_000,
+          subtitle_active: false,
+          subtitle_phase: "idle",
+          subtitle_queued: 3,
+          transcode_cpu_percent: 42.5,
+          server_cpu_percent: 6.0,
+        },
+        {
+          timestamp_ms: Date.now() - 5_000,
+          transcode_sessions: 2,
+          direct_sessions: 1,
+          reserved_bps: 12_000_000,
+          subtitle_active: true,
+          subtitle_phase: "transcribing",
+          subtitle_queued: 2,
+          transcode_cpu_percent: 55.0,
+          server_cpu_percent: 18.0,
+        },
+      ];
     case "get_media_root_health":
       return testRootHealth;
     case "get_transcription_status":
@@ -283,6 +308,21 @@ async function main() {
       document.getElementById("artworkCacheRecent").textContent.includes("Living Room TV")) {
     failures.push("Expected artwork cache activity to filter to the selected client.");
   }
+  await dom.window.refreshTranscoding();
+  const transcodingGrid = document.getElementById("transcodingStatusGrid").textContent;
+  if (!transcodingGrid.includes("Active transcodes") || !transcodingGrid.includes("Subtitle generation")) {
+    failures.push(`Expected the transcoding panel to summarize live ffmpeg and subtitle activity, got: ${transcodingGrid}.`);
+  }
+  if (!transcodingGrid.includes("Running")) {
+    failures.push("Expected the transcoding panel to report subtitle generation as running when the latest sample is transcribing.");
+  }
+  if (!transcodingGrid.includes("73%")) {
+    failures.push(`Expected the transcoding panel to report combined CPU use (55 + 18), got: ${transcodingGrid}.`);
+  }
+  if (document.getElementById("transcodingChartEmpty").classList.contains("d-none") === false) {
+    failures.push("Expected the transcoding empty-state to be hidden once samples exist.");
+  }
+
   const cacheExplainer = document.querySelector(".cache-explainer");
   cacheExplainer.open = true;
   if (!cacheExplainer.textContent.includes("refresh after 30 days")) {

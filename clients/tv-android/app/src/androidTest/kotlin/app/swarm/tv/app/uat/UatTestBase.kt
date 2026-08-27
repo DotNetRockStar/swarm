@@ -1,8 +1,11 @@
 package app.swarm.tv.app.uat
 
 import android.content.Intent
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.rules.ActivityScenarioRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -69,9 +72,14 @@ abstract class UatTestBase {
 
     @get:Rule
     val ruleChain: TestRule = RuleChain
-        .outerRule(failureCaptureRule)
+        // Compose must install its root registry before ActivityScenario
+        // launches MainActivity; otherwise setContent() runs too early and
+        // every semantics lookup polls an empty, unregistered hierarchy.
+        .outerRule(composeTestRule)
         .around(activityScenarioRule)
-        .around(composeTestRule)
+        // Keep capture inside both lifecycle rules so a failure is recorded
+        // while the Compose registry and MainActivity are still alive.
+        .around(failureCaptureRule)
 
     protected val device: UiDevice by lazy {
         UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
@@ -126,6 +134,83 @@ abstract class UatTestBase {
     protected fun pressDpadDown() = device.pressDPadDown()
     protected fun pressDpadLeft() = device.pressDPadLeft()
     protected fun pressDpadRight() = device.pressDPadRight()
+
+    /**
+     * Activates a tagged TV control through the same focus + D-pad Center
+     * path as the physical remote. Compose's `performClick()` injects a
+     * pointer click at the node's coordinates; on Fire TV that can silently
+     * land on the clipped edge of an off-screen lazy item without invoking
+     * the control. Requesting focus first also makes lazy containers bring
+     * the target on-screen before the real key event is sent.
+     */
+    protected fun selectTagWithDpad(tag: String) {
+        focusTag(tag)
+        pressSelect()
+        device.waitForIdle()
+    }
+
+    /** Gives a tagged TV surface focus without activating it. */
+    protected fun focusTag(tag: String) {
+        composeTestRule.onNodeWithTag(tag).performSemanticsAction(SemanticsActions.RequestFocus)
+        composeTestRule.waitForIdle()
+        device.waitForIdle(250)
+    }
+
+    /** Expands the browse filter rail through real directional navigation. */
+    protected fun openFilterRail() {
+        val expandedTag = UatTestTags.FILTER_KIND_PREFIX + "ALL"
+        val deadline = System.currentTimeMillis() + 5_000
+        while (
+            System.currentTimeMillis() < deadline &&
+            composeTestRule.onAllNodesWithTag(expandedTag).fetchSemanticsNodes().isEmpty()
+        ) {
+            pressDpadLeft()
+            device.waitForIdle(250)
+        }
+        waitForTag(expandedTag)
+    }
+
+    /**
+     * Moves down the real TV focus graph until a lazy catalog item is
+     * composed. Merely polling semantics cannot materialize rows that are
+     * still below a LazyColumn's viewport.
+     */
+    protected fun navigateDownUntilTag(tag: String, timeoutMs: Long = 5_000) {
+        navigateDownUntil(timeoutMs) {
+            composeTestRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    /** Moves up the real TV focus graph until an earlier lazy row is composed. */
+    protected fun navigateUpUntilTag(tag: String, timeoutMs: Long = 5_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (composeTestRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()) return
+            pressDpadUp()
+            // The testing-mode banner updates continuously, so the default
+            // UIAutomator idle wait can consume this helper's whole timeout
+            // after a single key. Use a bounded settle so several real D-pad
+            // steps can traverse the lazy catalog within the same deadline.
+            device.waitForIdle(250)
+        }
+        composeTestRule.waitUntil(timeoutMillis = 1) {
+            composeTestRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    protected fun navigateDownUntilTagPrefix(prefix: String, timeoutMs: Long = 5_000) {
+        navigateDownUntil(timeoutMs) { composeTestRule.allTagsStartingWith(prefix).isNotEmpty() }
+    }
+
+    private fun navigateDownUntil(timeoutMs: Long, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            pressDpadDown()
+            device.waitForIdle(250)
+        }
+        composeTestRule.waitUntil(timeoutMillis = 1) { condition() }
+    }
 
     /**
      * Polls Compose semantics for a node carrying [tag], failing the test if

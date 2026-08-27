@@ -9,6 +9,7 @@ pub mod lan;
 pub mod punch_connect;
 mod state_db;
 mod subtitle_download;
+pub mod transcode_activity;
 pub mod transcription;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,6 +42,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use crate::punch_connect::{respond_to_punch_offer, ReceivedOffer};
+use crate::transcode_activity::{TranscodeActivityMeter, TranscodeActivitySample};
 use crate::transcription::{TranscriptionManager, TranscriptionStatus};
 
 pub use state_db::{HttpMediaDeviceRecord, LocalPeerRecord, ManagedSwarmIdentity, StunLinkRecord};
@@ -134,6 +136,7 @@ pub struct ServerCore {
     pub http_media_addr: SocketAddr,
     service: Arc<MediaService>,
     transcription: Arc<TranscriptionManager>,
+    transcode_activity: Arc<TranscodeActivityMeter>,
     data_dir: PathBuf,
     state_db: Arc<state_db::StateDb>,
     lan_service: lan::LanService,
@@ -331,6 +334,11 @@ impl ServerCore {
         )
         .await?;
 
+        let transcode_activity = TranscodeActivityMeter::start(
+            Arc::downgrade(service.transcode_manager()),
+            Arc::downgrade(&transcription),
+        );
+
         let core = Arc::new(Self {
             identity,
             library,
@@ -340,6 +348,7 @@ impl ServerCore {
             http_media_addr: http_media.local_addr,
             service,
             transcription,
+            transcode_activity,
             data_dir: config.data_dir,
             state_db,
             lan_service,
@@ -710,6 +719,13 @@ impl ServerCore {
     /// tab's live graph and "current" panel.
     pub fn bandwidth_history(&self) -> Vec<BandwidthSample> {
         self.service.bandwidth_meter().history()
+    }
+
+    /// Up to the last 60 minutes of transcoding/subtitle activity samples,
+    /// one per 5-second bucket — see `crate::transcode_activity` — for the
+    /// Details tab's live "Transcoding" graph.
+    pub fn transcode_activity_history(&self) -> Vec<TranscodeActivitySample> {
+        self.transcode_activity.history()
     }
 
     pub async fn artwork_cache_snapshot(&self) -> swarm_media::artwork_cache::ArtworkCacheSnapshot {

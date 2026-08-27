@@ -36,6 +36,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,6 +47,7 @@ import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.data.CONNECTION_SETUP_SWARM_ID
 import app.swarm.tv.app.data.LanPairingActivation
 import app.swarm.tv.app.data.LanServer
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
@@ -169,7 +171,7 @@ fun SwarmDashboardScreen(
                     ) { Text("Browse library") }
                     Button(
                         onClick = onOpenSettings,
-                        modifier = downToFirstServer,
+                        modifier = downToFirstServer.testTag(UatTestTags.DASHBOARD_SETTINGS_BUTTON),
                         colors = swarmActionButtonColors(),
                     ) { Text("Settings") }
                 }
