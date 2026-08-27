@@ -565,6 +565,16 @@ class RunnerTestCase(unittest.TestCase):
             repo = root / "repo"
             state = root / "state"
             repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "runner test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "runner@example.invalid"], check=True
+            )
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
             worker = root / "fake_worker.py"
             result_file = root / "result.json"
             worker.write_text(
@@ -588,6 +598,91 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(result["repo"], str(repo.resolve()))
             self.assertEqual(result["state"], str(state.resolve()))
             self.assertEqual(result["args"], ["--github-repository", "example/repo", "--no-email"])
+
+    def test_scheduler_fast_forwards_before_copying_worker_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-sync-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            remote = root / "remote.git"
+            state = root / "state"
+            result_file = root / "result.txt"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+                subprocess.run(["git", "-C", str(repo), "config", name, value], check=True)
+            worker = repo / "worker.py"
+            worker.write_text(
+                "import os\nfrom pathlib import Path\n"
+                "Path(os.environ['FAKE_RESULT_FILE']).write_text('old')\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(repo), "add", "worker.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "old worker"], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
+
+            updater = root / "updater"
+            subprocess.run(
+                ["git", "clone", "-q", "--branch", "main", str(remote), str(updater)], check=True
+            )
+            for name, value in (("user.name", "updater"), ("user.email", "updater@example.invalid")):
+                subprocess.run(["git", "-C", str(updater), "config", name, value], check=True)
+            (updater / "worker.py").write_text(
+                "import os\nfrom pathlib import Path\n"
+                "Path(os.environ['FAKE_RESULT_FILE']).write_text('new')\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(updater), "add", "worker.py"], check=True)
+            subprocess.run(["git", "-C", str(updater), "commit", "-q", "-m", "new worker"], check=True)
+            subprocess.run(["git", "-C", str(updater), "push", "-q", "origin", "main"], check=True)
+            remote_sha = subprocess.run(
+                ["git", "-C", str(updater), "rev-parse", "HEAD"], text=True,
+                stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repo-dir", str(repo), "--state-dir", str(state), "--worker", str(worker),
+                    "--once", "--no-email", "--pgrep-bin", "",
+                ]
+            )
+            with mock.patch.dict(os.environ, {"FAKE_RESULT_FILE": str(result_file)}):
+                self.assertEqual(runner_module.Runner(args, []).run(), 0)
+
+            self.assertEqual(result_file.read_text(encoding="utf-8"), "new")
+            local_sha = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+                stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            self.assertEqual(local_sha, remote_sha)
+
+    def test_scheduler_does_not_switch_an_active_issue_checkout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-active-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            state = root / "state"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "runner test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "runner@example.invalid"], check=True
+            )
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+            subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "swarm/codex/issue-114"], check=True)
+            state.mkdir()
+            (state / "in-progress-issue.json").write_text("{}\n", encoding="utf-8")
+            (repo / "dirty.txt").write_text("active work\n", encoding="utf-8")
+            args = runner_module.build_parser().parse_args(
+                ["--repo-dir", str(repo), "--state-dir", str(state), "--no-email"]
+            )
+            runner = runner_module.Runner(args, [])
+
+            self.assertTrue(runner.synchronize_repository())
+            branch = subprocess.run(
+                ["git", "-C", str(repo), "branch", "--show-current"], text=True,
+                stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "swarm/codex/issue-114")
+            self.assertTrue((repo / "dirty.txt").is_file())
 
 
 class GitHubAppAuthTestCase(unittest.TestCase):

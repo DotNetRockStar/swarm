@@ -121,6 +121,14 @@ The scheduler securely prompts for the SMTP password and keeps it only in
 memory. Use `--no-email` for an installation that intentionally does not send
 notifications. Press Ctrl+C to stop.
 
+Before each immutable worker snapshot is created, the scheduler returns an
+idle, clean checkout to the configured base branch and performs a
+fast-forward-only pull from the configured remote. Worker changes merged by a
+prior run are therefore available to the next run automatically. A saved
+in-progress attempt keeps ownership of its branch and worktree until recovery
+finishes; dirty work without saved ownership, diverged history, or a failed
+pull safely defers AI work instead of overwriting anything.
+
 ### Parameters
 
 Command-line options override environment variables; environment variables
@@ -172,6 +180,9 @@ account is trusted for completion markers.
 | `--log-path` | `SWARM_ISSUE_WORKER_LOG_PATH` | `STATE_DIR/cron.log` |
 | `--cargo-target-dir` | `SWARM_CARGO_TARGET_DIR` | `REPO_DIR/target` |
 | `--transcode-pattern` | `SWARM_TRANSCODE_PROCESS_PATTERN` | SWARM HLS FFmpeg command pattern |
+| `--git-bin` | `GIT_BIN` | `git` from `PATH` |
+| `--base-branch` | `SWARM_BASE_BRANCH` | `main` |
+| `--remote-name` | `SWARM_GIT_REMOTE` | `origin` |
 
 The scheduler accepts worker-only options and forwards unknown arguments to the
 worker. Shared repository and state options are forwarded through the worker's
