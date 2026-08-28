@@ -39,6 +39,12 @@ class NavigationSearchPersistenceUatTest : UatTestBase() {
         }
         pressSelect()
         waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
+        // A newly negotiated stream can briefly expose the surface before a
+        // final buffering transition. Reconfirm the surface after settling
+        // so Back is handled by the player rather than the loading screen.
+        Thread.sleep(2_000)
+        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
+        focusTag(UatTestTags.PLAYER_SURFACE)
         // Back from the bare playback surface intentionally pauses first;
         // Back from the resulting pause overlay exits to detail.
         pressBack()
@@ -73,7 +79,13 @@ class NavigationSearchPersistenceUatTest : UatTestBase() {
         waitForTag(UatTestTags.SEARCH_NO_MATCHES)
         selectTagWithDpad(UatTestTags.SEARCH_CLEAR_BUTTON)
         // Clearing restores the full lazy catalog but does not force-scroll
-        // the Movies shelf into the currently composed viewport.
+        // the Movies shelf into the currently composed viewport. Focus can
+        // also fall into the expanded rail during the list replacement.
+        if (composeTestRule.allTagsStartingWith(UatTestTags.FILTER_KIND_PREFIX + "ALL").isNotEmpty()) {
+            focusTag(UatTestTags.FILTER_KIND_PREFIX + "ALL")
+            pressDpadRight()
+            waitForTagGone(UatTestTags.FILTER_KIND_PREFIX + "ALL")
+        }
         navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
 
         openFilterRail()
@@ -88,7 +100,7 @@ class NavigationSearchPersistenceUatTest : UatTestBase() {
             composeTestRule.allTagsStartingWith(UatTestTags.CARD_MOVIE_PREFIX).isNotEmpty()
         }
         openFilterRail()
-        selectTagWithDpad(genreTag)
+        selectTagWithDpad(UatTestTags.FILTER_GENRE_PREFIX + "ALL")
         openFilterRail()
         selectTagWithDpad(UatTestTags.FILTER_KIND_PREFIX + "ALL")
         waitForTag(UatTestTags.SHELF_MOVIES)
@@ -98,14 +110,18 @@ class NavigationSearchPersistenceUatTest : UatTestBase() {
         navigateFocusUntilPrefix(UatTestTags.BROWSE_ALL_MOVIES, timeoutMs = 15_000, press = ::pressDpadRight)
         pressSelect()
         composeTestRule.waitForTagPrefix(UatTestTags.GRID_MOVIE_PREFIX)
-        val visibleGridTags = composeTestRule.allTagsStartingWith(UatTestTags.GRID_MOVIE_PREFIX)
+        val visibleGridTags = composeTestRule.tagsStartingWithInLayoutOrder(UatTestTags.GRID_MOVIE_PREFIX)
         val visibleTitles = visibleGridTags.mapNotNull { tag ->
             composeTestRule.contentDescriptionsUnderTag(tag).firstOrNull()?.removeSuffix(" artwork")
         }
         assertTrue("Browse All should expose at least two visible movies", visibleTitles.size >= 2)
         assertEquals("Browse All movies should be alphabetical", visibleTitles.sortedBy(::sortKey), visibleTitles)
         pressBack()
-        waitForTag(UatTestTags.SHELF_MOVIES)
+        // Returning from the full Browse-All grid re-composes the catalog's
+        // shelves and genre sub-shelves from scratch against a real,
+        // multi-thousand-entry library — the default 5s budget is tuned for
+        // simple state changes, not this heavier recomposition.
+        waitForTag(UatTestTags.SHELF_MOVIES, timeoutMs = 15_000)
     }
 
     @Test

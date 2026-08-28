@@ -1,17 +1,20 @@
 # Closed-loop Fire TV testing
 
-Two suites test the real desktop media server against real Amazon Fire TV
-hardware on the same LAN. Both require real hardware and can't run on
-GitHub-hosted CI — see [Why local-only](#why-local-only-hardware). Both are
+Three suites close the loop on the media server and the Amazon Fire TV
+client. Two require real Fire TV hardware on the same LAN and can't run on
+GitHub-hosted CI — see [Why local-only](#why-local-only-hardware). The third,
+`media_server_uat_tests.sh`, is the media server's own backend/API UAT suite
+— plain `cargo test`, no hardware, no LAN, CI-friendly. All three are
 change-controlled: **read the `swarm-e2e-suite-lockdown` skill before editing
-either one's test logic.** Neither suite is touched by editing the other.
+any of their test logic.** None of the three is touched by editing another.
 
 ## TL;DR — run everything
 
 ```bash
-./scripts/run_now.sh                        # 1. start the local media server (if not already running)
-./scripts/tv_e2e_suite.sh                   # 2. fast smoke test — no UI navigation, full fan-out, ~1 min/device
-./scripts/tv_uat_suite.sh                   # 3. full UAT suite — real UI navigation, ~16 scenarios, several minutes
+./scripts/media_server_uat_tests.sh         # 1. media server backend UAT — no hardware needed, ~1 sec
+./scripts/run_now.sh                        # 2. start the local media server (if not already running)
+./scripts/tv_e2e_suite.sh                   # 3. fast smoke test — no UI navigation, full fan-out, ~1 min/device
+./scripts/tv_uat_suite.sh                   # 4. full UAT suite — real UI navigation, ~16 scenarios, several minutes
 ```
 
 Run them **one after the other, never at the same time** — both suites point
@@ -66,23 +69,29 @@ run looks like:
   nothing else failed) rather than erroring out, since running on a network
   with no TV present is a legitimate state, not a bug.
 
-## The two suites
+## The three suites
 
-| | `tv_e2e_suite.sh` | `tv_uat_suite.sh` |
-|---|---|---|
-| What it proves | The app launches, pairs, and completes one real catalog round-trip | Sixteen real UI scenarios: browse, detail, like/watchlist/report-a-problem, playback, music, filters |
-| How it asserts | Logcat/adb evidence only — **sends no D-pad input** | Real Compose UI navigation (`androidx.compose.ui.test` + `androidx.test.uiautomator`) |
-| SQLite validation | None | Real server (`library.sqlite`) and TV-side (`swarm.db`, `SharedPreferences`) state, cross-checked |
-| Device targeting | Preferred device by default (see below); `--all` for full fan-out | Preferred device by default (see below); `--all` for full fan-out |
-| On failure | Per-device logcat dump | Full UI-to-server evidence bundle (see below) |
-| Runtime per device | ~1 minute | Several minutes (16 scenarios, one plays real video/audio for 30s each) |
-| Skill | `swarm-closed-loop-tv-testing` | `swarm-tv-uat-suite` |
+| | `tv_e2e_suite.sh` | `tv_uat_suite.sh` | `media_server_uat_tests.sh` |
+|---|---|---|---|
+| What it proves | The app launches, pairs, and completes one real catalog round-trip | Sixteen real UI scenarios: browse, detail, like/watchlist/report-a-problem, playback, music, filters | Media server command/API correctness: media roots, library scan, TV pairing approval, notifications/client-errors, metadata editing, MCP tokens |
+| How it asserts | Logcat/adb evidence only — **sends no D-pad input** | Real Compose UI navigation (`androidx.compose.ui.test` + `androidx.test.uiautomator`) | Real `#[tauri::command]` handlers called directly against a real, isolated `ServerCore`/SQLite/filesystem behind a mocked Tauri runtime — **no UI, no IPC layer** |
+| SQLite validation | None | Real server (`library.sqlite`) and TV-side (`swarm.db`, `SharedPreferences`) state, cross-checked | Real, per-test isolated `library.sqlite`/settings.json |
+| Hardware needed | Real Fire TV on the LAN | Real Fire TV on the LAN | None — plain `cargo test`, CI-friendly |
+| Device targeting | Preferred device by default (see below); `--all` for full fan-out | Preferred device by default (see below); `--all` for full fan-out | N/A |
+| On failure | Per-device logcat dump | Full UI-to-server evidence bundle (see below) | `cargo test`'s own panic output (assertion diff, real error text) |
+| Runtime | ~1 minute/device | Several minutes (16 scenarios, one plays real video/audio for 30s each) | ~1 second |
+| Skill | `swarm-closed-loop-tv-testing` | `swarm-tv-uat-suite` | `swarm-media-server-uat-tests` |
 
 Use `tv_e2e_suite.sh` as the fast "did I break the build" check after any
 change touching the client, server, or LAN pairing path. Use
 `tv_uat_suite.sh` when a change could affect actual screen content, like/
 watchlist/report-a-problem behavior, playback, or the filter bar — or run
-its `--test` form for just the one scenario your change touches.
+its `--test` form for just the one scenario your change touches. Use
+`media_server_uat_tests.sh` for any change to a media server command
+handler (`apps/server/src/gui.rs`) or the library/scan/pairing/notification
+logic it calls into — it needs no hardware, so run it first; it'll catch a
+real backend regression in about a second, before spending minutes on the
+hardware suites.
 
 ## Prerequisites
 
@@ -160,6 +169,27 @@ wording (e.g. "reviews" doesn't exist as a field — the pause overlay shows
 an aggregate rating instead), and the server-resolve mechanism live in the
 `swarm-tv-uat-suite` skill.
 
+## Scenario catalog (`media_server_uat_tests.sh`)
+
+One Rust test file per category under `apps/server/src/gui_tests/`:
+
+| File | Covers |
+|---|---|
+| `media_root_lifecycle.rs` | Add/list/remove a media root; duplicate-label rejection; last-root-removal guard |
+| `library_scan.rs` | Rescan add/update/remove reconciliation against real files on disk; the empty-root mass-deletion safety guard |
+| `tv_pairing.rs` | LAN pairing-code approval (real invalid-code error path); local peer listing |
+| `notifications_and_errors.rs` | Client-error report → list → resolve → clear round-trip, seeded through the same write path a real client uses |
+| `metadata_editing.rs` | Manual title/genres/overview/rating overrides on a real scanned entry |
+| `mcp_tokens.rs` | MCP access-token generation/rotation and the enabled toggle |
+
+Real UI-visible flows (browse, playback, watchlist, ...) aren't covered here
+by design — see `swarm-media-server-uat-tests` (skill) for why (no reliable
+macOS UI-automation path today) and what's covered instead. `harness.rs`
+gives each test a real, isolated data directory and its own unique QUIC/HTTP
+ports, so tests are safe to run concurrently in the same process — see its
+doc comment for why that isolation is necessary (Tauri's `mock_context()`
+otherwise gives every test the same shared path/ports).
+
 ## Failure evidence (`tv_uat_suite.sh`)
 
 Every failed scenario writes a self-contained folder under
@@ -197,6 +227,10 @@ needed to debug without touching real hardware again:
 ./scripts/tv_uat_suite.sh --github-issue          # opt in to filing findings on GitHub
 ./scripts/tv_uat_suite.sh --no-issue              # explicit local-only mode (the default)
 ./scripts/tv_uat_suite.sh --skip-install         # smoke-test an already-installed build
+
+# media_server_uat_tests.sh
+./scripts/media_server_uat_tests.sh              # run every backend UAT test
+./scripts/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
 ```
 
 Both suites are plain deterministic scripts — a human, a CI runner (once a

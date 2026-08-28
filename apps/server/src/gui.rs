@@ -44,6 +44,20 @@ struct AppState {
     // dropped, which only happens when the user actually quits the app (not
     // when the main window is hidden to the tray).
     _sleep_inhibitor: Option<keepawake::KeepAwake>,
+    /// Test-only override for `app_data_dir()`. `mock_context()`'s
+    /// identifier defaults to empty, so every test would otherwise resolve
+    /// to the same shared OS path and corrupt each other's state when
+    /// Rust's test runner runs them concurrently in the same process — this
+    /// gives each test's own `AppState` instance a genuinely unique temp
+    /// directory instead. Always `None` in production.
+    test_data_dir: Option<PathBuf>,
+    /// Test-only override for the QUIC/HTTP-media bind addresses `core()`
+    /// otherwise reads from `SWARM_PEER_BIND`/`SWARM_HTTP_MEDIA_BIND` (which
+    /// default to fixed ports). Those env vars are process-global, so two
+    /// tests that started a real `ServerCore` concurrently in the same test
+    /// binary would race to bind the same ports; this gives each test's
+    /// `AppState` its own unique pair instead. Always `None` in production.
+    test_bind_override: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
 }
 
 fn acquire_sleep_inhibitor() -> Option<keepawake::KeepAwake> {
@@ -78,7 +92,12 @@ fn acquire_sleep_inhibitor() -> Option<keepawake::KeepAwake> {
     }
 }
 
-fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn app_data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(dir) = &state.test_data_dir {
+            return Ok(dir.clone());
+        }
+    }
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
@@ -153,7 +172,7 @@ impl AppState {
     /// sentinel `"not_configured"` when no media folder has been chosen yet
     /// — the frontend checks for that exact string to show onboarding
     /// instead of a raw error.
-    async fn core(&self, app: &tauri::AppHandle) -> Result<Arc<ServerCore>, String> {
+    async fn core<R: tauri::Runtime>(&self, app: &tauri::AppHandle<R>) -> Result<Arc<ServerCore>, String> {
         self.core
             .get_or_try_init(|| async {
                 let dir = app_data_dir(app)?;
@@ -165,25 +184,43 @@ impl AppState {
                     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
                 }
                 let recovery_settings_dir = dir.clone();
+                let (default_bind, default_http_media_bind) = self
+                    .test_bind_override
+                    .unwrap_or_else(|| {
+                        (
+                            "0.0.0.0:8543".parse().unwrap(),
+                            "0.0.0.0:8546".parse().unwrap(),
+                        )
+                    });
                 let config = ServerConfig {
                     media_roots: to_media_roots(&settings.media_roots),
                     data_dir: dir,
                     // This remains an environment override for development and
                     // managed deployments; ordinary desktop users never need it.
-                    bind: std::env::var("SWARM_PEER_BIND")
-                        .unwrap_or_else(|_| "0.0.0.0:8543".into())
-                        .parse()
-                        .expect("SWARM_PEER_BIND must be host:port"),
+                    // Test-only bind overrides win over the env var so
+                    // concurrently-running tests never race on the same port.
+                    bind: if self.test_bind_override.is_some() {
+                        default_bind
+                    } else {
+                        std::env::var("SWARM_PEER_BIND")
+                            .unwrap_or_else(|_| "0.0.0.0:8543".into())
+                            .parse()
+                            .expect("SWARM_PEER_BIND must be host:port")
+                    },
                     // Same override convention as SWARM_PEER_BIND above.
                     // Always on (see http_media.rs), so — unlike mcp_port —
                     // this deliberately has no Settings/UI field yet: an env
                     // var is enough for the one real need (port conflicts on
                     // a dev machine) without exposing a toggle for a surface
                     // that isn't optional.
-                    http_media_bind: std::env::var("SWARM_HTTP_MEDIA_BIND")
-                        .unwrap_or_else(|_| "0.0.0.0:8546".into())
-                        .parse()
-                        .expect("SWARM_HTTP_MEDIA_BIND must be host:port"),
+                    http_media_bind: if self.test_bind_override.is_some() {
+                        default_http_media_bind
+                    } else {
+                        std::env::var("SWARM_HTTP_MEDIA_BIND")
+                            .unwrap_or_else(|_| "0.0.0.0:8546".into())
+                            .parse()
+                            .expect("SWARM_HTTP_MEDIA_BIND must be host:port")
+                    },
                     allowed_fingerprints: vec![],
                     // Real bug, found live: with PreferKeyring, a token saved
                     // successfully via the OS keychain has no file backup —
@@ -627,7 +664,7 @@ struct SettingsView {
 }
 
 #[tauri::command]
-async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
+async fn get_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<SettingsView, String> {
     let settings = settings::load(&app_data_dir(&app)?);
     Ok(SettingsView {
         media_roots: settings.media_roots,
@@ -650,8 +687,8 @@ async fn get_settings(app: tauri::AppHandle) -> Result<SettingsView, String> {
 /// time, same as the media-root recovery loop already does, so there is no
 /// live core state to push this into immediately.
 #[tauri::command]
-async fn set_auto_library_watch_enabled(
-    app: tauri::AppHandle,
+async fn set_auto_library_watch_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
@@ -664,14 +701,14 @@ async fn set_auto_library_watch_enabled(
 /// disconnected file share is the very thing preventing normal dashboard
 /// work from completing.
 #[tauri::command]
-async fn get_media_root_health(app: tauri::AppHandle) -> Result<Vec<MediaRootHealth>, String> {
+async fn get_media_root_health<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<MediaRootHealth>, String> {
     let roots = settings::load(&app_data_dir(&app)?).media_roots;
     tokio::task::spawn_blocking(move || settings::media_root_health(&roots))
         .await
         .map_err(|error| error.to_string())
 }
 
-async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+async fn pick_folder<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().pick_folder(move |picked| {
         let _ = tx.send(picked);
@@ -683,7 +720,7 @@ async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<String>, String> {
 /// *first* media root, labeled `"local"` — the first-run onboarding path.
 /// Does not affect an already-running core — see the module docs.
 #[tauri::command]
-async fn choose_media_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn choose_media_folder<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<String>, String> {
     let Some(path) = pick_folder(&app).await? else {
         return Ok(None);
     };
@@ -703,14 +740,14 @@ async fn choose_media_folder(app: tauri::AppHandle) -> Result<Option<String>, St
 /// (Details tab), which needs the user to also supply a label before
 /// `add_media_root` actually saves anything.
 #[tauri::command]
-async fn pick_folder_path(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn pick_folder_path<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<String>, String> {
     pick_folder(&app).await
 }
 
 /// Native file picker, filtered to common image types — for the "upload
 /// artwork" flow (Media tab), paired with [`read_file_bytes`].
 #[tauri::command]
-async fn pick_file_path(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn pick_file_path<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -730,11 +767,12 @@ async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-async fn list_media_roots(app: tauri::AppHandle) -> Result<Vec<MediaRootSetting>, String> {
+async fn list_media_roots<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<MediaRootSetting>, String> {
     Ok(settings::load(&app_data_dir(&app)?).media_roots)
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(test, derive(Debug))]
 struct MediaRootsResult {
     media_roots: Vec<MediaRootSetting>,
     /// Present when a core was already running and the change was applied
@@ -746,8 +784,8 @@ struct MediaRootsResult {
 /// whatever's already configured. Applied live to an already-running core —
 /// see the module docs.
 #[tauri::command]
-async fn add_media_root(
-    app: tauri::AppHandle,
+async fn add_media_root<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     label: String,
     path: String,
@@ -781,8 +819,8 @@ async fn add_media_root(
 /// Credential entry/storage stays in macOS rather than passing a password
 /// through the webview or persisting one in SWARM settings.
 #[tauri::command]
-async fn connect_smb_root(
-    app: tauri::AppHandle,
+async fn connect_smb_root<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     label: String,
     server: String,
@@ -834,8 +872,8 @@ async fn connect_smb_root(
 /// `/Volumes/<name>` SMB mount first. It retries scanning only when the
 /// current/last scan was interrupted; an otherwise-valid catalog is reused.
 #[tauri::command]
-async fn repair_smb_root(
-    app: tauri::AppHandle,
+async fn repair_smb_root<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     label: String,
 ) -> Result<MediaRootsResult, String> {
@@ -883,8 +921,8 @@ async fn repair_smb_root(
 /// root — a server always needs at least one. Applied live to an
 /// already-running core — see the module docs.
 #[tauri::command]
-async fn remove_media_root(
-    app: tauri::AppHandle,
+async fn remove_media_root<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     label: String,
 ) -> Result<MediaRootsResult, String> {
@@ -903,7 +941,7 @@ async fn remove_media_root(
 }
 
 #[tauri::command]
-async fn set_tmdb_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+async fn set_tmdb_api_key<R: tauri::Runtime>(app: tauri::AppHandle<R>, key: String) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
     let mut settings: Settings = settings::load(&dir);
     settings.tmdb_api_key = if key.trim().is_empty() {
@@ -915,7 +953,7 @@ async fn set_tmdb_api_key(app: tauri::AppHandle, key: String) -> Result<(), Stri
 }
 
 #[tauri::command]
-async fn set_opensubtitles_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+async fn set_opensubtitles_api_key<R: tauri::Runtime>(app: tauri::AppHandle<R>, key: String) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
     let mut settings = settings::load(&dir);
     settings.opensubtitles_api_key = if key.trim().is_empty() {
@@ -933,8 +971,8 @@ struct SubtitleDownloadResult {
 }
 
 #[tauri::command]
-async fn download_subtitle(
-    app: tauri::AppHandle,
+async fn download_subtitle<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     language: String,
@@ -957,8 +995,8 @@ async fn download_subtitle(
 }
 
 #[tauri::command]
-async fn set_streaming_upload_budget_enabled(
-    app: tauri::AppHandle,
+async fn set_streaming_upload_budget_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -973,8 +1011,8 @@ async fn set_streaming_upload_budget_enabled(
 }
 
 #[tauri::command]
-async fn set_artwork_disk_cache_enabled(
-    app: tauri::AppHandle,
+async fn set_artwork_disk_cache_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -989,8 +1027,8 @@ async fn set_artwork_disk_cache_enabled(
 }
 
 #[tauri::command]
-async fn set_local_transcription_enabled(
-    app: tauri::AppHandle,
+async fn set_local_transcription_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1004,8 +1042,8 @@ async fn set_local_transcription_enabled(
 }
 
 #[tauri::command]
-async fn set_transcription_pause_while_streaming(
-    app: tauri::AppHandle,
+async fn set_transcription_pause_while_streaming<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1019,8 +1057,8 @@ async fn set_transcription_pause_while_streaming(
 }
 
 #[tauri::command]
-async fn get_transcription_status(
-    app: tauri::AppHandle,
+async fn get_transcription_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<swarm_server::transcription::TranscriptionStatus, String> {
     state
@@ -1032,8 +1070,8 @@ async fn get_transcription_status(
 }
 
 #[tauri::command]
-async fn set_transcription_skip_if_subtitles_exist(
-    app: tauri::AppHandle,
+async fn set_transcription_skip_if_subtitles_exist<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1050,8 +1088,8 @@ async fn set_transcription_skip_if_subtitles_exist(
 /// it was off, since a user asking for subtitles on this one item clearly
 /// wants Whisper to actually run rather than sit queued and idle.
 #[tauri::command]
-async fn generate_subtitles_for_entry(
-    app: tauri::AppHandle,
+async fn generate_subtitles_for_entry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
 ) -> Result<(), String> {
@@ -1070,7 +1108,7 @@ async fn generate_subtitles_for_entry(
 /// comment and `AppState::core`, which only ever starts the MCP listener
 /// once, the same time it starts `ServerCore` itself.
 #[tauri::command]
-async fn set_mcp_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+async fn set_mcp_enabled<R: tauri::Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
     let mut settings: Settings = settings::load(&dir);
     settings.mcp_enabled = enabled;
@@ -1078,7 +1116,7 @@ async fn set_mcp_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn set_mcp_port(app: tauri::AppHandle, port: u16) -> Result<(), String> {
+async fn set_mcp_port<R: tauri::Runtime>(app: tauri::AppHandle<R>, port: u16) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
     let mut settings: Settings = settings::load(&dir);
     settings.mcp_port = port;
@@ -1086,7 +1124,7 @@ async fn set_mcp_port(app: tauri::AppHandle, port: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn generate_mcp_access_token(app: tauri::AppHandle) -> Result<String, String> {
+async fn generate_mcp_access_token<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     let token = format!("swarm_mcp_{}", hex::encode(bytes));
@@ -1098,8 +1136,8 @@ async fn generate_mcp_access_token(app: tauri::AppHandle) -> Result<String, Stri
 }
 
 #[tauri::command]
-async fn get_status(
-    app: tauri::AppHandle,
+async fn get_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ServerStatus, String> {
     state
@@ -1111,30 +1149,31 @@ async fn get_status(
 }
 
 #[tauri::command]
-async fn get_bandwidth_history(
-    app: tauri::AppHandle,
+async fn get_bandwidth_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<swarm_media::bandwidth::BandwidthSample>, String> {
     Ok(state.core(&app).await?.bandwidth_history())
 }
 
 #[tauri::command]
-async fn get_transcoding_history(
-    app: tauri::AppHandle,
+async fn get_transcoding_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<swarm_server::transcode_activity::TranscodeActivitySample>, String> {
     Ok(state.core(&app).await?.transcode_activity_history())
 }
 
 #[tauri::command]
-async fn get_artwork_cache_snapshot(
-    app: tauri::AppHandle,
+async fn get_artwork_cache_snapshot<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<swarm_media::artwork_cache::ArtworkCacheSnapshot, String> {
     Ok(state.core(&app).await?.artwork_cache_snapshot().await)
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(test, derive(Debug))]
 struct RescanResult {
     added: u64,
     updated: u64,
@@ -1152,8 +1191,8 @@ struct RescanResult {
 const SCAN_PROGRESS_EVENT: &str = "scan-progress";
 
 #[tauri::command]
-async fn rescan(
-    app: tauri::AppHandle,
+async fn rescan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<RescanResult, String> {
     let core = state.core(&app).await?;
@@ -1183,8 +1222,8 @@ async fn rescan(
 /// whatever it actually corrects; run a normal Scrape metadata afterward to
 /// pick those back up under their now-correct classification.
 #[tauri::command]
-async fn reclassify_library(
-    app: tauri::AppHandle,
+async fn reclassify_library<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<swarm_media::store::ReclassifyReport, String> {
     let core = state.core(&app).await?;
@@ -1227,8 +1266,8 @@ struct EntrySummary {
 }
 
 #[tauri::command]
-async fn list_entries(
-    app: tauri::AppHandle,
+async fn list_entries<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<EntrySummary>, String> {
     let core = state.core(&app).await?;
@@ -1272,8 +1311,8 @@ async fn list_entries(
 /// destructive filesystem work lives in `ServerCore`, where it can share
 /// scan serialization and be exercised independently of the webview.
 #[tauri::command]
-async fn delete_asset(
-    app: tauri::AppHandle,
+async fn delete_asset<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
 ) -> Result<swarm_server::DeleteAssetReport, String> {
@@ -1306,8 +1345,8 @@ struct AssetDetail {
 }
 
 #[tauri::command]
-async fn get_asset_detail(
-    app: tauri::AppHandle,
+async fn get_asset_detail<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
 ) -> Result<AssetDetail, String> {
@@ -1384,8 +1423,8 @@ async fn get_asset_detail(
 /// `Library::distinct_genres`'s doc comment for why genres double as
 /// categories rather than this being a separate concept.
 #[tauri::command]
-async fn list_categories(
-    app: tauri::AppHandle,
+async fn list_categories<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
     let core = state.core(&app).await?;
@@ -1402,8 +1441,8 @@ async fn list_categories(
 /// directly, so this reads the file straight off disk instead. `Ok(None)`
 /// means no artwork of that kind was ever scraped/uploaded — not an error.
 #[tauri::command]
-async fn get_artwork_bytes(
-    app: tauri::AppHandle,
+async fn get_artwork_bytes<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     kind: String,
@@ -1457,8 +1496,8 @@ struct LibraryMaintenanceResult {
 /// scan, scrape, then classification repair. `force` selects whether the
 /// scrape replaces existing metadata or fills only missing fields.
 #[tauri::command]
-async fn run_library_maintenance(
-    app: tauri::AppHandle,
+async fn run_library_maintenance<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     force: bool,
 ) -> Result<LibraryMaintenanceResult, String> {
@@ -1586,8 +1625,8 @@ async fn cancel_library_maintenance(state: tauri::State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-async fn run_scrape(
-    app: tauri::AppHandle,
+async fn run_scrape<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     force: bool,
 ) -> Result<BulkScrapeReport, String> {
@@ -1632,8 +1671,8 @@ async fn run_scrape(
 /// Pinpoint rescrape of one entry, optionally against a manual TMDb id/URL
 /// override (music entries ignore `tmdb_url` — no TMDb concept there).
 #[tauri::command]
-async fn rescrape_entry(
-    app: tauri::AppHandle,
+async fn rescrape_entry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     tmdb_url: Option<String>,
@@ -1658,8 +1697,8 @@ async fn rescrape_entry(
 /// `Library::set_overview`/`Library::set_rating`. Never affects grouping
 /// (artist/album/show/season/episode), which stays path-derived.
 #[tauri::command]
-async fn set_manual_metadata(
-    app: tauri::AppHandle,
+async fn set_manual_metadata<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     title: Option<String>,
@@ -1694,8 +1733,8 @@ async fn set_manual_metadata(
 /// `artist`/`album` matter only when `kind` is "track"; `show_title` only
 /// when it's "episode" — both ignored otherwise.
 #[tauri::command]
-async fn set_manual_kind(
-    app: tauri::AppHandle,
+async fn set_manual_kind<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     kind: String,
@@ -1729,8 +1768,8 @@ async fn set_manual_kind(
 /// file the user picked, since manually uploaded art isn't always a jpg like
 /// every scraped image is today.
 #[tauri::command]
-async fn upload_artwork(
-    app: tauri::AppHandle,
+async fn upload_artwork<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
     kind: String,
@@ -1782,8 +1821,8 @@ async fn upload_artwork(
 /// root-relative (`get_artwork_bytes` above), never relative to the
 /// referencing entry's own folder.
 #[tauri::command]
-async fn upload_group_artwork(
-    app: tauri::AppHandle,
+async fn upload_group_artwork<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_keys: Vec<String>,
     kind: String,
@@ -1832,8 +1871,8 @@ async fn upload_group_artwork(
 /// was already gone, or a flaky network mount) never fails the command
 /// itself — the database state is what actually matters here.
 #[tauri::command]
-async fn clear_scraped_metadata(
-    app: tauri::AppHandle,
+async fn clear_scraped_metadata<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     entry_key: String,
 ) -> Result<(), String> {
@@ -1864,8 +1903,8 @@ struct SwarmLinkView {
 }
 
 #[tauri::command]
-async fn get_swarm_link(
-    app: tauri::AppHandle,
+async fn get_swarm_link<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<SwarmLinkView>, String> {
     let core = state.core(&app).await?;
@@ -1889,8 +1928,8 @@ async fn get_swarm_link(
 /// Accepts the short-lived code displayed by a TV discovered on the LAN.
 /// This approval path is entirely local and independent of the SWARM service.
 #[tauri::command]
-async fn approve_lan_pairing(
-    app: tauri::AppHandle,
+async fn approve_lan_pairing<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     code: String,
 ) -> Result<swarm_server::lan::LanPairingApproval, String> {
@@ -1917,8 +1956,8 @@ async fn approve_lan_pairing(
 }
 
 #[tauri::command]
-async fn list_local_peers(
-    app: tauri::AppHandle,
+async fn list_local_peers<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<swarm_server::LocalPeerRecord>, String> {
     let core = state.core(&app).await?;
@@ -1926,8 +1965,8 @@ async fn list_local_peers(
 }
 
 #[tauri::command]
-async fn revoke_local_peer(
-    app: tauri::AppHandle,
+async fn revoke_local_peer<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     fingerprint: String,
 ) -> Result<(), String> {
@@ -1941,8 +1980,8 @@ async fn revoke_local_peer(
 /// device — the plain-HTTP counterpart of `approve_lan_pairing` above, see
 /// `http_media.rs`'s module doc comment for how the two flows differ.
 #[tauri::command]
-async fn approve_http_media_pairing(
-    app: tauri::AppHandle,
+async fn approve_http_media_pairing<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     code: String,
 ) -> Result<String, String> {
@@ -1970,8 +2009,8 @@ async fn approve_http_media_pairing(
 }
 
 #[tauri::command]
-async fn list_http_media_devices(
-    app: tauri::AppHandle,
+async fn list_http_media_devices<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<swarm_server::HttpMediaDeviceRecord>, String> {
     let core = state.core(&app).await?;
@@ -1979,8 +2018,8 @@ async fn list_http_media_devices(
 }
 
 #[tauri::command]
-async fn revoke_http_media_device(
-    app: tauri::AppHandle,
+async fn revoke_http_media_device<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     token_hash: String,
 ) -> Result<(), String> {
@@ -1991,8 +2030,8 @@ async fn revoke_http_media_device(
 }
 
 #[tauri::command]
-async fn lookup_tv_activation(
-    app: tauri::AppHandle,
+async fn lookup_tv_activation<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     code: String,
 ) -> Result<swarm_core::rest::ActivationPreview, String> {
@@ -2003,8 +2042,8 @@ async fn lookup_tv_activation(
 }
 
 #[tauri::command]
-async fn approve_tv_activation(
-    app: tauri::AppHandle,
+async fn approve_tv_activation<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     activation_id: String,
 ) -> Result<swarm_core::rest::ActivationStatusResponse, String> {
@@ -2015,8 +2054,8 @@ async fn approve_tv_activation(
 }
 
 #[tauri::command]
-async fn resync_swarm(
-    app: tauri::AppHandle,
+async fn resync_swarm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
     let core = state.core(&app).await?;
@@ -2026,8 +2065,8 @@ async fn resync_swarm(
 /// Leave one joined swarm, keeping the STUN link (and other memberships)
 /// intact — see `ServerCore::leave_swarm`.
 #[tauri::command]
-async fn leave_swarm(
-    app: tauri::AppHandle,
+async fn leave_swarm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     swarm_id: String,
 ) -> Result<(), String> {
@@ -2043,8 +2082,8 @@ async fn leave_swarm(
 /// gap, not an oversight, and codes are generated from the STUN server's own
 /// admin page today (see `get_swarm_link`'s `base_url`).
 #[tauri::command]
-async fn get_swarm_devices(
-    app: tauri::AppHandle,
+async fn get_swarm_devices<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     swarm_id: String,
 ) -> Result<swarm_core::rest::SwarmDevicesResponse, String> {
@@ -2099,8 +2138,8 @@ impl From<swarm_media::store::ClientErrorRecord> for ClientErrorView {
 /// `swarm_core::peer::ClientErrorReport`), newest first, for the swarm
 /// page's Errors panel.
 #[tauri::command]
-async fn list_client_errors(
-    app: tauri::AppHandle,
+async fn list_client_errors<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ClientErrorView>, String> {
     let core = state.core(&app).await?;
@@ -2116,8 +2155,8 @@ async fn list_client_errors(
 /// [`list_client_errors`] so the badge can refresh cheaply without pulling
 /// every error's full body down each time.
 #[tauri::command]
-async fn client_error_count(
-    app: tauri::AppHandle,
+async fn client_error_count<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<u64, String> {
     let core = state.core(&app).await?;
@@ -2128,8 +2167,8 @@ async fn client_error_count(
 }
 
 #[tauri::command]
-async fn delete_client_error(
-    app: tauri::AppHandle,
+async fn delete_client_error<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     id: i64,
 ) -> Result<(), String> {
@@ -2141,8 +2180,8 @@ async fn delete_client_error(
 }
 
 #[tauri::command]
-async fn resolve_client_error(
-    app: tauri::AppHandle,
+async fn resolve_client_error<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     id: i64,
     comments: Option<String>,
@@ -2161,8 +2200,8 @@ async fn resolve_client_error(
 }
 
 #[tauri::command]
-async fn clear_client_errors(
-    app: tauri::AppHandle,
+async fn clear_client_errors<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
@@ -2194,8 +2233,8 @@ impl From<swarm_media::store::ServerNotificationRecord> for ServerNotificationVi
 }
 
 #[tauri::command]
-async fn list_server_notifications(
-    app: tauri::AppHandle,
+async fn list_server_notifications<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ServerNotificationView>, String> {
     let core = state.core(&app).await?;
@@ -2212,8 +2251,8 @@ async fn list_server_notifications(
 }
 
 #[tauri::command]
-async fn notification_count(
-    app: tauri::AppHandle,
+async fn notification_count<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<u64, String> {
     let core = state.core(&app).await?;
@@ -2231,8 +2270,8 @@ async fn notification_count(
 }
 
 #[tauri::command]
-async fn delete_server_notification(
-    app: tauri::AppHandle,
+async fn delete_server_notification<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     id: i64,
 ) -> Result<(), String> {
@@ -2244,8 +2283,8 @@ async fn delete_server_notification(
 }
 
 #[tauri::command]
-async fn clear_server_notifications(
-    app: tauri::AppHandle,
+async fn clear_server_notifications<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let core = state.core(&app).await?;
@@ -2267,7 +2306,7 @@ async fn clear_server_notifications(
 // `choose_media_folder` below wraps the dialog plugin instead of exposing it
 // to JS directly.
 #[tauri::command]
-fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn open_external_url<R: tauri::Runtime>(app: tauri::AppHandle<R>, url: String) -> Result<(), String> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
@@ -2287,7 +2326,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// [`ServerCore`] alive. Playback, LAN discovery, and remote connections keep
 /// running until the user chooses Quit from the tray menu.
 #[tauri::command]
-fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+fn hide_to_tray<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     app.get_webview_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| "main window is unavailable".to_string())?
         .hide()
@@ -2359,6 +2398,8 @@ fn main() {
             core: OnceCell::new(),
             library_maintenance_cancel: Mutex::new(None),
             _sleep_inhibitor: acquire_sleep_inhibitor(),
+            test_data_dir: None,
+            test_bind_override: None,
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -2440,3 +2481,15 @@ fn main() {
         }
     });
 }
+
+/// Server-side UAT coverage: real `#[tauri::command]` handlers invoked
+/// directly against a real, isolated `AppState`/SQLite/filesystem behind a
+/// mocked Tauri runtime (`tauri::test::mock_builder`/`mock_context`) —
+/// see `gui_tests/harness.rs` for why this shape, not the real native UI
+/// (the platform's WebDriver story has no macOS backend) and not Tauri's
+/// simulated webview IPC/ACL pipeline (that's Tauri's own framework code,
+/// not this app's logic). Read `swarm-media-server-uat-tests` (skill)
+/// before changing test logic here — same standing policy as the TV suites.
+#[cfg(test)]
+#[path = "gui_tests/mod.rs"]
+mod gui_tests;

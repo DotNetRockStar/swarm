@@ -15,11 +15,13 @@ class ResilienceUatTest : UatTestBase() {
             composeTestRule.firstTagStartingWith(UatTestTags.TRANSPORT_RECOVERY_PREFIX)?.let { it != before } == true
         }
         waitForTag(UatTestTags.FILTER_RAIL)
-        // Recovery may return focus inside the expanded filter rail. Collapse
-        // it through a real selection before traversing the catalog, rather
-        // than spending the navigation budget walking every genre option.
+        // Recovery may return focus inside the expanded filter rail. Exit it
+        // with the product's real D-pad Right gesture before traversing the
+        // catalog, rather than walking every genre option with Down.
         openFilterRail()
-        selectTagWithDpad(UatTestTags.FILTER_KIND_PREFIX + "ALL")
+        focusTag(UatTestTags.FILTER_KIND_PREFIX + "ALL")
+        pressDpadRight()
+        waitForTagGone(UatTestTags.FILTER_KIND_PREFIX + "ALL")
         navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
     }
 

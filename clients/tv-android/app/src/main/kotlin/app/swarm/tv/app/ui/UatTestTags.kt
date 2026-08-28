@@ -42,6 +42,7 @@ object UatTestTags {
 
     // CatalogScreen: top bar.
     const val OPEN_SWARM_BUTTON = "uat_open_swarm_button"
+    const val DASHBOARD_BROWSE_BUTTON = "uat_dashboard_browse_button"
     const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
     // MovieDetailScreen.
@@ -118,6 +119,8 @@ object UatTestTags {
     const val FAMILY_TAB_BUTTON = "uat_family_tab_button"
     const val KID_MODE_STATUS = "uat_kid_mode_status"
     const val KID_MODE_MANAGE_BUTTON = "uat_kid_mode_manage_button"
+    const val KID_MODE_PIN_PROMPT = "uat_kid_mode_pin_prompt"
+    const val KID_MODE_PIN_ERROR = "uat_kid_mode_pin_error"
     const val KID_MODE_KIND_MOVIES = "uat_kid_mode_kind_movies"
     const val KID_MODE_KIND_SHOWS = "uat_kid_mode_kind_shows"
     const val KID_MODE_KIND_MUSIC = "uat_kid_mode_kind_music"

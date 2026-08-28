@@ -166,7 +166,7 @@ fun SwarmDashboardScreen(
                         enabled = hasConnectedServer,
                         modifier = downToFirstServer.then(
                             if (!isConnectionSetup) Modifier.focusRequester(initialActionFocusRequester) else Modifier,
-                        ),
+                        ).testTag(UatTestTags.DASHBOARD_BROWSE_BUTTON),
                         colors = swarmActionButtonColors(),
                     ) { Text("Browse library") }
                     Button(

@@ -52,6 +52,21 @@ private fun ComposeTestRule.allSemanticsNodes(): List<SemanticsNode> = try {
 fun ComposeTestRule.allTagsStartingWith(prefix: String): List<String> =
     allSemanticsNodes().mapNotNull { it.testTagOrNull() }.filter { it.startsWith(prefix) }.distinct()
 
+/**
+ * Matching tags in their rendered top-to-bottom, left-to-right order.
+ *
+ * Compose semantics traversal is composition order, not layout order: a
+ * focused lazy-grid item may be recomposed and appended after its siblings
+ * even while it remains the top-left card. Assertions about visible sort
+ * order must therefore use bounds rather than tree traversal order.
+ */
+fun ComposeTestRule.tagsStartingWithInLayoutOrder(prefix: String): List<String> =
+    allSemanticsNodes()
+        .filter { it.testTagOrNull()?.startsWith(prefix) == true }
+        .sortedWith(compareBy<SemanticsNode> { it.boundsInRoot.top }.thenBy { it.boundsInRoot.left })
+        .mapNotNull { it.testTagOrNull() }
+        .distinct()
+
 /** The tag string (prefix + entry key) of the first matching node, or null if none exist yet. */
 fun ComposeTestRule.firstTagStartingWith(prefix: String): String? = allTagsStartingWith(prefix).firstOrNull()
 

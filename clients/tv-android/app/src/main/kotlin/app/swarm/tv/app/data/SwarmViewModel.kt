@@ -2134,6 +2134,21 @@ class SwarmViewModel(
         }
     }
 
+    /**
+     * Resolution notifications are otherwise only synced on a fresh LAN
+     * connection or a full catalog refresh — neither of which necessarily
+     * happens again during a long session, so a resolution that lands after
+     * the user is already connected can go unnoticed until one of those
+     * happens to recur. Let opening the Notifications tab itself ask each
+     * already-known server directly, using the same servers
+     * syncResolutionNotifications has already discovered.
+     */
+    fun refreshResolutionNotifications() {
+        viewModelScope.launch {
+            syncResolutionNotifications(notificationServers.values.toList())
+        }
+    }
+
     fun dismissResolvedProblem(notification: ResolvedProblemNotification) {
         viewModelScope.launch {
             clientNotificationStore.dismiss(notification.key)

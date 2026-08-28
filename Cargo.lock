@@ -4941,6 +4941,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tower-http",

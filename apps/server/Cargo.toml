@@ -64,3 +64,9 @@ tauri-build = { version = "2", optional = true }
 stun-server = { path = "../stun-server" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
 flate2 = { workspace = true }
+# Cargo unifies this with the [dependencies] tauri entry (gated behind the
+# `gui` feature) for test builds only — `test` never reaches a production
+# `cargo build --release`, which doesn't pull in [dev-dependencies] at all.
+# See gui.rs's tauri_command_tests module.
+tauri = { version = "2", features = ["test"] }
+tempfile = "3"

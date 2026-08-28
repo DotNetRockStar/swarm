@@ -85,6 +85,8 @@ class ShowPlaybackPauseUatTest : UatTestBase() {
         // the same frame can leave the second one on the releasing player.
         composeTestRule.waitForTagPrefix(UatTestTags.EPISODE_ITEM_PREFIX, timeoutMs = 15_000)
         pressBack()
-        waitForTag(UatTestTags.SHELF_SHOWS)
+        // Returning to the catalog re-composes its shelves against a real,
+        // multi-thousand-entry library — give it more than the default 5s.
+        waitForTag(UatTestTags.SHELF_SHOWS, timeoutMs = 15_000)
     }
 }

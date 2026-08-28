@@ -104,7 +104,10 @@ class MusicPlaybackUatTest : UatTestBase() {
         val upNextAfterShuffle = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_UP_NEXT)
 
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SKIP_BUTTON)
-        Thread.sleep(1_000)
+        // A real track transition (new file negotiation) can take longer
+        // than a fixed 1s sleep before the title view settles — wait/retry
+        // instead of a single immediate check.
+        waitForTag(UatTestTags.MUSIC_PLAYER_TITLE, timeoutMs = 10_000)
         composeTestRule.onNodeWithTag(UatTestTags.MUSIC_PLAYER_TITLE).assertIsDisplayed()
         assertTrue("skip should have advanced to what Up Next promised", upNextAfterShuffle.isNotBlank())
 
@@ -114,7 +117,7 @@ class MusicPlaybackUatTest : UatTestBase() {
         composeTestRule.onNodeWithTag(UatTestTags.MINI_PLAYER_CLOSE_BUTTON).assertIsDisplayed()
 
         selectTagWithDpad(UatTestTags.MINI_PLAYER_REOPEN)
-        waitForTag(UatTestTags.MUSIC_PLAYER_COVER)
+        waitForTag(UatTestTags.MUSIC_PLAYER_COVER, timeoutMs = 10_000)
         pressBack()
         waitForTag(UatTestTags.MINI_PLAYER_REOPEN)
 

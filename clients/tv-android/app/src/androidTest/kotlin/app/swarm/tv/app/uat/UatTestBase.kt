@@ -135,7 +135,18 @@ abstract class UatTestBase {
      */
     @Before
     fun waitForCatalogReady() {
-        waitForTag(UatTestTags.FILTER_RAIL, timeoutMs = 45_000)
+        composeTestRule.waitUntil(timeoutMillis = 45_000) {
+            try {
+                composeTestRule.onAllNodesWithTag(UatTestTags.FILTER_RAIL).fetchSemanticsNodes().isNotEmpty() ||
+                    composeTestRule.onAllNodesWithTag(UatTestTags.DASHBOARD_BROWSE_BUTTON).fetchSemanticsNodes().isNotEmpty()
+            } catch (e: IllegalStateException) {
+                false
+            }
+        }
+        if (composeTestRule.onAllNodesWithTag(UatTestTags.FILTER_RAIL).fetchSemanticsNodes().isEmpty()) {
+            selectTagWithDpad(UatTestTags.DASHBOARD_BROWSE_BUTTON)
+            waitForTag(UatTestTags.FILTER_RAIL, timeoutMs = 45_000)
+        }
     }
 
     protected fun pressSelect() = device.pressDPadCenter()
@@ -178,6 +189,16 @@ abstract class UatTestBase {
      * overlay performs the server-acknowledged release and exits.
      */
     protected fun exitPlaybackTo(targetTag: String, timeoutMs: Long = 15_000) {
+        if (composeTestRule.allTagsStartingWith(UatTestTags.PLAYER_SURFACE).isNotEmpty()) {
+            // A newly negotiated stream can briefly expose the bare surface
+            // before a final buffering transition, during which Back is
+            // unreliable — settle, reconfirm, and give the surface real
+            // focus first (same fix already proven in
+            // NavigationSearchPersistenceUatTest's passing navigation test).
+            Thread.sleep(2_000)
+            waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs)
+            focusTag(UatTestTags.PLAYER_SURFACE)
+        }
         pressBack()
         composeTestRule.waitUntil(timeoutMillis = timeoutMs) {
             composeTestRule.allTagsStartingWith(targetTag).isNotEmpty() ||

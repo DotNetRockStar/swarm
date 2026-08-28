@@ -1,6 +1,6 @@
 ---
 name: swarm-e2e-suite-lockdown
-description: Use before touching scripts/tv_e2e_suite.sh OR scripts/tv_uat_suite.sh (the two closed-loop real-Fire-TV suites) for any reason, or when a run of either reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that neither suite's test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
+description: Use before touching scripts/tv_e2e_suite.sh, scripts/tv_uat_suite.sh, OR scripts/media_server_uat_tests.sh (the three closed-loop suites — two real-Fire-TV, one backend-only) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of the three suites' test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
 ---
 
 # These test suites are frozen by explicit user policy
@@ -14,8 +14,13 @@ this repo, not a one-time instruction that expired when the suite first
 shipped. When the user later asked for a second, much larger UI-driving UAT
 suite (`scripts/tv_uat_suite.sh` + the instrumented sources under
 `clients/tv-android/app/src/androidTest/kotlin/app/swarm/tv/app/uat/`, see
-`swarm-tv-uat-suite`), they explicitly extended the same rule to it. **Both
-suites are frozen the same way, independently.**
+`swarm-tv-uat-suite`), they explicitly extended the same rule to it. The same
+rule applies again to the third suite, `scripts/media_server_uat_tests.sh` +
+`apps/server/src/gui_tests/` (real `#[tauri::command]` handlers invoked
+directly against a real, isolated backend — no hardware, no UI — see
+`swarm-media-server-uat-tests`), added when the user chose backend/API-only
+coverage after two real-UI-automation approaches proved unreliable. **All
+three suites are frozen the same way, independently.**
 
 ## What is frozen
 
@@ -69,38 +74,72 @@ suites are frozen the same way, independently.**
 - That every run compiles a findings report, filed to GitHub as an issue
   only on failure — same as the original suite.
 
+### `scripts/media_server_uat_tests.sh` + `apps/server/src/gui_tests/`
+
+- Which category files/tests run (see `swarm-media-server-uat-tests` for the
+  full catalog: media root lifecycle, library scan, TV pairing, notifications/
+  client-errors, metadata editing, MCP tokens) and what each one asserts —
+  real command-handler return values and real SQLite/settings-file state
+  read back afterward, not a mocked layer.
+- The direct-command-invocation test shape itself (real `AppHandle<MockRuntime>`,
+  real `AppState`, commands called as plain functions) rather than Tauri's
+  simulated IPC/ACL layer — this isn't an implementation detail, it's the
+  deliberate result of the two rejected approaches documented in
+  `swarm-media-server-uat-tests`; reverting to `get_ipc_response` or
+  attempting real native UI automation without the user explicitly asking to
+  revisit that decision is a policy change, not a refactor.
+- The per-test data-dir/port isolation contract (`AppState::test_data_dir`/
+  `test_bind_override`, allocated per test so the suite runs safely under
+  Rust's default parallel test execution) — do not collapse this to a shared
+  fixture or add `--test-threads=1` to work around a collision instead of
+  preserving isolation.
+- That every new test needing a real `ServerCore` goes through
+  `test_app_with_media_root()` (or otherwise awaits `wait_for_scan()`) so it
+  never races the startup background scan — see `swarm-media-server-uat-tests`
+  for the real race this prevents.
+- That this suite stays backend/API-only by design (no real UI drives it) —
+  covering an actual user-visible UI flow belongs in `swarm-tv-uat-suite`
+  (server-side effects) or awaits a reliable macOS UI-automation path, not a
+  simulated substitute added here.
+
 ## What is NOT frozen
 
-- **The product code either suite exercises.** A FAIL means something in
+- **The product code any suite exercises.** A FAIL means something in
   `apps/server`, `crates/`, or `clients/tv-android` is broken — go fix that,
   the same as any other bug report, and let the suite re-confirm it. The
-  UAT suite's evidence bundle exists specifically so this fix can happen
-  without re-running the suite just to see what broke.
-- **Genuine infrastructure bugs in either suite's own supporting logic** (a
+  UAT suites' evidence (the full TV-to-server bundle, or `cargo test`'s own
+  panic output for the backend suite) exists specifically so this fix can
+  happen without re-running the suite just to see what broke.
+- **Genuine infrastructure bugs in any suite's own supporting logic** (a
   shell quoting bug, a stdin-consumption bug in a discovery loop, an adb
-  timing race, an instrumentation-output parsing edge case) — these are
-  implementation bugs, not test-policy changes, and fixing them so the suite
-  behaves as designed is expected maintenance, not a rule violation. The
-  bar: does the fix change *what* the suite verifies or *how strictly*, or
-  does it just make the existing verification actually execute correctly?
-  Only the latter is fair game without asking.
-- Adding a brand-new, clearly-separate script (or a brand-new scenario in
-  either suite) that tests something not yet covered — under explicit user
-  direction, same as any other change here.
+  timing race, an instrumentation-output parsing edge case, a test harness
+  bug like the startup-scan race documented in
+  `swarm-media-server-uat-tests`) — these are implementation bugs, not
+  test-policy changes, and fixing them so the suite behaves as designed is
+  expected maintenance, not a rule violation. The bar: does the fix change
+  *what* the suite verifies or *how strictly*, or does it just make the
+  existing verification actually execute correctly? Only the latter is fair
+  game without asking. A test assertion built on a wrong assumption about
+  real product behavior (confirmed by reading the actual implementation, not
+  guessed) falls in this same fair-game category — fix the assertion to
+  match verified real behavior, same as any other test bug.
+- Adding a brand-new, clearly-separate script (or a brand-new scenario/
+  category in any suite) that tests something not yet covered — under
+  explicit user direction, same as any other change here.
 
 ## The failure mode this skill exists to prevent
 
 An agent picks up a follow-up issue, runs one of the suites, sees a real
 FAIL, and — under time pressure to "complete the issue" — edits the
 assertion, loosens its threshold, or removes the failing test case (or, in
-the UAT suite, quietly drops a piece of the failure-evidence bundle) so the
-run goes green. That produces a false all-clear on real hardware and is
-exactly the outcome the user asked to be protected from. If a test result
-looks wrong (flaky timing, a device-specific quirk), say so in the findings
-report and ask the user in the next planning step — do not quietly adjust
-either suite to stop noticing it.
+a UAT suite, quietly drops a piece of the failure-evidence bundle) so the
+run goes green. That produces a false all-clear and is exactly the outcome
+the user asked to be protected from. If a test result looks wrong (flaky
+timing, a device-specific quirk), say so in the findings report and ask the
+user in the next planning step — do not quietly adjust any suite to stop
+noticing it.
 
-## If a change to either suite is genuinely warranted
+## If a change to any suite is genuinely warranted
 
 Only make it when the user explicitly asks for it in the current
 conversation (e.g., "add a seek test," "raise the catalog-refresh timeout to

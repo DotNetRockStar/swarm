@@ -71,7 +71,11 @@ PREFERRED_DEVICE_FILE="scripts/tv_test_device.local.json"
 SERVER_DATA_DIR="${SWARM_SERVER_DATA_DIR:-$HOME/Library/Application Support/app.swarm.server}"
 SERVER_LIBRARY_DB="$SERVER_DATA_DIR/library.sqlite"
 SERVER_STATE_DB="$SERVER_DATA_DIR/server-state.sqlite"
-SERVER_LOG_FILE="$SERVER_DATA_DIR/logs/server.log"
+# tracing-appender's daily rolling writer names files server.log.<date>
+# (e.g. server.log.2026-08-28), never a bare "server.log" — resolve the
+# newest matching file at evidence-collection time rather than a fixed name,
+# so an evidence bundle is never silently missing the server-side log.
+SERVER_LOG_DIR="$SERVER_DATA_DIR/logs"
 
 # The full scenario catalog run by default (no --test). One class per
 # scenario group — see swarm-tv-uat-suite (skill) for what each covers.
@@ -321,10 +325,12 @@ else
         if [ -f "$SERVER_STATE_DB" ]; then
             server_query "$SERVER_STATE_DB" "SELECT * FROM http_media_device;" > "$dest/server_state_http_media_device.txt" 2>/dev/null || true
         fi
-        if [ -f "$SERVER_LOG_FILE" ]; then
-            tail -n 500 "$SERVER_LOG_FILE" > "$dest/server_log_tail.txt" 2>/dev/null || true
+        local newest_log
+        newest_log="$(ls -t "$SERVER_LOG_DIR"/server.log.* 2>/dev/null | head -1)"
+        if [ -n "$newest_log" ] && [ -f "$newest_log" ]; then
+            tail -n 500 "$newest_log" > "$dest/server_log_tail.txt" 2>/dev/null || true
         else
-            echo "No server log file at $SERVER_LOG_FILE" > "$dest/server_log_tail.txt"
+            echo "No server log file found under $SERVER_LOG_DIR/server.log.*" > "$dest/server_log_tail.txt"
         fi
         [ -f "$SERVER_DATA_DIR/settings.json" ] && cp "$SERVER_DATA_DIR/settings.json" "$dest/server_settings.json" 2>/dev/null || true
     }

@@ -1121,6 +1121,7 @@ private fun GenreFilteredGrid(
                     additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "movies" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
                     isLiked = isLiked(entry),
+                    testTag = UatTestTags.CARD_MOVIE_PREFIX + entry.entry.entryKey,
                 )
             }
         }
@@ -1143,6 +1144,7 @@ private fun GenreFilteredGrid(
                     ) firstFocusRequester else null,
                     additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "shows" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
+                    testTag = UatTestTags.CARD_SHOW_PREFIX + show.show,
                 )
             }
         }
@@ -1169,6 +1171,7 @@ private fun GenreFilteredGrid(
                     ) firstFocusRequester else null,
                     additionalFocusRequester = firstEntryFocusRequester.takeIf { firstSection == "music" && index == 0 },
                     widthModifier = Modifier.fillMaxWidth(),
+                    testTag = UatTestTags.CARD_ARTIST_PREFIX + artist.artist,
                 )
             }
         }
@@ -1284,7 +1287,12 @@ private fun FilterRail(
             if (genres.isNotEmpty()) {
                 Spacer(Modifier.height(14.dp))
                 FilterRailSection("Genre") {
-                    FilterRailOption("All genres", isSelected = genreFilter == null, onClick = { onGenreSelect(null) })
+                    FilterRailOption(
+                        "All genres",
+                        isSelected = genreFilter == null,
+                        onClick = { onGenreSelect(null) },
+                        testTag = UatTestTags.FILTER_GENRE_PREFIX + "ALL",
+                    )
                     for (genre in genres) {
                         FilterRailOption(
                             genre,

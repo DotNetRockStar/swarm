@@ -74,13 +74,7 @@ class ContinuePlaybackLifecycleUatTest : UatTestBase() {
 
     @Test
     fun testPlaybackReleaseAcknowledgedAndTrackChoicesWork() {
-        openFirstMovie()
-        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
-        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
-        val releasesBefore = composeTestRule.allTagsStartingWith(UatTestTags.PLAYBACK_RELEASED_PREFIX)
-        Thread.sleep(2_000)
-        pressSelect()
-        waitForTag(UatTestTags.PAUSE_LABEL)
+        val releasesBefore = openMovieWithTrackChoicesAndPause()
 
         val audioOptions = composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_AUDIO_OPTION_PREFIX)
         val subtitleOptions = composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_SUBTITLE_OPTION_PREFIX)
@@ -130,5 +124,55 @@ class ContinuePlaybackLifecycleUatTest : UatTestBase() {
         selectTagWithDpad(movieTag)
         waitForTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
         return movieTag
+    }
+
+    /**
+     * Real track choices depend on the specific asset's negotiated ExoPlayer
+     * tracks, not something visible before playing — the shelf's first movie
+     * has no guarantee of reporting any audio track at all (see the sibling
+     * capability gap this exact assumption caused in
+     * MoviePlaybackPauseUatTest). Play a bounded number of real candidates
+     * from the Movies shelf, back out of ones with too few choices, and stop
+     * once a qualifying one is genuinely paused. Returns the
+     * PLAYBACK_RELEASED_PREFIX snapshot taken right before opening the pause
+     * overlay on the qualifying candidate.
+     */
+    private fun openMovieWithTrackChoicesAndPause(maxCandidates: Int = 5): List<String> {
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
+        val candidates = composeTestRule.allTagsStartingWith(UatTestTags.CARD_MOVIE_PREFIX).take(maxCandidates)
+        for (candidate in candidates) {
+            // One candidate's own transient failure (a slow negotiation, a
+            // truly track-less file) must not abort the whole search — catch
+            // it, best-effort-recover the navigation state, and try the next
+            // candidate instead of failing the test on the first unlucky one.
+            val releasesBefore = runCatching {
+                navigateDownUntilTag(candidate)
+                selectTagWithDpad(candidate)
+                waitForTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+                selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+                waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
+                val releases = composeTestRule.allTagsStartingWith(UatTestTags.PLAYBACK_RELEASED_PREFIX)
+                Thread.sleep(2_000)
+                pressSelect()
+                waitForTag(UatTestTags.PAUSE_LABEL)
+
+                val hasAudio = composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_AUDIO_OPTION_PREFIX).isNotEmpty()
+                val hasSubtitles = composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_SUBTITLE_OPTION_PREFIX).size >= 2
+                if (hasAudio && hasSubtitles) releases else null
+            }.getOrNull()
+            if (releasesBefore != null) return releasesBefore
+
+            recoverToMoviesShelf()
+        }
+        throw AssertionError(
+            "none of the first $maxCandidates visible movies reported both an audio track and a real subtitle track",
+        )
+    }
+
+    /** Best-effort recovery to the catalog after an unqualified or failed candidate, regardless of what state it left the UI in. */
+    private fun recoverToMoviesShelf() {
+        runCatching { exitPlaybackTo(UatTestTags.MOVIE_DETAIL_ARTWORK) }
+        runCatching { pressBack() }
+        runCatching { navigateDownUntilTag(UatTestTags.SHELF_MOVIES, timeoutMs = 15_000) }
     }
 }

@@ -1,6 +1,5 @@
 package app.swarm.tv.app.uat
 
-import androidx.test.uiautomator.By
 import app.swarm.tv.app.ui.UatTestTags
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
@@ -25,8 +24,10 @@ class KidModeUatTest : UatTestBase() {
             // PIN-stage transitions are deliberately delayed so the fourth
             // digit paints. Do not send confirmation digits into the still-
             // full first-stage keypad during that transition.
-            waitForText("Confirm the PIN")
-            assertTrue(device.hasObject(By.textContains("Confirm the PIN")))
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                runCatching { composeTestRule.textUnderTag(UatTestTags.KID_MODE_PIN_PROMPT) }
+                    .getOrNull() == "Confirm the PIN"
+            }
             enterPin('1')
             waitForTag(UatTestTags.KID_MODE_KIND_MUSIC)
             selectTagWithDpad(UatTestTags.KID_MODE_KIND_MUSIC)
@@ -44,8 +45,8 @@ class KidModeUatTest : UatTestBase() {
             openFamilySettings()
             selectTagWithDpad(UatTestTags.KID_MODE_MANAGE_BUTTON)
             enterPin('2')
-            waitForText("Wrong PIN")
-            assertTrue(device.hasObject(By.textContains("Wrong PIN")))
+            waitForTag(UatTestTags.KID_MODE_PIN_ERROR)
+            assertTrue(composeTestRule.textUnderTag(UatTestTags.KID_MODE_PIN_ERROR).contains("Wrong PIN"))
             enterPin('1')
             waitForTag(UatTestTags.KID_MODE_DISABLE_BUTTON)
             selectTagWithDpad(UatTestTags.KID_MODE_DISABLE_BUTTON)

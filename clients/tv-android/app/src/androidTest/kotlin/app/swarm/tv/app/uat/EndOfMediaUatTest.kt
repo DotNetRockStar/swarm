@@ -40,9 +40,11 @@ class EndOfMediaUatTest : UatTestBase() {
         waitForTagGone(UatTestTags.CONTINUE_OVERLAY, timeoutMs = 15_000)
         waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 20_000)
         focusTag(UatTestTags.PLAYER_SURFACE)
-        Thread.sleep(2_000)
+        // The advanced-to episode is a real, freshly-negotiated file, not a
+        // resume — give it more settle time than a simple pause/resume needs.
+        Thread.sleep(3_000)
         pressSelect()
-        waitForTag(UatTestTags.PAUSE_LABEL)
+        waitForTag(UatTestTags.PAUSE_LABEL, timeoutMs = 10_000)
         val nextTitle = composeTestRule.textUnderTag(UatTestTags.PAUSE_TITLE)
         assertNotEquals("Play now should advance to the next episode", originalTitle, nextTitle)
     }

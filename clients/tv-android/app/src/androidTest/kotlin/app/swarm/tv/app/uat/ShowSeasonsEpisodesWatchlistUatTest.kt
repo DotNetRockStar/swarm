@@ -15,7 +15,11 @@ class ShowSeasonsEpisodesWatchlistUatTest : UatTestBase() {
 
     @Test
     fun testSeasonsEpisodesAndWatchlistRoundTrip() {
-        navigateDownUntilTag(UatTestTags.SHELF_SHOWS)
+        // Reaching Shows can mean traversing Continue Watching, Watchlist,
+        // Movies, and up to 3 movie-genre sub-shelves first on a real,
+        // populated library — the default 5s D-pad-press budget isn't
+        // always enough real time to get there.
+        navigateDownUntilTag(UatTestTags.SHELF_SHOWS, timeoutMs = 15_000)
         val before = runBlocking { watchlistStore.loadAll() }
         val showTag = requireNotNull(
             composeTestRule.allTagsStartingWith(UatTestTags.CARD_SHOW_PREFIX).firstOrNull { tag ->

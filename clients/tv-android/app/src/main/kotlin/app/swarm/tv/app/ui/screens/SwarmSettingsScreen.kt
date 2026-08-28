@@ -72,6 +72,7 @@ fun SwarmSettingsScreen(
     onDisableKidMode: () -> Unit,
     notifications: List<ResolvedProblemNotification>,
     onDismissNotification: (ResolvedProblemNotification) -> Unit,
+    onRefreshNotifications: () -> Unit,
     testingModeAvailable: Boolean,
     testingMode: TestingModeStatus?,
     onEnableTestingMode: () -> Unit,
@@ -113,7 +114,15 @@ fun SwarmSettingsScreen(
             SettingsTab(
                 if (notifications.isEmpty()) "Notifications" else "Notifications (${notifications.size})",
                 section == SettingsSection.NOTIFICATIONS,
-                { section = SettingsSection.NOTIFICATIONS },
+                {
+                    section = SettingsSection.NOTIFICATIONS
+                    // Resolution sync otherwise only happens on a fresh LAN
+                    // connection or a full catalog refresh, neither of which
+                    // is guaranteed to have recurred since a resolution
+                    // landed server-side — ask directly whenever the user
+                    // actually opens this tab looking for it.
+                    onRefreshNotifications()
+                },
                 modifier = Modifier.testTag(UatTestTags.NOTIFICATIONS_TAB_BUTTON),
             )
             if (testingModeAvailable) {
@@ -455,7 +464,12 @@ private fun KidModeCard(
             }
         }
         KidModeStep.ENTER_PIN -> {
-            Text("Enter the PIN to manage Kid Mode", color = SwarmText, fontSize = 14.sp)
+            Text(
+                "Enter the PIN to manage Kid Mode",
+                color = SwarmText,
+                fontSize = 14.sp,
+                modifier = Modifier.testTag(UatTestTags.KID_MODE_PIN_PROMPT),
+            )
             Spacer(Modifier.height(12.dp))
             NumberPadEntry(
                 value = pinField,
@@ -467,11 +481,21 @@ private fun KidModeCard(
             )
             if (pinError) {
                 Spacer(Modifier.height(10.dp))
-                Text("Wrong PIN.", color = SwarmError, fontSize = 13.sp)
+                Text(
+                    "Wrong PIN.",
+                    color = SwarmError,
+                    fontSize = 13.sp,
+                    modifier = Modifier.testTag(UatTestTags.KID_MODE_PIN_ERROR),
+                )
             }
         }
         KidModeStep.SET_PIN -> {
-            Text("Choose a $KID_MODE_PIN_LENGTH-digit PIN", color = SwarmText, fontSize = 14.sp)
+            Text(
+                "Choose a $KID_MODE_PIN_LENGTH-digit PIN",
+                color = SwarmText,
+                fontSize = 14.sp,
+                modifier = Modifier.testTag(UatTestTags.KID_MODE_PIN_PROMPT),
+            )
             Spacer(Modifier.height(12.dp))
             NumberPadEntry(
                 value = pinField,
@@ -483,7 +507,12 @@ private fun KidModeCard(
             )
         }
         KidModeStep.CONFIRM_PIN -> {
-            Text("Confirm the PIN", color = SwarmText, fontSize = 14.sp)
+            Text(
+                "Confirm the PIN",
+                color = SwarmText,
+                fontSize = 14.sp,
+                modifier = Modifier.testTag(UatTestTags.KID_MODE_PIN_PROMPT),
+            )
             Spacer(Modifier.height(12.dp))
             NumberPadEntry(
                 value = pinField,
@@ -495,7 +524,12 @@ private fun KidModeCard(
             )
             if (pinError) {
                 Spacer(Modifier.height(10.dp))
-                Text("Didn't match — start over.", color = SwarmError, fontSize = 13.sp)
+                Text(
+                    "Didn't match — start over.",
+                    color = SwarmError,
+                    fontSize = 13.sp,
+                    modifier = Modifier.testTag(UatTestTags.KID_MODE_PIN_ERROR),
+                )
             }
         }
         KidModeStep.EDIT_RULES -> {
