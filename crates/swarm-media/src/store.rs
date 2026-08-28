@@ -1732,6 +1732,26 @@ impl Library {
             .collect())
     }
 
+    /// TheIntroDB caching state for a single asset, for the Media detail
+    /// page's metadata checklist. `None` means the scraper has never recorded
+    /// a TheIntroDB lookup for this entry; `Some(segments)` means it has, and
+    /// an empty vector is a real result: TheIntroDB was queried and published
+    /// no accepted markers for the asset.
+    pub async fn introdb_segments_for(
+        &self,
+        entry_key: &str,
+    ) -> sqlx::Result<Option<Vec<SkipSegment>>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT skip_segments_json FROM library_entries WHERE entry_key = ?",
+        )
+        .bind(entry_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .and_then(|(json,)| json)
+            .map(|json| serde_json::from_str(&json).unwrap_or_default()))
+    }
+
     /// The exact catalog payload plus its stable SHA-256 version token.
     ///
     /// This intentionally hashes every client-visible field, including

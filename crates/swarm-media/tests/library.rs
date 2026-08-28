@@ -244,6 +244,48 @@ async fn introdb_segments_are_cached_and_version_the_catalog() {
 }
 
 #[tokio::test]
+async fn introdb_segments_for_reports_scrape_state() {
+    let fx = fixture("introdb-segments-for").await;
+    let entry = movie_entry(
+        "0123456789abcdef01234567",
+        "movies/example.mp4",
+        "introdb-fingerprint",
+    );
+    fx.library.upsert(&entry).await.unwrap();
+
+    // Never scraped: no cached lookup at all.
+    assert_eq!(
+        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        None
+    );
+
+    // Scraped, but TheIntroDB published nothing: an empty (but present) result.
+    fx.library
+        .set_introdb_segments(&entry.entry_key, 27205, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        Some(Vec::new())
+    );
+
+    // Scraped with markers.
+    let segments = vec![SkipSegment {
+        kind: SkipSegmentKind::Intro,
+        start_ms: Some(30_000),
+        end_ms: Some(90_000),
+    }];
+    fx.library
+        .set_introdb_segments(&entry.entry_key, 27205, &segments)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        Some(segments)
+    );
+}
+
+#[tokio::test]
 async fn bulk_enqueue_can_skip_entries_with_any_existing_subtitle() {
     let fx = fixture("skip-existing-subtitles").await;
     let with_subtitle = movie_entry("a1", "movies/a.mp4", "fp-a");

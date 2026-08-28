@@ -447,6 +447,10 @@ td.mono {
 .asset-checklist-list .checklist-have i { color: var(--green); }
 .asset-checklist-list .checklist-missing { color: var(--muted); }
 .asset-checklist-list .checklist-missing i { color: var(--muted); }
+/* "na": the source was checked and has nothing for this asset — not a local
+   gap, so it's shown neutrally and left out of the present/total count. */
+.asset-checklist-list .checklist-na { color: var(--muted); }
+.asset-checklist-list .checklist-na i { color: var(--muted); }
 
 /* AI tab: example-prompt "console" — a mock terminal/chat transcript, not a
    real input (there's nothing to submit to from this webview), just a

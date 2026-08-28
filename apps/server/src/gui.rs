@@ -1283,17 +1283,23 @@ async fn delete_asset(
         .map_err(|error| error.to_string())
 }
 
-/// Per-asset artwork/subtitle/lyrics presence for the Media detail page's
-/// "metadata & artwork" completeness checklist, plus the file counts the
-/// delete-asset confirmation modal spells out before anything is removed.
-/// Everything else the checklist shows (title, year, cast, rating, …) is
-/// already on the `EntrySummary` the webview holds, so it is not repeated
-/// here.
+/// Per-asset artwork/subtitle/lyrics presence and TheIntroDB scrape state
+/// for the Media detail page's "metadata & artwork" completeness checklist,
+/// plus the file counts the delete-asset confirmation modal spells out
+/// before anything is removed. Everything else the checklist shows (title,
+/// year, cast, rating, …) is already on the `EntrySummary` the webview
+/// holds, so it is not repeated here.
 #[derive(serde::Serialize)]
 struct AssetDetail {
     artwork_present: Vec<String>,
     subtitle_languages: Vec<String>,
     has_lyrics: bool,
+    /// Whether the scraper has ever recorded a TheIntroDB lookup for this
+    /// asset, and how many skip markers it cached. `introdb_checked` false
+    /// means "not scraped yet"; true with a zero count means TheIntroDB was
+    /// queried and had no accepted data for the asset.
+    introdb_checked: bool,
+    introdb_segment_count: usize,
     delete_unshared_artwork_count: usize,
     delete_shared_artwork_count: usize,
     delete_subtitle_count: usize,
@@ -1340,6 +1346,13 @@ async fn get_asset_detail(
         .await
         .map_err(|e| e.to_string())?
         .is_some();
+    let introdb_segments = core
+        .library
+        .introdb_segments_for(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?;
+    let introdb_checked = introdb_segments.is_some();
+    let introdb_segment_count = introdb_segments.map_or(0, |s| s.len());
     let manifest = core
         .library
         .asset_deletion_manifest(&entry_key)
@@ -1358,6 +1371,8 @@ async fn get_asset_detail(
         artwork_present,
         subtitle_languages,
         has_lyrics,
+        introdb_checked,
+        introdb_segment_count,
         delete_unshared_artwork_count,
         delete_shared_artwork_count,
         delete_subtitle_count: subtitle_tracks.len(),
