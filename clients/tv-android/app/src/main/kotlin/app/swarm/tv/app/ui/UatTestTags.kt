@@ -67,6 +67,7 @@ object UatTestTags {
 
     // PreparingPlaybackScreen: the instant cover shown while a fresh play is negotiated.
     const val PREPARING_PLAYBACK = "uat_preparing_playback"
+    const val PREPARING_PLAYBACK_RESUME_BUTTON = "uat_preparing_playback_resume"
 
     // PlayerScreen / PauseOverlay.
     const val PLAYER_SURFACE = "uat_player_surface"
