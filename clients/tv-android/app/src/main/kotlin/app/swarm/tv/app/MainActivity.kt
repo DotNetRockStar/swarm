@@ -89,6 +89,7 @@ import app.swarm.tv.app.ui.screens.MusicPlayerScreen
 import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
+import app.swarm.tv.app.ui.screens.PreparingPlaybackScreen
 import app.swarm.tv.app.ui.screens.isServerOfflineLoadError
 import app.swarm.tv.app.ui.screens.playbackErrorContext
 import app.swarm.tv.app.ui.screens.playbackHttpResponseCode
@@ -315,6 +316,7 @@ class MainActivity : ComponentActivity() {
                         onPlayPaused = { entry -> viewModel.play(entry, startPaused = true) },
                         onPlayPauseRecommendation = viewModel::playPauseRecommendation,
                         onPlayNext = viewModel::playNext,
+                        onCancelPlaybackPreparation = viewModel::cancelPlaybackPreparation,
                         onPreloadNextEpisode = viewModel::preloadNextEpisode,
                         onSeekPlayback = viewModel::seekPlayback,
                         onStopPlayback = viewModel::stopPlayback,
@@ -453,6 +455,7 @@ private fun SwarmApp(
     onPlayPaused: (MergedEntry) -> Unit,
     onPlayPauseRecommendation: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
+    onCancelPlaybackPreparation: () -> Unit,
     onPreloadNextEpisode: (String) -> Unit,
     onSeekPlayback: (Double) -> Unit,
     onStopPlayback: () -> Unit,
@@ -686,7 +689,7 @@ private fun SwarmApp(
     }
 
     val config = LocalConfiguration.current
-    val contentModifier = if (state is UiState.Player || state is UiState.PlaybackLoading) {
+    val contentModifier = if (state is UiState.Player || state is UiState.PlaybackLoading || state is UiState.PreparingPlayback) {
         Modifier.fillMaxSize()
     } else {
         Modifier.fillMaxSize().padding(
@@ -706,6 +709,12 @@ private fun SwarmApp(
                         onPlaybackBuffering()
                     }
                 }
+            is UiState.PreparingPlayback ->
+                PreparingPlaybackScreen(
+                    title = state.title,
+                    artworkUrl = state.artworkUrl,
+                    onCancel = onCancelPlaybackPreparation,
+                )
             is UiState.RequestingActivation ->
                 ActivationRequestScreen(onCancel = onCancelActivation)
             is UiState.Activating ->

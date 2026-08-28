@@ -65,6 +65,9 @@ object UatTestTags {
     const val ALBUM_CARD_PREFIX = "uat_album_card_" // + album key
     const val TRACK_ROW_PREFIX = "uat_track_row_" // + track entryKey
 
+    // PreparingPlaybackScreen: the instant cover shown while a fresh play is negotiated.
+    const val PREPARING_PLAYBACK = "uat_preparing_playback"
+
     // PlayerScreen / PauseOverlay.
     const val PLAYER_SURFACE = "uat_player_surface"
     const val PAUSE_LABEL = "uat_pause_label"
