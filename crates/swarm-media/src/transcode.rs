@@ -673,10 +673,27 @@ impl TranscodeManager {
         }
         let mut state = self.state.lock().unwrap();
         let session = state.sessions.get_mut(session_id)?;
-        let SessionKind::Hls { directory, .. } = &session.kind else {
+        let SessionKind::Hls { directory, child } = &mut session.kind else {
             return None;
         };
         let path = directory.join(relative_path);
+        // Once ffmpeg has exited, make sure every media playlist carries an
+        // `#EXT-X-ENDLIST` tag. A clean exit already writes one, but a
+        // mid-stream ffmpeg failure (for example a transient VideoToolbox
+        // session-pool error) leaves the last-written playlist open-ended for
+        // good. ExoPlayer keeps reloading an open-ended playlist and, once it
+        // stops advancing, aborts playback with `PlaylistStuckException`
+        // instead of ending cleanly (#126). Terminating the playlist turns
+        // that into an ordinary end-of-stream.
+        if relative_path.ends_with(".m3u8") {
+            let exited = child
+                .as_mut()
+                .map(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
+                .unwrap_or(false);
+            if exited {
+                finalize_hls_playlists(directory);
+            }
+        }
         session.last_access = Instant::now();
         session.in_use += 1;
         Some(SessionFile {
@@ -1296,6 +1313,39 @@ fn reset_hls_attempt(directory: &Path) -> Result<(), TranscodeError> {
     Ok(())
 }
 
+/// Append `#EXT-X-ENDLIST` to every media playlist under `directory` that has
+/// at least one segment but no end tag. Best-effort and idempotent: safe to
+/// call on each playlist request once the session's ffmpeg process is gone.
+fn finalize_hls_playlists(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let rendition_dir = entry.path();
+        if rendition_dir.is_dir() {
+            finalize_hls_playlist(&rendition_dir.join("index.m3u8"));
+        }
+    }
+}
+
+fn finalize_hls_playlist(playlist: &Path) {
+    let Ok(contents) = std::fs::read_to_string(playlist) else {
+        return;
+    };
+    if contents.contains("#EXT-X-ENDLIST") || !contents.contains("#EXTINF") {
+        return;
+    }
+    let mut patched = contents;
+    if !patched.ends_with('\n') {
+        patched.push('\n');
+    }
+    patched.push_str("#EXT-X-ENDLIST\n");
+    let tmp = playlist.with_file_name("index.m3u8.endlist");
+    if std::fs::write(&tmp, patched.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp, playlist);
+    }
+}
+
 async fn cleanup_loop(manager: Weak<TranscodeManager>) {
     let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
     interval.tick().await;
@@ -1644,6 +1694,42 @@ mod tests {
         assert!(!safe_hls_path("v0//segment.m4s"));
         assert!(!safe_hls_path("/absolute"));
         assert!(!safe_hls_path("ffmpeg.log"));
+    }
+
+    #[test]
+    fn finalize_hls_playlists_terminates_open_ended_media_playlists() {
+        let root = std::env::temp_dir().join(format!("swarm-endlist-{}", session_id()));
+        let open_ended = root.join("v1080p");
+        let already_ended = root.join("v360p");
+        let header_only = root.join("vaudio");
+        std::fs::create_dir_all(&open_ended).unwrap();
+        std::fs::create_dir_all(&already_ended).unwrap();
+        std::fs::create_dir_all(&header_only).unwrap();
+
+        let open_playlist = open_ended.join("index.m3u8");
+        std::fs::write(
+            &open_playlist,
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000,\nsegment_000000.m4s\n",
+        )
+        .unwrap();
+        let ended_playlist = already_ended.join("index.m3u8");
+        let ended_body =
+            "#EXTM3U\n#EXTINF:4.000,\nsegment_000000.m4s\n#EXT-X-ENDLIST\n".to_string();
+        std::fs::write(&ended_playlist, &ended_body).unwrap();
+        let header_playlist = header_only.join("index.m3u8");
+        let header_body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n".to_string();
+        std::fs::write(&header_playlist, &header_body).unwrap();
+
+        finalize_hls_playlists(&root);
+        finalize_hls_playlists(&root);
+
+        let patched = std::fs::read_to_string(&open_playlist).unwrap();
+        assert!(patched.trim_end().ends_with("#EXT-X-ENDLIST"));
+        assert_eq!(patched.matches("#EXT-X-ENDLIST").count(), 1);
+        assert_eq!(std::fs::read_to_string(&ended_playlist).unwrap(), ended_body);
+        assert_eq!(std::fs::read_to_string(&header_playlist).unwrap(), header_body);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
