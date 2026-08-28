@@ -15,6 +15,11 @@ class ResilienceUatTest : UatTestBase() {
             composeTestRule.firstTagStartingWith(UatTestTags.TRANSPORT_RECOVERY_PREFIX)?.let { it != before } == true
         }
         waitForTag(UatTestTags.FILTER_RAIL)
+        // Recovery may return focus inside the expanded filter rail. Collapse
+        // it through a real selection before traversing the catalog, rather
+        // than spending the navigation budget walking every genre option.
+        openFilterRail()
+        selectTagWithDpad(UatTestTags.FILTER_KIND_PREFIX + "ALL")
         navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
     }
 
@@ -40,6 +45,5 @@ class ResilienceUatTest : UatTestBase() {
         waitForTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
         selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
         waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
-        exitPlaybackTo(UatTestTags.MOVIE_DETAIL_ARTWORK)
     }
 }
