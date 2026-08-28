@@ -55,6 +55,23 @@ fn identity_material(
     (chain, key)
 }
 
+/// Shared QUIC transport tuning. quinn's stock 30s idle timeout with no
+/// keep-alive drops a connection that goes quiet — which a peer request
+/// legitimately does while the far side negotiates playback (a large transcode
+/// can take a minute to flush its first HLS playlist off a slow share) or
+/// while a viewer sits on the pause overlay between segment fetches. Server-
+/// sent keep-alive PINGs hold the path open through those gaps for both ends.
+fn peer_transport_config() -> Arc<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+    transport.max_idle_timeout(Some(
+        std::time::Duration::from_secs(90)
+            .try_into()
+            .expect("90s is a valid QUIC idle timeout"),
+    ));
+    Arc::new(transport)
+}
+
 fn server_config(
     identity: &DeviceIdentity,
     allowed: AllowedPeers,
@@ -65,7 +82,9 @@ fn server_config(
         .with_single_cert(chain, key)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicServerConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    config.transport_config(peer_transport_config());
+    Ok(config)
 }
 
 fn client_config(
@@ -79,7 +98,9 @@ fn client_config(
         .with_client_auth_cert(chain, key)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicClientConfig::try_from(tls).map_err(|e| P2pError::Quic(e.to_string()))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic)))
+    let mut config = quinn::ClientConfig::new(Arc::new(quic));
+    config.transport_config(peer_transport_config());
+    Ok(config)
 }
 
 /// Accepting endpoint for the server role: requires a client cert whose
