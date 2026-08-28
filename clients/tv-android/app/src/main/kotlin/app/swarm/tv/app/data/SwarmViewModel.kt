@@ -133,6 +133,20 @@ sealed class UiState {
      * their progress is reported through the shared toast surface.
      */
     data object PlaybackLoading : UiState()
+    /**
+     * Shown the instant a fresh play is requested from a browse/detail screen
+     * — most visibly a "Continue Watching" tap — so the frozen catalog is
+     * immediately replaced by the title and its artwork while the server
+     * session is negotiated and the first frames buffer. Distinct from
+     * [PlaybackLoading], which backs the mid-playback handoffs (next episode,
+     * out-of-buffer seek, post-pause recovery) that deliberately keep a plain
+     * video backdrop and report progress through the shared toast surface.
+     */
+    data class PreparingPlayback(
+        val title: String,
+        val artworkUrl: String?,
+        val previous: UiState,
+    ) : UiState()
     data object RequestingActivation : UiState()
     data class Activating(
         val code: String,
@@ -2171,6 +2185,16 @@ class SwarmViewModel(
             if (_minimizedPlayer.value?.sessionId == replaceSession.sessionId) {
                 _minimizedPlayer.value = null
             }
+        } else if (!keepMinimized) {
+            // A fresh play with nothing to hand off from: cover the frozen
+            // browse screen right away so the tap registers instantly, rather
+            // than leaving the user on an unresponsive catalog for the whole
+            // negotiation-plus-buffer wait (#122).
+            _state.value = UiState.PreparingPlayback(
+                title = entry.entry.displayTitle(),
+                artworkUrl = backdropUrl(entry) ?: fullArtworkUrl(entry),
+                previous = previousScreen,
+            )
         }
         val serverId = entry.sources.first()
         val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute)
@@ -2249,10 +2273,17 @@ class SwarmViewModel(
                 return@launch
             }
             val isHls = selection.mode == PlaybackMode.HLS
-            val nextEntry = when (entry.entry.kind) {
-                MediaKind.EPISODE -> CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
-                MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), _shuffleEnabled.value)
-                MediaKind.MOVIE -> null
+            // Both of these scan the whole catalog (grouping + a sort). Keep
+            // them off the main thread so the browse→player hand-off doesn't
+            // stutter on a large library right as the screen swaps in (#122).
+            val shuffle = _shuffleEnabled.value
+            val (nextEntry, recommendations) = withContext(Dispatchers.Default) {
+                val next = when (entry.entry.kind) {
+                    MediaKind.EPISODE -> CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
+                    MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), shuffle)
+                    MediaKind.MOVIE -> null
+                }
+                next to pauseRecommendations(entry, catalog.entries)
             }
             // A stale error only ever lives on a flat Catalog screen (the
             // only state playbackError is ever set on — see this
@@ -2276,7 +2307,7 @@ class SwarmViewModel(
                 sessionId = selection.sessionId,
                 lyrics = selection.lyrics,
                 subtitles = selection.subtitles,
-                recommendations = pauseRecommendations(entry, catalog.entries),
+                recommendations = recommendations,
                 startPaused = startPaused,
             )
             // keepMinimized: an autoplay-to-next-track that started while
@@ -2694,6 +2725,20 @@ class SwarmViewModel(
         }
     }
 
+    /**
+     * Back-press while the [UiState.PreparingPlayback] cover is up: abandon
+     * the in-flight negotiation and return to the screen the play started
+     * from. The negotiation coroutine is left to finish on its own — the
+     * generation bump makes [playEntry] release any session it still manages
+     * to reserve, exactly as [stopAllStreaming] relies on.
+     */
+    fun cancelPlaybackPreparation() {
+        val current = _state.value as? UiState.PreparingPlayback ?: return
+        playbackRequestGeneration++
+        playbackNegotiationJob = null
+        _state.value = current.previous
+    }
+
     fun stopPlayback() {
         val current = _state.value
         if (current is UiState.Player) {
@@ -2736,6 +2781,9 @@ class SwarmViewModel(
             current != null -> _state.value = current.previous
             _state.value == UiState.PlaybackLoading && pendingReplacement != null -> {
                 _state.value = pendingReplacement.previous
+            }
+            _state.value is UiState.PreparingPlayback -> {
+                _state.value = (_state.value as UiState.PreparingPlayback).previous
             }
         }
 
