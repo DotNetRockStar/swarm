@@ -2232,12 +2232,10 @@ class SwarmViewModel(
         val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute)
         val fingerprint = entry.entry.fingerprint
         playbackNegotiationJob = viewModelScope.launch {
-            // Clicking Play while a hover preview is active must release the
-            // preview's reservation before asking the same server for the
-            // real session, or a one-slot transcoder can reject the actual
-            // playback with 429.
-            browsePreviewWorker?.join()
-            browsePreviewReleaseJob?.join()
+            // stopBrowsePreview() has already withdrawn the enhancement.
+            // Never wait for its blocking network negotiation or best-effort
+            // release before beginning user-requested playback; the server
+            // preempts any remaining preview reservation for this request.
             if (requestGeneration != playbackRequestGeneration) return@launch
             if (replaceSession?.preloadedNext != null) {
                 runCatching {
