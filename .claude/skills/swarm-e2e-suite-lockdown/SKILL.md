@@ -1,6 +1,6 @@
 ---
 name: swarm-e2e-suite-lockdown
-description: Use before touching scripts/tests/tv_e2e_suite.sh, scripts/tests/tv_uat_suite.sh, scripts/tests/media_server_uat_tests.sh, OR scripts/tests/full_uat_suite.sh (the three closed-loop suites — two real-Fire-TV, one backend-only — plus the orchestrator that runs all three) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of their test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
+description: Use before touching scripts/tests/tv_e2e_suite.sh, scripts/tests/tv_uat_suite.sh, scripts/tests/media_server_uat_tests.sh, scripts/tests/full_uat_suite.sh, OR scripts/tests/full_uat_cron.sh (the three closed-loop suites — two real-Fire-TV, one backend-only — plus the orchestrator that runs all three and the continuous-checking loop around that) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of their test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
 ---
 
 # These test suites are frozen by explicit user policy
@@ -22,8 +22,11 @@ directly against a real, isolated backend — no hardware, no UI — see
 coverage after two real-UI-automation approaches proved unreliable, and again
 to `scripts/tests/full_uat_suite.sh`, the orchestrator the user asked for to run
 all three suites together, gather each one's evidence, and file a single
-consolidated GitHub issue only when at least one test actually failed. **All
-four are frozen the same way, independently.**
+consolidated GitHub issue only when at least one test actually failed, and
+once more to `scripts/tests/full_uat_cron.sh`, the continuous-checking loop
+the user asked for around that orchestrator — re-running it whenever `main`
+changes and tracking failures/fixes in one reused GitHub issue instead of a
+fresh one every run. **All five are frozen the same way, independently.**
 
 ## What is frozen
 
@@ -125,6 +128,31 @@ Frozen about the orchestrator specifically:
   **and** `TOTAL_FAIL > 0` — both conditions, same "only on a real failure"
   policy as the suites it wraps — and that the issue body includes every
   suite's result, passes and failures both, not just the failing ones.
+
+### `scripts/tests/full_uat_cron.sh` (continuous checking around the orchestrator)
+
+A foreground, Ctrl+C-able loop (deliberately not a real system cron/
+launchd job) that re-runs `full_uat_suite.sh` only when the locally
+checked-out `main` commit has actually changed since the last check
+(covers both new commits landed and local commits not yet pushed), never
+overlapping a still-in-progress run (a PID-liveness-checked lock file), and
+reuses one tracking GitHub issue across runs — commenting failures and
+recoveries onto it while it stays open, filing a fresh one only after the
+previous one was closed — instead of filing a new issue every run. Frozen
+about this wrapper specifically:
+
+- That it never mutates the working tree or pulls/merges anything on its
+  own — it only `git fetch`es (to keep the not-yet-pushed count accurate)
+  and tests whatever is already checked out locally, exactly as-is. Adding
+  an automatic pull/merge/checkout here is a real behavior change, not a
+  bugfix, even if it seems convenient.
+- The "one open tracking issue, reused until closed" contract: a failure
+  comments on the currently-open tracking issue (verified open via a live
+  `gh issue view`, never assumed from stale state) if one exists, or files
+  a new one if not; a pass comments a recovery note on an open tracking
+  issue but never opens a new issue on its own.
+- The lock-file overlap guard — never remove or weaken this to let two
+  `full_uat_suite.sh` runs execute concurrently.
 
 ## What is NOT frozen
 

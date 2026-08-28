@@ -1,14 +1,16 @@
 # Closed-loop Fire TV testing
 
 Three suites close the loop on the media server and the Amazon Fire TV
-client, plus one orchestrator that runs all three together. Two of the
-three suites require real Fire TV hardware on the same LAN and can't run on
-GitHub-hosted CI — see [Why local-only](#why-local-only-hardware). The
-third, `media_server_uat_tests.sh`, is the media server's own backend/API
-UAT suite — plain `cargo test`, no hardware, no LAN, CI-friendly. All three
-suites (and the orchestrator's own behavior) are change-controlled: **read
-the `swarm-e2e-suite-lockdown` skill before editing any of their test
-logic.** None of them is touched by editing another.
+client, plus an orchestrator that runs all three together and a
+continuous-checking wrapper around that. Two of the three suites require
+real Fire TV hardware on the same LAN and can't run on GitHub-hosted CI —
+see [Why local-only](#why-local-only-hardware). The third,
+`media_server_uat_tests.sh`, is the media server's own backend/API UAT
+suite — plain `cargo test`, no hardware, no LAN, CI-friendly. All of the
+above (and the orchestrator/cron wrapper's own behavior) are
+change-controlled: **read the `swarm-e2e-suite-lockdown` skill before
+editing any of their test logic.** None of them is touched by editing
+another.
 
 ## TL;DR — run everything
 
@@ -53,6 +55,29 @@ No flags needed for the common case: both hardware suites run against your
 preferred device (see below) if one is configured, otherwise they fan out
 across every Fire TV they find on the LAN. All three suites need the server
 already running — none of them starts it.
+
+### Continuous checking: `full_uat_cron.sh`
+
+`full_uat_suite.sh` above runs once. `full_uat_cron.sh` wraps it in a
+foreground loop that checks every 60 minutes for new commits on `main`
+(including local commits not yet pushed) and re-runs the full suite only
+when something actually changed:
+
+```bash
+./scripts/tests/full_uat_cron.sh          # run in a terminal you can Ctrl+C — checks every 60 min
+```
+
+It's deliberately a plain foreground process, not a real system cron/
+launchd job — leave it running in its own terminal/tmux session and
+`Ctrl+C` it whenever you want to stop. It skips a check entirely if the
+previous one is still running (never overlaps two `full_uat_suite.sh`
+invocations), and — instead of filing a new GitHub issue every time it
+finds a failure — reuses the same tracking issue across runs as long as
+it's still open, so a break and its eventual fix show up as one timeline
+in one ticket; a new failure after the old issue was closed opens a fresh
+one. See its own header comment for the full behavior and env vars
+(`SWARM_FULL_UAT_CRON_INTERVAL` to change the 60-minute interval, `--once`
+to run a single check-and-exit for testing).
 
 Fast local iteration on one scenario while developing (run the suite
 standalone rather than through the orchestrator):
