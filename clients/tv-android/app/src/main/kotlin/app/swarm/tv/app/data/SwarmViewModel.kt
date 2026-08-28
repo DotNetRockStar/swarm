@@ -136,16 +136,27 @@ sealed class UiState {
     /**
      * Shown the instant a fresh play is requested from a browse/detail screen
      * — most visibly a "Continue Watching" tap — so the frozen catalog is
-     * immediately replaced by the title and its artwork while the server
-     * session is negotiated and the first frames buffer. Distinct from
-     * [PlaybackLoading], which backs the mid-playback handoffs (next episode,
-     * out-of-buffer seek, post-pause recovery) that deliberately keep a plain
-     * video backdrop and report progress through the shared toast surface.
+     * immediately replaced by a pause-style cover (title + artwork, and a
+     * Resume button when [startPaused]) while the server session is negotiated
+     * behind it. Distinct from [PlaybackLoading], which backs the mid-playback
+     * handoffs (next episode, out-of-buffer seek, post-pause recovery) that
+     * deliberately keep a plain video backdrop and report progress through the
+     * shared toast surface.
+     *
+     * When negotiation finishes first, this swaps to the real paused
+     * [Player]/[PauseOverlay] with no visible seam. If the viewer presses
+     * Resume here before then, [resumeRequested] flips and playback begins the
+     * instant the session is ready instead of opening paused.
      */
     data class PreparingPlayback(
         val title: String,
         val artworkUrl: String?,
         val previous: UiState,
+        /** A "Continue Watching" style start: negotiation opens the player
+         * paused, so this cover offers a Resume button. A plain play shows
+         * only a preparing indicator. */
+        val startPaused: Boolean,
+        val resumeRequested: Boolean = false,
     ) : UiState()
     data object RequestingActivation : UiState()
     data class Activating(
@@ -405,6 +416,10 @@ class SwarmViewModel(
     /** Invalidates a negotiation without cancelling its server response, allowing a
      * late-created reservation to be explicitly released instead of timing out. */
     private var playbackRequestGeneration = 0L
+    /** Set when the viewer presses Resume on the [UiState.PreparingPlayback]
+     * cover before negotiation has finished: the still-buffering session then
+     * starts playing the instant it is ready instead of opening paused. */
+    private var preparingResumeRequested = false
     /** The player removed while a replacement is negotiated. Retained so a
      * foreground-loss cleanup can release it and restore its previous screen. */
     private var pendingPlaybackReplacement: PendingPlaybackReplacement? = null
@@ -2171,6 +2186,7 @@ class SwarmViewModel(
         // reserve duplicate transcode sessions for it.
         if (playbackNegotiationJob?.isActive == true) return
         val requestGeneration = ++playbackRequestGeneration
+        preparingResumeRequested = false
         if (replaceSession != null) {
             pendingPlaybackReplacement = PendingPlaybackReplacement(requestGeneration, replaceSession)
             // Drop the client-side reader before doing any network cleanup.
@@ -2194,6 +2210,7 @@ class SwarmViewModel(
                 title = entry.entry.displayTitle(),
                 artworkUrl = backdropUrl(entry) ?: fullArtworkUrl(entry),
                 previous = previousScreen,
+                startPaused = startPaused,
             )
         }
         val serverId = entry.sources.first()
@@ -2308,7 +2325,9 @@ class SwarmViewModel(
                 lyrics = selection.lyrics,
                 subtitles = selection.subtitles,
                 recommendations = recommendations,
-                startPaused = startPaused,
+                // A Resume press on the PreparingPlayback cover cancels the
+                // "open paused" behavior so the stream just starts (#122).
+                startPaused = startPaused && !preparingResumeRequested,
             )
             // keepMinimized: an autoplay-to-next-track that started while
             // the mini-bar (not the full screen) was showing stays in the
@@ -2736,7 +2755,22 @@ class SwarmViewModel(
         val current = _state.value as? UiState.PreparingPlayback ?: return
         playbackRequestGeneration++
         playbackNegotiationJob = null
+        preparingResumeRequested = false
         _state.value = current.previous
+    }
+
+    /**
+     * Resume pressed on the [UiState.PreparingPlayback] cover while the
+     * session is still being negotiated: record the intent so [playEntry]
+     * starts playing the moment it is ready instead of opening paused, and
+     * swap the button for a "Starting…" indicator. A no-op once negotiation
+     * has already handed off to the real paused player.
+     */
+    fun resumeFromPreparingPlayback() {
+        val current = _state.value as? UiState.PreparingPlayback ?: return
+        if (!current.startPaused || current.resumeRequested) return
+        preparingResumeRequested = true
+        _state.value = current.copy(resumeRequested = true)
     }
 
     fun stopPlayback() {
@@ -2772,6 +2806,7 @@ class SwarmViewModel(
         // that late response from ever becoming an active local player.
         playbackRequestGeneration++
         playbackNegotiationJob = null
+        preparingResumeRequested = false
         pendingPlaybackReplacement = null
         continueAfterPreloadSessionId = null
 

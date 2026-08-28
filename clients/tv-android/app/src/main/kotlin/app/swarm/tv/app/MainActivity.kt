@@ -317,6 +317,7 @@ class MainActivity : ComponentActivity() {
                         onPlayPauseRecommendation = viewModel::playPauseRecommendation,
                         onPlayNext = viewModel::playNext,
                         onCancelPlaybackPreparation = viewModel::cancelPlaybackPreparation,
+                        onResumePreparingPlayback = viewModel::resumeFromPreparingPlayback,
                         onPreloadNextEpisode = viewModel::preloadNextEpisode,
                         onSeekPlayback = viewModel::seekPlayback,
                         onStopPlayback = viewModel::stopPlayback,
@@ -456,6 +457,7 @@ private fun SwarmApp(
     onPlayPauseRecommendation: (MergedEntry) -> Unit,
     onPlayNext: () -> Unit,
     onCancelPlaybackPreparation: () -> Unit,
+    onResumePreparingPlayback: () -> Unit,
     onPreloadNextEpisode: (String) -> Unit,
     onSeekPlayback: (Double) -> Unit,
     onStopPlayback: () -> Unit,
@@ -713,6 +715,9 @@ private fun SwarmApp(
                 PreparingPlaybackScreen(
                     title = state.title,
                     artworkUrl = state.artworkUrl,
+                    startPaused = state.startPaused,
+                    resumeRequested = state.resumeRequested,
+                    onResume = onResumePreparingPlayback,
                     onCancel = onCancelPlaybackPreparation,
                 )
             is UiState.RequestingActivation ->
