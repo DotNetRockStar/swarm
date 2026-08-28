@@ -10,6 +10,7 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use swarm_core::peer::{MediaKind, PlaybackMode, PlaybackPlan, PlaybackPreferences};
@@ -29,8 +30,8 @@ const STARTUP_HARD_CAP: Duration = Duration::from_secs(120);
 const STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Hover previews must fail fast instead of pinning a browse card (and a
 /// transcode slot) for the full playback budget.
-const PREVIEW_STARTUP_HARD_CAP: Duration = Duration::from_secs(25);
-const PREVIEW_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+const PREVIEW_STARTUP_HARD_CAP: Duration = Duration::from_secs(10);
+const PREVIEW_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const AUDIO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIEW_DURATION_SECS: u64 = 32;
@@ -93,6 +94,8 @@ pub enum TranscodeError {
     Ffmpeg(String),
     #[error("ffmpeg did not produce a playlist in time")]
     StartupTimeout,
+    #[error("browse preview was superseded by foreground playback")]
+    Superseded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +331,10 @@ enum SessionKind {
 #[derive(Debug)]
 struct Session {
     kind: SessionKind,
+    /// Browse previews are opportunistic. A foreground request may cancel
+    /// them immediately so an enhancement never holds playback capacity.
+    preview: bool,
+    cancelled: Arc<AtomicBool>,
     reserved_bps: u64,
     /// LAN sessions never consume the internet-uplink budget, including if
     /// the global preference is toggled while they are active.
@@ -351,15 +358,20 @@ fn active_hls_processes(state: &mut State) -> usize {
     state
         .sessions
         .values_mut()
-        .map(|session| match &mut session.kind {
-            SessionKind::Hls {
-                child: Some(child), ..
-            } => match child.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) | Err(_) => true,
-            },
-            SessionKind::Hls { child: None, .. } => true,
-            SessionKind::Direct { .. } => false,
+        .map(|session| {
+            if session.cancelled.load(Ordering::Relaxed) {
+                return false;
+            }
+            match &mut session.kind {
+                SessionKind::Hls {
+                    child: Some(child), ..
+                } => match child.try_wait() {
+                    Ok(Some(_)) => false,
+                    Ok(None) | Err(_) => true,
+                },
+                SessionKind::Hls { child: None, .. } => true,
+                SessionKind::Direct { .. } => false,
+            }
         })
         .filter(|active| *active)
         .count()
@@ -524,7 +536,13 @@ impl TranscodeManager {
     }
 
     pub fn active_sessions(&self) -> usize {
-        self.state.lock().unwrap().sessions.len()
+        self.state
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .filter(|session| !session.cancelled.load(Ordering::Relaxed))
+            .count()
     }
 
     pub fn reserved_bps(&self) -> u64 {
@@ -533,6 +551,7 @@ impl TranscodeManager {
             .unwrap()
             .sessions
             .values()
+            .filter(|session| !session.cancelled.load(Ordering::Relaxed))
             .map(|session| session.reserved_bps)
             .sum()
     }
@@ -553,11 +572,15 @@ impl TranscodeManager {
         let direct_sessions = state
             .sessions
             .values()
-            .filter(|session| matches!(session.kind, SessionKind::Direct { .. }))
+            .filter(|session| {
+                !session.cancelled.load(Ordering::Relaxed)
+                    && matches!(session.kind, SessionKind::Direct { .. })
+            })
             .count();
         let reserved_bps = state
             .sessions
             .values()
+            .filter(|session| !session.cancelled.load(Ordering::Relaxed))
             .map(|session| session.reserved_bps)
             .sum();
         TranscodeActivity {
@@ -578,6 +601,13 @@ impl TranscodeManager {
         is_lan: bool,
     ) -> Result<PlaybackPlan, TranscodeError> {
         self.expire_idle();
+        // A hover preview is an enhancement, not a prerequisite for actual
+        // playback. Withdraw it before admission/direct-play planning so it
+        // cannot consume the final ffmpeg slot or upload reservation while a
+        // viewer waits on the playback screen.
+        if !preferences.preview {
+            self.cancel_previews();
+        }
         let enforce_budget = self.should_throttle(is_lan);
         let available = if enforce_budget {
             self.available_bps()?
@@ -647,9 +677,16 @@ impl TranscodeManager {
             .as_ref()
             .map(|video| video.height)
             .unwrap_or(preferences.capabilities.max_height);
-        let variants = video_variants(source_height, preferences, client_limit);
+        let mut variants = video_variants(source_height, preferences, client_limit);
         if variants.is_empty() {
             return Err(TranscodeError::Bandwidth);
+        }
+        // An on-LAN player does not need an adaptive upload ladder. Encoding
+        // only the best compatible rendition gets the first playable segment
+        // out promptly and avoids multiplying decoder/encoder work on the
+        // desktop, while remote clients retain the full adaptive ladder.
+        if is_lan && !preferences.preview {
+            variants.truncate(1);
         }
         // LADDER is high-to-low. The first entry is the reservation ceiling;
         // all remaining entries let ExoPlayer adapt downward without using
@@ -688,6 +725,9 @@ impl TranscodeManager {
         }
         let mut state = self.state.lock().unwrap();
         let session = state.sessions.get_mut(session_id)?;
+        if session.cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let SessionKind::Hls { directory, child } = &mut session.kind else {
             return None;
         };
@@ -749,7 +789,7 @@ impl TranscodeManager {
         let reserved: u64 = state
             .sessions
             .values()
-            .filter(|session| !session.budget_exempt)
+            .filter(|session| !session.budget_exempt && !session.cancelled.load(Ordering::Relaxed))
             .map(|session| session.reserved_bps)
             .sum();
         Ok(self.usable_upload_bps().saturating_sub(reserved))
@@ -769,7 +809,7 @@ impl TranscodeManager {
         let already_reserved: u64 = state
             .sessions
             .values()
-            .filter(|session| !session.budget_exempt)
+            .filter(|session| !session.budget_exempt && !session.cancelled.load(Ordering::Relaxed))
             .map(|session| session.reserved_bps)
             .sum();
         if enforce_budget
@@ -782,6 +822,8 @@ impl TranscodeManager {
             id.clone(),
             Session {
                 kind,
+                preview: false,
+                cancelled: Arc::new(AtomicBool::new(false)),
                 reserved_bps,
                 budget_exempt,
                 rate_limiter: Arc::new(SessionRateLimiter::new(reserved_bps)),
@@ -790,6 +832,21 @@ impl TranscodeManager {
             },
         );
         Ok(id)
+    }
+
+    fn cancel_previews(&self) {
+        let previews = self
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.preview)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in previews {
+            self.remove_session(&id);
+        }
     }
 
     async fn start_hls(
@@ -806,6 +863,7 @@ impl TranscodeManager {
             enforce_budget,
             budget_exempt,
         } = reservation;
+        let cancelled = Arc::new(AtomicBool::new(false));
         std::fs::create_dir_all(&self.config.session_dir).map_err(TranscodeError::Workspace)?;
         let id = session_id();
         let directory = self.config.session_dir.join(&id);
@@ -832,7 +890,9 @@ impl TranscodeManager {
             let already_reserved: u64 = state
                 .sessions
                 .values()
-                .filter(|session| !session.budget_exempt)
+                .filter(|session| {
+                    !session.budget_exempt && !session.cancelled.load(Ordering::Relaxed)
+                })
                 .map(|session| session.reserved_bps)
                 .sum();
             if enforce_budget
@@ -848,6 +908,8 @@ impl TranscodeManager {
                         directory: directory.clone(),
                         child: None,
                     },
+                    preview,
+                    cancelled: Arc::clone(&cancelled),
                     reserved_bps,
                     budget_exempt,
                     rate_limiter: Arc::new(SessionRateLimiter::new(reserved_bps)),
@@ -866,6 +928,7 @@ impl TranscodeManager {
                 reserved_bps,
                 &directory,
                 preview,
+                &cancelled,
             )
             .await;
         let child = match result {
@@ -875,12 +938,31 @@ impl TranscodeManager {
                 return Err(error);
             }
         };
-        if let Some(Session {
-            kind: SessionKind::Hls { child: slot, .. },
-            ..
-        }) = self.state.lock().unwrap().sessions.get_mut(&id)
-        {
-            *slot = Some(child);
+        let mut child = Some(child);
+        let installed = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(Session {
+                kind: SessionKind::Hls { child: slot, .. },
+                cancelled,
+                ..
+            }) = state.sessions.get_mut(&id)
+            {
+                if !cancelled.load(Ordering::Relaxed) {
+                    *slot = child.take();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if !installed {
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
+            self.remove_session(&id);
+            return Err(TranscodeError::Superseded);
         }
 
         Ok(PlaybackPlan {
@@ -903,6 +985,7 @@ impl TranscodeManager {
         reserved_bps: u64,
         directory: &Path,
         preview: bool,
+        cancelled: &Arc<AtomicBool>,
     ) -> Result<Child, TranscodeError> {
         let has_audio = entry.audio.is_some();
         // Audio language is routing metadata, not part of the codec summary
@@ -936,7 +1019,14 @@ impl TranscodeManager {
             audio_map_entries(options)
         };
 
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(TranscodeError::Superseded);
+        }
+
         let encoder = self.preferred_video_encoder(variants.len()).await;
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(TranscodeError::Superseded);
+        }
         let attempt = self
             .spawn_ffmpeg_attempt(
                 media_path,
@@ -948,9 +1038,13 @@ impl TranscodeManager {
                 has_audio,
                 &audio_tracks,
                 encoder,
+                cancelled,
             )
             .await;
-        if attempt.is_ok() || encoder != VideoEncoder::VideoToolbox {
+        if attempt.is_ok()
+            || encoder != VideoEncoder::VideoToolbox
+            || matches!(&attempt, Err(TranscodeError::Superseded))
+        {
             return attempt;
         }
 
@@ -971,6 +1065,7 @@ impl TranscodeManager {
             has_audio,
             &audio_tracks,
             self.software_video_encoder(variants.len()),
+            cancelled,
         )
         .await
     }
@@ -1030,6 +1125,7 @@ impl TranscodeManager {
         has_audio: bool,
         audio_tracks: &[AudioMapEntry],
         encoder: VideoEncoder,
+        cancelled: &Arc<AtomicBool>,
     ) -> Result<Child, TranscodeError> {
         let log_path = directory.join("ffmpeg.log");
         let log = std::fs::File::create(&log_path).map_err(TranscodeError::Workspace)?;
@@ -1205,6 +1301,8 @@ impl TranscodeManager {
             } else {
                 self.config.segment_duration_secs.max(2).to_string()
             })
+            .arg("-hls_init_time")
+            .arg("1")
             .arg("-hls_list_size")
             .arg("0")
             .arg("-hls_playlist_type")
@@ -1237,6 +1335,10 @@ impl TranscodeManager {
         let mut last_progress = Instant::now();
         let mut last_output = hls_output_signature(directory);
         loop {
+            if cancelled.load(Ordering::Relaxed) {
+                let _ = child.kill().await;
+                return Err(TranscodeError::Superseded);
+            }
             if master.metadata().is_ok_and(|metadata| metadata.len() > 0) {
                 return Ok(child);
             }
@@ -1291,9 +1393,11 @@ impl TranscodeManager {
                     directory,
                     mut child,
                 },
+            cancelled,
             ..
         }) = removed
         {
+            cancelled.store(true, Ordering::Relaxed);
             if let Some(child) = child.as_mut() {
                 let _ = child.start_kill();
             }
@@ -1306,6 +1410,7 @@ impl Drop for TranscodeManager {
     fn drop(&mut self) {
         let sessions = std::mem::take(&mut self.state.lock().unwrap().sessions);
         for (_, session) in sessions {
+            session.cancelled.store(true, Ordering::Relaxed);
             if let SessionKind::Hls {
                 directory,
                 mut child,
@@ -1630,6 +1735,8 @@ mod tests {
 
         let session = |kind| Session {
             kind,
+            preview: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
             reserved_bps: 128_000,
             budget_exempt: true,
             rate_limiter: Arc::new(SessionRateLimiter::new(0)),
@@ -1663,6 +1770,64 @@ mod tests {
             }),
         );
         assert_eq!(active_hls_processes(&mut state), 1);
+
+        state
+            .sessions
+            .get("starting")
+            .unwrap()
+            .cancelled
+            .store(true, Ordering::Relaxed);
+        assert_eq!(active_hls_processes(&mut state), 0);
+    }
+
+    #[test]
+    fn foreground_playback_preempts_only_preview_sessions() {
+        let root =
+            std::env::temp_dir().join(format!("swarm-preview-preemption-test-{}", session_id()));
+        let manager = TranscodeManager::new(TranscodeConfig::disabled(root.clone()));
+        let preview_cancelled = Arc::new(AtomicBool::new(false));
+        let foreground_cancelled = Arc::new(AtomicBool::new(false));
+        let session = |kind, preview, cancelled| Session {
+            kind,
+            preview,
+            cancelled,
+            reserved_bps: 128_000,
+            budget_exempt: true,
+            rate_limiter: Arc::new(SessionRateLimiter::new(0)),
+            last_access: Instant::now(),
+            in_use: 0,
+        };
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.sessions.insert(
+                "preview".into(),
+                session(
+                    SessionKind::Hls {
+                        directory: root.join("preview"),
+                        child: None,
+                    },
+                    true,
+                    Arc::clone(&preview_cancelled),
+                ),
+            );
+            state.sessions.insert(
+                "foreground".into(),
+                session(
+                    SessionKind::Direct {
+                        entry_key: "movie".into(),
+                    },
+                    false,
+                    Arc::clone(&foreground_cancelled),
+                ),
+            );
+        }
+
+        manager.cancel_previews();
+
+        assert!(preview_cancelled.load(Ordering::Relaxed));
+        assert!(!foreground_cancelled.load(Ordering::Relaxed));
+        assert_eq!(manager.active_sessions(), 1);
+        assert_eq!(manager.reserved_bps(), 128_000);
     }
 
     #[test]
@@ -1992,6 +2157,18 @@ mod tests {
         manager.finish_use(session);
 
         manager.release(session);
+        let lan_plan = manager
+            .plan(&source_entry, &source, &prefs, true)
+            .await
+            .unwrap();
+        let lan_relative = lan_plan.path.splitn(4, '/').nth(3).unwrap();
+        let lan_session = lan_plan.path.split('/').nth(2).unwrap();
+        let lan_file = manager.open_hls(lan_session, lan_relative).unwrap();
+        let lan_master = std::fs::read_to_string(lan_file.path).unwrap();
+        assert_eq!(lan_master.matches("#EXT-X-STREAM-INF").count(), 1);
+        manager.finish_use(lan_session);
+        manager.release(lan_session);
+
         prefs.preview = true;
         let preview_plan = manager
             .plan(&source_entry, &source, &prefs, false)

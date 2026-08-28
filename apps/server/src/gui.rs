@@ -324,9 +324,13 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                 .iter()
                 .map(|root| root.label.as_str())
                 .collect::<HashSet<_>>();
+            let configured_reconnects = roots
+                .iter()
+                .map(reconnect_attempt_key)
+                .collect::<HashSet<_>>();
             unavailable.retain(|label| configured_labels.contains(label.as_str()));
             needs_recovery_rescan.retain(|label| configured_labels.contains(label.as_str()));
-            last_attempt.retain(|label, _| configured_labels.contains(label.as_str()));
+            last_attempt.retain(|key, _| configured_reconnects.contains(key));
             let mut recovered = Vec::<String>::new();
             let mut recovered_needing_rescan = Vec::<String>::new();
             let scan_needs_retry = matches!(
@@ -334,6 +338,7 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                 ScanState::Scanning | ScanState::Failed(_)
             );
             for (root, status) in roots.iter().zip(health) {
+                let reconnect_key = reconnect_attempt_key(root);
                 if status.available {
                     if unavailable.remove(&root.label) {
                         tracing::info!(root = %root.label, path = %root.path, "media root recovered");
@@ -342,7 +347,6 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                             recovered_needing_rescan.push(root.label.clone());
                         }
                     }
-                    last_attempt.remove(&root.label);
                     continue;
                 }
                 if scan_needs_retry {
@@ -371,10 +375,15 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                 }
                 let should_attempt = status.auto_reconnect
                     && last_attempt
-                        .get(&root.label)
+                        .get(&reconnect_key)
                         .is_none_or(|last| last.elapsed() >= Duration::from_secs(30));
                 if should_attempt {
-                    last_attempt.insert(root.label.clone(), Instant::now());
+                    // Multiple configured roots commonly live under the same
+                    // SMB share. Reconnect the shared URL once per interval;
+                    // parallel Finder requests for that identical URL can
+                    // deadlock macOS's credential/mount agent and leave every
+                    // root unavailable indefinitely (#131).
+                    last_attempt.insert(reconnect_key, Instant::now());
                     let reconnect_root = root.clone();
                     tokio::task::spawn_blocking(move || {
                         match settings::reconnect_network_root(&reconnect_root) {
@@ -449,6 +458,12 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
             }
         }
     });
+}
+
+fn reconnect_attempt_key(root: &MediaRootSetting) -> String {
+    root.reconnect_url
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", root.path))
 }
 
 /// How often the idle-time watcher below re-walks every media root looking
