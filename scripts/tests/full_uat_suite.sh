@@ -175,21 +175,27 @@ if [ "$RUN_BACKEND" -eq 1 ]; then
 fi
 
 if [ "$RUN_E2E" -eq 1 ]; then
+    e2e_cmd=(./scripts/tests/tv_e2e_suite.sh --no-issue)
+    [ "${#DEVICE_ARGS[@]}" -gt 0 ] && e2e_cmd+=("${DEVICE_ARGS[@]}")
     run_suite "e2e" "tv_e2e_suite.sh (smoke test — real Fire TV)" \
         "$REPORT_DIR/tv_e2e_suite.log" \
-        ./scripts/tests/tv_e2e_suite.sh --no-issue "${DEVICE_ARGS[@]}"
+        "${e2e_cmd[@]}"
 fi
 
 if [ "$RUN_UAT" -eq 1 ]; then
+    uat_cmd=(./scripts/tests/tv_uat_suite.sh --no-issue)
+    [ "${#DEVICE_ARGS[@]}" -gt 0 ] && uat_cmd+=("${DEVICE_ARGS[@]}")
     run_suite "uat" "tv_uat_suite.sh (full UAT — real Fire TV)" \
         "$REPORT_DIR/tv_uat_suite.log" \
-        ./scripts/tests/tv_uat_suite.sh --no-issue "${DEVICE_ARGS[@]}"
+        "${uat_cmd[@]}"
 fi
 
 if [ "$RUN_RESILIENCE" -eq 1 ]; then
+    resilience_cmd=(./scripts/tests/tv_uat_resilience_suite.sh)
+    [ "${#DEVICE_ARGS[@]}" -gt 0 ] && resilience_cmd+=("${DEVICE_ARGS[@]}")
     run_suite "resilience" "tv_uat_resilience_suite.sh (opt-in — real Fire TV)" \
         "$REPORT_DIR/tv_uat_resilience_suite.log" \
-        ./scripts/tests/tv_uat_resilience_suite.sh "${DEVICE_ARGS[@]}"
+        "${resilience_cmd[@]}"
 fi
 
 # --- Compile the consolidated Markdown summary ---
