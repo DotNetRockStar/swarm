@@ -299,6 +299,8 @@ impl AppState {
 /// overlapped the outage or had failed. A healthy catalog does not need a
 /// filesystem walk merely because the same mount came back. Attempts are
 /// throttled so an offline NAS cannot produce a reconnect storm.
+const MEDIA_ROOT_RECONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(90);
+
 fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
     tokio::spawn(async move {
         let mut unavailable = HashSet::<String>::new();
@@ -376,7 +378,7 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                 let should_attempt = status.auto_reconnect
                     && last_attempt
                         .get(&reconnect_key)
-                        .is_none_or(|last| last.elapsed() >= Duration::from_secs(30));
+                        .is_none_or(|last| last.elapsed() >= MEDIA_ROOT_RECONNECT_RETRY_INTERVAL);
                 if should_attempt {
                     // Multiple configured roots commonly live under the same
                     // SMB share. Reconnect the shared URL once per interval;
@@ -388,7 +390,7 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                     tokio::task::spawn_blocking(move || {
                         match settings::reconnect_network_root(&reconnect_root) {
                             Ok(true) => {
-                                tracing::info!(root = %reconnect_root.label, "requested network-share reconnect")
+                                tracing::info!(root = %reconnect_root.label, "network-share reconnect became readable")
                             }
                             Ok(false) => {}
                             Err(error) => {
