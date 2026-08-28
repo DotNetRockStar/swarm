@@ -1,37 +1,61 @@
 # Closed-loop Fire TV testing
 
 Three suites close the loop on the media server and the Amazon Fire TV
-client. Two require real Fire TV hardware on the same LAN and can't run on
-GitHub-hosted CI — see [Why local-only](#why-local-only-hardware). The third,
-`media_server_uat_tests.sh`, is the media server's own backend/API UAT suite
-— plain `cargo test`, no hardware, no LAN, CI-friendly. All three are
-change-controlled: **read the `swarm-e2e-suite-lockdown` skill before editing
-any of their test logic.** None of the three is touched by editing another.
+client, plus one orchestrator that runs all three together. Two of the
+three suites require real Fire TV hardware on the same LAN and can't run on
+GitHub-hosted CI — see [Why local-only](#why-local-only-hardware). The
+third, `media_server_uat_tests.sh`, is the media server's own backend/API
+UAT suite — plain `cargo test`, no hardware, no LAN, CI-friendly. All three
+suites (and the orchestrator's own behavior) are change-controlled: **read
+the `swarm-e2e-suite-lockdown` skill before editing any of their test
+logic.** None of them is touched by editing another.
 
 ## TL;DR — run everything
 
 ```bash
-./scripts/media_server_uat_tests.sh         # 1. media server backend UAT — no hardware needed, ~1 sec
-./scripts/run_now.sh                        # 2. start the local media server (if not already running)
-./scripts/tv_e2e_suite.sh                   # 3. fast smoke test — no UI navigation, full fan-out, ~1 min/device
-./scripts/tv_uat_suite.sh                   # 4. full UAT suite — real UI navigation, ~16 scenarios, several minutes
+./scripts/run_now.sh                        # 1. start the local media server (if not already running — separate terminal, this blocks)
+./scripts/full_uat_suite.sh --github-issue  # 2. runs the three suites below in order, one consolidated report/issue
 ```
 
-Run them **one after the other, never at the same time** — both suites point
-the TV at one shared testing-mode control file, and it's the exact path the
-already-running server was configured with at startup (`run_now.sh` sets
-`SWARM_TV_E2E_CONTROL_FILE` once, and the server only ever reads that one
-path for the rest of its life). Each suite writes a fresh token there for its
-own run and deletes it on exit; if two runs overlap, whichever finishes first
-deletes the file the other is still using. Chained with `&&` above, that's
-handled for you.
+`full_uat_suite.sh` is the one-command entry point. It runs, in order:
+`media_server_uat_tests.sh` → `tv_e2e_suite.sh` → `tv_uat_suite.sh`,
+captures each one's own evidence exactly as it would produce running
+standalone, and — only when **at least one test actually failed**, and only
+when `--github-issue` was passed — files **one** consolidated GitHub issue
+covering every suite's result, passes and failures both, instead of the up
+to three separate issues the suites would otherwise file (each wrapped
+suite always runs with its own issue-filing suppressed). A clean run with
+`--github-issue` still prints "no failures — nothing to file" and opens
+nothing. Exit code `0` only if nothing failed anywhere.
 
-No flags needed for the common case: both suites run against your preferred
-device (see below) if one is configured, otherwise they fan out across every
-Fire TV they find on the LAN. Both need the server already running — neither
-one starts it.
+```bash
+./scripts/full_uat_suite.sh                       # local-only, no issue filed regardless of result
+./scripts/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
+./scripts/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
+./scripts/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
+./scripts/full_uat_suite.sh --include-resilience  # also run the opt-in disruptive resilience suite
+./scripts/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
+./scripts/full_uat_suite.sh --all                   # forwarded to both hardware suites: force full fan-out
+```
 
-Fast local iteration on one scenario while developing:
+The two hardware suites still can't run **at the same time as each other**
+outside the orchestrator either — they point the TV at one shared
+testing-mode control file, the exact path the already-running server was
+configured with at startup (`run_now.sh` sets `SWARM_TV_E2E_CONTROL_FILE`
+once, and the server only ever reads that one path for the rest of its
+life). Each suite writes a fresh token there for its own run and deletes it
+on exit; if two runs overlap, whichever finishes first deletes the file the
+other is still using. `full_uat_suite.sh` always runs them sequentially, so
+this is handled for you; running any two of the suites concurrently
+yourself, outside the orchestrator, is not safe.
+
+No flags needed for the common case: both hardware suites run against your
+preferred device (see below) if one is configured, otherwise they fan out
+across every Fire TV they find on the LAN. All three suites need the server
+already running — none of them starts it.
+
+Fast local iteration on one scenario while developing (run the suite
+standalone rather than through the orchestrator):
 
 ```bash
 ./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest
@@ -231,12 +255,25 @@ needed to debug without touching real hardware again:
 # media_server_uat_tests.sh
 ./scripts/media_server_uat_tests.sh              # run every backend UAT test
 ./scripts/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
+
+# full_uat_suite.sh (orchestrator — runs all three suites above, in order)
+./scripts/full_uat_suite.sh                       # local-only report, no issue filed regardless of result
+./scripts/full_uat_suite.sh --github-issue        # file one consolidated issue if TOTAL_FAIL > 0
+./scripts/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
+./scripts/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
+./scripts/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
+./scripts/full_uat_suite.sh --include-resilience  # also run tv_uat_resilience_suite.sh
+./scripts/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
+./scripts/full_uat_suite.sh --all                   # forwarded to both hardware suites
 ```
 
-Both suites are plain deterministic scripts — a human, a CI runner (once a
-self-hosted LAN runner exists; see below), and an AI agent all invoke the
-exact same command with the exact same result. Nothing in either suite calls
-an LLM at run time.
+Every suite here is a plain deterministic script — a human, a CI runner
+(once a self-hosted LAN runner exists; see below), and an AI agent all
+invoke the exact same command with the exact same result. Nothing in any of
+them calls an LLM at run time. `full_uat_suite.sh` always passes
+`--no-issue` down to `tv_e2e_suite.sh`/`tv_uat_suite.sh` regardless of its
+own `--github-issue` flag — it's the one that decides whether to file,
+once, after seeing every suite's result, not each wrapped suite on its own.
 
 ## Why local-only hardware
 

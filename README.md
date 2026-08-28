@@ -41,6 +41,45 @@ Three apps:
 | **Server app** (`apps/server`) | your macOS/Linux/Windows machine with the media | Tauri (Rust core + web UI), FFmpeg/ffprobe runtime |
 | **TV client** (`clients/tv-android`) | Fire TV (first), Amazon Appstore | Kotlin, Compose for TV, Media3/ExoPlayer |
 
+## TL;DR — run the automated test suites
+
+Five scripts close the loop at different levels — from no-hardware backend
+checks up to real Fire TV UI. Full detail (scenario catalogs, evidence
+bundles, device targeting) is in `scripts/TV_TESTING.md`; all are
+change-controlled — read `.claude/skills/swarm-e2e-suite-lockdown/` before
+editing any of their test logic.
+
+```bash
+cargo test --workspace                       # 0. plain Rust unit tests — no server, no hardware
+./scripts/run_now.sh                         # 1. start the local media/STUN server (separate terminal — this blocks)
+
+./scripts/full_uat_suite.sh --github-issue   # 2. runs everything below in order, one consolidated report/issue
+```
+
+`full_uat_suite.sh` is the one-command entry point: it runs
+`media_server_uat_tests.sh` → `tv_e2e_suite.sh` → `tv_uat_suite.sh` in
+sequence, captures each one's own evidence, and — only when at least one
+test actually failed, and only with `--github-issue` — files a single
+GitHub issue with every suite's result (passes and failures both), instead
+of each suite filing its own. `--skip-backend`/`--skip-e2e`/`--skip-uat`
+narrow the run; `--include-resilience` adds the opt-in disruptive suite;
+`--device <x>`/`--all` forward to the two hardware suites. Exit code `0`
+only if nothing failed. Each wrapped script also still runs fine standalone
+(useful for iterating on one layer):
+
+```bash
+./scripts/media_server_uat_tests.sh          # media server backend UAT — no hardware, ~1 sec
+./scripts/tv_e2e_suite.sh                    # fast smoke test — no UI navigation, full device fan-out
+./scripts/tv_uat_suite.sh --github-issue     # full UAT — real Fire TV UI, ~16 scenarios, files its own issue on FAIL
+./scripts/tv_uat_resilience_suite.sh         # opt-in: disruptive transport drop/recovery, kept out of the above by design
+```
+
+`run_now.sh` runs in the foreground (`Ctrl+C` stops it) — start it once in
+its own terminal/session and leave it running; every suite above only
+health-checks the server, none of them start or stop it. Only the backend
+suite needs no server and no hardware at all, so run it first on any
+backend change.
+
 ## How it works
 
 1. Register on the STUN server web UI, create a **swarm** (a private device group), and generate an 8-digit join code.

@@ -1,6 +1,6 @@
 ---
 name: swarm-e2e-suite-lockdown
-description: Use before touching scripts/tv_e2e_suite.sh, scripts/tv_uat_suite.sh, OR scripts/media_server_uat_tests.sh (the three closed-loop suites — two real-Fire-TV, one backend-only) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of the three suites' test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
+description: Use before touching scripts/tv_e2e_suite.sh, scripts/tv_uat_suite.sh, scripts/media_server_uat_tests.sh, OR scripts/full_uat_suite.sh (the three closed-loop suites — two real-Fire-TV, one backend-only — plus the orchestrator that runs all three) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of their test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
 ---
 
 # These test suites are frozen by explicit user policy
@@ -19,8 +19,11 @@ rule applies again to the third suite, `scripts/media_server_uat_tests.sh` +
 `apps/server/src/gui_tests/` (real `#[tauri::command]` handlers invoked
 directly against a real, isolated backend — no hardware, no UI — see
 `swarm-media-server-uat-tests`), added when the user chose backend/API-only
-coverage after two real-UI-automation approaches proved unreliable. **All
-three suites are frozen the same way, independently.**
+coverage after two real-UI-automation approaches proved unreliable, and again
+to `scripts/full_uat_suite.sh`, the orchestrator the user asked for to run
+all three suites together, gather each one's evidence, and file a single
+consolidated GitHub issue only when at least one test actually failed. **All
+four are frozen the same way, independently.**
 
 ## What is frozen
 
@@ -101,6 +104,27 @@ three suites are frozen the same way, independently.**
   covering an actual user-visible UI flow belongs in `swarm-tv-uat-suite`
   (server-side effects) or awaits a reliable macOS UI-automation path, not a
   simulated substitute added here.
+
+### `scripts/full_uat_suite.sh` (orchestrator — runs all three above)
+
+This wraps the three suites without changing any of them: it runs
+`media_server_uat_tests.sh` → `tv_e2e_suite.sh` → `tv_uat_suite.sh` in
+order, always suppressing each wrapped suite's own issue-filing
+(`--no-issue`), and files at most one consolidated GitHub issue itself.
+Frozen about the orchestrator specifically:
+
+- The default set it runs (all three) and that `--skip-backend`/
+  `--skip-e2e`/`--skip-uat`/`--include-resilience` are opt-out/opt-in, not a
+  silently narrowed default — don't drop a suite from the default run to
+  make a flaky day go quiet.
+- That it never reimplements a suite's own evidence-gathering — it captures
+  each suite's full console output and folds in whatever report file that
+  suite already wrote, nothing more; evidence-bundle *content* stays each
+  suite's own frozen responsibility (see their sections above).
+- That it files a consolidated issue only when `--github-issue` was passed
+  **and** `TOTAL_FAIL > 0` — both conditions, same "only on a real failure"
+  policy as the suites it wraps — and that the issue body includes every
+  suite's result, passes and failures both, not just the failing ones.
 
 ## What is NOT frozen
 
