@@ -15,7 +15,22 @@ use std::time::{Duration, Instant};
 use swarm_core::peer::{MediaKind, PlaybackMode, PlaybackPlan, PlaybackPreferences};
 use tokio::process::{Child, Command};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long negotiation waits for FFmpeg's first playlist while the encoder is
+/// still making visible progress (writing segments). A large adaptive-ladder
+/// transcode of high-bitrate 10-bit source off a slow network share can take
+/// well over a minute to flush the first segment of every rendition, and
+/// killing a healthy encoder at a tight deadline turned every such playback
+/// into a dead-end "Getting your stream ready…" screen (#131).
+const STARTUP_HARD_CAP: Duration = Duration::from_secs(120);
+/// Give up sooner when FFmpeg is running but has written nothing new for this
+/// long — a wedged decoder or a media root that dropped mid-read, rather than
+/// a slow-but-working transcode. Comfortably longer than a transient SMB
+/// remount so a brief share blip is ridden out instead of failing playback.
+const STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hover previews must fail fast instead of pinning a browse card (and a
+/// transcode slot) for the full playback budget.
+const PREVIEW_STARTUP_HARD_CAP: Duration = Duration::from_secs(25);
+const PREVIEW_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 const AUDIO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIEW_DURATION_SECS: u64 = 32;
@@ -76,7 +91,7 @@ pub enum TranscodeError {
     Spawn(#[source] std::io::Error),
     #[error("ffmpeg exited before producing a playlist: {0}")]
     Ffmpeg(String),
-    #[error("ffmpeg did not produce a playlist within {} seconds", STARTUP_TIMEOUT.as_secs())]
+    #[error("ffmpeg did not produce a playlist in time")]
     StartupTimeout,
 }
 
@@ -1213,7 +1228,14 @@ impl TranscodeManager {
 
         let mut child = command.spawn().map_err(TranscodeError::Spawn)?;
         let master = directory.join("master.m3u8");
+        let (hard_cap, stall_timeout) = if preview {
+            (PREVIEW_STARTUP_HARD_CAP, PREVIEW_STARTUP_STALL_TIMEOUT)
+        } else {
+            (STARTUP_HARD_CAP, STARTUP_STALL_TIMEOUT)
+        };
         let started = Instant::now();
+        let mut last_progress = Instant::now();
+        let mut last_output = hls_output_signature(directory);
         loop {
             if master.metadata().is_ok_and(|metadata| metadata.len() > 0) {
                 return Ok(child);
@@ -1223,7 +1245,18 @@ impl TranscodeManager {
                     .unwrap_or_else(|_| format!("exit status {status}"));
                 return Err(TranscodeError::Ffmpeg(detail.trim().to_string()));
             }
-            if started.elapsed() >= STARTUP_TIMEOUT {
+            // A large adaptive-ladder transcode of high-bitrate source off a
+            // slow share legitimately takes a while to flush the first segment
+            // of every rendition, so wait as long as FFmpeg keeps writing
+            // output — bounded only by an absolute cap. Bail early only when it
+            // is alive but producing nothing, which is what a wedged decoder or
+            // a media root that vanished mid-read looks like (#131).
+            let output = hls_output_signature(directory);
+            if output != last_output {
+                last_output = output;
+                last_progress = Instant::now();
+            }
+            if started.elapsed() >= hard_cap || last_progress.elapsed() >= stall_timeout {
                 let _ = child.kill().await;
                 return Err(TranscodeError::StartupTimeout);
             }
@@ -1311,6 +1344,34 @@ fn reset_hls_attempt(directory: &Path) -> Result<(), TranscodeError> {
         }
     }
     Ok(())
+}
+
+/// A cheap fingerprint of everything FFmpeg has written into a session
+/// directory so far — file count plus total bytes across the rendition
+/// subdirectories, ignoring its own text log. Used only during startup to tell
+/// a slow-but-advancing transcode apart from a wedged one; exact values never
+/// matter, only whether it changed while FFmpeg was making progress.
+fn hls_output_signature(directory: &Path) -> (u64, u64) {
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![directory.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if entry.path().extension().and_then(|ext| ext.to_str()) != Some("log") {
+                count += 1;
+                bytes += entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            }
+        }
+    }
+    (count, bytes)
 }
 
 /// Append `#EXT-X-ENDLIST` to every media playlist under `directory` that has
@@ -1694,6 +1755,31 @@ mod tests {
         assert!(!safe_hls_path("v0//segment.m4s"));
         assert!(!safe_hls_path("/absolute"));
         assert!(!safe_hls_path("ffmpeg.log"));
+    }
+
+    #[test]
+    fn hls_output_signature_tracks_encoder_progress_but_ignores_the_log() {
+        let root = std::env::temp_dir().join(format!("swarm-sig-{}", session_id()));
+        let rendition = root.join("v360p");
+        std::fs::create_dir_all(&rendition).unwrap();
+
+        let empty = hls_output_signature(&root);
+
+        // FFmpeg's own text log must not read as transcode progress — a
+        // stalled decoder that keeps logging would otherwise look alive.
+        std::fs::write(root.join("ffmpeg.log"), "warning: something\n").unwrap();
+        assert_eq!(hls_output_signature(&root), empty);
+
+        // A freshly written segment (in a nested rendition dir) is progress.
+        std::fs::write(rendition.join("segment_000000.m4s"), b"abcd").unwrap();
+        let after_first = hls_output_signature(&root);
+        assert_ne!(after_first, empty);
+
+        // So is that segment growing, or a second one landing.
+        std::fs::write(rendition.join("segment_000000.m4s"), b"abcdefgh").unwrap();
+        assert_ne!(hls_output_signature(&root), after_first);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
