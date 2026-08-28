@@ -1,40 +1,40 @@
 ---
 name: swarm-e2e-suite-lockdown
-description: Use before touching scripts/tv_e2e_suite.sh, scripts/tv_uat_suite.sh, scripts/media_server_uat_tests.sh, OR scripts/full_uat_suite.sh (the three closed-loop suites — two real-Fire-TV, one backend-only — plus the orchestrator that runs all three) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of their test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
+description: Use before touching scripts/tests/tv_e2e_suite.sh, scripts/tests/tv_uat_suite.sh, scripts/tests/media_server_uat_tests.sh, OR scripts/tests/full_uat_suite.sh (the three closed-loop suites — two real-Fire-TV, one backend-only — plus the orchestrator that runs all three) for any reason, or when a run of any of them reports a FAIL/SKIP and the instinct is to "fix the test." States the user's standing rule that none of their test logic may change without their explicit, in-conversation permission — an AI agent finding it inconvenient is not permission.
 ---
 
 # These test suites are frozen by explicit user policy
 
-The user who requested `scripts/tv_e2e_suite.sh` (closed-loop testing of the
+The user who requested `scripts/tests/tv_e2e_suite.sh` (closed-loop testing of the
 real desktop media server against real Amazon Fire TV hardware, see
 `swarm-closed-loop-tv-testing`) was explicit: **the suite must stay
 consistent, and neither Claude nor Codex may change it on their own
 initiative.** This is a standing rule for every future session that touches
 this repo, not a one-time instruction that expired when the suite first
 shipped. When the user later asked for a second, much larger UI-driving UAT
-suite (`scripts/tv_uat_suite.sh` + the instrumented sources under
+suite (`scripts/tests/tv_uat_suite.sh` + the instrumented sources under
 `clients/tv-android/app/src/androidTest/kotlin/app/swarm/tv/app/uat/`, see
 `swarm-tv-uat-suite`), they explicitly extended the same rule to it. The same
-rule applies again to the third suite, `scripts/media_server_uat_tests.sh` +
+rule applies again to the third suite, `scripts/tests/media_server_uat_tests.sh` +
 `apps/server/src/gui_tests/` (real `#[tauri::command]` handlers invoked
 directly against a real, isolated backend — no hardware, no UI — see
 `swarm-media-server-uat-tests`), added when the user chose backend/API-only
 coverage after two real-UI-automation approaches proved unreliable, and again
-to `scripts/full_uat_suite.sh`, the orchestrator the user asked for to run
+to `scripts/tests/full_uat_suite.sh`, the orchestrator the user asked for to run
 all three suites together, gather each one's evidence, and file a single
 consolidated GitHub issue only when at least one test actually failed. **All
 four are frozen the same way, independently.**
 
 ## What is frozen
 
-### `scripts/tv_e2e_suite.sh` (log-evidence only, no UI navigation)
+### `scripts/tests/tv_e2e_suite.sh` (log-evidence only, no UI navigation)
 
 - Which test cases run (`install_and_launch`, `lan_closed_loop_catalog`,
   `testing_mode_cleanup`, and any later addition made under explicit user
   direction).
 - Their pass/fail/skip thresholds and the log lines/exit codes they key on.
 - The device-targeting precedence: explicit `--device`/positional target(s)
-  > preferred device from `scripts/tv_test_device.local.json` (gitignored,
+  > preferred device from `scripts/tests/tv_test_device.local.json` (gitignored,
   shared with `tv_uat_suite.sh`) > every already-adb-connected Amazon device
   > full LAN scan fan-out; `--all` always forces full fan-out regardless of
   the preference file. Defaulting to a configured preferred device (added
@@ -55,7 +55,7 @@ four are frozen the same way, independently.**
   failure" under explicit user direction; a clean PASS run still writes the
   local report, just never opens an issue for it.
 
-### `scripts/tv_uat_suite.sh` + the `uat` instrumented test sources
+### `scripts/tests/tv_uat_suite.sh` + the `uat` instrumented test sources
 
 - Which scenario classes/methods run (see `swarm-tv-uat-suite` for the full
   catalog) and what each one asserts — UI state via Compose test tags, TV-side
@@ -64,7 +64,7 @@ four are frozen the same way, independently.**
   (`library_entries`, `entry_likes`, `client_errors`, `server_notifications`
   in `library.sqlite`) queried from the host.
 - The device-targeting precedence (explicit `--device` > preferred device
-  from `scripts/tv_test_device.local.json` > already-connected Amazon devices > full
+  from `scripts/tests/tv_test_device.local.json` > already-connected Amazon devices > full
   LAN fan-out) and that `--all` always means every discovered device, never
   a silently-narrowed subset.
 - The failure-evidence bundle: every FAIL must produce the full TV-to-server
@@ -77,7 +77,7 @@ four are frozen the same way, independently.**
 - That every run compiles a findings report, filed to GitHub as an issue
   only on failure — same as the original suite.
 
-### `scripts/media_server_uat_tests.sh` + `apps/server/src/gui_tests/`
+### `scripts/tests/media_server_uat_tests.sh` + `apps/server/src/gui_tests/`
 
 - Which category files/tests run (see `swarm-media-server-uat-tests` for the
   full catalog: media root lifecycle, library scan, TV pairing, notifications/
@@ -105,7 +105,7 @@ four are frozen the same way, independently.**
   (server-side effects) or awaits a reliable macOS UI-automation path, not a
   simulated substitute added here.
 
-### `scripts/full_uat_suite.sh` (orchestrator — runs all three above)
+### `scripts/tests/full_uat_suite.sh` (orchestrator — runs all three above)
 
 This wraps the three suites without changing any of them: it runs
 `media_server_uat_tests.sh` → `tv_e2e_suite.sh` → `tv_uat_suite.sh` in

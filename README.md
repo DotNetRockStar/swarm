@@ -45,7 +45,7 @@ Three apps:
 
 Five scripts close the loop at different levels — from no-hardware backend
 checks up to real Fire TV UI. Full detail (scenario catalogs, evidence
-bundles, device targeting) is in `scripts/TV_TESTING.md`; all are
+bundles, device targeting) is in `scripts/tests/TV_TESTING.md`; all are
 change-controlled — read `.claude/skills/swarm-e2e-suite-lockdown/` before
 editing any of their test logic.
 
@@ -53,7 +53,7 @@ editing any of their test logic.
 cargo test --workspace                       # 0. plain Rust unit tests — no server, no hardware
 ./scripts/run_now.sh                         # 1. start the local media/STUN server (separate terminal — this blocks)
 
-./scripts/full_uat_suite.sh --github-issue   # 2. runs everything below in order, one consolidated report/issue
+./scripts/tests/full_uat_suite.sh --github-issue   # 2. runs everything below in order, one consolidated report/issue
 ```
 
 `full_uat_suite.sh` is the one-command entry point: it runs
@@ -68,10 +68,10 @@ only if nothing failed. Each wrapped script also still runs fine standalone
 (useful for iterating on one layer):
 
 ```bash
-./scripts/media_server_uat_tests.sh          # media server backend UAT — no hardware, ~1 sec
-./scripts/tv_e2e_suite.sh                    # fast smoke test — no UI navigation, full device fan-out
-./scripts/tv_uat_suite.sh --github-issue     # full UAT — real Fire TV UI, ~16 scenarios, files its own issue on FAIL
-./scripts/tv_uat_resilience_suite.sh         # opt-in: disruptive transport drop/recovery, kept out of the above by design
+./scripts/tests/media_server_uat_tests.sh          # media server backend UAT — no hardware, ~1 sec
+./scripts/tests/tv_e2e_suite.sh                    # fast smoke test — no UI navigation, full device fan-out
+./scripts/tests/tv_uat_suite.sh --github-issue     # full UAT — real Fire TV UI, ~16 scenarios, files its own issue on FAIL
+./scripts/tests/tv_uat_resilience_suite.sh         # opt-in: disruptive transport drop/recovery, kept out of the above by design
 ```
 
 `run_now.sh` runs in the foreground (`Ctrl+C` stops it) — start it once in

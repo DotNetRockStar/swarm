@@ -1,11 +1,11 @@
 ---
 name: swarm-media-server-uat-tests
-description: Use when creating, running, extending, debugging, or explaining the media server's backend UAT suite — apps/server/src/gui_tests/ and scripts/media_server_uat_tests.sh. Covers the direct-command-invocation test shape (no simulated Tauri IPC/ACL, no real UI), per-test data/port isolation, the ServerCore startup-scan race and how the harness settles it, and why this suite is backend/API-only. Read swarm-e2e-suite-lockdown before editing test logic.
+description: Use when creating, running, extending, debugging, or explaining the media server's backend UAT suite — apps/server/src/gui_tests/ and scripts/tests/media_server_uat_tests.sh. Covers the direct-command-invocation test shape (no simulated Tauri IPC/ACL, no real UI), per-test data/port isolation, the ServerCore startup-scan race and how the harness settles it, and why this suite is backend/API-only. Read swarm-e2e-suite-lockdown before editing test logic.
 ---
 
 # Media server backend UAT suite
 
-`./scripts/media_server_uat_tests.sh` (a thin wrapper around `cargo test -p
+`./scripts/tests/media_server_uat_tests.sh` (a thin wrapper around `cargo test -p
 swarm-server --bin swarm-server-app --features gui`) runs real
 `#[tauri::command]` handlers from `apps/server/src/gui.rs` directly against a
 real, isolated `AppState` — real SQLite (`library.sqlite`), real filesystem,
@@ -171,18 +171,18 @@ change, and doesn't need to wait for permission. Then:
    bypasses the real command/store logic being tested.
 4. Add the test to the relevant category file, or a new file registered in
    `gui_tests/mod.rs` for a genuinely new category.
-5. Run `./scripts/media_server_uat_tests.sh`, and run it a few times in a
+5. Run `./scripts/tests/media_server_uat_tests.sh`, and run it a few times in a
    row — this suite's own port/data isolation should make it fully
    deterministic; repeated runs are how the startup-scan race above was
    originally caught.
-6. Document the new file/category in `scripts/TV_TESTING.md`'s scenario
+6. Document the new file/category in `scripts/tests/TV_TESTING.md`'s scenario
    table.
 
 ## Invocation
 
 ```bash
-./scripts/media_server_uat_tests.sh              # run every backend UAT test
-./scripts/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
+./scripts/tests/media_server_uat_tests.sh              # run every backend UAT test
+./scripts/tests/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
 ```
 
 Exit code `0` only if every test passed. Nothing here calls an LLM at run

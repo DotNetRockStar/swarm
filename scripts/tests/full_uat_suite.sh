@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Master orchestrator for scripts/TV_TESTING.md's "run everything" flow:
+# Master orchestrator for scripts/tests/TV_TESTING.md's "run everything" flow:
 # runs the media server backend UAT suite, the TV E2E smoke test, and the
 # full TV UAT suite in sequence, captures each one's own evidence, and
 # — only when at least one of them reported a real failure — offers to file
@@ -20,14 +20,14 @@
 # suite's result.
 #
 # Usage:
-#   ./scripts/full_uat_suite.sh                      # run backend + E2E + UAT, local-only report
-#   ./scripts/full_uat_suite.sh --github-issue        # same, plus file one consolidated issue if any suite failed
-#   ./scripts/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
-#   ./scripts/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
-#   ./scripts/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
-#   ./scripts/full_uat_suite.sh --include-resilience  # also run the opt-in disruptive resilience suite
-#   ./scripts/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
-#   ./scripts/full_uat_suite.sh --all                   # forwarded to both hardware suites: force full fan-out
+#   ./scripts/tests/full_uat_suite.sh                      # run backend + E2E + UAT, local-only report
+#   ./scripts/tests/full_uat_suite.sh --github-issue        # same, plus file one consolidated issue if any suite failed
+#   ./scripts/tests/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
+#   ./scripts/tests/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
+#   ./scripts/tests/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
+#   ./scripts/tests/full_uat_suite.sh --include-resilience  # also run the opt-in disruptive resilience suite
+#   ./scripts/tests/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
+#   ./scripts/tests/full_uat_suite.sh --all                   # forwarded to both hardware suites: force full fan-out
 #
 # Env vars (same defaults as the suites this wraps):
 #   SWARM_GITHUB_REPOSITORY  where the consolidated issue is filed (default DotNetRockStar/swarm)
@@ -39,7 +39,7 @@
 # or a script, same contract as the suites it wraps.
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
@@ -171,32 +171,32 @@ run_suite() {
 if [ "$RUN_BACKEND" -eq 1 ]; then
     run_suite "backend" "media_server_uat_tests.sh (backend UAT — no hardware)" \
         "$REPORT_DIR/media_server_uat_tests.log" \
-        ./scripts/media_server_uat_tests.sh
+        ./scripts/tests/media_server_uat_tests.sh
 fi
 
 if [ "$RUN_E2E" -eq 1 ]; then
     run_suite "e2e" "tv_e2e_suite.sh (smoke test — real Fire TV)" \
         "$REPORT_DIR/tv_e2e_suite.log" \
-        ./scripts/tv_e2e_suite.sh --no-issue "${DEVICE_ARGS[@]}"
+        ./scripts/tests/tv_e2e_suite.sh --no-issue "${DEVICE_ARGS[@]}"
 fi
 
 if [ "$RUN_UAT" -eq 1 ]; then
     run_suite "uat" "tv_uat_suite.sh (full UAT — real Fire TV)" \
         "$REPORT_DIR/tv_uat_suite.log" \
-        ./scripts/tv_uat_suite.sh --no-issue "${DEVICE_ARGS[@]}"
+        ./scripts/tests/tv_uat_suite.sh --no-issue "${DEVICE_ARGS[@]}"
 fi
 
 if [ "$RUN_RESILIENCE" -eq 1 ]; then
     run_suite "resilience" "tv_uat_resilience_suite.sh (opt-in — real Fire TV)" \
         "$REPORT_DIR/tv_uat_resilience_suite.log" \
-        ./scripts/tv_uat_resilience_suite.sh "${DEVICE_ARGS[@]}"
+        ./scripts/tests/tv_uat_resilience_suite.sh "${DEVICE_ARGS[@]}"
 fi
 
 # --- Compile the consolidated Markdown summary ---
 {
     echo "# Full SWARM UAT run — $RUN_STAMP"
     echo
-    echo "Commit \`$COMMIT\`. Orchestrated by \`scripts/full_uat_suite.sh\`; each suite below also wrote its own local report/evidence exactly as it would running standalone."
+    echo "Commit \`$COMMIT\`. Orchestrated by \`scripts/tests/full_uat_suite.sh\`; each suite below also wrote its own local report/evidence exactly as it would running standalone."
     echo
     echo "**TOTAL — PASS: $TOTAL_PASS   FAIL: $TOTAL_FAIL   SKIP: $TOTAL_SKIP**"
     echo

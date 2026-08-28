@@ -16,4 +16,4 @@ clients/tv-android/local.properties
 clients/tv-android/*/gen/
 deploy/**/.env
 nohup.out
-/scripts/tv_test_device.local.json
+/scripts/tests/tv_test_device.local.json

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# See scripts/TV_TESTING.md for the TL;DR on running this suite alongside
-# scripts/tv_uat_suite.sh, and what a completed run looks like.
+# See scripts/tests/TV_TESTING.md for the TL;DR on running this suite alongside
+# scripts/tests/tv_uat_suite.sh, and what a completed run looks like.
 #
 # Closed-loop end-to-end test suite: local media server <-> real Amazon Fire
 # TV(s) on the same network. "Closed loop" means every assertion here is
@@ -17,16 +17,16 @@
 # only checks that one is reachable before running.
 #
 # Usage:
-#   ./scripts/tv_e2e_suite.sh                    # preferred device (scripts/tv_test_device.local.json) if configured, else full LAN fan-out
-#   ./scripts/tv_e2e_suite.sh --all               # force full fan-out across every discovered Fire TV, ignoring the preferred-device config
-#   ./scripts/tv_e2e_suite.sh --device 192.168.0.148       # test only this device, by IP or adb device_name (repeatable)
-#   ./scripts/tv_e2e_suite.sh 192.168.0.148       # same as --device, positional form kept for backward compatibility
-#   ./scripts/tv_e2e_suite.sh --no-issue          # write the report locally; skip posting it to GitHub
-#   ./scripts/tv_e2e_suite.sh --skip-install      # smoke-test whatever build is already installed; no rebuild/reinstall
+#   ./scripts/tests/tv_e2e_suite.sh                    # preferred device (scripts/tests/tv_test_device.local.json) if configured, else full LAN fan-out
+#   ./scripts/tests/tv_e2e_suite.sh --all               # force full fan-out across every discovered Fire TV, ignoring the preferred-device config
+#   ./scripts/tests/tv_e2e_suite.sh --device 192.168.0.148       # test only this device, by IP or adb device_name (repeatable)
+#   ./scripts/tests/tv_e2e_suite.sh 192.168.0.148       # same as --device, positional form kept for backward compatibility
+#   ./scripts/tests/tv_e2e_suite.sh --no-issue          # write the report locally; skip posting it to GitHub
+#   ./scripts/tests/tv_e2e_suite.sh --skip-install      # smoke-test whatever build is already installed; no rebuild/reinstall
 #
-# Device targeting precedence — see scripts/TV_TESTING.md: explicit
+# Device targeting precedence — see scripts/tests/TV_TESTING.md: explicit
 # --device/positional target(s) > preferred device from
-# scripts/tv_test_device.local.json (gitignored; shared with
+# scripts/tests/tv_test_device.local.json (gitignored; shared with
 # tv_uat_suite.sh) > every already-adb-connected Amazon device > full LAN
 # scan fan-out. This default-to-preferred-device behavior (and --all/--device)
 # was added under explicit user direction — see swarm-e2e-suite-lockdown.
@@ -40,7 +40,7 @@
 #   SWARM_RUN_DIR            shared local run directory (default .run)
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
@@ -55,7 +55,7 @@ GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 ISSUE_LABEL="${SWARM_E2E_ISSUE_LABEL:-Testing}"
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
 TV_E2E_CONTROL_FILE="$RUN_DIR/tv-e2e-control.json"
-PREFERRED_DEVICE_FILE="scripts/tv_test_device.local.json"
+PREFERRED_DEVICE_FILE="scripts/tests/tv_test_device.local.json"
 
 NO_ISSUE=0
 SKIP_INSTALL=0
@@ -362,7 +362,7 @@ SKIP_COUNT="$(awk -F'\t' '$4=="SKIP"' "$RESULTS_TSV" 2>/dev/null | wc -l | tr -d
 {
     echo "# TV closed-loop E2E suite — $RUN_STAMP"
     echo
-    echo "Local media server + \`${#SERIALS[@]}\` real Amazon Fire TV(s) on the LAN, exercised by \`scripts/tv_e2e_suite.sh\` against commit \`$COMMIT\`."
+    echo "Local media server + \`${#SERIALS[@]}\` real Amazon Fire TV(s) on the LAN, exercised by \`scripts/tests/tv_e2e_suite.sh\` against commit \`$COMMIT\`."
     echo
     echo "**PASS: $PASS_COUNT   FAIL: $FAIL_COUNT   SKIP: $SKIP_COUNT**"
     echo
@@ -378,7 +378,7 @@ SKIP_COUNT="$(awk -F'\t' '$4=="SKIP"' "$RESULTS_TSV" 2>/dev/null | wc -l | tr -d
     echo "Full per-device logcat captures were kept locally under \`.run/tv-e2e-reports/$RUN_STAMP/\` (not committed)."
     echo
     echo "---"
-    echo "_This suite's test logic and pass/fail thresholds are frozen by policy — see the \`swarm-e2e-suite-lockdown\` skill. An AI agent picking up a follow-up on this issue should fix the underlying product bug behind any FAIL above, not edit \`scripts/tv_e2e_suite.sh\` to make it pass._"
+    echo "_This suite's test logic and pass/fail thresholds are frozen by policy — see the \`swarm-e2e-suite-lockdown\` skill. An AI agent picking up a follow-up on this issue should fix the underlying product bug behind any FAIL above, not edit \`scripts/tests/tv_e2e_suite.sh\` to make it pass._"
 } > "$REPORT_DIR/report.md"
 
 echo

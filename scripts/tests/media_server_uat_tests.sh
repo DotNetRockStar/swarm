@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# See scripts/TV_TESTING.md for how this fits alongside tv_e2e_suite.sh and
+# See scripts/tests/TV_TESTING.md for how this fits alongside tv_e2e_suite.sh and
 # tv_uat_suite.sh as part of "run everything."
 #
 # Backend UAT suite for the media server: real `#[tauri::command]` handlers
@@ -22,14 +22,14 @@
 # product bug the tests surface) are fair game to fix without asking.
 #
 # Usage:
-#   ./scripts/media_server_uat_tests.sh                # run every backend UAT test
-#   ./scripts/media_server_uat_tests.sh media_root      # run only tests whose name contains this substring
+#   ./scripts/tests/media_server_uat_tests.sh                # run every backend UAT test
+#   ./scripts/tests/media_server_uat_tests.sh media_root      # run only tests whose name contains this substring
 #
 # Exit code: 0 only if every test passed; whatever `cargo test` returns
 # otherwise (nonzero). Safe to chain in CI or a script.
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 FILTER="${1:-}"

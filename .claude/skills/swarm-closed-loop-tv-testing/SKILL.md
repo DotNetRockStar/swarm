@@ -1,11 +1,11 @@
 ---
 name: swarm-closed-loop-tv-testing
-description: Use when running, extending, or explaining scripts/tv_e2e_suite.sh — the automated closed-loop suite that tests the real desktop media server against real Amazon Fire TV(s) on the same LAN, targeting a configured preferred device by default (or fanning out across every TV found), filing its findings to GitHub as an issue. Covers what "closed loop" means here, why each test case is evidence-based rather than UI-driven, and how device targeting/fan-out discovery works. Change policy for this suite lives in swarm-e2e-suite-lockdown — read that before editing test logic.
+description: Use when running, extending, or explaining scripts/tests/tv_e2e_suite.sh — the automated closed-loop suite that tests the real desktop media server against real Amazon Fire TV(s) on the same LAN, targeting a configured preferred device by default (or fanning out across every TV found), filing its findings to GitHub as an issue. Covers what "closed loop" means here, why each test case is evidence-based rather than UI-driven, and how device targeting/fan-out discovery works. Change policy for this suite lives in swarm-e2e-suite-lockdown — read that before editing test logic.
 ---
 
 # Closed-loop real-hardware testing: local media server <-> real Fire TV(s)
 
-`./scripts/tv_e2e_suite.sh` is the automated version of the manual workflow
+`./scripts/tests/tv_e2e_suite.sh` is the automated version of the manual workflow
 in `swarm-local-testing`: it builds the debug client, installs it on every
 real Amazon Fire TV it can find on the LAN, and checks — with real evidence,
 not a mock — that each one actually talks to the real local media server.
@@ -60,7 +60,7 @@ section). Target selection, in order:
 
 1. Explicit `--device <ip-or-name>` (or a bare positional IP/name argument,
    kept for backward compatibility — repeatable for more than one target).
-2. Otherwise, if `--all` was not passed and `scripts/tv_test_device.local.json`
+2. Otherwise, if `--all` was not passed and `scripts/tests/tv_test_device.local.json`
    (gitignored, shared with `tv_uat_suite.sh`) names a `preferred_device_name`
    found on the LAN, that device alone.
 3. Otherwise (including whenever `--all` is passed, or the preferred device

@@ -1,21 +1,21 @@
 ---
 name: swarm-tv-uat-suite
-description: Use when creating, running, extending, debugging, or explaining Fire TV UAT tests and scripts/tv_uat_suite.sh — the real-D-pad suite against the real local media server. Covers stable Compose tags, bounded synchronization, fresh-process persistence tests, state cleanup, capability-aware media selection, debug-only test hooks, failure evidence, and focused/full real-device verification. Read swarm-e2e-suite-lockdown before editing test logic.
+description: Use when creating, running, extending, debugging, or explaining Fire TV UAT tests and scripts/tests/tv_uat_suite.sh — the real-D-pad suite against the real local media server. Covers stable Compose tags, bounded synchronization, fresh-process persistence tests, state cleanup, capability-aware media selection, debug-only test hooks, failure evidence, and focused/full real-device verification. Read swarm-e2e-suite-lockdown before editing test logic.
 ---
 
 # TV UAT suite: real UI navigation against the real media server
 
-`./scripts/tv_uat_suite.sh` drives the actual Fire TV app UI (D-pad
+`./scripts/tests/tv_uat_suite.sh` drives the actual Fire TV app UI (D-pad
 navigation, real button presses) against a real, already-running local media
 server, asserting on real Compose UI state, real persisted TV-side state
 (Room `swarm.db` + the liked/watchlist/watch-state `SharedPreferences`
 stores, read in-process), and real server-side SQLite state
 (`library.sqlite`'s `library_entries`, `entry_likes`, `client_errors`,
 `server_notifications` tables). Its change policy is the same explicit,
-standing user rule as `scripts/tv_e2e_suite.sh` — **read
+standing user rule as `scripts/tests/tv_e2e_suite.sh` — **read
 `swarm-e2e-suite-lockdown` before editing anything here.**
 
-## How this differs from `scripts/tv_e2e_suite.sh`
+## How this differs from `scripts/tests/tv_e2e_suite.sh`
 
 The original suite (`swarm-closed-loop-tv-testing`) deliberately sends no
 D-pad input at all — it proves the app launches and completes one real
@@ -54,9 +54,9 @@ that specified it.
 | `ContinuePlaybackLifecycleUatTest` | Playback lifecycle | Continue Watching save/resume/completion removal, persisted restoration, server release acknowledgement, audio/subtitle choice, browse-preview movement and preview-to-play |
 | `KidModeUatTest` | Kid Mode | PIN setup, content-kind gating, wrong/correct PIN behavior, disabling Kid Mode, and persistence across a fresh Activity and ViewModel |
 | `EndOfMediaUatTest` | End of media | Continue-overlay Play Now/Cancel behavior and automatic music-track advance at end of media |
-| `ResilienceUatTest` | Resilience (opt-in) | Catalog and playback transport interruption/recovery; kept out of the default deterministic suite and run by `scripts/tv_uat_resilience_suite.sh` |
+| `ResilienceUatTest` | Resilience (opt-in) | Catalog and playback transport interruption/recovery; kept out of the default deterministic suite and run by `scripts/tests/tv_uat_resilience_suite.sh` |
 
-The canonical, current scenario matrix is in `scripts/TV_TESTING.md`; update
+The canonical, current scenario matrix is in `scripts/tests/TV_TESTING.md`; update
 that matrix whenever the user explicitly authorizes adding a scenario.
 
 ## Baseline for writing reliable TV UAT tests
@@ -134,7 +134,7 @@ conversation changes the frozen scenario contract. Then:
 3. Add the instrumented scenario under the existing `uat` package and register
    deterministic classes in `ALL_TEST_CLASSES`. Put disruptive coverage in the
    resilience wrapper.
-4. Document the scenario in `scripts/TV_TESTING.md`.
+4. Document the scenario in `scripts/tests/TV_TESTING.md`.
 5. Compile locally, run the single class/method on the preferred real TV, repeat
    timing-sensitive coverage, and finally run the whole relevant suite.
 6. Inspect the evidence bundle for every failure before modifying code. Fix
@@ -182,8 +182,8 @@ independently of resolution.
 ## Device targeting: preferred device vs. fan-out
 
 Precedence: explicit `--device <ip-or-name>` > preferred device from
-`scripts/tv_test_device.local.json` (gitignored; example at
-`scripts/tv_test_device.local.json.example`) > every already-adb-connected Amazon
+`scripts/tests/tv_test_device.local.json` (gitignored; example at
+`scripts/tests/tv_test_device.local.json.example`) > every already-adb-connected Amazon
 device > full LAN scan fan-out.
 
 ```json
@@ -198,7 +198,7 @@ regardless of the preference file, for comprehensive runs. If the preferred
 device isn't found on the LAN, the script logs that and falls back to full
 fan-out rather than silently doing nothing.
 
-`scripts/tv_e2e_suite.sh` reads this exact same config file and follows the
+`scripts/tests/tv_e2e_suite.sh` reads this exact same config file and follows the
 identical precedence (see its own "Fan-out discovery" section in
 `swarm-closed-loop-tv-testing`) — set the preferred device once and both
 suites default to it.
@@ -206,14 +206,14 @@ suites default to it.
 ## Invocation
 
 ```
-./scripts/tv_uat_suite.sh                        # preferred device if configured, else full fan-out
-./scripts/tv_uat_suite.sh --all                   # force full fan-out
-./scripts/tv_uat_suite.sh --device 192.168.0.148  # one specific device, by IP or device_name
-./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest             # one scenario class
-./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike    # one scenario method
-./scripts/tv_uat_suite.sh --no-issue              # skip filing to GitHub
-./scripts/tv_uat_suite.sh --skip-install          # smoke-test an already-installed build
-./scripts/tv_uat_resilience_suite.sh --device 192.168.0.148 --no-issue
+./scripts/tests/tv_uat_suite.sh                        # preferred device if configured, else full fan-out
+./scripts/tests/tv_uat_suite.sh --all                   # force full fan-out
+./scripts/tests/tv_uat_suite.sh --device 192.168.0.148  # one specific device, by IP or device_name
+./scripts/tests/tv_uat_suite.sh --test BrowseCatalogUatTest             # one scenario class
+./scripts/tests/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike    # one scenario method
+./scripts/tests/tv_uat_suite.sh --no-issue              # skip filing to GitHub
+./scripts/tests/tv_uat_suite.sh --skip-install          # smoke-test an already-installed build
+./scripts/tests/tv_uat_resilience_suite.sh --device 192.168.0.148 --no-issue
 ```
 
 Nothing here calls an LLM at run time — a human, a CI runner (once a

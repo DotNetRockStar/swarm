@@ -14,7 +14,7 @@ logic.** None of them is touched by editing another.
 
 ```bash
 ./scripts/run_now.sh                        # 1. start the local media server (if not already running — separate terminal, this blocks)
-./scripts/full_uat_suite.sh --github-issue  # 2. runs the three suites below in order, one consolidated report/issue
+./scripts/tests/full_uat_suite.sh --github-issue  # 2. runs the three suites below in order, one consolidated report/issue
 ```
 
 `full_uat_suite.sh` is the one-command entry point. It runs, in order:
@@ -29,13 +29,13 @@ suite always runs with its own issue-filing suppressed). A clean run with
 nothing. Exit code `0` only if nothing failed anywhere.
 
 ```bash
-./scripts/full_uat_suite.sh                       # local-only, no issue filed regardless of result
-./scripts/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
-./scripts/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
-./scripts/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
-./scripts/full_uat_suite.sh --include-resilience  # also run the opt-in disruptive resilience suite
-./scripts/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
-./scripts/full_uat_suite.sh --all                   # forwarded to both hardware suites: force full fan-out
+./scripts/tests/full_uat_suite.sh                       # local-only, no issue filed regardless of result
+./scripts/tests/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
+./scripts/tests/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
+./scripts/tests/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
+./scripts/tests/full_uat_suite.sh --include-resilience  # also run the opt-in disruptive resilience suite
+./scripts/tests/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
+./scripts/tests/full_uat_suite.sh --all                   # forwarded to both hardware suites: force full fan-out
 ```
 
 The two hardware suites still can't run **at the same time as each other**
@@ -58,7 +58,7 @@ Fast local iteration on one scenario while developing (run the suite
 standalone rather than through the orchestrator):
 
 ```bash
-./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest
+./scripts/tests/tv_uat_suite.sh --test BrowseCatalogUatTest
 ```
 
 ### What to expect
@@ -133,14 +133,14 @@ hardware suites.
 
 ## Preferring one device for local runs
 
-Both suites share one config file, `scripts/tv_test_device.local.json`
+Both suites share one config file, `scripts/tests/tv_test_device.local.json`
 (gitignored — not committed) — set it once and both default to that device:
 
 ```json
 { "preferred_device_name": "Michael's 4th TV" }
 ```
 
-Copy `scripts/tv_test_device.local.json.example` to get started. The name is
+Copy `scripts/tests/tv_test_device.local.json.example` to get started. The name is
 matched against the TV's own `settings get global device_name`. Local runs
 should set this once and get fast, single-device iteration by default; use
 `--all` on either suite to force full fan-out (e.g. for a pre-release
@@ -151,10 +151,10 @@ fan-out rather than silently doing nothing.
 Override for a single run without touching the config file, on either suite:
 
 ```bash
-./scripts/tv_e2e_suite.sh --device 192.168.0.148
-./scripts/tv_e2e_suite.sh --device "Living Room TV"
-./scripts/tv_uat_suite.sh --device 192.168.0.148
-./scripts/tv_uat_suite.sh --device "Living Room TV"
+./scripts/tests/tv_e2e_suite.sh --device 192.168.0.148
+./scripts/tests/tv_e2e_suite.sh --device "Living Room TV"
+./scripts/tests/tv_uat_suite.sh --device 192.168.0.148
+./scripts/tests/tv_uat_suite.sh --device "Living Room TV"
 ```
 
 Device-targeting precedence is the same on both: explicit `--device` (or, on
@@ -184,8 +184,8 @@ separate opt-in journey. They close real client connections but never start,
 stop, or mutate the GUI-owned server:
 
 ```bash
-./scripts/tv_uat_resilience_suite.sh
-./scripts/tv_uat_resilience_suite.sh --device 192.168.0.148
+./scripts/tests/tv_uat_resilience_suite.sh
+./scripts/tests/tv_uat_resilience_suite.sh --device 192.168.0.148
 ```
 
 Full detail on each scenario, known deviations from earlier scenario
@@ -235,36 +235,36 @@ needed to debug without touching real hardware again:
 
 ```bash
 # tv_e2e_suite.sh
-./scripts/tv_e2e_suite.sh                    # preferred device if configured, else full fan-out
-./scripts/tv_e2e_suite.sh --all              # force full fan-out
-./scripts/tv_e2e_suite.sh --device 192.168.0.148   # one device, by IP or device_name
-./scripts/tv_e2e_suite.sh 192.168.0.148      # same, positional form (backward compatible)
-./scripts/tv_e2e_suite.sh --no-issue         # skip filing a GitHub issue
-./scripts/tv_e2e_suite.sh --skip-install     # smoke-test an already-installed build
+./scripts/tests/tv_e2e_suite.sh                    # preferred device if configured, else full fan-out
+./scripts/tests/tv_e2e_suite.sh --all              # force full fan-out
+./scripts/tests/tv_e2e_suite.sh --device 192.168.0.148   # one device, by IP or device_name
+./scripts/tests/tv_e2e_suite.sh 192.168.0.148      # same, positional form (backward compatible)
+./scripts/tests/tv_e2e_suite.sh --no-issue         # skip filing a GitHub issue
+./scripts/tests/tv_e2e_suite.sh --skip-install     # smoke-test an already-installed build
 
 # tv_uat_suite.sh
-./scripts/tv_uat_suite.sh                        # preferred device if configured, else full fan-out
-./scripts/tv_uat_suite.sh --all                  # force full fan-out
-./scripts/tv_uat_suite.sh --device 192.168.0.148 # one device, by IP or device_name
-./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest            # one scenario class
-./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # one scenario method
-./scripts/tv_uat_suite.sh --github-issue          # opt in to filing findings on GitHub
-./scripts/tv_uat_suite.sh --no-issue              # explicit local-only mode (the default)
-./scripts/tv_uat_suite.sh --skip-install         # smoke-test an already-installed build
+./scripts/tests/tv_uat_suite.sh                        # preferred device if configured, else full fan-out
+./scripts/tests/tv_uat_suite.sh --all                  # force full fan-out
+./scripts/tests/tv_uat_suite.sh --device 192.168.0.148 # one device, by IP or device_name
+./scripts/tests/tv_uat_suite.sh --test BrowseCatalogUatTest            # one scenario class
+./scripts/tests/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # one scenario method
+./scripts/tests/tv_uat_suite.sh --github-issue          # opt in to filing findings on GitHub
+./scripts/tests/tv_uat_suite.sh --no-issue              # explicit local-only mode (the default)
+./scripts/tests/tv_uat_suite.sh --skip-install         # smoke-test an already-installed build
 
 # media_server_uat_tests.sh
-./scripts/media_server_uat_tests.sh              # run every backend UAT test
-./scripts/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
+./scripts/tests/media_server_uat_tests.sh              # run every backend UAT test
+./scripts/tests/media_server_uat_tests.sh media_root    # run only tests whose name contains this substring
 
 # full_uat_suite.sh (orchestrator — runs all three suites above, in order)
-./scripts/full_uat_suite.sh                       # local-only report, no issue filed regardless of result
-./scripts/full_uat_suite.sh --github-issue        # file one consolidated issue if TOTAL_FAIL > 0
-./scripts/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
-./scripts/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
-./scripts/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
-./scripts/full_uat_suite.sh --include-resilience  # also run tv_uat_resilience_suite.sh
-./scripts/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
-./scripts/full_uat_suite.sh --all                   # forwarded to both hardware suites
+./scripts/tests/full_uat_suite.sh                       # local-only report, no issue filed regardless of result
+./scripts/tests/full_uat_suite.sh --github-issue        # file one consolidated issue if TOTAL_FAIL > 0
+./scripts/tests/full_uat_suite.sh --skip-backend        # skip media_server_uat_tests.sh
+./scripts/tests/full_uat_suite.sh --skip-e2e            # skip tv_e2e_suite.sh
+./scripts/tests/full_uat_suite.sh --skip-uat            # skip tv_uat_suite.sh
+./scripts/tests/full_uat_suite.sh --include-resilience  # also run tv_uat_resilience_suite.sh
+./scripts/tests/full_uat_suite.sh --device 192.168.0.148  # forwarded to both hardware suites
+./scripts/tests/full_uat_suite.sh --all                   # forwarded to both hardware suites
 ```
 
 Every suite here is a plain deterministic script — a human, a CI runner

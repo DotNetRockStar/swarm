@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SUITE="$REPO_ROOT/scripts/tv_uat_suite.sh"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SUITE="$REPO_ROOT/scripts/tests/tv_uat_suite.sh"
 
 bash -n "$SUITE"
 grep -q '^POST_GITHUB_ISSUE=0$' "$SUITE"

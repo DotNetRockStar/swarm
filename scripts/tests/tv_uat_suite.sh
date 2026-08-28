@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# See scripts/TV_TESTING.md for the TL;DR on running this suite alongside
-# scripts/tv_e2e_suite.sh (they must not run at the same time — both point
+# See scripts/tests/TV_TESTING.md for the TL;DR on running this suite alongside
+# scripts/tests/tv_e2e_suite.sh (they must not run at the same time — both point
 # at one shared testing-mode control file the already-running server was
 # configured with at startup), and what a completed run looks like.
 #
 # UAT / integration suite: drives the real Fire TV UI (browse, detail, like,
 # watchlist, report-a-problem, playback, music) against the real local media
 # server, cross-checking real SQLite state on both sides where such state
-# exists. This is a SEPARATE, newer suite from scripts/tv_e2e_suite.sh (which
+# exists. This is a SEPARATE, newer suite from scripts/tests/tv_e2e_suite.sh (which
 # stays log-evidence-only, no UI navigation, and is untouched by this file).
 # Both suites' test logic, thresholds, and fan-out/evidence behavior are
 # frozen by explicit user policy — see swarm-e2e-suite-lockdown (skill). Do
@@ -22,14 +22,14 @@
 # uses the same debug-only testing-mode mechanism tv_e2e_suite.sh uses.
 #
 # Usage:
-#   ./scripts/tv_uat_suite.sh                        # preferred device (scripts/tv_test_device.local.json) if configured, else full LAN fan-out
-#   ./scripts/tv_uat_suite.sh --all                   # force full fan-out across every discovered Fire TV, ignoring the preferred-device config
-#   ./scripts/tv_uat_suite.sh --device 192.168.0.148  # test only this device (IP or adb device_name)
-#   ./scripts/tv_uat_suite.sh --test BrowseCatalogUatTest            # run one scenario class
-#   ./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # run one scenario method
-#   ./scripts/tv_uat_suite.sh --github-issue           # opt in to filing a GitHub issue when failures occur
-#   ./scripts/tv_uat_suite.sh --no-issue               # explicit local-only mode (the default; retained for compatibility)
-#   ./scripts/tv_uat_suite.sh --skip-install          # smoke-test whatever build is already installed; no rebuild/reinstall
+#   ./scripts/tests/tv_uat_suite.sh                        # preferred device (scripts/tests/tv_test_device.local.json) if configured, else full LAN fan-out
+#   ./scripts/tests/tv_uat_suite.sh --all                   # force full fan-out across every discovered Fire TV, ignoring the preferred-device config
+#   ./scripts/tests/tv_uat_suite.sh --device 192.168.0.148  # test only this device (IP or adb device_name)
+#   ./scripts/tests/tv_uat_suite.sh --test BrowseCatalogUatTest            # run one scenario class
+#   ./scripts/tests/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike   # run one scenario method
+#   ./scripts/tests/tv_uat_suite.sh --github-issue           # opt in to filing a GitHub issue when failures occur
+#   ./scripts/tests/tv_uat_suite.sh --no-issue               # explicit local-only mode (the default; retained for compatibility)
+#   ./scripts/tests/tv_uat_suite.sh --skip-install          # smoke-test whatever build is already installed; no rebuild/reinstall
 #
 # Env vars:
 #   SWARM_STUN_PORT          local rendezvous HTTP port to health-check (default 8080)
@@ -45,7 +45,7 @@
 #   SWARM_RUN_DIR            shared local run directory (default .run)
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
@@ -63,7 +63,7 @@ GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 ISSUE_LABEL="${SWARM_E2E_ISSUE_LABEL:-Testing}"
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
 TV_E2E_CONTROL_FILE="$RUN_DIR/tv-e2e-control.json"
-PREFERRED_DEVICE_FILE="scripts/tv_test_device.local.json"
+PREFERRED_DEVICE_FILE="scripts/tests/tv_test_device.local.json"
 
 # Same directory the real macOS Tauri app_data_dir() resolves to for
 # app.swarm.server (see apps/server/src/gui.rs) — override if your server
@@ -485,7 +485,7 @@ SKIP_COUNT="$(awk -F'\t' '$4=="SKIP"' "$RESULTS_TSV" 2>/dev/null | wc -l | tr -d
 {
     echo "# TV UAT suite — $RUN_STAMP"
     echo
-    echo "Local media server + \`${#SERIALS[@]}\` real Amazon Fire TV(s) on the LAN, exercised by \`scripts/tv_uat_suite.sh\` against commit \`$COMMIT\`."
+    echo "Local media server + \`${#SERIALS[@]}\` real Amazon Fire TV(s) on the LAN, exercised by \`scripts/tests/tv_uat_suite.sh\` against commit \`$COMMIT\`."
     echo
     echo "**PASS: $PASS_COUNT   FAIL: $FAIL_COUNT   SKIP: $SKIP_COUNT**"
     echo
@@ -501,7 +501,7 @@ SKIP_COUNT="$(awk -F'\t' '$4=="SKIP"' "$RESULTS_TSV" 2>/dev/null | wc -l | tr -d
     echo "Full per-test evidence bundles (logcat, screenshots, hierarchy dumps, TV + server SQLite state, server log tail) are kept locally under \`.run/tv-uat-reports/$RUN_STAMP/<device>/<test>/\` for every FAIL (not committed)."
     echo
     echo "---"
-    echo "_This suite's test logic, thresholds, and evidence collection are frozen by policy — see the \`swarm-e2e-suite-lockdown\` skill. An AI agent picking up a follow-up on this issue should fix the underlying product bug behind any FAIL above (evidence bundle has the full UI-to-server trace), not edit \`scripts/tv_uat_suite.sh\` or the \`uat\` test sources to make it pass._"
+    echo "_This suite's test logic, thresholds, and evidence collection are frozen by policy — see the \`swarm-e2e-suite-lockdown\` skill. An AI agent picking up a follow-up on this issue should fix the underlying product bug behind any FAIL above (evidence bundle has the full UI-to-server trace), not edit \`scripts/tests/tv_uat_suite.sh\` or the \`uat\` test sources to make it pass._"
 } > "$REPORT_DIR/report.md"
 
 echo
