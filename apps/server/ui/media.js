@@ -649,7 +649,12 @@ async function populateAssetChecklist(entry) {
   const isTrack = entry.kind === "track";
   const isEpisode = entry.kind === "episode";
   const items = [];
-  const add = (label, present) => items.push({ label, present: Boolean(present) });
+  // Most rows are a simple have/missing. A few (currently just TheIntroDB
+  // skip markers) have a third "na" state: the source was checked and simply
+  // has nothing for this asset, which is not a gap in the local library, so
+  // those rows are excluded from the "N of M present" denominator.
+  const add = (label, present) => items.push({ label, state: present ? "have" : "missing" });
+  const addTriState = (label, state) => items.push({ label, state });
 
   add("Title", entry.scraped_title);
   if (!isTrack) {
@@ -670,15 +675,28 @@ async function populateAssetChecklist(entry) {
     if (isEpisode) add("Season poster", artwork.has("season"));
     add("Backdrop", artwork.has("backdrop"));
     add("Subtitles", (detail.subtitle_languages || []).length);
+    // TheIntroDB intro/recap/credits skip markers, cached by the scraper
+    // after a TMDb match (issue #124). Three outcomes: not scraped yet,
+    // scraped with markers, or scraped but TheIntroDB published nothing.
+    if (!detail.introdb_checked) {
+      addTriState("TheIntroDB skip markers", "missing");
+    } else if (detail.introdb_segment_count > 0) {
+      addTriState(`TheIntroDB skip markers (${detail.introdb_segment_count})`, "have");
+    } else {
+      addTriState("TheIntroDB skip markers — none published", "na");
+    }
   }
 
-  const have = items.filter(item => item.present).length;
+  const scorable = items.filter(item => item.state !== "na");
+  const have = scorable.filter(item => item.state === "have").length;
+  const icon = { have: "bi-check-circle-fill", missing: "bi-circle", na: "bi-dash-circle" };
+  const cls = { have: "checklist-have", missing: "checklist-missing", na: "checklist-na" };
   container.innerHTML = `
-    <h2><i class="bi bi-check2-square"></i>Metadata &amp; artwork <span class="muted">(${have} of ${items.length} present)</span></h2>
+    <h2><i class="bi bi-check2-square"></i>Metadata &amp; artwork <span class="muted">(${have} of ${scorable.length} present)</span></h2>
     <ul class="asset-checklist-list">
       ${items.map(item => `
-        <li class="${item.present ? "checklist-have" : "checklist-missing"}">
-          <i class="bi ${item.present ? "bi-check-circle-fill" : "bi-circle"}"></i>${esc(item.label)}
+        <li class="${cls[item.state]}">
+          <i class="bi ${icon[item.state]}"></i>${esc(item.label)}
         </li>`).join("")}
     </ul>`;
 }
