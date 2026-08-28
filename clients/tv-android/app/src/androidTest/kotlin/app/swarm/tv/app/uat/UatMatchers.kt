@@ -59,15 +59,24 @@ fun ComposeTestRule.firstTagStartingWith(prefix: String): String? = allTagsStart
 fun ComposeTestRule.focusedTagStartingWith(prefix: String): String? =
     allSemanticsNodes().firstOrNull { it.isFocused() && it.testTagOrNull()?.startsWith(prefix) == true }?.testTagOrNull()
 
+/** The exact tag currently owning TV focus, or null when focus is between nodes. */
+fun ComposeTestRule.focusedTag(): String? =
+    allSemanticsNodes().firstOrNull { it.isFocused() }?.testTagOrNull()
+
 /** How many currently-rendered nodes have a tag starting with [prefix]. */
 fun ComposeTestRule.countNodesWithTagPrefix(prefix: String): Int = allTagsStartingWith(prefix).size
 
 /** How many distinct matching tags are rendered beneath the exact tagged parent. */
 fun ComposeTestRule.countDescendantNodesWithTagPrefix(parentTag: String, prefix: String): Int {
-    val parent = allSemanticsNodes().firstOrNull { it.testTagOrNull() == parentTag } ?: return 0
+    return descendantTagsStartingWith(parentTag, prefix).size
+}
+
+/** Distinct matching tags beneath the exact tagged parent, in semantics traversal order. */
+fun ComposeTestRule.descendantTagsStartingWith(parentTag: String, prefix: String): List<String> {
+    val parent = allSemanticsNodes().firstOrNull { it.testTagOrNull() == parentTag } ?: return emptyList()
     val descendants = mutableListOf<SemanticsNode>()
     parent.children.forEach { collectNodes(it, descendants) }
-    return descendants.mapNotNull { it.testTagOrNull() }.filter { it.startsWith(prefix) }.distinct().size
+    return descendants.mapNotNull { it.testTagOrNull() }.filter { it.startsWith(prefix) }.distinct()
 }
 
 /**
@@ -100,4 +109,19 @@ fun ComposeTestRule.textUnderTag(tag: String): String = try {
     pieces.joinToString(" ")
 } catch (e: IllegalStateException) {
     ""
+}
+
+/** All accessibility descriptions beneath [tag], useful for artwork-backed cards whose visible title is merged into the image. */
+fun ComposeTestRule.contentDescriptionsUnderTag(tag: String): List<String> = try {
+    val root = onNodeWithTag(tag, useUnmergedTree = true).fetchSemanticsNode()
+    val pieces = mutableListOf<String>()
+    fun collect(node: SemanticsNode) {
+        (node.config.firstOrNull { it.key == SemanticsProperties.ContentDescription }?.value as? List<*>)
+            ?.forEach { pieces.add(it.toString()) }
+        node.children.forEach { collect(it) }
+    }
+    collect(root)
+    pieces
+} catch (e: IllegalStateException) {
+    emptyList()
 }

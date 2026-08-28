@@ -365,6 +365,10 @@ class SwarmViewModel(
 
     private val _browsePreview = MutableStateFlow<BrowsePreview?>(null)
     val browsePreview: StateFlow<BrowsePreview?> = _browsePreview.asStateFlow()
+    private val _lastReleasedPlaybackSession = MutableStateFlow<String?>(null)
+    val lastReleasedPlaybackSession: StateFlow<String?> = _lastReleasedPlaybackSession.asStateFlow()
+    private val _transportRecoveryGeneration = MutableStateFlow(0L)
+    val transportRecoveryGeneration: StateFlow<Long> = _transportRecoveryGeneration.asStateFlow()
     private var requestedBrowsePreview: MergedEntry? = null
     private var browsePreviewWorker: Job? = null
     private var browsePreviewReleaseJob: Job? = null
@@ -1906,6 +1910,46 @@ class SwarmViewModel(
         )
     }
 
+    /** Debug-UAT hook: exercise the real seek/re-negotiation path close enough to the end for completion UI to occur promptly. */
+    fun seekPlaybackNearEndForUat() {
+        if (!testingModeAvailable || _testingMode.value == null) return
+        val duration = (activePlayerSession()?.mediaDurationSecs ?: return).takeIf { it.isFinite() && it > 4.0 } ?: return
+        seekPlayback(duration - 3.0)
+    }
+
+    /**
+     * Debug-UAT resilience hook. It closes the actual catalog transports,
+     * republishes the dashboard transition, then performs the same real
+     * catalog open/refresh used after a normal reconnect. It never stops or
+     * mutates the server and is ignored outside an active debug test mode.
+     */
+    fun dropAndRecoverTransportForUat() {
+        if (!testingModeAvailable || _testingMode.value == null) return
+        val current = _state.value
+        val catalog = when (current) {
+            is UiState.Player -> current.previous.embeddedCatalog()
+            else -> current.embeddedCatalog()
+        } ?: return
+        viewModelScope.launch {
+            if (current is UiState.Player && !current.sessionReleased) {
+                runCatching { releasePlaybackSessionNow(catalog, current.serverId, current.sessionId) }
+            }
+            catalog.devices.forEach { catalogSession.disconnect(it.deviceId) }
+            val dashboard = UiState.Dashboard(catalog.swarm, catalog.dashboardDevices)
+            _state.value = dashboard
+            openCatalog(dashboard)
+            val deadline = SystemClock.elapsedRealtime() + CATALOG_LOAD_TIMEOUT_MS + 5_000
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val recovered = _state.value as? UiState.Catalog
+                if (recovered != null && !recovered.loading && recovered.entries.isNotEmpty()) {
+                    _transportRecoveryGeneration.value += 1
+                    return@launch
+                }
+                delay(100)
+            }
+        }
+    }
+
     /** Whichever [UiState.Player] is actually live right now — the full screen's own state, or a session still playing in the background after [minimizePlayback]. At most one is ever non-null. */
     private fun activePlayerSession(): UiState.Player? = (_state.value as? UiState.Player) ?: _minimizedPlayer.value
 
@@ -1978,6 +2022,7 @@ class SwarmViewModel(
         withContext(Dispatchers.IO) {
             catalogSession.stopPlayback(device, sessionId, clientCertificate, clientKey)
         }
+        _lastReleasedPlaybackSession.value = sessionId
     }
 
     /**

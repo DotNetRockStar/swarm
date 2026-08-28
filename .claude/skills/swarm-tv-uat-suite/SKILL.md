@@ -1,6 +1,6 @@
 ---
 name: swarm-tv-uat-suite
-description: Use when running, extending, or explaining scripts/tv_uat_suite.sh — the UI-driving UAT/integration suite that navigates the real Fire TV app (browse, detail, like/watchlist/report-a-problem, playback, music) against the real local media server, cross-checking real SQLite state, and produces a full UI-to-server evidence bundle on any failure. This is the second, larger closed-loop suite alongside scripts/tv_e2e_suite.sh (see swarm-closed-loop-tv-testing) — read swarm-e2e-suite-lockdown before editing test logic in either.
+description: Use when creating, running, extending, debugging, or explaining Fire TV UAT tests and scripts/tv_uat_suite.sh — the real-D-pad suite against the real local media server. Covers stable Compose tags, bounded synchronization, fresh-process persistence tests, state cleanup, capability-aware media selection, debug-only test hooks, failure evidence, and focused/full real-device verification. Read swarm-e2e-suite-lockdown before editing test logic.
 ---
 
 # TV UAT suite: real UI navigation against the real media server
@@ -50,11 +50,96 @@ that specified it.
 | `ShowPlaybackPauseUatTest` | 13 | Same pause-overlay checks for an episode, plus the Next Episode button (present and functional — unlike the movie case) |
 | `ShowSeasonsEpisodesWatchlistUatTest` | 14 | Season list with box art/episode counts, watchlist round-trip on a show, episode grid sequencing and non-duplication |
 | `MusicPlaybackUatTest` | 15 | Artist → album → track browsing, per-track like round-trip through the filter, shuffle/skip/pause/resume, mini-player reopen/close |
+| `NavigationSearchPersistenceUatTest` | Navigation/search/persistence | Pure remote navigation and focus restoration; search, empty results, clear, combined filters, Browse All ordering; likes/watchlist surviving a fresh Activity and ViewModel |
+| `ContinuePlaybackLifecycleUatTest` | Playback lifecycle | Continue Watching save/resume/completion removal, persisted restoration, server release acknowledgement, audio/subtitle choice, browse-preview movement and preview-to-play |
+| `KidModeUatTest` | Kid Mode | PIN setup, content-kind gating, wrong/correct PIN behavior, disabling Kid Mode, and persistence across a fresh Activity and ViewModel |
+| `EndOfMediaUatTest` | End of media | Continue-overlay Play Now/Cancel behavior and automatic music-track advance at end of media |
+| `ResilienceUatTest` | Resilience (opt-in) | Catalog and playback transport interruption/recovery; kept out of the default deterministic suite and run by `scripts/tv_uat_resilience_suite.sh` |
 
-**Suggested additional coverage**, added under the same explicit-request
-rule as everything else here once the user asks for a specific one: repeated
-Back-button navigation-stack integrity from a deep screen, kid-mode content
-gating, combined filters, notification badge-count accuracy.
+The canonical, current scenario matrix is in `scripts/TV_TESTING.md`; update
+that matrix whenever the user explicitly authorizes adding a scenario.
+
+## Baseline for writing reliable TV UAT tests
+
+Use these rules for every new scenario. They encode failures already found on
+real Fire TV hardware, not optional style preferences.
+
+1. **Activate with real remote input.** Discover and assert elements through
+   Compose semantics/test tags, but invoke user actions with actual D-pad
+   directions and D-pad Center. Do not replace activation with `performClick`.
+   A scenario specifically proving remote focus traversal must not use
+   `RequestFocus`; other scenarios may use it only to establish a deterministic
+   starting point before sending real D-pad input.
+2. **Never wait for global UI idleness.** Testing mode has a visible countdown,
+   so UIAutomator's default `waitForIdle` can consume the whole test without
+   ever considering the app idle. Keep the configurator idle timeout bounded
+   (currently 250 ms), send the key immediately, then wait for a named state:
+   a tag appears/disappears, focus changes, a persisted value changes, or a
+   server checkpoint is observed. Prefer condition polling over sleeps.
+3. **Give startup its own budget.** The real desktop server, discovery, TLS,
+   catalog negotiation, and image population are asynchronous. Use the shared
+   `waitForCatalogReady` helper and its 45-second catalog budget instead of
+   copying shorter arbitrary delays into individual tests. The host suite keeps
+   its testing authorization token renewed for the duration of the run; the
+   app's individual testing-mode activation remains limited to ten minutes.
+4. **Tag behavior, not prose or coordinates.** Put additive tags in
+   `UatTestTags.kt`. Use stable exact tags for singleton controls and stable
+   prefixes plus real IDs for repeated/dynamic content. Copy changes and screen
+   density must not break a scenario. Use visible text only when the text itself
+   is the requirement.
+5. **Select fixtures by capability.** The suite runs against the user's real,
+   changing library. Do not hardcode a title, season, album, language, or row
+   position when the assertion needs a capability. Inspect candidates and pick
+   one that actually has subtitles, multiple audio tracks, a next episode, or
+   another required property. Record the selected stable ID in tags/evidence.
+6. **Make reruns non-destructive.** Snapshot pre-existing likes, watchlist,
+   watch progress, Kid Mode, notifications, and similar persistent state before
+   mutation. Restore exactly that state in `finally`/teardown, whether the test
+   passes or fails. Tests must tolerate pre-existing Continue items and reports;
+   identify the row created by this run rather than assuming the newest-looking
+   UI item belongs to it.
+7. **Use a genuinely fresh owner for persistence.** `scenario.recreate()` may
+   retain process-scoped objects and is insufficient proof of store hydration.
+   Use `restartActivityAndWaitForCatalog`, which closes the old scenario and
+   launches a fresh Activity/ViewModel, then assert the UI and backing store.
+8. **Keep hooks product-safe.** When end-of-media or transport recovery cannot
+   be reached deterministically in reasonable time, add the smallest explicit
+   hook. It must be gated by both `BuildConfig.DEBUG` and active testing mode,
+   expose an observable completion marker, and leave release behavior unchanged.
+   Never make the assertion weaker to accommodate the hook.
+9. **Assert the real contract at every layer that matters.** UI state alone is
+   insufficient for persistence/report/release cases. Cross-check the TV store,
+   server SQLite/log checkpoint, or release acknowledgement as applicable. Do
+   not remove evidence or loosen a threshold to turn a failure green.
+10. **Keep deterministic and disruptive coverage separate.** Stable scenarios
+    belong in `tv_uat_suite.sh`. Transport-drop, reconnection, and other
+    environment-sensitive scenarios run through the opt-in resilience wrapper
+    unless the user explicitly changes that contract.
+
+The test-rule order is intentional: Compose rule outermost, Activity scenario
+inside it, and failure capture inside the scenario lifecycle. This lets failure
+capture see the live semantics tree while still guaranteeing cleanup. Reuse
+`UatTestBase` navigation/wait/restart helpers and `UatMatchers` before inventing
+local variants.
+
+## Creating or changing a scenario
+
+First read `swarm-e2e-suite-lockdown`. A failing test is not permission to
+change its assertion; only a user's explicit request in the current
+conversation changes the frozen scenario contract. Then:
+
+1. State the user-visible behavior and the independent evidence proving it.
+2. Add stable product tags or a narrowly gated debug hook if observability is
+   missing.
+3. Add the instrumented scenario under the existing `uat` package and register
+   deterministic classes in `ALL_TEST_CLASSES`. Put disruptive coverage in the
+   resilience wrapper.
+4. Document the scenario in `scripts/TV_TESTING.md`.
+5. Compile locally, run the single class/method on the preferred real TV, repeat
+   timing-sensitive coverage, and finally run the whole relevant suite.
+6. Inspect the evidence bundle for every failure before modifying code. Fix
+   product behavior or genuine orchestration/synchronization defects; preserve
+   the scenario's intended assertions.
 
 ## Known deviations from the literal scenario wording (confirmed with the user)
 
@@ -128,6 +213,7 @@ suites default to it.
 ./scripts/tv_uat_suite.sh --test MusicPlaybackUatTest#testLike    # one scenario method
 ./scripts/tv_uat_suite.sh --no-issue              # skip filing to GitHub
 ./scripts/tv_uat_suite.sh --skip-install          # smoke-test an already-installed build
+./scripts/tv_uat_resilience_suite.sh --device 192.168.0.148 --no-issue
 ```
 
 Nothing here calls an LLM at run time — a human, a CI runner (once a
@@ -165,3 +251,6 @@ bundle should be enough on its own, per the user's explicit requirement.
   this suite never starts, stops, or restarts it.
 - First-time D-pad pairing is never driven by this suite either — it uses
   the same debug-only testing-mode token mechanism as the original suite.
+- The issue-worker cron requires a clean worktree. After verification, commit
+  the authorized suite/test/product changes together with a message explaining
+  the behavior and evidence; do not leave validated UAT work uncommitted.

@@ -606,7 +606,12 @@ internal fun CatalogScreen(
                     if (movies.isEmpty() && shows.isEmpty() && artists.isEmpty()) {
                         Column {
                             catalogControls(null)
-                            Text("No matches for the current search/filter.", color = SwarmMuted, fontSize = 14.sp)
+                            Text(
+                                "No matches for the current search/filter.",
+                                color = SwarmMuted,
+                                fontSize = 14.sp,
+                                modifier = Modifier.testTag(UatTestTags.SEARCH_NO_MATCHES),
+                            )
                         }
                     } else {
                         // Which top-level row gets *default* (first-card)
@@ -925,7 +930,8 @@ private fun CatalogControls(
                 onSubmit = onSubmitSearch,
                 modifier = Modifier.weight(1f)
                     .focusRequester(searchFocusRequester)
-                    .onFocusChanged { onSearchFocusChanged(it.isFocused) },
+                    .onFocusChanged { onSearchFocusChanged(it.isFocused) }
+                    .testTag(UatTestTags.SEARCH_FIELD),
             )
             Button(
                 onClick = onOpenSwarm,
@@ -943,6 +949,7 @@ private fun CatalogControls(
                 Button(
                     onClick = onClear,
                     colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.SEARCH_CLEAR_BUTTON),
                 ) {
                     Text("Clear", fontSize = 13.sp)
                 }
@@ -1391,12 +1398,12 @@ private fun ShelfHeader(label: String, fontSize: TextUnit) {
  * — replaces the old header-level "Browse all" button with an in-row tile,
  * matching the same poster-sized footprint as every other card in the row. */
 @Composable
-private fun BrowseAllTile(onClick: () -> Unit) {
+private fun BrowseAllTile(onClick: () -> Unit, testTag: String) {
     Card(
         onClick = onClick,
         colors = CardDefaults.colors(containerColor = SwarmSurfaceMuted),
         scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-        modifier = Modifier.width(CARD_WIDTH),
+        modifier = Modifier.width(CARD_WIDTH).testTag(testTag),
     ) {
         Box(
             modifier = Modifier.fillMaxWidth().height(CARD_MEDIA_HEIGHT).clip(RoundedCornerShape(4.dp)),
@@ -1579,7 +1586,7 @@ private fun MovieRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenShelf(movies) })
+                    BrowseAllTile(onClick = { onOpenShelf(movies) }, testTag = UatTestTags.BROWSE_ALL_MOVIES)
                 }
             }
         }
@@ -1653,7 +1660,7 @@ private fun ShowShelfRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenShowShelf(shows) })
+                    BrowseAllTile(onClick = { onOpenShowShelf(shows) }, testTag = UatTestTags.BROWSE_ALL_SHOWS)
                 }
             }
         }
@@ -1731,7 +1738,7 @@ private fun ArtistShelfRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenArtistShelf(artists) })
+                    BrowseAllTile(onClick = { onOpenArtistShelf(artists) }, testTag = UatTestTags.BROWSE_ALL_MUSIC)
                 }
             }
         }

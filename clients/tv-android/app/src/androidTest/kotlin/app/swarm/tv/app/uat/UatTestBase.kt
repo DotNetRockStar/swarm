@@ -8,17 +8,21 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.rules.ActivityScenarioRule
+import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import app.swarm.tv.app.MainActivity
 import app.swarm.tv.app.data.AndroidLikedEntriesStore
+import app.swarm.tv.app.data.AndroidKidModeStore
 import app.swarm.tv.app.data.AndroidWatchStateStore
 import app.swarm.tv.app.data.AndroidWatchlistStore
 import app.swarm.tv.app.data.db.AppDatabase
 import app.swarm.tv.app.ui.UatTestTags
+import kotlinx.coroutines.runBlocking
 import org.junit.Before
+import org.junit.After
 import org.junit.Rule
 import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
@@ -65,6 +69,7 @@ abstract class UatTestBase {
      * currently resumed rather than launching one itself.
      */
     private val activityScenarioRule = ActivityScenarioRule<MainActivity>(launchIntent)
+    private var restartedScenario: ActivityScenario<MainActivity>? = null
 
     val composeTestRule = createEmptyComposeRule()
 
@@ -106,6 +111,9 @@ abstract class UatTestBase {
     protected val watchStateStore: AndroidWatchStateStore by lazy {
         AndroidWatchStateStore(InstrumentationRegistry.getInstrumentation().targetContext)
     }
+    protected val kidModeStore: AndroidKidModeStore by lazy {
+        AndroidKidModeStore(InstrumentationRegistry.getInstrumentation().targetContext)
+    }
 
     @Before
     fun waitForIdleBeforeEachTest() {
@@ -138,6 +146,73 @@ abstract class UatTestBase {
     protected fun pressDpadDown() = device.pressDPadDown()
     protected fun pressDpadLeft() = device.pressDPadLeft()
     protected fun pressDpadRight() = device.pressDPadRight()
+
+    protected fun withActivity(action: (MainActivity) -> Unit) {
+        (restartedScenario ?: activityScenarioRule.scenario).onActivity(action)
+    }
+
+    /** Closes the Activity and its ViewModelStore, then launches a genuinely fresh app Activity against persisted stores. */
+    protected fun restartActivityAndWaitForCatalog() {
+        restartedScenario?.close()
+        activityScenarioRule.scenario.close()
+        restartedScenario = ActivityScenario.launch(launchIntent)
+        waitForTag(UatTestTags.FILTER_RAIL, timeoutMs = 45_000)
+    }
+
+    @After
+    fun closeRestartedActivity() {
+        restartedScenario?.close()
+        restartedScenario = null
+    }
+
+    protected fun waitForTagGone(tag: String, timeoutMs: Long = 5_000) {
+        composeTestRule.waitUntil(timeoutMillis = timeoutMs) {
+            composeTestRule.allTagsStartingWith(tag).isEmpty()
+        }
+    }
+
+    /**
+     * Leaves real playback without assuming whether Back first pauses or the
+     * player has already transitioned to its origin screen. On a bare video
+     * surface Back intentionally opens the pause overlay; Back from that
+     * overlay performs the server-acknowledged release and exits.
+     */
+    protected fun exitPlaybackTo(targetTag: String, timeoutMs: Long = 15_000) {
+        pressBack()
+        composeTestRule.waitUntil(timeoutMillis = timeoutMs) {
+            composeTestRule.allTagsStartingWith(targetTag).isNotEmpty() ||
+                composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isNotEmpty()
+        }
+        if (composeTestRule.allTagsStartingWith(targetTag).isEmpty()) {
+            pressBack()
+        }
+        waitForTag(targetTag, timeoutMs)
+    }
+
+    /** Replaces every watch-state record with an exact pre-test snapshot. */
+    protected fun restoreWatchStates(snapshot: Map<String, app.swarm.tv.core.watch.WatchState>) {
+        runBlocking {
+            watchStateStore.all().keys.forEach { watchStateStore.clear(it) }
+            snapshot.forEach { (fingerprint, state) -> watchStateStore.set(fingerprint, state) }
+        }
+    }
+
+    /** Repeatedly sends one real remote direction until focus reaches [prefix]. */
+    protected fun navigateFocusUntilPrefix(
+        prefix: String,
+        timeoutMs: Long = 8_000,
+        press: () -> Unit,
+    ): String {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            composeTestRule.focusedTagStartingWith(prefix)?.let { return it }
+            press()
+            device.waitForIdle(250)
+        }
+        return requireNotNull(composeTestRule.focusedTagStartingWith(prefix)) {
+            "real D-pad focus never reached tag prefix $prefix"
+        }
+    }
 
     /**
      * Activates a tagged TV control through the same focus + D-pad Center

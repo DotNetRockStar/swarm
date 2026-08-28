@@ -28,12 +28,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.ShowGroup
 
@@ -82,7 +84,12 @@ fun ShowShelfScreen(
                 ) { index, show ->
                     val representative = show.seasons.firstOrNull()?.episodes?.firstOrNull()
                     val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
-                    Card(onClick = { onOpenShow(show) }, colors = CardDefaults.colors(containerColor = SwarmSurface), modifier = focusModifier.fillMaxWidth()) {
+                    Card(
+                        onClick = { onOpenShow(show) },
+                        colors = CardDefaults.colors(containerColor = SwarmSurface),
+                        modifier = focusModifier.fillMaxWidth()
+                            .testTag(UatTestTags.GRID_SHOW_PREFIX + show.show),
+                    ) {
                         ArtworkImage(
                             label = show.show,
                             placeholderType = "Show",

@@ -141,6 +141,19 @@ already-adb-connected Amazon device > full LAN scan fan-out.
 | `ShowPlaybackPauseUatTest` | Episode playback, pause overlay, Next Episode button |
 | `ShowSeasonsEpisodesWatchlistUatTest` | Season/episode structure, show watchlist round-trip |
 | `MusicPlaybackUatTest` | Artist → album → track browsing, per-track Like, shuffle/skip, mini-player |
+| `NavigationSearchPersistenceUatTest` | Pure D-pad traversal; focus/back-stack restoration; title search, no-results/clear, combined filters, alphabetical Browse All; Like/watchlist persistence across a fresh Activity |
+| `ContinuePlaybackLifecycleUatTest` | Continue Watching save/resume/completion removal; acknowledged server session release; audio/subtitle selection; moving browse previews and preview-to-play handoff |
+| `KidModeUatTest` | PIN setup/rejection, media-kind filtering, restart persistence, and disable/cleanup |
+| `EndOfMediaUatTest` | Episode Continue Play Now/Cancel and automatic next-track playback, using a debug testing-mode near-end seek to keep the real-player scenarios bounded |
+
+The deliberately disruptive client-transport drop/recovery checks remain a
+separate opt-in journey. They close real client connections but never start,
+stop, or mutate the GUI-owned server:
+
+```bash
+./scripts/tv_uat_resilience_suite.sh
+./scripts/tv_uat_resilience_suite.sh --device 192.168.0.148
+```
 
 Full detail on each scenario, known deviations from earlier scenario
 wording (e.g. "reviews" doesn't exist as a field — the pause overlay shows

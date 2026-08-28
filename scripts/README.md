@@ -18,5 +18,6 @@ To create or verify the Claude and Codex GitHub Apps through the local setup UI:
 
 Other scripts in this directory cover local server startup, Fire TV deployment,
 and logs. For closed-loop Fire TV testing (`tv_e2e_suite.sh` and
-`tv_uat_suite.sh`), see [`TV_TESTING.md`](TV_TESTING.md) — start there,
+`tv_uat_suite.sh`, and the opt-in `tv_uat_resilience_suite.sh`), see
+[`TV_TESTING.md`](TV_TESTING.md) — start there,
 including its TL;DR, before running or changing either suite.

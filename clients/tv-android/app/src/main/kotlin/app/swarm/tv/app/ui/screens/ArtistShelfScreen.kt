@@ -29,12 +29,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 
@@ -85,7 +87,8 @@ fun ArtistShelfScreen(
                     Card(
                         onClick = { onOpenArtist(artist) },
                         colors = CardDefaults.colors(containerColor = SwarmSurface),
-                        modifier = focusModifier.fillMaxWidth(),
+                        modifier = focusModifier.fillMaxWidth()
+                            .testTag(UatTestTags.GRID_ARTIST_PREFIX + artist.artist),
                     ) {
                         ArtworkImage(
                             label = artist.artist,

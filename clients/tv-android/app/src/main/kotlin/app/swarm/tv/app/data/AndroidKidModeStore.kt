@@ -120,6 +120,25 @@ class AndroidKidModeStore(context: Context) {
     }
 
     suspend fun disable() = withContext(Dispatchers.IO) { dao.clear() }
+
+    /** Restores an exact pre-test snapshot, including its existing salted PIN hash. */
+    internal suspend fun restoreSnapshotForTesting(settings: KidModeSettings?) = withContext(Dispatchers.IO) {
+        if (settings == null) {
+            dao.clear()
+        } else {
+            dao.upsert(
+                KidModeSettingsEntity(
+                    enabled = settings.enabled,
+                    pinHash = settings.pinHash,
+                    pinSalt = settings.pinSalt,
+                    allowedKinds = settings.allowedKinds.joinToString(",") { it.name },
+                    allowedGenres = settings.allowedGenres?.joinToString(","),
+                    maxMovieRating = settings.maxMovieRating,
+                    maxTvRating = settings.maxTvRating,
+                ),
+            )
+        }
+    }
 }
 
 private fun KidModeSettingsEntity.toDomain() = KidModeSettings(

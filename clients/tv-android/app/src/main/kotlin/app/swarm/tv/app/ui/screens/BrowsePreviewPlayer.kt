@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +34,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import app.swarm.tv.R
 import app.swarm.tv.app.PausePlayerWhenAppBackgrounded
 import app.swarm.tv.app.data.BrowsePreview
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
 import kotlinx.coroutines.delay
 
@@ -156,7 +158,12 @@ internal fun BrowsePreviewPlayer(
     // the card's own album-cover artwork underneath keep showing.
     if (!hasVideo) return
 
-    Box(modifier = modifier.background(Color.Black).focusProperties { canFocus = false }) {
+    Box(
+        modifier = modifier
+            .background(Color.Black)
+            .focusProperties { canFocus = false }
+            .testTag(UatTestTags.BROWSE_PREVIEW_PREFIX + preview.sessionId),
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize().focusProperties { canFocus = false },
             factory = { ctx ->

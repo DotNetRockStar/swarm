@@ -42,7 +42,9 @@ class ShowPlaybackPauseUatTest : UatTestBase() {
         // first frame; activate the established real focus directly.
         pressSelect() // episodes play immediately on D-pad Center
         device.waitForIdle(250)
-        waitForTag(UatTestTags.PLAYER_SURFACE)
+        // The real server may still be negotiating/transcoding while the app
+        // shows its loading state.
+        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
         focusTag(UatTestTags.PLAYER_SURFACE)
 
         Thread.sleep(30_000)
@@ -69,13 +71,19 @@ class ShowPlaybackPauseUatTest : UatTestBase() {
         composeTestRule.waitUntil(timeoutMillis = 10_000) {
             composeTestRule.allTagsStartingWith(UatTestTags.PAUSE_LABEL).isEmpty()
         }
-        waitForTag(UatTestTags.PLAYER_SURFACE)
+        // Promoting the preloaded next episode still has to finish real
+        // server negotiation/transcoding on slower Fire TV hardware.
+        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 20_000)
         focusTag(UatTestTags.PLAYER_SURFACE)
         Thread.sleep(2_000)
         pressSelect()
         waitForTag(UatTestTags.PAUSE_LABEL)
 
         pressBack()
+        // Stopping a real server playback session is asynchronous. Wait for
+        // the season grid to own the next Back press; sending both presses in
+        // the same frame can leave the second one on the releasing player.
+        composeTestRule.waitForTagPrefix(UatTestTags.EPISODE_ITEM_PREFIX, timeoutMs = 15_000)
         pressBack()
         waitForTag(UatTestTags.SHELF_SHOWS)
     }

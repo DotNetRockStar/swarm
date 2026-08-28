@@ -1321,6 +1321,7 @@ private fun PauseOverlay(
                         emptyLabel = "None reported",
                         onSelect = onSelectAudioTrack,
                         testTag = UatTestTags.PAUSE_AUDIO_TRACK_PICKER,
+                        optionTagPrefix = UatTestTags.PAUSE_AUDIO_OPTION_PREFIX,
                     )
                     Spacer(Modifier.height(18.dp))
                     TrackPickerBlock(
@@ -1329,6 +1330,7 @@ private fun PauseOverlay(
                         emptyLabel = "None available",
                         onSelect = onSelectSubtitleTrack,
                         testTag = UatTestTags.PAUSE_SUBTITLE_TRACK_PICKER,
+                        optionTagPrefix = UatTestTags.PAUSE_SUBTITLE_OPTION_PREFIX,
                     )
                 }
             }
@@ -1362,6 +1364,7 @@ private fun TrackPickerBlock(
     emptyLabel: String,
     onSelect: (TrackChoice) -> Unit,
     testTag: String? = null,
+    optionTagPrefix: String? = null,
 ) {
     Text(heading, color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     Spacer(Modifier.height(5.dp))
@@ -1370,6 +1373,7 @@ private fun TrackPickerBlock(
         return
     }
     FlowRow(
+        modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -1378,7 +1382,7 @@ private fun TrackPickerBlock(
                 choice.label,
                 isSelected = choice.isSelected,
                 onClick = { onSelect(choice) },
-                modifier = if (index == 0 && testTag != null) Modifier.testTag(testTag) else Modifier,
+                modifier = if (optionTagPrefix != null) Modifier.testTag(optionTagPrefix + index) else Modifier,
             )
         }
     }
@@ -1575,7 +1579,12 @@ private fun ContinueOverlay(nextTitle: String?, nextArtworkUrl: String?, onPlayN
     val playNowFocusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { playNowFocusRequester.requestFocus() }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.78f)), contentAlignment = Alignment.BottomEnd) {
+    Box(
+        modifier = Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.78f))
+            .testTag(UatTestTags.CONTINUE_OVERLAY),
+        contentAlignment = Alignment.BottomEnd,
+    ) {
         Column(modifier = Modifier.padding(40.dp).width(340.dp)) {
             Text("Up next", color = SwarmMuted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
@@ -1591,12 +1600,17 @@ private fun ContinueOverlay(nextTitle: String?, nextArtworkUrl: String?, onPlayN
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = onPlayNow,
-                    modifier = Modifier.focusRequester(playNowFocusRequester),
+                    modifier = Modifier.focusRequester(playNowFocusRequester)
+                        .testTag(UatTestTags.CONTINUE_PLAY_NOW_BUTTON),
                     colors = swarmActionButtonColors(),
                 ) {
                     Text("Play now ($secondsLeft)", color = Color(0xFF04263A), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
-                Button(onClick = onCancel, colors = swarmActionButtonColors()) {
+                Button(
+                    onClick = onCancel,
+                    colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.CONTINUE_CANCEL_BUTTON),
+                ) {
                     Text("Cancel", fontSize = 14.sp)
                 }
             }

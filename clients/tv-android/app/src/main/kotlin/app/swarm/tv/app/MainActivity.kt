@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +76,7 @@ import app.swarm.tv.app.data.resolveDeviceName
 import app.swarm.tv.app.ui.components.SwarmStartupImage
 import app.swarm.tv.app.ui.components.ClientToastHost
 import app.swarm.tv.app.ui.components.rememberClientToastHostState
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.screens.AlbumScreen
 import app.swarm.tv.app.ui.screens.ArtistShelfScreen
 import app.swarm.tv.app.ui.screens.CatalogScreen
@@ -246,6 +249,8 @@ class MainActivity : ComponentActivity() {
                     val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
                     val browsePreview by viewModel.browsePreview.collectAsState()
+                    val lastReleasedPlaybackSession by viewModel.lastReleasedPlaybackSession.collectAsState()
+                    val transportRecoveryGeneration by viewModel.transportRecoveryGeneration.collectAsState()
                     val lanServers by viewModel.lanServers.collectAsState()
                     val lanPairingBusy by viewModel.lanPairingBusy.collectAsState()
                     val lanPairingActivation by viewModel.lanPairingActivation.collectAsState()
@@ -349,6 +354,19 @@ class MainActivity : ComponentActivity() {
                             .align(Alignment.BottomEnd)
                             .padding(bottom = if (minimizedPlayer != null) 66.dp else 0.dp),
                     )
+                    if (testingMode != null) {
+                        lastReleasedPlaybackSession?.let { sessionId ->
+                            Box(
+                                Modifier.size(1.dp)
+                                    .testTag(UatTestTags.PLAYBACK_RELEASED_PREFIX + sessionId),
+                            )
+                        }
+                        Box(
+                            Modifier.size(1.dp).testTag(
+                                UatTestTags.TRANSPORT_RECOVERY_PREFIX + transportRecoveryGeneration,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -365,6 +383,19 @@ class MainActivity : ComponentActivity() {
                     activeViewModel?.enableTestingModeForAutomation(it)
                 }
         }
+    }
+
+    /** Instrumented-UAT hooks; ViewModel re-checks active debug testing mode before doing anything. */
+    fun seekPlaybackNearEndForUat() {
+        if (BuildConfig.DEBUG) activeViewModel?.seekPlaybackNearEndForUat()
+    }
+
+    fun dropAndRecoverTransportForUat() {
+        if (BuildConfig.DEBUG) activeViewModel?.dropAndRecoverTransportForUat()
+    }
+
+    fun disableKidModeForUat() {
+        if (BuildConfig.DEBUG) activeViewModel?.disableKidMode()
     }
 }
 

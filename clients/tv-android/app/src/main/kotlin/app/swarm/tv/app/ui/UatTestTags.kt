@@ -29,6 +29,16 @@ object UatTestTags {
     const val FILTER_LIKED_ONLY = "uat_filter_liked_only"
     const val FILTER_GENRE_PREFIX = "uat_filter_genre_" // + genre name
     const val FILTER_RATING_PREFIX = "uat_filter_rating_" // + rating value
+    const val SEARCH_FIELD = "uat_search_field"
+    const val SEARCH_CLEAR_BUTTON = "uat_search_clear_button"
+    const val SEARCH_NO_MATCHES = "uat_search_no_matches"
+    const val BROWSE_PREVIEW_PREFIX = "uat_browse_preview_" // + playback session id
+    const val BROWSE_ALL_MOVIES = "uat_browse_all_movies"
+    const val BROWSE_ALL_SHOWS = "uat_browse_all_shows"
+    const val BROWSE_ALL_MUSIC = "uat_browse_all_music"
+    const val GRID_MOVIE_PREFIX = "uat_grid_movie_"
+    const val GRID_SHOW_PREFIX = "uat_grid_show_"
+    const val GRID_ARTIST_PREFIX = "uat_grid_artist_"
 
     // CatalogScreen: top bar.
     const val OPEN_SWARM_BUTTON = "uat_open_swarm_button"
@@ -71,6 +81,12 @@ object UatTestTags {
     const val PAUSE_SUBTITLE_TRACK_PICKER = "uat_pause_subtitle_track_picker"
     const val PAUSE_RESUME_BUTTON = "uat_pause_resume_button"
     const val PAUSE_NEXT_EPISODE_BUTTON = "uat_pause_next_episode_button"
+    const val PAUSE_AUDIO_OPTION_PREFIX = "uat_pause_audio_option_"
+    const val PAUSE_SUBTITLE_OPTION_PREFIX = "uat_pause_subtitle_option_"
+    const val CONTINUE_OVERLAY = "uat_continue_overlay"
+    const val CONTINUE_PLAY_NOW_BUTTON = "uat_continue_play_now_button"
+    const val CONTINUE_CANCEL_BUTTON = "uat_continue_cancel_button"
+    const val PLAYBACK_RELEASED_PREFIX = "uat_playback_released_" // + session id
 
     // MusicPlayerScreen.
     const val MUSIC_PLAYER_COVER = "uat_music_player_cover"
@@ -93,4 +109,18 @@ object UatTestTags {
     const val NOTIFICATIONS_TAB_BUTTON = "uat_notifications_tab_button"
     const val NOTIFICATION_ROW_PREFIX = "uat_notification_row_" // + notification key
     const val NOTIFICATION_DISMISS_BUTTON = "uat_notification_dismiss_button"
+
+    // SwarmSettingsScreen / Kid Mode.
+    const val FAMILY_TAB_BUTTON = "uat_family_tab_button"
+    const val KID_MODE_STATUS = "uat_kid_mode_status"
+    const val KID_MODE_MANAGE_BUTTON = "uat_kid_mode_manage_button"
+    const val KID_MODE_KIND_MOVIES = "uat_kid_mode_kind_movies"
+    const val KID_MODE_KIND_SHOWS = "uat_kid_mode_kind_shows"
+    const val KID_MODE_KIND_MUSIC = "uat_kid_mode_kind_music"
+    const val KID_MODE_SAVE_BUTTON = "uat_kid_mode_save_button"
+    const val KID_MODE_DISABLE_BUTTON = "uat_kid_mode_disable_button"
+    const val NUMBER_PAD_KEY_PREFIX = "uat_number_pad_key_" // + digit/backspace
+
+    // Debug-only testing-mode lifecycle marker rendered by MainActivity.
+    const val TRANSPORT_RECOVERY_PREFIX = "uat_transport_recovery_" // + generation
 }

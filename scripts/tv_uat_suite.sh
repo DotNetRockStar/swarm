@@ -84,6 +84,10 @@ ALL_TEST_CLASSES=(
     ShowPlaybackPauseUatTest
     ShowSeasonsEpisodesWatchlistUatTest
     MusicPlaybackUatTest
+    NavigationSearchPersistenceUatTest
+    ContinuePlaybackLifecycleUatTest
+    KidModeUatTest
+    EndOfMediaUatTest
 )
 
 ALL_MODE=0

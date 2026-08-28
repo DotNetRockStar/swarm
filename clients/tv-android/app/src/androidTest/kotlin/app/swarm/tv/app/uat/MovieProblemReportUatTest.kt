@@ -75,6 +75,37 @@ class MovieProblemReportUatTest : UatTestBase() {
         waitForText("test")
     }
 
+    /** Resolved notifications survive a fresh Activity exactly once, and a dismissal survives another restart. */
+    @Test
+    fun testResolvedNotificationPersistsWithoutDuplicationAndDismissalPersists() {
+        submitReportAndAwaitResolve()
+        val rowTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.NOTIFICATION_ROW_PREFIX))
+
+        restartActivityAndWaitForCatalog()
+        openNotificationSettings()
+        waitForTag(rowTag, timeoutMs = 30_000)
+        val copies = composeTestRule.allTagsStartingWith(rowTag)
+        check(copies.size == 1) { "resolved notification should appear exactly once after restart, saw ${copies.size}" }
+        selectTagWithDpad(rowTag)
+        selectTagWithDpad(UatTestTags.NOTIFICATION_DISMISS_BUTTON)
+        waitForTagGone(rowTag)
+
+        restartActivityAndWaitForCatalog()
+        openNotificationSettings()
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.allTagsStartingWith(rowTag).isEmpty()
+        }
+    }
+
+    private fun openNotificationSettings() {
+        navigateUpUntilTag(UatTestTags.OPEN_SWARM_BUTTON)
+        selectTagWithDpad(UatTestTags.OPEN_SWARM_BUTTON)
+        waitForTag(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
+        selectTagWithDpad(UatTestTags.DASHBOARD_SETTINGS_BUTTON)
+        waitForTag(UatTestTags.NOTIFICATIONS_TAB_BUTTON)
+        selectTagWithDpad(UatTestTags.NOTIFICATIONS_TAB_BUTTON)
+    }
+
     private companion object {
         const val CHECKPOINT = "UAT_AWAITING_SERVER_RESOLVE"
     }

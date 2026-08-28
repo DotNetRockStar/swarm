@@ -104,7 +104,12 @@ fun SwarmSettingsScreen(
                 onClick = { section = SettingsSection.GENERAL },
                 modifier = Modifier.focusRequester(firstSectionFocusRequester),
             )
-            SettingsTab("Family", section == SettingsSection.FAMILY, { section = SettingsSection.FAMILY })
+            SettingsTab(
+                "Family",
+                section == SettingsSection.FAMILY,
+                { section = SettingsSection.FAMILY },
+                modifier = Modifier.testTag(UatTestTags.FAMILY_TAB_BUTTON),
+            )
             SettingsTab(
                 if (notifications.isEmpty()) "Notifications" else "Notifications (${notifications.size})",
                 section == SettingsSection.NOTIFICATIONS,
@@ -431,6 +436,7 @@ private fun KidModeCard(
                 if (isEnabled) "On — restricting what's shown across this app." else "Off — the full library is browsable.",
                 color = SwarmText,
                 fontSize = 14.sp,
+                modifier = Modifier.testTag(UatTestTags.KID_MODE_STATUS),
             )
             Spacer(Modifier.height(10.dp))
             Button(
@@ -443,6 +449,7 @@ private fun KidModeCard(
                     }
                 },
                 colors = swarmActionButtonColors(),
+                modifier = Modifier.testTag(UatTestTags.KID_MODE_MANAGE_BUTTON),
             ) {
                 Text(if (isEnabled) "Manage Kid Mode" else "Turn on Kid Mode")
             }
@@ -525,6 +532,7 @@ private fun KidModeCard(
                     },
                     enabled = draftKinds.isNotEmpty(),
                     colors = swarmActionButtonColors(),
+                    modifier = Modifier.testTag(UatTestTags.KID_MODE_SAVE_BUTTON),
                 ) {
                     Text(if (pendingNewPin != null) "Turn on Kid Mode" else "Save changes", fontWeight = FontWeight.Bold)
                 }
@@ -532,6 +540,7 @@ private fun KidModeCard(
                     Button(
                         onClick = { onDisable(); step = KidModeStep.COLLAPSED },
                         colors = swarmActionButtonColors(),
+                        modifier = Modifier.testTag(UatTestTags.KID_MODE_DISABLE_BUTTON),
                     ) {
                         Text("Turn off Kid Mode")
                     }
@@ -557,9 +566,24 @@ private fun KidModeRulesEditor(
     Text("Visible media types", color = SwarmMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     Spacer(Modifier.height(8.dp))
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SelectableChip("Movies", isSelected = MediaKind.MOVIE in allowedKinds, onClick = { onToggleKind(MediaKind.MOVIE) })
-        SelectableChip("Shows", isSelected = MediaKind.EPISODE in allowedKinds, onClick = { onToggleKind(MediaKind.EPISODE) })
-        SelectableChip("Music", isSelected = MediaKind.TRACK in allowedKinds, onClick = { onToggleKind(MediaKind.TRACK) })
+        SelectableChip(
+            "Movies",
+            isSelected = MediaKind.MOVIE in allowedKinds,
+            onClick = { onToggleKind(MediaKind.MOVIE) },
+            modifier = Modifier.testTag(UatTestTags.KID_MODE_KIND_MOVIES),
+        )
+        SelectableChip(
+            "Shows",
+            isSelected = MediaKind.EPISODE in allowedKinds,
+            onClick = { onToggleKind(MediaKind.EPISODE) },
+            modifier = Modifier.testTag(UatTestTags.KID_MODE_KIND_SHOWS),
+        )
+        SelectableChip(
+            "Music",
+            isSelected = MediaKind.TRACK in allowedKinds,
+            onClick = { onToggleKind(MediaKind.TRACK) },
+            modifier = Modifier.testTag(UatTestTags.KID_MODE_KIND_MUSIC),
+        )
     }
     if (allowedKinds.isEmpty()) {
         Spacer(Modifier.height(6.dp))

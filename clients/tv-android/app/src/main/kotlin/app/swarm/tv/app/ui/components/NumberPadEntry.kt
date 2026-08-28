@@ -27,11 +27,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.theme.SwarmSurfaceMuted
 import app.swarm.tv.app.ui.theme.SwarmText
@@ -91,9 +93,11 @@ private fun NumberPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: ()
                                 onClick = { if (key == '<') onBackspace() else onDigit(key) },
                                 enabled = enabled,
                                 colors = ButtonDefaults.colors(containerColor = SwarmSurfaceMuted, contentColor = SwarmText),
-                                modifier = Modifier.size(48.dp).then(
-                                    if (key == '1' && firstKeyFocusRequester != null) Modifier.focusRequester(firstKeyFocusRequester) else Modifier,
-                                ),
+                                modifier = Modifier.size(48.dp)
+                                    .testTag(UatTestTags.NUMBER_PAD_KEY_PREFIX + if (key == '<') "backspace" else key)
+                                    .then(
+                                        if (key == '1' && firstKeyFocusRequester != null) Modifier.focusRequester(firstKeyFocusRequester) else Modifier,
+                                    ),
                             ) {
                                 Text(if (key == '<') "⌫" else key.toString(), fontSize = 17.sp)
                             }
