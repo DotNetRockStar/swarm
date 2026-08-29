@@ -25,6 +25,7 @@ ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
 END_MARKER = "# END SWARM ISSUE WORKER"
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def timestamp() -> str:
@@ -40,6 +41,22 @@ def positive_integer(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def schedule_time(value: str) -> tuple[int, int]:
+    try:
+        parsed = dt.datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must use 24-hour HH:MM format") from error
+    return parsed.hour, parsed.minute
+
+
+def schedule_days(value: str) -> frozenset[int]:
+    names = [part.strip().lower()[:3] for part in value.split(",") if part.strip()]
+    invalid = [name for name in names if name not in WEEKDAY_NAMES]
+    if invalid or not names:
+        raise argparse.ArgumentTypeError("must be a comma-separated list such as mon,tue,wed")
+    return frozenset(WEEKDAY_NAMES.index(name) for name in names)
 
 
 class Runner:
@@ -271,6 +288,39 @@ class Runner:
         while not self.stop_requested and time.monotonic() < deadline:
             time.sleep(min(1, deadline - time.monotonic()))
 
+    def scheduled_days(self) -> frozenset[int]:
+        if self.args.schedule_mode == "weekdays":
+            return frozenset(range(5))
+        if self.args.schedule_mode == "custom":
+            return self.args.schedule_days
+        return frozenset(range(7))
+
+    def next_scheduled_run(self, now: dt.datetime | None = None) -> dt.datetime:
+        current = now or dt.datetime.now().astimezone()
+        hour, minute = self.args.schedule_time
+        allowed_days = self.scheduled_days()
+        for offset in range(8):
+            day = current.date() + dt.timedelta(days=offset)
+            if day.weekday() not in allowed_days:
+                continue
+            # Calling astimezone() on a naive local datetime lets the host OS
+            # apply the correct UTC offset even when the next run crosses a
+            # daylight-saving boundary.
+            candidate = dt.datetime.combine(day, dt.time(hour, minute)).astimezone()
+            if candidate > current:
+                return candidate
+        raise RuntimeError("Could not determine the next scheduled worker run")
+
+    def wait_for_schedule(self) -> bool:
+        target = self.next_scheduled_run()
+        self.log(f"Next scheduled issue-worker check: {target:%A, %Y-%m-%d at %H:%M %Z}.")
+        while not self.stop_requested:
+            remaining = (target - dt.datetime.now().astimezone()).total_seconds()
+            if remaining <= 0:
+                return True
+            time.sleep(min(1, remaining))
+        return False
+
     def run(self) -> int:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.remove_legacy_cron()
@@ -302,11 +352,20 @@ class Runner:
 
         self.log(
             "Running the SWARM issue worker in this terminal. Queued issues run back to back; "
-            f"idle checks occur every {self.args.interval_seconds} seconds."
+            + (
+                f"idle checks occur every {self.args.interval_seconds} seconds."
+                if self.args.schedule_mode == "continuous"
+                else f"queue checks use the {self.args.schedule_mode} schedule."
+            )
         )
         self.log(f"Live output is also appended to {self.log_path}. Press Ctrl+C to stop.")
+        scheduled_tick_active = self.args.once or self.args.schedule_mode == "continuous"
         try:
             while not self.stop_requested:
+                if not scheduled_tick_active:
+                    if not self.wait_for_schedule():
+                        break
+                    scheduled_tick_active = True
                 self.log("Starting a worker run.")
                 if self.transcode_active():
                     self.log(
@@ -346,7 +405,13 @@ class Runner:
                     )
                 if self.args.once:
                     return status
-                self.sleep()
+                if self.args.schedule_mode == "continuous":
+                    self.sleep()
+                else:
+                    # A scheduled tick drains completed/quota-shelved issues
+                    # immediately via the branches above. Once the worker is
+                    # idle (or errored), return to the next configured slot.
+                    scheduled_tick_active = False
         finally:
             self.release_lock()
         self.log("Ctrl+C received; stopped the SWARM issue worker.")
@@ -365,6 +430,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval-seconds",
         type=positive_integer,
         default=positive_integer(env_value("SWARM_ISSUE_WORKER_INTERVAL_SECONDS", "600")),
+    )
+    parser.add_argument(
+        "--schedule-mode",
+        choices=("continuous", "daily", "weekdays", "custom"),
+        default=env_value("SWARM_ISSUE_WORKER_SCHEDULE_MODE", "continuous"),
+        help="continuous polling, daily, weekdays, or selected custom days",
+    )
+    parser.add_argument(
+        "--schedule-time",
+        type=schedule_time,
+        default=schedule_time(env_value("SWARM_ISSUE_WORKER_SCHEDULE_TIME", "09:00")),
+        metavar="HH:MM",
+        help="local start time for daily/weekday/custom schedules",
+    )
+    parser.add_argument(
+        "--schedule-days",
+        type=schedule_days,
+        default=schedule_days(env_value("SWARM_ISSUE_WORKER_SCHEDULE_DAYS", "mon,tue,wed,thu,fri")),
+        metavar="DAYS",
+        help="comma-separated weekdays used by --schedule-mode custom",
     )
     parser.add_argument(
         "--cargo-target-max-gib",

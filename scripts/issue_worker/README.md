@@ -17,6 +17,14 @@ The issue worker is implemented in Python:
 The Python implementation reads all existing shell-worker state files, so an
 active or quota-paused attempt survives the migration.
 
+A native macOS desktop GUI for running this worker (start/pause/resume/
+stop, schedule, repository picker, AI CLI detection/install, bot setup) is
+maintained as its own project, vendoring its own copy of this directory
+rather than depending on it directly: see
+[SWARM-Media-Steaming/swarm-automation](https://github.com/SWARM-Media-Steaming/swarm-automation).
+It's a separate repository intentionally — that GUI is meant to run this
+worker against *any* GitHub checkout, not just this one.
+
 ### TL;DR: set up and run
 
 From the repository root, create and install both GitHub Apps once:
@@ -173,6 +181,9 @@ account is trusted for completion markers.
 | Scheduler option | Environment variable | Default |
 | --- | --- | --- |
 | `--interval-seconds` | `SWARM_ISSUE_WORKER_INTERVAL_SECONDS` | `600` |
+| `--schedule-mode` | `SWARM_ISSUE_WORKER_SCHEDULE_MODE` | `continuous` |
+| `--schedule-time` | `SWARM_ISSUE_WORKER_SCHEDULE_TIME` | `09:00` local time |
+| `--schedule-days` | `SWARM_ISSUE_WORKER_SCHEDULE_DAYS` | `mon,tue,wed,thu,fri` |
 | `--cargo-target-max-gib` | `SWARM_CARGO_TARGET_MAX_GIB` | `5` |
 | `--worker` | `SWARM_ISSUE_WORKER_PATH` | `swarm_issue_worker.py` |
 | `--repo-dir` | `SWARM_REPO_DIR` | repository containing `scripts` |
@@ -186,7 +197,12 @@ account is trusted for completion markers.
 
 The scheduler accepts worker-only options and forwards unknown arguments to the
 worker. Shared repository and state options are forwarded through the worker's
-environment. `--once` performs a single scheduler iteration, and
+environment. The schedule mode may be `continuous`, `daily`, `weekdays`, or
+`custom`; scheduled runs drain completed and quota-shelved work immediately,
+then wait for the next local-time slot once the queue is idle or errors. The
+custom mode uses the comma-separated three-letter weekday names supplied by
+`--schedule-days`. `--once` always performs one immediate scheduler iteration,
+regardless of the configured schedule, and
 `--check-transcode-active` exits 0 only when a SWARM HLS FFmpeg process is
 active.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -562,6 +563,28 @@ class WorkerTestCase(unittest.TestCase):
 
 
 class RunnerTestCase(unittest.TestCase):
+    def test_schedule_parser_and_next_run(self) -> None:
+        args = runner_module.build_parser().parse_args(
+            [
+                "--schedule-mode", "custom",
+                "--schedule-time", "14:30",
+                "--schedule-days", "mon,wed,fri",
+                "--no-email",
+            ]
+        )
+        runner = runner_module.Runner(args, [])
+        monday_before = dt.datetime(2026, 8, 31, 13, 0).astimezone()
+        self.assertEqual(runner.next_scheduled_run(monday_before).weekday(), 0)
+        self.assertEqual(runner.next_scheduled_run(monday_before).strftime("%H:%M"), "14:30")
+        monday_after = dt.datetime(2026, 8, 31, 15, 0).astimezone()
+        self.assertEqual(runner.next_scheduled_run(monday_after).weekday(), 2)
+
+    def test_invalid_schedule_values_are_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            runner_module.build_parser().parse_args(["--schedule-time", "25:00"])
+        with self.assertRaises(SystemExit):
+            runner_module.build_parser().parse_args(["--schedule-days", "monday,nonesday"])
+
     def test_active_transcode_diagnostic_and_runner_lock(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-test.") as temporary:
             root = Path(temporary)
