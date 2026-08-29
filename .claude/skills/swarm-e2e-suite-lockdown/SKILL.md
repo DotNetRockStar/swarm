@@ -138,8 +138,11 @@ checked-out `main` commit has actually changed since the last check
 overlapping a still-in-progress run (a PID-liveness-checked lock file), and
 reuses one tracking GitHub issue across runs — commenting failures and
 recoveries onto it while it stays open, filing a fresh one only after the
-previous one was closed — instead of filing a new issue every run. Frozen
-about this wrapper specifically:
+previous one was closed — instead of filing a new issue every run. On a
+failure it also asks whichever of Claude/Codex has spare quota to post a
+read-only triage comment, alternating providers with the same rule
+`swarm_issue_worker.py` uses for follow-up passes. Frozen about this
+wrapper specifically:
 
 - That it never mutates the working tree or pulls/merges anything on its
   own — it only `git fetch`es (to keep the not-yet-pushed count accurate)
@@ -153,6 +156,26 @@ about this wrapper specifically:
   issue but never opens a new issue on its own.
 - The lock-file overlap guard — never remove or weaken this to let two
   `full_uat_suite.sh` runs execute concurrently.
+- The two preconditions checked once a real change is pending — the media
+  server answering its health endpoint, and the `batocera.local` SMB share
+  passing a real directory read, not just being listed by `mount` — and
+  that failing either skips the tick without recording the pending SHA as
+  tested (so it's retried once the precondition clears, never silently
+  skipped forever).
+- **AI triage is strictly read-only.** Claude is invoked with
+  `--disallowedTools "Edit Write NotebookEdit Bash WebFetch WebSearch"`;
+  Codex with `--sandbox read-only`. This step exists to post an analysis
+  comment, never to edit code, run commands, or open a PR — removing or
+  loosening these restrictions turns this into a second, undocumented
+  issue-worker and is a real scope change, not a tuning knob.
+- The provider-alternation rule itself (prefer whichever provider did not
+  run the previous triage, falling back to the other if it's over quota) —
+  same reasoning as `swarm_issue_worker.py`'s own follow-up alternation:
+  don't let one provider's quota silently starve triage coverage.
+- That a failed/unavailable capacity check (missing CLI, malformed
+  response, over quota) always degrades to "skip AI triage for this run,"
+  never to "run it anyway" — an uncertain quota reading must never be
+  treated as available capacity.
 
 ## What is NOT frozen
 

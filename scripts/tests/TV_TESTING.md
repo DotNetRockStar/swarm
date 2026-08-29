@@ -75,9 +75,36 @@ invocations), and — instead of filing a new GitHub issue every time it
 finds a failure — reuses the same tracking issue across runs as long as
 it's still open, so a break and its eventual fix show up as one timeline
 in one ticket; a new failure after the old issue was closed opens a fresh
-one. See its own header comment for the full behavior and env vars
-(`SWARM_FULL_UAT_CRON_INTERVAL` to change the 60-minute interval, `--once`
-to run a single check-and-exit for testing).
+one.
+
+Two preconditions are checked before every run, once a real code change is
+pending — neither one updates the "last tested" state on failure, so the
+same pending commit is retried at the next check once the precondition
+clears:
+
+- The local media server must already be answering its health endpoint
+  (same check the two hardware suites use themselves) — this script never
+  starts one.
+- The SMB share from `batocera.local` (real UAT media root storage) must
+  be mounted **and** pass a real directory read, not just be listed by
+  `mount` — a dropped SMB connection can sit there looking healthy until
+  something actually tries to read it.
+
+On a failure, if a Claude or Codex CLI has spare quota, it also asks one of
+them — read-only, no file edits, no shell access — to post a plain-text
+triage comment (likely cause, where to look) on the same tracking issue.
+Which provider gets asked alternates every failure, preferring whichever
+one didn't run the previous triage — the same rule
+`scripts/issue_worker/swarm_issue_worker.py` uses for follow-up passes —
+falling back to the other if the preferred one is over quota, and skipping
+the triage step entirely (silently, no GitHub noise) if neither has
+capacity right now.
+
+See the script's own header comment for the full behavior and every env
+var (`SWARM_FULL_UAT_CRON_INTERVAL` to change the 60-minute interval,
+`SWARM_UAT_BATOCERA_HOST` to change the required SMB host,
+`SWARM_UAT_TRIAGE_ENABLED=0` to disable AI triage entirely, `--once` to run
+a single check-and-exit for testing).
 
 Fast local iteration on one scenario while developing (run the suite
 standalone rather than through the orchestrator):
