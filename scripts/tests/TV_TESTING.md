@@ -59,13 +59,22 @@ already running — none of them starts it.
 ### Continuous checking: `full_uat_cron.sh`
 
 `full_uat_suite.sh` above runs once. `full_uat_cron.sh` wraps it in a
-foreground loop that checks every 60 minutes for new commits on `main`
-(including local commits not yet pushed) and re-runs the full suite only
-when something actually changed:
+foreground loop that runs **once a day, at a fixed local time (03:00 by
+default)**, against whatever's on `main` (including local commits not yet
+pushed) at that moment, skipping the run entirely if nothing changed since
+yesterday:
 
 ```bash
-./scripts/tests/full_uat_cron.sh          # run in a terminal you can Ctrl+C — checks every 60 min
+./scripts/tests/full_uat_cron.sh          # run in a terminal you can Ctrl+C — checks once daily at 3am
+SWARM_FULL_UAT_CRON_HOUR=5 ./scripts/tests/full_uat_cron.sh   # 5am instead
 ```
+
+The once-a-day cadence is deliberate, not just a convenient default: if a
+failure ever triggers a bad interaction with something else that reacts to
+new activity on this tracking issue, the loop is bounded to once per 24
+hours instead of firing on every commit — this happened for real once (see
+below), which is why the schedule changed from checking every commit to a
+single fixed daily time.
 
 It's deliberately a plain foreground process, not a real system cron/
 launchd job — leave it running in its own terminal/tmux session and
@@ -76,6 +85,17 @@ finds a failure — reuses the same tracking issue across runs as long as
 it's still open, so a break and its eventual fix show up as one timeline
 in one ticket; a new failure after the old issue was closed opens a fresh
 one.
+
+**A word of caution from real experience:** assigning this tracking issue
+to yourself opts it into any other automation (e.g.
+`scripts/issue_worker/`) that watches for issues assigned to you — that
+automation cannot verify a fix against `tv_uat_suite.sh`'s real-hardware
+failures (it has no access to the physical Fire TV), so a "fix" it merges
+can easily leave the exact same failures in place, this cron re-reports
+them as a new comment, and the other automation reads that as more work to
+do. That loop burned real AI usage before the daily-schedule change above
+existed. Leaving this tracking issue unassigned avoids the interaction
+entirely.
 
 Two preconditions are checked before every run, once a real code change is
 pending — neither one updates the "last tested" state on failure, so the
@@ -101,10 +121,12 @@ the triage step entirely (silently, no GitHub noise) if neither has
 capacity right now.
 
 See the script's own header comment for the full behavior and every env
-var (`SWARM_FULL_UAT_CRON_INTERVAL` to change the 60-minute interval,
+var (`SWARM_FULL_UAT_CRON_HOUR` to change the daily hour,
+`SWARM_FULL_UAT_CRON_INTERVAL` to replace the daily schedule with a fixed
+interval — **testing this script only**, not for real use,
 `SWARM_UAT_BATOCERA_HOST` to change the required SMB host,
 `SWARM_UAT_TRIAGE_ENABLED=0` to disable AI triage entirely, `--once` to run
-a single check-and-exit for testing).
+a single check-and-exit immediately for testing).
 
 Fast local iteration on one scenario while developing (run the suite
 standalone rather than through the orchestrator):

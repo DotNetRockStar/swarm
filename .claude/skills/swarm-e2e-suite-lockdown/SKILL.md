@@ -132,18 +132,32 @@ Frozen about the orchestrator specifically:
 ### `scripts/tests/full_uat_cron.sh` (continuous checking around the orchestrator)
 
 A foreground, Ctrl+C-able loop (deliberately not a real system cron/
-launchd job) that re-runs `full_uat_suite.sh` only when the locally
-checked-out `main` commit has actually changed since the last check
-(covers both new commits landed and local commits not yet pushed), never
-overlapping a still-in-progress run (a PID-liveness-checked lock file), and
-reuses one tracking GitHub issue across runs — commenting failures and
-recoveries onto it while it stays open, filing a fresh one only after the
-previous one was closed — instead of filing a new issue every run. On a
-failure it also asks whichever of Claude/Codex has spare quota to post a
-read-only triage comment, alternating providers with the same rule
-`swarm_issue_worker.py` uses for follow-up passes. Frozen about this
-wrapper specifically:
+launchd job) that runs `full_uat_suite.sh` **once a day, at a fixed local
+time (03:00 by default)**, testing whatever is on the locally checked-out
+`main` at that moment (skipping the run if the commit hasn't changed since
+yesterday), never overlapping a still-in-progress run (a
+PID-liveness-checked lock file), and reuses one tracking GitHub issue
+across runs — commenting failures and recoveries onto it while it stays
+open, filing a fresh one only after the previous one was closed — instead
+of filing a new issue every run. On a failure it also asks whichever of
+Claude/Codex has spare quota to post a read-only triage comment,
+alternating providers with the same rule `swarm_issue_worker.py` uses for
+follow-up passes. Frozen about this wrapper specifically:
 
+- **The once-a-day, fixed-hour schedule.** This was deliberately changed
+  from checking on every commit (hourly) after a real incident: the
+  tracking issue got assigned (by a human action, not this script — it
+  never sets an assignee) to the account `swarm_issue_worker.py` watches,
+  which then autonomously attempted three blind code "fixes" for
+  hardware-dependent UAT failures it had no way to verify, each merge
+  triggering this cron to re-test, fail identically, and post a new
+  comment the worker read as more work to do — an hourly-triggered
+  feedback loop that burned real Claude/Codex quota before Codex's own
+  rate limit finally stopped it. `SWARM_FULL_UAT_CRON_INTERVAL` exists only
+  to test this script itself without waiting for the real clock time —
+  reverting the *default* back to commit-triggered checking recreates the
+  exact incident this change fixed and needs explicit user sign-off, not
+  an agent's own judgment that "checking more often would be better."
 - That it never mutates the working tree or pulls/merges anything on its
   own — it only `git fetch`es (to keep the not-yet-pushed count accurate)
   and tests whatever is already checked out locally, exactly as-is. Adding

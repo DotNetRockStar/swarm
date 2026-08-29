@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# Runs ./scripts/tests/full_uat_suite.sh automatically whenever the code on
-# `main` changes, checking every 60 minutes, and tracks results in ONE
-# persistent GitHub issue (reused across runs while it stays open) instead
-# of filing a fresh issue every time something fails — so breaks and their
-# eventual fixes show up as a single timeline in one ticket.
+# Runs ./scripts/tests/full_uat_suite.sh once a day, at a fixed local time
+# (03:00 by default), against whatever code is on `main` at that moment,
+# and tracks results in ONE persistent GitHub issue (reused across runs
+# while it stays open) instead of filing a fresh issue every time something
+# fails — so breaks and their eventual fixes show up as a single timeline
+# in one ticket.
+#
+# Fixed, once-daily scheduling is deliberate, not just a default: if a
+# failure ever triggers a bad feedback loop with something else that reacts
+# to this tracking issue (e.g. an unrelated automation treating a new
+# comment on an assigned issue as "more work to do"), the loop is bounded
+# to once per 24 hours instead of firing on every commit. See
+# swarm-e2e-suite-lockdown before changing the schedule back to
+# commit-triggered checking.
 #
 # This is a persistent foreground process, run directly in a terminal —
 # deliberately NOT installed as a real system cron/launchd job, so it's
@@ -19,7 +28,7 @@
 #
 #   nohup ./scripts/tests/full_uat_cron.sh >> .run/full-uat-cron/nohup.log 2>&1 &
 #
-# Each tick:
+# Each day's tick, at the scheduled hour:
 #   1. If a previous check/run is still in progress (lock held by a live
 #      PID), skip this tick entirely — never run two full_uat_suite.sh
 #      invocations at the same time.
@@ -29,10 +38,11 @@
 #      pulls/merges/checks out anything on its own; it always tests
 #      whatever is currently checked out locally, exactly as-is.
 #   3. Compare the current local HEAD commit to the SHA recorded from the
-#      last check. If unchanged, skip — nothing new to test. A changed SHA
-#      covers both cases the user cares about: new commits landed on `main`
-#      (e.g. a `git pull`/merge brought origin/main forward) and new local
-#      commits that haven't been pushed yet.
+#      last check. If unchanged (nothing landed since yesterday's run),
+#      skip — nothing new to test. A changed SHA covers both cases the user
+#      cares about: new commits landed on `main` (e.g. a `git pull`/merge
+#      brought origin/main forward) and new local commits that haven't been
+#      pushed yet.
 #   4. Two preconditions, checked only once a real change is pending (so a
 #      quiet SHA never triggers a real-server/SMB probe for nothing): the
 #      local media server must already be answering its health endpoint
@@ -77,12 +87,14 @@
 # logic here.
 #
 # Usage:
-#   ./scripts/tests/full_uat_cron.sh                 # run forever, checking every 60 minutes
-#   SWARM_FULL_UAT_CRON_INTERVAL=300 ./scripts/tests/full_uat_cron.sh   # override the interval (seconds), e.g. for testing this script itself
-#   ./scripts/tests/full_uat_cron.sh --once           # run exactly one check-and-maybe-test cycle, then exit (no loop)
+#   ./scripts/tests/full_uat_cron.sh                 # run forever, once a day at 03:00 local time
+#   SWARM_FULL_UAT_CRON_HOUR=5 ./scripts/tests/full_uat_cron.sh   # run at 05:00 local time instead
+#   SWARM_FULL_UAT_CRON_INTERVAL=300 ./scripts/tests/full_uat_cron.sh   # TESTING ONLY: replaces the daily schedule with a fixed interval (seconds) between checks, so you don't have to wait for 3am to verify this script itself still works
+#   ./scripts/tests/full_uat_cron.sh --once           # run exactly one check-and-maybe-test cycle immediately, then exit (no schedule, no loop)
 #
 # Env vars:
-#   SWARM_FULL_UAT_CRON_INTERVAL  seconds between checks (default 3600 = 60 minutes)
+#   SWARM_FULL_UAT_CRON_HOUR      local hour (0-23) to run at once a day (default 3 = 3am)
+#   SWARM_FULL_UAT_CRON_INTERVAL  TESTING ONLY — if set, replaces the daily schedule above with a fixed seconds-between-checks interval instead. Leave unset for real use.
 #   SWARM_GITHUB_REPOSITORY       where the tracking issue lives (default DotNetRockStar/swarm)
 #   SWARM_E2E_ISSUE_LABEL         label applied to a newly-filed tracking issue (default "Testing")
 #   SWARM_RUN_DIR                 shared local run directory (default .run)
@@ -98,7 +110,10 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-CHECK_INTERVAL_SECONDS="${SWARM_FULL_UAT_CRON_INTERVAL:-3600}"
+# Empty by default (real daily-at-SCHEDULE_HOUR scheduling); set only to
+# switch to the old fixed-interval loop for testing this script itself.
+CHECK_INTERVAL_SECONDS="${SWARM_FULL_UAT_CRON_INTERVAL:-}"
+SCHEDULE_HOUR="${SWARM_FULL_UAT_CRON_HOUR:-3}"
 GITHUB_REPOSITORY="${SWARM_GITHUB_REPOSITORY:-DotNetRockStar/swarm}"
 ISSUE_LABEL="${SWARM_E2E_ISSUE_LABEL:-Testing}"
 RUN_DIR="${SWARM_RUN_DIR:-.run}"
@@ -133,6 +148,23 @@ done
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# Prints "<seconds-to-wait>|<target timestamp>" for the next occurrence of
+# SCHEDULE_HOUR:00:00 local time — today's if it hasn't passed yet,
+# otherwise tomorrow's. python3 (not `date`) so this doesn't have to juggle
+# BSD- vs GNU-date flag differences across platforms.
+next_scheduled_run() {
+    python3 -c "
+from datetime import datetime, timedelta
+import sys
+hour = int(sys.argv[1])
+now = datetime.now()
+target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+if target <= now:
+    target += timedelta(days=1)
+print(f'{int((target - now).total_seconds())}|{target:%Y-%m-%d %H:%M:%S}')
+" "$SCHEDULE_HOUR"
 }
 
 # Ctrl+C (or a plain `kill`) should stop this cleanly and immediately free
@@ -509,14 +541,26 @@ run_one_check() {
     rm -f "$LOCK_FILE"
 }
 
-log "full_uat_cron.sh started (pid $$, checking every ${CHECK_INTERVAL_SECONDS}s)."
-
 if [ "$RUN_ONCE" -eq 1 ]; then
+    log "full_uat_cron.sh started (pid $$, --once)."
     run_one_check
     exit 0
 fi
 
+if [ -n "$CHECK_INTERVAL_SECONDS" ]; then
+    log "full_uat_cron.sh started (pid $$, TESTING MODE: fixed interval, checking every ${CHECK_INTERVAL_SECONDS}s — set SWARM_FULL_UAT_CRON_INTERVAL only for testing this script; leave it unset for the real once-a-day schedule)."
+    while true; do
+        run_one_check
+        sleep "$CHECK_INTERVAL_SECONDS"
+    done
+fi
+
+log "full_uat_cron.sh started (pid $$, scheduled once a day at ${SCHEDULE_HOUR}:00 local time)."
 while true; do
+    schedule="$(next_scheduled_run)"
+    wait_seconds="${schedule%%|*}"
+    next_at="${schedule#*|}"
+    log "Next check at $next_at local time (in ${wait_seconds}s)."
+    sleep "$wait_seconds"
     run_one_check
-    sleep "$CHECK_INTERVAL_SECONDS"
 done
