@@ -124,12 +124,37 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
         error_report: None,
         like: None,
     };
-    let resolved = service.resolve(&negotiation).await;
+    let resolved = service
+        .resolve_for_peer(&negotiation, false, "Living room TV", "tv-fingerprint")
+        .await;
     assert_eq!(resolved.header.status, 200);
     let Body::Bytes(body) = resolved.body else {
         panic!("playback plan must be JSON")
     };
+    let abandoned_plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(abandoned_plan.mode, PlaybackMode::Direct);
+
+    // The TV never opened the first plan, as happens when its `/play`
+    // response stream is lost. A retry from the same authenticated peer must
+    // replace that unclaimed reservation instead of returning 429 forever.
+    let retry = service
+        .resolve_for_peer(&negotiation, false, "Living room TV", "tv-fingerprint")
+        .await;
+    assert_eq!(retry.header.status, 200);
+    let Body::Bytes(body) = retry.body else {
+        panic!("retry playback plan must be JSON")
+    };
     let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
+    assert_ne!(plan.session_id, abandoned_plan.session_id);
+    assert_eq!(
+        service
+            .resolve(&request(abandoned_plan.path.clone()))
+            .await
+            .header
+            .status,
+        404,
+        "the superseded plan must no longer consume capacity"
+    );
     assert_eq!(plan.mode, PlaybackMode::Direct);
     assert_eq!(plan.max_bitrate, 1_000_000);
     assert_eq!(plan.subtitles.len(), 1);
@@ -154,6 +179,18 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
     let media = service.resolve(&media_request).await;
     assert_eq!((media.header.status, media.header.len), (206, 100));
     assert_eq!(service.transcode_manager().reserved_bps(), 1_000_000);
+
+    // Once the TV has opened the plan, another negotiation must not cancel
+    // active playback just because it comes from the same device.
+    let active_retry = service
+        .resolve_for_peer(&negotiation, false, "Living room TV", "tv-fingerprint")
+        .await;
+    assert_eq!(active_retry.header.status, 200);
+    assert_eq!(
+        service.resolve(&request(plan.path.clone())).await.header.status,
+        200,
+        "a retry must not supersede a plan after the TV has opened it"
+    );
 
     // The first internet session already holds budget. A second internet
     // negotiation is therefore rejected, while the identical request from

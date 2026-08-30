@@ -7,6 +7,8 @@ import app.swarm.tv.core.peer.ClientErrorReport
 import app.swarm.tv.core.peer.LikeToggle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.peer.PeerResponseHeader
+import app.swarm.tv.core.peer.PlaybackMode
+import app.swarm.tv.core.peer.PlaybackPlan
 import app.swarm.tv.core.peer.PlaybackPreferences
 import app.swarm.tv.core.proxy.PeerLoopbackProxy
 import app.swarm.tv.core.rest.DeviceType
@@ -158,6 +160,44 @@ class CatalogSessionTest {
             assertTrue(result.unreachable.isEmpty())
             assertEquals(listOf("Recovered"), result.entries.map { it.entry.title })
             assertTrue(connectionAttempts.get() >= 2)
+            assertTrue(stalling.wasClosed())
+        }
+        proxy.close()
+    }
+
+    @Test
+    fun `playback preparation abandons a stalled response and retries on a fresh connection`() = runBlocking {
+        val stalling = StallingCatalogConnection()
+        val healthy = PlaybackConnection("replacement-session")
+        val connectionAttempts = AtomicInteger()
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                if (connectionAttempts.incrementAndGet() == 1) stalling else healthy
+            },
+            playbackPreparationTimeoutMs = 100L,
+        ).use { session ->
+            val selection = session.preparePlayback(
+                device,
+                "0123456789abcdef01234567",
+                0,
+                identity.certificate,
+                identity.privateKey,
+            )
+
+            assertEquals("replacement-session", selection.sessionId)
+            assertEquals(2, connectionAttempts.get())
             assertTrue(stalling.wasClosed())
         }
         proxy.close()
@@ -320,6 +360,31 @@ class CatalogSessionTest {
         ): PeerResponse {
             require(path == "/media/song") { "unexpected media request: $path" }
             val body = content.toByteArray()
+            return PeerResponse(
+                PeerResponseHeader(status = 200, len = body.size.toLong()),
+                ByteArrayInputStream(body),
+            )
+        }
+    }
+
+    private class PlaybackConnection(private val sessionId: String) : PeerConnection {
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            require(path.startsWith("/play/")) { "unexpected playback request: $path" }
+            val body = SwarmJson.encodeToString(
+                PlaybackPlan(
+                    mode = PlaybackMode.HLS,
+                    path = "/hls/$sessionId/master.m3u8",
+                    maxBitrate = 8_192_000,
+                    sessionId = sessionId,
+                ),
+            ).toByteArray()
             return PeerResponse(
                 PeerResponseHeader(status = 200, len = body.size.toLong()),
                 ByteArrayInputStream(body),

@@ -2764,13 +2764,14 @@ class SwarmViewModel(
     /**
      * Back-press while the [UiState.PreparingPlayback] cover is up: abandon
      * the in-flight negotiation and return to the screen the play started
-     * from. The negotiation coroutine is left to finish on its own — the
-     * generation bump makes [playEntry] release any session it still manages
-     * to reserve, exactly as [stopAllStreaming] relies on.
+     * from. Cancelling closes the blocking QUIC request in [CatalogSession],
+     * allowing the server to terminate any pending transcode reservation
+     * immediately rather than waiting for negotiation or an idle timeout.
      */
     fun cancelPlaybackPreparation() {
         val current = _state.value as? UiState.PreparingPlayback ?: return
         playbackRequestGeneration++
+        playbackNegotiationJob?.cancel()
         playbackNegotiationJob = null
         preparingResumeRequested = false
         _state.value = current.previous
@@ -2818,10 +2819,11 @@ class SwarmViewModel(
         val minimized = _minimizedPlayer.value
         val pendingReplacement = pendingPlaybackReplacement?.player
 
-        // Let any in-flight /play response complete so its newly allocated
-        // session id can be stopped. The generation check in playEntry keeps
-        // that late response from ever becoming an active local player.
+        // Close an in-flight /play request while the Activity backgrounds.
+        // CatalogSession eviction unblocks its blocking QUIC read and the
+        // server owns cancellation-safe cleanup before returning a plan.
         playbackRequestGeneration++
+        playbackNegotiationJob?.cancel()
         playbackNegotiationJob = null
         preparingResumeRequested = false
         pendingPlaybackReplacement = null
