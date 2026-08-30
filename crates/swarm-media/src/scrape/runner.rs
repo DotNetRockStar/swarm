@@ -880,14 +880,28 @@ async fn scrape_tracks(
         }
     }
 
+    let mut musicbrainz_outage = None;
     for ((artist, album), group) in groups {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        scrape_one_album_group(
+        if let Some(reason) = musicbrainz_outage.as_deref() {
+            record_musicbrainz_failure(&group, reason, report, progress);
+            continue;
+        }
+        if let Some(reason) = scrape_one_album_group(
             library, roots, &scrapers, &artist, &album, &group, report, progress,
         )
-        .await?;
+        .await?
+        {
+            tracing::warn!(
+                %artist,
+                %album,
+                %reason,
+                "musicbrainz unavailable; pausing MusicBrainz requests until the next scrape run"
+            );
+            musicbrainz_outage = Some(reason);
+        }
     }
     scrape_track_lyrics(library, &scrapers.lrclib, entries.lyrics, cancel).await?;
     Ok(())
@@ -1018,7 +1032,7 @@ async fn scrape_one_album_group(
     group: &[&EntryRecord],
     report: &mut BulkScrapeReport,
     progress: Option<&ScrapeProgress>,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<Option<String>> {
     let MusicScrapers {
         mb,
         coverart,
@@ -1053,26 +1067,18 @@ async fn scrape_one_album_group(
             report.not_found += group.len() as u64;
         }
         Err(MbError::Unavailable(reason)) => {
-            tracing::warn!(%artist, %album, %reason, "musicbrainz unavailable, will retry next run");
-            for track in group {
-                report.issues.push(ScrapeIssue {
-                    entry_key: track.entry_key.clone(),
-                    title: track.title.clone(),
-                    reason: reason.clone(),
-                });
-                if let Some(p) = progress {
-                    p.issue(
-                        &track.entry_key,
-                        &track.title,
-                        ScrapeOutcome::Failed,
-                        reason.clone(),
-                    );
-                }
-            }
-            report.failed += group.len() as u64;
+            record_musicbrainz_failure(group, &reason, report, progress);
+            return Ok(Some(reason));
         }
         Ok(release_mbid) => {
-            let details = mb.release_lookup(&release_mbid).await.ok();
+            let details = match mb.release_lookup(&release_mbid).await {
+                Ok(details) => Some(details),
+                Err(MbError::NotFound) => None,
+                Err(MbError::Unavailable(reason)) => {
+                    record_musicbrainz_failure(group, &reason, report, progress);
+                    return Ok(Some(reason));
+                }
+            };
             let genres = details
                 .as_ref()
                 .map(|d| d.genres.clone())
@@ -1147,7 +1153,31 @@ async fn scrape_one_album_group(
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+fn record_musicbrainz_failure(
+    group: &[&EntryRecord],
+    reason: &str,
+    report: &mut BulkScrapeReport,
+    progress: Option<&ScrapeProgress>,
+) {
+    for track in group {
+        report.issues.push(ScrapeIssue {
+            entry_key: track.entry_key.clone(),
+            title: track.title.clone(),
+            reason: reason.to_string(),
+        });
+        if let Some(p) = progress {
+            p.issue(
+                &track.entry_key,
+                &track.title,
+                ScrapeOutcome::Failed,
+                reason.to_string(),
+            );
+        }
+    }
+    report.failed += group.len() as u64;
 }
 
 /// Pinpoint (single-entry) video scrape — bypasses `missing_scrape()`
@@ -1289,7 +1319,7 @@ pub async fn scrape_one_track(
     let group: Vec<&EntryRecord> = siblings.iter().collect();
     let scrapers = MusicScrapers::from_config(config);
     let mut report = BulkScrapeReport::default();
-    scrape_one_album_group(
+    if let Some(reason) = scrape_one_album_group(
         library,
         roots,
         &scrapers,
@@ -1299,7 +1329,15 @@ pub async fn scrape_one_track(
         &mut report,
         None,
     )
-    .await?;
+    .await?
+    {
+        tracing::warn!(
+            %artist,
+            %album,
+            %reason,
+            "musicbrainz unavailable; retrying on the next scrape run"
+        );
+    }
     scrape_track_lyrics(
         library,
         &scrapers.lrclib,
@@ -1367,7 +1405,7 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn resolver(root: &std::path::Path) -> SharedRootResolver {
         SharedRootResolver::new(crate::roots::RootResolver::single(root.to_path_buf()))
@@ -2412,6 +2450,74 @@ mod tests {
             .unwrap();
         assert_eq!(path_a, path_b);
         assert_eq!(std::fs::read(root.join(&path_a)).unwrap(), vec![7, 7, 7]);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn persistent_musicbrainz_outage_opens_circuit_for_remaining_albums() {
+        let (root, db_path) = fixture_dirs("musicbrainz-circuit-breaker");
+        std::fs::create_dir_all(root.join("music/Artist One/Album One")).unwrap();
+        std::fs::write(
+            root.join("music/Artist One/Album One/01 - Song One.flac"),
+            vec![1u8; 10],
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("music/Artist Two/Album Two")).unwrap();
+        std::fs::write(
+            root.join("music/Artist Two/Album Two/01 - Song Two.flac"),
+            vec![2u8; 10],
+        )
+        .unwrap();
+        let library = Library::open(db_path.to_str().unwrap()).await.unwrap();
+        scan_root(&library, &root).await.unwrap();
+
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let handler_hits = hits.clone();
+        let router = Router::new().route(
+            "/mb/release/",
+            get(move || {
+                let handler_hits = handler_hits.clone();
+                async move {
+                    handler_hits.fetch_add(1, Ordering::Relaxed);
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        [("retry-after", "0")],
+                        Json(json!({"error": "temporarily unavailable"})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = ScrapeConfig {
+            musicbrainz_base: Some(format!("http://{addr}/mb")),
+            ..Default::default()
+        };
+
+        let report = run_bulk_scrape(
+            &library,
+            &resolver(&root),
+            &config,
+            &AtomicBool::new(false),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.failed, 2);
+        assert_eq!(report.issues.len(), 2);
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            3,
+            "only the first album should use the bounded retry budget"
+        );
+        assert_eq!(
+            library.incomplete_scrape().await.unwrap().len(),
+            2,
+            "provider failures must remain eligible for the next scrape run"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 

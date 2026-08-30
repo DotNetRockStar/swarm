@@ -143,6 +143,8 @@ private const val SERVER_OFFLINE_RETRY_DELAY_MS = 2_000L
 private const val SKIP_INTRO_OFFER_MS = 10_000L
 private const val INTRO_POSITION_POLL_MS = 250L
 private const val PERIODIC_POSITION_SAVE_MS = 15_000L
+internal const val BUFFERING_QUALITY_RECOVERY_MS = 30_000L
+private const val BUFFERING_VIDEO_BITRATE_PERCENT = 80L
 
 /** D-pad left/right rewind/fast-forward step. Android's own key-repeat
  * mechanism redelivers ACTION_DOWN with an incrementing repeatCount while a
@@ -280,6 +282,42 @@ internal fun playbackBackAction(
     showPauseOverlay || showContinuePrompt -> PlaybackBackAction.EXIT
     controlsVisible -> PlaybackBackAction.HIDE_CONTROLS
     else -> PlaybackBackAction.PAUSE
+}
+
+/** A post-start HLS stall means the selected rendition has outrun the
+ * connection. Startup buffering has no established quality to downgrade,
+ * direct play has no alternate rendition, and pausing must never look like a
+ * bandwidth problem. */
+internal fun shouldStartBufferingQualityRecovery(
+    playbackState: Int,
+    hasStartedPlayback: Boolean,
+    playWhenReady: Boolean,
+    playbackMode: PlaybackMode,
+    hasVideo: Boolean,
+): Boolean = playbackState == Player.STATE_BUFFERING &&
+    hasStartedPlayback &&
+    playWhenReady &&
+    playbackMode == PlaybackMode.HLS &&
+    hasVideo
+
+/** Caps video at 80% of the currently selected rendition, which forces
+ * Media3 onto the next viable HLS rung. If Media3 has not exposed that
+ * rendition's bitrate yet, the negotiated ceiling is the conservative
+ * fallback. An existing recovery cap can only become tighter. */
+internal fun bufferingRecoveryVideoBitrateCap(
+    selectedVideoBitrate: Int?,
+    negotiatedMaxBitrate: Long,
+    currentMaxVideoBitrate: Int,
+): Int? {
+    val referenceBitrate = selectedVideoBitrate
+        ?.takeIf { it > 0 }
+        ?.toLong()
+        ?: negotiatedMaxBitrate.takeIf { it > 0 }
+        ?: return null
+    val reducedBitrate = (referenceBitrate * BUFFERING_VIDEO_BITRATE_PERCENT / 100L)
+        .coerceIn(1L, Int.MAX_VALUE.toLong())
+        .toInt()
+    return minOf(reducedBitrate, currentMaxVideoBitrate)
 }
 
 private data class PlaybackPlayerConfig(
@@ -622,7 +660,11 @@ fun PlayerScreen(
     }
     PausePlayerWhenAppBackgrounded(player)
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
-    var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
+    var hasStartedPlayback by remember(sessionId) {
+        // A preloaded next episode can already be READY when it is promoted,
+        // so it may never emit another initial READY callback to this screen.
+        mutableStateOf(player.playbackState == Player.STATE_READY)
+    }
     val playbackOutage = remember(sessionId) { PlaybackOutageTracker() }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
     var consumeSurfaceSelectKeyUp by remember(sessionId) { mutableStateOf(false) }
@@ -643,6 +685,22 @@ fun PlayerScreen(
     var sectionLabel by remember(sessionId) { mutableStateOf<String?>(null) }
     var trackAvailability by remember(sessionId) {
         mutableStateOf(trackAvailability(player.currentTracks))
+    }
+    val normalMaxVideoBitrate = remember(player) { player.trackSelectionParameters.maxVideoBitrate }
+    var bufferingQualityRecoveryGeneration by remember(sessionId) { mutableStateOf(0L) }
+
+    // Each excessive-buffering transition immediately constrains adaptive
+    // selection to 80% of the active rendition. Re-entering BUFFERING after a
+    // recovery tightens the cap again when Media3 has already stepped down,
+    // and restarts this 30-second hold. Restore only the video ceiling so any
+    // audio/subtitle choice made while recovering remains intact.
+    LaunchedEffect(player, bufferingQualityRecoveryGeneration) {
+        if (bufferingQualityRecoveryGeneration == 0L) return@LaunchedEffect
+        delay(BUFFERING_QUALITY_RECOVERY_MS)
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setMaxVideoBitrate(normalMaxVideoBitrate)
+            .build()
     }
 
     // Keep the video surface visible while Media3 waits for data. The global
@@ -867,6 +925,27 @@ fun PlayerScreen(
                 // visible and let the loading-state effect surface the toast.
                 if (playbackState == Player.STATE_BUFFERING && hasStartedPlayback && !showPauseOverlay) {
                     isLoading = true
+                }
+                if (
+                    shouldStartBufferingQualityRecovery(
+                        playbackState = playbackState,
+                        hasStartedPlayback = hasStartedPlayback,
+                        playWhenReady = player.playWhenReady,
+                        playbackMode = playbackMode,
+                        hasVideo = player.videoFormat != null,
+                    )
+                ) {
+                    bufferingRecoveryVideoBitrateCap(
+                        selectedVideoBitrate = player.videoFormat?.bitrate,
+                        negotiatedMaxBitrate = maxBitrate,
+                        currentMaxVideoBitrate = player.trackSelectionParameters.maxVideoBitrate,
+                    )?.let { recoveryCap ->
+                        player.trackSelectionParameters = player.trackSelectionParameters
+                            .buildUpon()
+                            .setMaxVideoBitrate(recoveryCap)
+                            .build()
+                        bufferingQualityRecoveryGeneration += 1L
+                    }
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     // Reached the true end, not just a credits marker (or no

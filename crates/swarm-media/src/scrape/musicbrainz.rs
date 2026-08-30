@@ -1,9 +1,10 @@
 //! MusicBrainz client — keyless, but their usage policy requires a
 //! descriptive User-Agent and a ~1 request/second global rate. Ported from
-//! Batocera.Drone's `music/musicbrainz_client.py`: proactive throttle (not
-//! reactive backoff), release-level (not per-track) matching, two-tier
-//! errors.
+//! Batocera.Drone's `music/musicbrainz_client.py`: proactive throttle,
+//! bounded reactive backoff for transient service failures, release-level
+//! (not per-track) matching, and two-tier errors.
 
+use reqwest::{RequestBuilder, Response, StatusCode};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
@@ -11,6 +12,8 @@ use tokio::time::{Duration, Instant};
 const DEFAULT_BASE: &str = "https://musicbrainz.org/ws/2";
 const USER_AGENT: &str = "SwarmMediaServer/0.1 (+https://github.com/Jerrod/swarm)";
 const MIN_INTERVAL: Duration = Duration::from_millis(1050);
+const MAX_TRANSIENT_RETRIES: usize = 2;
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MbError {
@@ -74,55 +77,117 @@ impl MusicBrainzClient {
         *last = Some(Instant::now());
     }
 
+    /// Send an idempotent MusicBrainz GET, retrying the statuses the service
+    /// uses for temporary overloads. Every retry goes through `throttle`, so
+    /// reactive backoff never bypasses MusicBrainz's normal request limit.
+    async fn send_with_retry(
+        &self,
+        operation: &str,
+        request: impl Fn() -> RequestBuilder,
+    ) -> Result<Response, MbError> {
+        for retry in 0..=MAX_TRANSIENT_RETRIES {
+            self.throttle().await;
+            match request().send().await {
+                Ok(response)
+                    if is_transient_status(response.status()) && retry < MAX_TRANSIENT_RETRIES =>
+                {
+                    let delay = retry_delay(&response, retry);
+                    tracing::debug!(
+                        operation,
+                        status = %response.status(),
+                        attempt = retry + 1,
+                        ?delay,
+                        "retrying transient MusicBrainz response"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if retry < MAX_TRANSIENT_RETRIES => {
+                    let delay = exponential_delay(retry);
+                    tracing::debug!(
+                        operation,
+                        %error,
+                        attempt = retry + 1,
+                        ?delay,
+                        "retrying transient MusicBrainz request failure"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => {
+                    return Err(MbError::Unavailable(format!(
+                        "{operation} request failed after {} attempts: {error}",
+                        MAX_TRANSIENT_RETRIES + 1
+                    )));
+                }
+            }
+        }
+        unreachable!("bounded MusicBrainz retry loop always returns")
+    }
+
     pub async fn search_release(&self, artist: &str, album: &str) -> Result<String, MbError> {
-        self.throttle().await;
         let query = format!(
             "artist:\"{}\" AND release:\"{}\"",
             escape_lucene(artist),
             escape_lucene(album)
         );
-        let response = self
-            .http
-            .get(format!("{}/release/", self.base))
-            .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "1")])
-            .send()
-            .await
-            .map_err(|e| MbError::Unavailable(e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(MbError::Unavailable(format!(
-                "search returned {}",
-                response.status()
-            )));
+        for retry in 0..=MAX_TRANSIENT_RETRIES {
+            let response = self
+                .send_with_retry("search", || {
+                    self.http.get(format!("{}/release/", self.base)).query(&[
+                        ("query", query.as_str()),
+                        ("fmt", "json"),
+                        ("limit", "1"),
+                    ])
+                })
+                .await?;
+            if !response.status().is_success() {
+                return Err(MbError::Unavailable(format!(
+                    "search returned {}",
+                    response.status()
+                )));
+            }
+            let body: ReleaseSearchResponse = response
+                .json()
+                .await
+                .map_err(|e| MbError::Unavailable(e.to_string()))?;
+            if let Some(error) = body.error {
+                if retry < MAX_TRANSIENT_RETRIES {
+                    let delay = exponential_delay(retry);
+                    tracing::debug!(
+                        %error,
+                        attempt = retry + 1,
+                        ?delay,
+                        "retrying MusicBrainz busy response"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(MbError::Unavailable(error));
+            }
+            return body
+                .releases
+                .into_iter()
+                .next()
+                .map(|r| r.id)
+                .ok_or(MbError::NotFound);
         }
-        let body: ReleaseSearchResponse = response
-            .json()
-            .await
-            .map_err(|e| MbError::Unavailable(e.to_string()))?;
-        if let Some(error) = body.error {
-            return Err(MbError::Unavailable(error));
-        }
-        body.releases
-            .into_iter()
-            .next()
-            .map(|r| r.id)
-            .ok_or(MbError::NotFound)
+        unreachable!("bounded MusicBrainz search retry loop always returns")
     }
 
     pub async fn release_lookup(&self, release_mbid: &str) -> Result<ReleaseDetails, MbError> {
-        self.throttle().await;
         let response = self
-            .http
-            .get(format!("{}/release/{release_mbid}", self.base))
-            // Releases themselves do not support ratings. Include the
-            // parent release group and its aggregate rating in this same
-            // lookup so rating support adds no extra rate-limited request.
-            .query(&[
-                ("inc", "artist-credits+genres+release-groups+ratings"),
-                ("fmt", "json"),
-            ])
-            .send()
-            .await
-            .map_err(|e| MbError::Unavailable(e.to_string()))?;
+            .send_with_retry("lookup", || {
+                self.http
+                    .get(format!("{}/release/{release_mbid}", self.base))
+                    // Releases themselves do not support ratings. Include the
+                    // parent release group and its aggregate rating in this same
+                    // lookup so rating support adds no extra rate-limited request.
+                    .query(&[
+                        ("inc", "artist-credits+genres+release-groups+ratings"),
+                        ("fmt", "json"),
+                    ])
+            })
+            .await?;
         if response.status().as_u16() == 404 {
             return Err(MbError::NotFound);
         }
@@ -153,14 +218,13 @@ impl MusicBrainzClient {
     }
 
     pub async fn artist_lookup(&self, artist_mbid: &str) -> Result<ArtistDetails, MbError> {
-        self.throttle().await;
         let response = self
-            .http
-            .get(format!("{}/artist/{artist_mbid}", self.base))
-            .query(&[("inc", "url-rels"), ("fmt", "json")])
-            .send()
-            .await
-            .map_err(|e| MbError::Unavailable(e.to_string()))?;
+            .send_with_retry("artist lookup", || {
+                self.http
+                    .get(format!("{}/artist/{artist_mbid}", self.base))
+                    .query(&[("inc", "url-rels"), ("fmt", "json")])
+            })
+            .await?;
         if response.status().as_u16() == 404 {
             return Err(MbError::NotFound);
         }
@@ -183,6 +247,25 @@ impl MusicBrainzClient {
             .and_then(|rel| commons_title_from_url(&rel.url.resource));
         Ok(ArtistDetails { commons_file })
     }
+}
+
+fn is_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn retry_delay(response: &Response, retry: usize) -> Duration {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .map(|delay| delay.min(MAX_RETRY_AFTER))
+        .unwrap_or_else(|| exponential_delay(retry))
+}
+
+fn exponential_delay(retry: usize) -> Duration {
+    Duration::from_secs(1 << retry.min(5))
 }
 
 impl Default for MusicBrainzClient {
@@ -310,9 +393,11 @@ struct RelationUrl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use axum::routing::get;
     use axum::Json;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn spawn_mock(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -364,7 +449,39 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn transient_service_errors_are_retried_before_succeeding() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let handler_hits = hits.clone();
+        let router = axum::Router::new().route(
+            "/release/",
+            get(move || {
+                let handler_hits = handler_hits.clone();
+                async move {
+                    let attempt = handler_hits.fetch_add(1, Ordering::Relaxed);
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": "temporarily unavailable"})),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(json!({"releases": [{"id": "rel-recovered"}]})),
+                        )
+                    }
+                }
+            }),
+        );
+        let client = MusicBrainzClient::with_base_url(spawn_mock(router).await);
+
+        let result = client.search_release("Artist", "Album").await;
+
+        assert_eq!(result.unwrap(), "rel-recovered");
+        assert_eq!(hits.load(Ordering::Relaxed), MAX_TRANSIENT_RETRIES + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn busy_error_body_at_200_is_unavailable_not_not_found() {
         // Real MusicBrainz behavior, confirmed live: the search endpoint's
         // throttle/overload message comes back as `{"error": "..."}\` at
