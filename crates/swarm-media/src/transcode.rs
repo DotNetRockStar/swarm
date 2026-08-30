@@ -894,8 +894,25 @@ impl TranscodeManager {
                 .collect::<Vec<_>>()
         };
         for id in abandoned {
-            self.remove_session(&id);
+            self.remove_unclaimed_session_for_owner(&id, owner);
         }
+    }
+
+    fn remove_unclaimed_session_for_owner(&self, id: &str, owner: &str) {
+        let removed = {
+            let mut state = self.state.lock().unwrap();
+            // Recheck while holding the removal lock: the player may have
+            // opened and claimed this session after the candidate list was
+            // collected but before this iteration reached it.
+            if state.claimed.contains(id) || state.owners.get(id).map(String::as_str) != Some(owner)
+            {
+                None
+            } else {
+                state.owners.remove(id);
+                state.sessions.remove(id)
+            }
+        };
+        Self::cleanup_removed_session(removed);
     }
 
     async fn start_hls(
@@ -1454,6 +1471,10 @@ impl TranscodeManager {
             state.claimed.remove(id);
             state.sessions.remove(id)
         };
+        Self::cleanup_removed_session(removed);
+    }
+
+    fn cleanup_removed_session(removed: Option<Session>) {
         if let Some(Session {
             kind:
                 SessionKind::Hls {
@@ -1959,6 +1980,8 @@ mod tests {
         }
 
         manager.cancel_unclaimed_for_owner("living-room");
+        manager.remove_unclaimed_session_for_owner("playing", "living-room");
+        manager.remove_unclaimed_session_for_owner("other-tv", "living-room");
 
         let state = manager.state.lock().unwrap();
         assert!(!state.sessions.contains_key("abandoned"));
