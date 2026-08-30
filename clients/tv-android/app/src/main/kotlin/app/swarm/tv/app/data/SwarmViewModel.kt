@@ -276,6 +276,14 @@ private fun UiState.embeddedCatalog(): UiState.Catalog? = when (this) {
     else -> null
 }
 
+/** Catalog state relevant to diagnostics, including screens that wrap their
+ * browse origin for playback transitions. */
+private fun UiState.diagnosticCatalog(): UiState.Catalog? = when (this) {
+    is UiState.Player -> previous.embeddedCatalog()
+    is UiState.PreparingPlayback -> previous.embeddedCatalog()
+    else -> embeddedCatalog()
+}
+
 /**
  * Onboarding, swarm-dashboard, merged-catalog, and playback state.
  * Registration is fully wired (real network calls against a real STUN
@@ -2065,24 +2073,57 @@ class SwarmViewModel(
     private fun reportClientError(
         device: SwarmDevice,
         message: String,
-        entryKey: String? = null,
-        assetTitle: String? = null,
-        kind: String? = null,
+        entry: MergedEntry? = null,
         context: String? = null,
     ) {
         val id = deviceId ?: return
         val name = deviceName ?: "Fire TV"
-        val report = ClientErrorReport(
-            deviceId = id,
-            deviceName = name,
-            entryKey = entryKey,
-            assetTitle = assetTitle,
-            kind = kind,
-            message = message,
-            context = context,
-            occurredAtMs = System.currentTimeMillis(),
-        )
+        val occurredAtMs = System.currentTimeMillis()
+        val stateSnapshot = _state.value
+        val catalogSnapshot = stateSnapshot.diagnosticCatalog()
+        val connectionMode = if (localSession) "lan" else "swarm"
+        val clientCertFingerprint = certFingerprint
+        val swarmIdSnapshot = swarmId
+        val pendingReportCount = pendingClientErrors.size
+        val kidModeEnabled = _kidModeSettings.value != null
+        val shuffleEnabled = _shuffleEnabled.value
+        val minimizedTitle = _minimizedPlayer.value?.title
+        val previewEntryKey = _browsePreview.value?.entryKey
         viewModelScope.launch {
+            val runtimeDiagnostics = withContext(Dispatchers.IO) {
+                runCatching(problemReportDiagnostics::collect)
+                    .getOrElse { "Client runtime\ndiagnostics=unavailable (${it.javaClass.simpleName})" }
+            }
+            val report = ClientErrorReport(
+                deviceId = id,
+                deviceName = name,
+                entryKey = entry?.entry?.entryKey,
+                assetTitle = entry?.entry?.displayTitle(),
+                kind = entry?.entry?.kind?.name?.lowercase(),
+                message = message,
+                context = buildClientErrorContext(
+                    entry = entry,
+                    device = device,
+                    screen = stateSnapshot.javaClass.simpleName,
+                    connectionMode = connectionMode,
+                    clientDeviceId = id,
+                    clientMachineId = machineId,
+                    clientCertFingerprint = clientCertFingerprint,
+                    swarmId = swarmIdSnapshot,
+                    catalogEntryCount = catalogSnapshot?.entries?.size ?: 0,
+                    catalogServerCount = catalogSnapshot?.devices?.size ?: 0,
+                    unreachableServerIds = catalogSnapshot?.unreachable?.map(SwarmDevice::deviceId).orEmpty(),
+                    playbackError = catalogSnapshot?.playbackError,
+                    pendingReportCount = pendingReportCount,
+                    kidModeEnabled = kidModeEnabled,
+                    shuffleEnabled = shuffleEnabled,
+                    minimizedTitle = minimizedTitle,
+                    previewEntryKey = previewEntryKey,
+                    errorDetails = context,
+                    runtimeDiagnostics = runtimeDiagnostics,
+                ),
+                occurredAtMs = occurredAtMs,
+            )
             val sent = runCatching {
                 withContext(Dispatchers.IO) {
                     catalogSession.reportError(device, report, clientCertificate, clientKey)
@@ -2287,9 +2328,7 @@ class SwarmViewModel(
                     reportClientError(
                         device = device,
                         message = message,
-                        entryKey = entry.entry.entryKey,
-                        assetTitle = entry.entry.displayTitle(),
-                        kind = entry.entry.kind.name.lowercase(),
+                        entry = entry,
                     )
                 }
                 return@launch
@@ -2369,9 +2408,7 @@ class SwarmViewModel(
         reportClientError(
             device = device,
             message = message,
-            entryKey = current.entry.entry.entryKey,
-            assetTitle = current.entry.entry.displayTitle(),
-            kind = current.entry.entry.kind.name.lowercase(),
+            entry = current.entry,
             context = context,
         )
     }
@@ -2389,9 +2426,7 @@ class SwarmViewModel(
         reportClientError(
             device = device,
             message = message,
-            entryKey = current.entry.entry.entryKey,
-            assetTitle = current.entry.entry.displayTitle(),
-            kind = current.entry.entry.kind.name.lowercase(),
+            entry = current.entry,
             context = context,
         )
     }
@@ -2434,9 +2469,7 @@ class SwarmViewModel(
             reportClientError(
                 device = device,
                 message = "Playback session expired after an extended pause; recovering automatically.",
-                entryKey = current.entry.entry.entryKey,
-                assetTitle = current.entry.entry.displayTitle(),
-                kind = current.entry.entry.kind.name.lowercase(),
+                entry = current.entry,
                 context = context,
             )
         }
@@ -2465,40 +2498,11 @@ class SwarmViewModel(
         val catalog = current.embeddedCatalog() ?: return
         val device = catalog.devices.find { it.deviceId == entry.sources.first() } ?: return
         Log.i(logTag, "user reported asset problem for ${entry.entry.entryKey}")
-        viewModelScope.launch {
-            val runtimeDiagnostics = withContext(Dispatchers.IO) {
-                runCatching(problemReportDiagnostics::collect)
-                    .getOrElse { "Client runtime\ndiagnostics=unavailable (${it.javaClass.simpleName})" }
-            }
-            val context = buildAssetProblemContext(
-                entry = entry,
-                device = device,
-                screen = current.javaClass.simpleName,
-                connectionMode = if (localSession) "lan" else "swarm",
-                clientDeviceId = deviceId,
-                clientMachineId = machineId,
-                clientCertFingerprint = certFingerprint,
-                swarmId = swarmId,
-                catalogEntryCount = catalog.entries.size,
-                catalogServerCount = catalog.devices.size,
-                unreachableServerIds = catalog.unreachable.map(SwarmDevice::deviceId),
-                playbackError = catalog.playbackError,
-                pendingReportCount = pendingClientErrors.size,
-                kidModeEnabled = _kidModeSettings.value != null,
-                shuffleEnabled = _shuffleEnabled.value,
-                minimizedTitle = _minimizedPlayer.value?.title,
-                previewEntryKey = _browsePreview.value?.entryKey,
-                runtimeDiagnostics = runtimeDiagnostics,
-            )
-            reportClientError(
-                device = device,
-                message = "User reported a problem with this asset from its detail page.",
-                entryKey = entry.entry.entryKey,
-                assetTitle = entry.entry.displayTitle(),
-                kind = entry.entry.kind.name.lowercase(),
-                context = context,
-            )
-        }
+        reportClientError(
+            device = device,
+            message = "User reported a problem with this asset from its detail page.",
+            entry = entry,
+        )
         notify("Problem report sent.", ClientNotificationKind.SUCCESS)
     }
 

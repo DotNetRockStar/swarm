@@ -136,8 +136,14 @@ class AndroidProblemReportDiagnostics(context: Context) : ProblemReportDiagnosti
     private data class LogcatResult(val exitCode: Int, val output: String)
 }
 
-internal fun buildAssetProblemContext(
-    entry: MergedEntry,
+/**
+ * Builds the diagnostic context shared by user-initiated problem reports and
+ * automatic client errors. Automatic errors are not always tied to an asset
+ * (catalog refresh failures, for example), so [entry] is optional while the
+ * application, reporting-server, and runtime sections are always present.
+ */
+internal fun buildClientErrorContext(
+    entry: MergedEntry?,
     device: SwarmDevice,
     screen: String,
     connectionMode: String,
@@ -154,6 +160,7 @@ internal fun buildAssetProblemContext(
     shuffleEnabled: Boolean,
     minimizedTitle: String?,
     previewEntryKey: String?,
+    errorDetails: String?,
     runtimeDiagnostics: String,
 ): String = buildString {
     appendLine("Application state")
@@ -173,32 +180,34 @@ internal fun buildAssetProblemContext(
     field("minimized_playback", minimizedTitle ?: "none")
     field("browse_preview_entry", previewEntryKey ?: "none")
 
-    appendLine()
-    appendLine("Asset")
-    field("entry_key", entry.entry.entryKey)
-    field("fingerprint", entry.entry.fingerprint)
-    field("kind", entry.entry.kind.name.lowercase())
-    field("display_title", entry.entry.displayTitle())
-    field("library_title", entry.entry.title)
-    field("sources", entry.sources.joinToString())
-    field("size_bytes", entry.entry.size)
-    field("duration_secs", entry.entry.durationSecs ?: "unknown")
-    field("show", entry.entry.showTitle ?: "none")
-    field("season_episode", "${entry.entry.season ?: "none"}/${entry.entry.episode ?: "none"}")
-    field("artist_album_track", "${entry.entry.artist ?: "none"} / ${entry.entry.album ?: "none"} / ${entry.entry.trackNumber ?: "none"}")
-    field("year", entry.entry.year ?: "unknown")
-    field("rating", entry.entry.rating ?: "unknown")
-    field("genres", entry.entry.genres.ifEmpty { listOf("none") }.joinToString())
-    field(
-        "video",
-        entry.entry.video?.let { "codec=${it.codec}; ${it.width}x${it.height}; level=${it.level ?: "unknown"}; bitrate=${it.bitrate ?: "unknown"}" }
-            ?: "none",
-    )
-    field(
-        "audio",
-        entry.entry.audio?.let { "codec=${it.codec}; channels=${it.channels}; bitrate=${it.bitrate ?: "unknown"}" } ?: "none",
-    )
-    field("artwork_etag", entry.entry.artworkEtag ?: "none")
+    if (entry != null) {
+        appendLine()
+        appendLine("Asset")
+        field("entry_key", entry.entry.entryKey)
+        field("fingerprint", entry.entry.fingerprint)
+        field("kind", entry.entry.kind.name.lowercase())
+        field("display_title", entry.entry.displayTitle())
+        field("library_title", entry.entry.title)
+        field("sources", entry.sources.joinToString())
+        field("size_bytes", entry.entry.size)
+        field("duration_secs", entry.entry.durationSecs ?: "unknown")
+        field("show", entry.entry.showTitle ?: "none")
+        field("season_episode", "${entry.entry.season ?: "none"}/${entry.entry.episode ?: "none"}")
+        field("artist_album_track", "${entry.entry.artist ?: "none"} / ${entry.entry.album ?: "none"} / ${entry.entry.trackNumber ?: "none"}")
+        field("year", entry.entry.year ?: "unknown")
+        field("rating", entry.entry.rating ?: "unknown")
+        field("genres", entry.entry.genres.ifEmpty { listOf("none") }.joinToString())
+        field(
+            "video",
+            entry.entry.video?.let { "codec=${it.codec}; ${it.width}x${it.height}; level=${it.level ?: "unknown"}; bitrate=${it.bitrate ?: "unknown"}" }
+                ?: "none",
+        )
+        field(
+            "audio",
+            entry.entry.audio?.let { "codec=${it.codec}; channels=${it.channels}; bitrate=${it.bitrate ?: "unknown"}" } ?: "none",
+        )
+        field("artwork_etag", entry.entry.artworkEtag ?: "none")
+    }
 
     appendLine()
     appendLine("Reporting server")
@@ -209,6 +218,12 @@ internal fun buildAssetProblemContext(
     field("online", device.online)
     field("last_seen", device.lastSeenAt ?: "unknown")
     device.metadata.toSortedMap().forEach { (key, value) -> field("metadata.$key", value) }
+
+    if (!errorDetails.isNullOrBlank()) {
+        appendLine()
+        appendLine("Error details")
+        appendLine(errorDetails.trim())
+    }
 
     appendLine()
     append(runtimeDiagnostics)
