@@ -1,6 +1,7 @@
 package app.swarm.tv.app.ui.screens
 
 import androidx.media3.common.C
+import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import app.swarm.tv.core.peer.SkipSegment
 import app.swarm.tv.core.peer.SkipSegmentKind
@@ -136,6 +137,34 @@ class PlayerSeekTest {
         assertTrue(isServerOfflineLoadError(EOFException("truncated response")))
         assertTrue(isServerOfflineLoadError(IOException("load failed", SocketException("connection reset"))))
         assertFalse(isServerOfflineLoadError(IOException("malformed media")))
+    }
+
+    @Test
+    fun `retryable prefetch timeout stays silent when playback remains ready`() {
+        val tracker = PlaybackOutageTracker()
+
+        assertEquals(null, tracker.onLoadError("timeout", Player.STATE_READY))
+        assertTrue(tracker.isPending)
+        tracker.onLoadCompleted()
+
+        assertFalse(tracker.isPending)
+        assertEquals(null, tracker.onPlaybackStateChanged(Player.STATE_BUFFERING))
+    }
+
+    @Test
+    fun `retryable load failure reports only after buffer is exhausted`() {
+        val tracker = PlaybackOutageTracker()
+
+        assertEquals(null, tracker.onLoadError("connection reset", Player.STATE_READY))
+        assertEquals("connection reset", tracker.onPlaybackStateChanged(Player.STATE_BUFFERING))
+        assertEquals(null, tracker.onPlaybackStateChanged(Player.STATE_BUFFERING))
+    }
+
+    @Test
+    fun `retryable load failure reports immediately when already buffering`() {
+        val tracker = PlaybackOutageTracker()
+
+        assertEquals("timeout", tracker.onLoadError("timeout", Player.STATE_BUFFERING))
     }
 
 }

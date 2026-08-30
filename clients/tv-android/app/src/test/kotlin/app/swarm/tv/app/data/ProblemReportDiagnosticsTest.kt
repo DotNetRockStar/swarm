@@ -50,7 +50,7 @@ class ProblemReportDiagnosticsTest {
             metadata = mapOf("connection_route" to "direct", "peer_addr" to "192.0.2.1:8544"),
         )
 
-        val result = buildAssetProblemContext(
+        val result = buildClientErrorContext(
             entry = entry,
             device = device,
             screen = "MovieDetail",
@@ -68,6 +68,7 @@ class ProblemReportDiagnosticsTest {
             shuffleEnabled = false,
             minimizedTitle = null,
             previewEntryKey = null,
+            errorDetails = null,
             runtimeDiagnostics = "Client runtime\nos=Fire OS",
         )
 
@@ -81,5 +82,52 @@ class ProblemReportDiagnosticsTest {
             "Client runtime",
             "os=Fire OS",
         ).forEach { expected -> assertTrue(result.contains(expected), "missing $expected") }
+    }
+
+    @Test
+    fun `automatic error context includes baseline diagnostics without an asset`() {
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Living Room Server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "cert",
+            online = false,
+            metadata = mapOf("connection_route" to "direct", "peer_addr" to "192.0.2.1:8544"),
+        )
+
+        val result = buildClientErrorContext(
+            entry = null,
+            device = device,
+            screen = "Catalog",
+            connectionMode = "lan",
+            clientDeviceId = "tv-1",
+            clientMachineId = "machine-1",
+            clientCertFingerprint = "client-cert",
+            swarmId = "swarm-1",
+            catalogEntryCount = 42,
+            catalogServerCount = 2,
+            unreachableServerIds = listOf("server-1"),
+            playbackError = null,
+            pendingReportCount = 0,
+            kidModeEnabled = false,
+            shuffleEnabled = false,
+            minimizedTitle = null,
+            previewEntryKey = null,
+            errorDetails = "phase=manifest; route=direct",
+            runtimeDiagnostics = "Client runtime\nnetwork=transport=wifi",
+        )
+
+        listOf(
+            "Application state",
+            "screen=Catalog",
+            "unreachable_servers=server-1",
+            "Reporting server",
+            "metadata.peer_addr=192.0.2.1:8544",
+            "Error details",
+            "phase=manifest; route=direct",
+            "Client runtime",
+            "network=transport=wifi",
+        ).forEach { expected -> assertTrue(result.contains(expected), "missing $expected") }
+        assertFalse(result.contains("\nAsset\n"))
     }
 }

@@ -346,6 +346,37 @@ internal fun isServerOfflineLoadError(error: IOException): Boolean =
         }
     }
 
+/** Delays an offline report until a retryable load failure actually exhausts
+ * the player's buffer. A single timed-out prefetch can recover without the
+ * viewer noticing (and without the server ever going offline), so reporting
+ * from AnalyticsListener.onLoadError alone produces false alarms. */
+internal class PlaybackOutageTracker {
+    private var pendingContext: String? = null
+    private var reported = false
+
+    val isPending: Boolean
+        get() = pendingContext != null
+
+    fun onLoadError(context: String, playbackState: Int): String? {
+        if (pendingContext == null) pendingContext = context
+        return reportIfBuffering(playbackState)
+    }
+
+    fun onPlaybackStateChanged(playbackState: Int): String? = reportIfBuffering(playbackState)
+
+    fun onLoadCompleted() {
+        pendingContext = null
+        reported = false
+    }
+
+    private fun reportIfBuffering(playbackState: Int): String? {
+        val context = pendingContext ?: return null
+        if (reported || playbackState != Player.STATE_BUFFERING) return null
+        reported = true
+        return context
+    }
+}
+
 internal fun playbackErrorContext(error: PlaybackException, player: Player): String {
     val causes = generateSequence<Throwable>(error) { it.cause }
         .take(6)
@@ -592,7 +623,7 @@ fun PlayerScreen(
     PausePlayerWhenAppBackgrounded(player)
     var isLoading by remember(sessionId) { mutableStateOf(player.playbackState != Player.STATE_READY) }
     var hasStartedPlayback by remember(sessionId) { mutableStateOf(false) }
-    var serverOffline by remember(sessionId) { mutableStateOf(false) }
+    val playbackOutage = remember(sessionId) { PlaybackOutageTracker() }
     var showPauseOverlay by remember(sessionId) { mutableStateOf(!player.playWhenReady) }
     var consumeSurfaceSelectKeyUp by remember(sessionId) { mutableStateOf(false) }
     var offeredIntro by remember(sessionId) { mutableStateOf<SkipSegment?>(null) }
@@ -798,15 +829,13 @@ fun PlayerScreen(
                 wasCanceled: Boolean,
             ) {
                 if (wasCanceled || !isServerOfflineLoadError(error)) return
-                if (!serverOffline) {
-                    serverOffline = true
-                    onServerOffline(
-                        "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
-                            "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
-                    )
-                }
+                val failureContext =
+                    "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
+                        "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}"
+                playbackOutage.onLoadError(failureContext, player.playbackState)?.let(onServerOffline)
                 // Let the buffered picture continue uninterrupted. Report
-                // buffering only once playback actually runs out of media.
+                // the outage and buffering only once playback actually runs
+                // out of media. A successful retry before then stays silent.
                 if (player.playbackState == Player.STATE_BUFFERING) isLoading = true
             }
 
@@ -815,7 +844,7 @@ fun PlayerScreen(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
-                serverOffline = false
+                playbackOutage.onLoadCompleted()
                 if (player.playbackState == Player.STATE_READY) isLoading = false
             }
 
@@ -828,7 +857,8 @@ fun PlayerScreen(
                     isLoading = false
                     hasStartedPlayback = true
                 }
-                if (playbackState == Player.STATE_BUFFERING && serverOffline) {
+                playbackOutage.onPlaybackStateChanged(playbackState)?.let(onServerOffline)
+                if (playbackState == Player.STATE_BUFFERING && playbackOutage.isPending) {
                     isLoading = true
                 }
                 // A stall after the viewer already saw a frame is a real

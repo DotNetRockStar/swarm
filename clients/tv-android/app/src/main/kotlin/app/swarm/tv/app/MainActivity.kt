@@ -89,6 +89,7 @@ import app.swarm.tv.app.ui.screens.MusicPlayerScreen
 import app.swarm.tv.app.ui.screens.ActivationCodeScreen
 import app.swarm.tv.app.ui.screens.ActivationRequestScreen
 import app.swarm.tv.app.ui.screens.PlayerScreen
+import app.swarm.tv.app.ui.screens.PlaybackOutageTracker
 import app.swarm.tv.app.ui.screens.PreparingPlaybackScreen
 import app.swarm.tv.app.ui.screens.isServerOfflineLoadError
 import app.swarm.tv.app.ui.screens.playbackErrorContext
@@ -552,7 +553,7 @@ private fun SwarmApp(
     var musicIsLoading by remember(musicPlayer) { mutableStateOf(true) }
     var musicPositionMs by remember(musicPlayer) { mutableLongStateOf(0L) }
     var musicPausedForPreview by remember(musicPlayer) { mutableStateOf(false) }
-    var musicServerOffline by remember(musicPlayer) { mutableStateOf(false) }
+    val musicPlaybackOutage = remember(musicPlayer) { PlaybackOutageTracker() }
 
     // Inline previews intentionally include audio. If music was already
     // playing in the minimized bar, pause it for the preview and restore it
@@ -591,15 +592,11 @@ private fun SwarmApp(
                 wasCanceled: Boolean,
             ) {
                 if (player == null || wasCanceled || !isServerOfflineLoadError(error)) return
-                if (!musicServerOffline) {
-                    musicServerOffline = true
-                    activeMusicSession?.let { session ->
-                        onServerOffline(
-                            session.sessionId,
-                            "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
-                                "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
-                        )
-                    }
+                val failureContext =
+                    "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
+                        "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}"
+                musicPlaybackOutage.onLoadError(failureContext, player.playbackState)?.let { context ->
+                    activeMusicSession?.let { session -> onServerOffline(session.sessionId, context) }
                 }
                 if (player.playbackState == Player.STATE_BUFFERING) musicIsLoading = true
             }
@@ -609,7 +606,7 @@ private fun SwarmApp(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
-                musicServerOffline = false
+                musicPlaybackOutage.onLoadCompleted()
                 if (player?.playbackState == Player.STATE_READY) musicIsLoading = false
             }
         }
@@ -619,7 +616,10 @@ private fun SwarmApp(
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) musicIsLoading = false
-                if (playbackState == Player.STATE_BUFFERING && musicServerOffline) musicIsLoading = true
+                musicPlaybackOutage.onPlaybackStateChanged(playbackState)?.let { context ->
+                    activeMusicSession?.let { session -> onServerOffline(session.sessionId, context) }
+                }
+                if (playbackState == Player.STATE_BUFFERING && musicPlaybackOutage.isPending) musicIsLoading = true
                 // onTrackPlaybackEnded reads the *current* session fresh off
                 // the ViewModel's own state rather than anything captured
                 // here, so this stays correct even if nextEntry changed
