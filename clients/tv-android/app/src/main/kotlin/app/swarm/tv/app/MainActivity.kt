@@ -108,6 +108,7 @@ import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
@@ -126,6 +127,10 @@ private data class DeviceIdentity(
     val certificate: X509Certificate,
     val privateKey: PrivateKey,
 )
+
+/** How far before a song's end the next track's stream is negotiated so it
+ * can be appended to the player and buffered for a seamless transition (#160). */
+private const val PRELOAD_NEXT_TRACK_LEAD_MS = 30_000L
 
 private const val EXTRA_ENABLE_TESTING_MODE = "app.swarm.tv.extra.ENABLE_TESTING_MODE"
 private const val EXTRA_DISABLE_TESTING_MODE = "app.swarm.tv.extra.DISABLE_TESTING_MODE"
@@ -248,7 +253,7 @@ class MainActivity : ComponentActivity() {
                     val watchlistKeys by viewModel.watchlistKeys.collectAsState()
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
                     val resolvedProblemNotifications by viewModel.resolvedProblemNotifications.collectAsState()
-                    val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
+                    val shuffleMode by viewModel.shuffleMode.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
                     val browsePreview by viewModel.browsePreview.collectAsState()
                     val lastReleasedPlaybackSession by viewModel.lastReleasedPlaybackSession.collectAsState()
@@ -296,8 +301,10 @@ class MainActivity : ComponentActivity() {
                         resolvedProblemNotifications = resolvedProblemNotifications,
                         onDismissResolvedProblem = viewModel::dismissResolvedProblem,
                         onRefreshNotifications = viewModel::refreshResolutionNotifications,
-                        shuffleEnabled = shuffleEnabled,
+                        shuffleMode = shuffleMode,
                         onToggleShuffle = viewModel::toggleShuffle,
+                        onPreloadNextTrack = viewModel::preloadNextTrack,
+                        onMusicPlaylistAdvanced = viewModel::onMusicPlaylistAdvanced,
                         minimizedPlayer = minimizedPlayer,
                         browsePreview = browsePreview,
                         onStartBrowsePreview = viewModel::startBrowsePreview,
@@ -437,8 +444,10 @@ private fun SwarmApp(
     resolvedProblemNotifications: List<ResolvedProblemNotification>,
     onDismissResolvedProblem: (ResolvedProblemNotification) -> Unit,
     onRefreshNotifications: () -> Unit,
-    shuffleEnabled: Boolean,
+    shuffleMode: ShuffleMode,
     onToggleShuffle: () -> Unit,
+    onPreloadNextTrack: (String) -> Unit,
+    onMusicPlaylistAdvanced: (String?) -> Unit,
     minimizedPlayer: UiState.Player?,
     browsePreview: BrowsePreview?,
     onStartBrowsePreview: (MergedEntry) -> Unit,
@@ -524,18 +533,22 @@ private fun SwarmApp(
     // At most one of these is ever non-null.
     val activeMusicSession = (state as? UiState.Player)?.takeIf { it.entry.entry.kind == MediaKind.TRACK } ?: minimizedPlayer
 
-    // Hoisted above both MusicPlayerScreen and MiniPlayerBar, keyed on
-    // sessionId (not the whole session object — nextEntry alone changing,
-    // e.g. via shuffle, must not tear down and rebuild a player that's
-    // already mid-track): this is *why* track playback survives minimizing
-    // away from MusicPlayerScreen's own composition, unlike PlayerScreen's
-    // video player, which is deliberately still tied to its own screen
-    // (movies/episodes never minimize, so there's nothing to hoist for).
-    // `remember` with a key already gives "build a new one when the key
-    // changes, otherwise keep the existing instance" for free — no separate
-    // hand-rolled holder class needed.
+    // Hoisted above both MusicPlayerScreen and MiniPlayerBar, keyed on the
+    // music *queue* id (#160) — stable across auto-advancing from track to
+    // track, unlike sessionId — so a song ending promotes the next track
+    // into the same player instance, keeping the item that
+    // preloadNextTrack already appended and buffered instead of tearing the
+    // player down and re-buffering from scratch. Falls back to sessionId
+    // for safety when there is no queue id. This is also *why* track
+    // playback survives minimizing away from MusicPlayerScreen's own
+    // composition, unlike PlayerScreen's video player, which is
+    // deliberately still tied to its own screen (movies/episodes never
+    // minimize, so there's nothing to hoist for). `remember` with a key
+    // already gives "build a new one when the key changes, otherwise keep
+    // the existing instance" for free — no separate hand-rolled holder
+    // class needed.
     val context = LocalContext.current
-    val musicPlayer = remember(activeMusicSession?.sessionId) {
+    val musicPlayer = remember(activeMusicSession?.musicQueueId ?: activeMusicSession?.sessionId) {
         activeMusicSession?.let { session ->
             ExoPlayer.Builder(context)
                 .setMediaSourceFactory(serverOfflineMediaSourceFactory(context))
@@ -548,12 +561,89 @@ private fun SwarmApp(
             }
         }
     }
+    // The listeners below outlive any single track now that the player is
+    // queue-keyed, so they must read the *current* session rather than the
+    // one captured when the player was built.
+    val currentMusicSession = rememberUpdatedState(activeMusicSession)
     PausePlayerWhenAppBackgrounded(musicPlayer)
     var musicIsPlaying by remember(musicPlayer) { mutableStateOf(true) }
     var musicIsLoading by remember(musicPlayer) { mutableStateOf(true) }
     var musicPositionMs by remember(musicPlayer) { mutableLongStateOf(0L) }
     var musicPausedForPreview by remember(musicPlayer) { mutableStateOf(false) }
     val musicPlaybackOutage = remember(musicPlayer) { PlaybackOutageTracker() }
+
+    // Keep the hoisted player's playlist tracking the active session as it
+    // advances from song to song (#160). The player instance itself
+    // survives — it is keyed on musicQueueId — so this only ever nudges the
+    // playlist: load a song it doesn't have yet (the one unavoidable buffer,
+    // at the start of a listening session or after a jump the preload did
+    // not cover), seek to one already queued and buffered as the next item,
+    // or just trim the finished leading item(s).
+    LaunchedEffect(musicPlayer, activeMusicSession?.sessionId, activeMusicSession?.url) {
+        val player = musicPlayer ?: return@LaunchedEffect
+        val session = activeMusicSession ?: return@LaunchedEffect
+        val index = (0 until player.mediaItemCount).firstOrNull {
+            player.getMediaItemAt(it).localConfiguration?.uri?.toString() == session.url
+        }
+        when {
+            index == null -> {
+                player.setMediaItem(
+                    MediaItem.Builder().setUri(Uri.parse(session.url)).setMediaId(session.title).build(),
+                )
+                if (session.resumePositionSecs > 0) player.seekTo((session.resumePositionSecs * 1000).toLong())
+                player.playWhenReady = true
+                player.prepare()
+            }
+            index > player.currentMediaItemIndex -> {
+                player.seekToDefaultPosition(index)
+                player.playWhenReady = true
+            }
+        }
+        while (player.mediaItemCount > 1 && player.currentMediaItemIndex > 0) {
+            player.removeMediaItem(0)
+        }
+    }
+
+    // Append the track preloadNextTrack negotiated so ExoPlayer buffers it
+    // ahead of time and crosses into it with no gap — and drop a stale
+    // queued item first (a shuffle-mode change replaces the preloaded next
+    // with a different track, whose old stream toggleShuffle already
+    // released, so it must not stay queued for playback).
+    LaunchedEffect(musicPlayer, activeMusicSession?.sessionId, activeMusicSession?.preloadedNext?.url) {
+        val player = musicPlayer ?: return@LaunchedEffect
+        val session = activeMusicSession ?: return@LaunchedEffect
+        val preloadedUrl = session.preloadedNext?.url
+        while (player.mediaItemCount > player.currentMediaItemIndex + 1) {
+            val tailIndex = player.mediaItemCount - 1
+            val tailUrl = player.getMediaItemAt(tailIndex).localConfiguration?.uri?.toString()
+            if (tailUrl == preloadedUrl || tailUrl == session.url) break
+            player.removeMediaItem(tailIndex)
+        }
+        if (preloadedUrl != null) {
+            val alreadyQueued = (0 until player.mediaItemCount).any {
+                player.getMediaItemAt(it).localConfiguration?.uri?.toString() == preloadedUrl
+            }
+            if (!alreadyQueued) {
+                player.addMediaItem(
+                    MediaItem.Builder().setUri(Uri.parse(preloadedUrl)).setMediaId(session.preloadedNext!!.title).build(),
+                )
+            }
+        }
+    }
+
+    // Ask the ViewModel to negotiate the next track once the current one is
+    // within PRELOAD_NEXT_TRACK_LEAD_MS of its end, so the append above can
+    // happen before playback reaches the seam.
+    LaunchedEffect(musicPlayer, activeMusicSession?.sessionId) {
+        val session = activeMusicSession ?: return@LaunchedEffect
+        val player = musicPlayer ?: return@LaunchedEffect
+        while (true) {
+            val duration = player.duration
+            val remaining = if (duration == C.TIME_UNSET) Long.MAX_VALUE else duration - player.currentPosition
+            if (remaining in 0..PRELOAD_NEXT_TRACK_LEAD_MS) onPreloadNextTrack(session.sessionId)
+            delay(1_000)
+        }
+    }
 
     // Inline previews intentionally include audio. If music was already
     // playing in the minimized bar, pause it for the preview and restore it
@@ -596,7 +686,7 @@ private fun SwarmApp(
                     "position_ms=${player.currentPosition}; buffered_position_ms=${player.bufferedPosition}; " +
                         "load_error=${error.javaClass.simpleName}: ${error.message.orEmpty()}"
                 musicPlaybackOutage.onLoadError(failureContext, player.playbackState)?.let { context ->
-                    activeMusicSession?.let { session -> onServerOffline(session.sessionId, context) }
+                    currentMusicSession.value?.let { session -> onServerOffline(session.sessionId, context) }
                 }
                 if (player.playbackState == Player.STATE_BUFFERING) musicIsLoading = true
             }
@@ -617,18 +707,30 @@ private fun SwarmApp(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) musicIsLoading = false
                 musicPlaybackOutage.onPlaybackStateChanged(playbackState)?.let { context ->
-                    activeMusicSession?.let { session -> onServerOffline(session.sessionId, context) }
+                    currentMusicSession.value?.let { session -> onServerOffline(session.sessionId, context) }
                 }
                 if (playbackState == Player.STATE_BUFFERING && musicPlaybackOutage.isPending) musicIsLoading = true
                 // onTrackPlaybackEnded reads the *current* session fresh off
                 // the ViewModel's own state rather than anything captured
                 // here, so this stays correct even if nextEntry changed
-                // (shuffle toggled) since this listener was attached.
+                // (shuffle toggled) since this listener was attached. Only
+                // reached when the next track was *not* already queued as a
+                // playlist item; a queued next crosses over via
+                // onMediaItemTransition below without ever hitting ENDED.
                 if (playbackState == Player.STATE_ENDED) onTrackPlaybackEnded()
             }
 
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // The player reached the end of a song and moved on to the
+                // track preloadNextTrack appended — promote it in the
+                // ViewModel so state follows the seamless transition (#160).
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    onMusicPlaylistAdvanced(mediaItem?.localConfiguration?.uri?.toString())
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
-                val session = activeMusicSession ?: return
+                val session = currentMusicSession.value ?: return
                 val activePlayer = player ?: return
                 val responseCode = playbackHttpResponseCode(error)
                 if (!shouldRecoverExpiredPlaybackSession(error.errorCode, responseCode)) return
@@ -655,7 +757,7 @@ private fun SwarmApp(
             // instance was actually playing — mirrors PlayerScreen's own
             // onDispose save, needed here too since this player now
             // outlives any single screen's composition.
-            activeMusicSession?.let { session ->
+            currentMusicSession.value?.let { session ->
                 val positionSecs = session.positionOffsetSecs + (player?.currentPosition ?: 0L) / 1000.0
                 val durationSecs = player?.duration?.takeIf { it != C.TIME_UNSET }?.let { session.positionOffsetSecs + it / 1000.0 } ?: 0.0
                 onSavePlaybackPosition(session.entry, positionSecs, session.mediaDurationSecs ?: durationSecs)
@@ -853,7 +955,14 @@ private fun SwarmApp(
                     initialFocusKey = lastFocusedArtistKey,
                 )
             is UiState.ArtistAlbums ->
-                AlbumScreen(state.artist, artworkUrl, onPlay = onPlay, onBack = onBackFromArtistAlbums)
+                AlbumScreen(
+                    state.artist,
+                    artworkUrl,
+                    onPlay = onPlay,
+                    onBack = onBackFromArtistAlbums,
+                    initialAlbumKey = state.initialAlbum,
+                    activeTrackKey = activeMusicSession?.entry?.entry?.entryKey,
+                )
             is UiState.MovieShelf ->
                 MovieShelfScreen(
                     state.movies,
@@ -912,7 +1021,7 @@ private fun SwarmApp(
                         nextTitle = state.nextEntry?.let { it.entry.displayTitle() },
                         isPlaying = musicIsPlaying,
                         isLoading = musicIsLoading,
-                        shuffleEnabled = shuffleEnabled,
+                        shuffleMode = shuffleMode,
                         isLiked = isLiked(state.entry),
                         artworkUrl = fullArtworkUrl(state.entry),
                         artistPhotoUrl = artistPhotoUrl(state.entry),
