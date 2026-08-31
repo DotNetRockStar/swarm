@@ -11,6 +11,7 @@ package app.swarm.tv.app.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
@@ -25,22 +26,33 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmSurface
 import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.core.catalog.MergedEntry
 
+/**
+ * @param preview the ViewModel's currently-negotiated hover preview, if any.
+ * @param onStartPreview / onStopPreview / onPreviewFinished the same
+ *   [app.swarm.tv.app.data.SwarmViewModel] hooks [CatalogScreen] uses, so a
+ *   focused grid card plays an inline video preview here too (#159).
+ */
 @Composable
 fun MovieShelfScreen(
     movies: List<MergedEntry>,
@@ -48,8 +60,18 @@ fun MovieShelfScreen(
     onOpenMovie: (MergedEntry) -> Unit,
     onBack: () -> Unit,
     initialFocusKey: String? = null,
+    preview: BrowsePreview? = null,
+    onStartPreview: (MergedEntry) -> Unit = {},
+    onStopPreview: () -> Unit = {},
+    onPreviewFinished: (String) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
+    val previewCoordinator = rememberBrowsePreviewCoordinator(
+        preview = preview,
+        onStartPreview = onStartPreview,
+        onStopPreview = onStopPreview,
+        onPreviewFinished = onPreviewFinished,
+    )
 
     // Alphabetical, not the rating order the shelf row that opened this
     // screen sorts by — see [browseAllSortKey].
@@ -93,18 +115,38 @@ fun MovieShelfScreen(
                     contentType = { _, _ -> "movie" },
                 ) { index, movie ->
                     val focusModifier = if (index == focusIndex) Modifier.focusRequester(firstCardFocusRequester) else Modifier
+                    var isFocused by remember(movie.entry.entryKey) { mutableStateOf(false) }
+                    val isPreviewExpanded = isFocused &&
+                        previewCoordinator.expandedPreviewEntryKey == movie.entry.entryKey
                     Card(
                         onClick = { onOpenMovie(movie) },
                         colors = CardDefaults.colors(containerColor = SwarmSurface),
                         modifier = focusModifier.fillMaxWidth()
-                            .testTag(UatTestTags.GRID_MOVIE_PREFIX + movie.entry.entryKey),
+                            .testTag(UatTestTags.GRID_MOVIE_PREFIX + movie.entry.entryKey)
+                            .onFocusChanged { focusState ->
+                                if (isFocused != focusState.isFocused) {
+                                    isFocused = focusState.isFocused
+                                    previewCoordinator.onPreviewFocusChanged(movie, focusState.isFocused)
+                                }
+                            },
                     ) {
-                        ArtworkImage(
-                            label = movie.entry.scrapedTitle ?: movie.entry.title,
-                            placeholderType = "Movie",
-                            primaryUrl = artworkUrl(movie),
+                        Box(
                             modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(4.dp)),
-                        )
+                        ) {
+                            ArtworkImage(
+                                label = movie.entry.scrapedTitle ?: movie.entry.title,
+                                placeholderType = "Movie",
+                                primaryUrl = artworkUrl(movie),
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                            BrowsePreviewGridOverlay(
+                                entryKey = movie.entry.entryKey,
+                                isFocused = isFocused,
+                                isExpanded = isPreviewExpanded,
+                                preview = preview,
+                                onFinished = previewCoordinator.onPreviewFinished,
+                            )
+                        }
                     }
                 }
             }
