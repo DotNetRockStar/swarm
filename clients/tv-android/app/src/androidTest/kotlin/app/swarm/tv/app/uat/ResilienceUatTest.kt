@@ -48,4 +48,32 @@ class ResilienceUatTest : UatTestBase() {
         selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
         waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 15_000)
     }
+
+    @Test
+    fun testCancelledPlaybackPreparationCanRetryWithoutCapacityError() {
+        navigateDownUntilTag(UatTestTags.SHELF_MOVIES)
+        val movieTag = requireNotNull(composeTestRule.firstTagStartingWith(UatTestTags.CARD_MOVIE_PREFIX))
+        selectTagWithDpad(movieTag)
+        waitForTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+
+        // On a transcode this is the real "Ready when you are / Starting…"
+        // screen from #146. Direct-compatible media may reach the player
+        // before the next semantics poll, so cancel from whichever real
+        // playback state won the race and verify the immediate retry.
+        composeTestRule.waitUntil(timeoutMillis = 15_000) {
+            composeTestRule.allTagsStartingWith(UatTestTags.PREPARING_PLAYBACK).isNotEmpty() ||
+                composeTestRule.allTagsStartingWith(UatTestTags.PLAYER_SURFACE).isNotEmpty()
+        }
+        if (composeTestRule.allTagsStartingWith(UatTestTags.PREPARING_PLAYBACK).isNotEmpty()) {
+            pressBack()
+            waitForTag(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON, timeoutMs = 15_000)
+        } else {
+            exitPlaybackTo(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+        }
+
+        selectTagWithDpad(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 45_000)
+        exitPlaybackTo(UatTestTags.MOVIE_DETAIL_PLAY_BUTTON)
+    }
 }

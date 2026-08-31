@@ -7,7 +7,7 @@
 use crate::probe::AudioStreamOption;
 use crate::store::EntryRecord;
 use rand::RngCore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -347,6 +347,14 @@ struct Session {
 #[derive(Default)]
 struct State {
     sessions: HashMap<String, Session>,
+    /// Stable peer fingerprint that reserved each session. Kept outside
+    /// `Session` so low-level/unit callers that do not have authenticated
+    /// transport context retain the existing behavior.
+    owners: HashMap<String, String>,
+    /// A reservation becomes claimed on its first playlist/media request.
+    /// Until then, a retry from the same peer may safely supersede it: the
+    /// peer never received (or never acted on) the old playback plan.
+    claimed: HashSet<String>,
 }
 
 /**
@@ -599,6 +607,7 @@ impl TranscodeManager {
         media_path: &Path,
         preferences: &PlaybackPreferences,
         is_lan: bool,
+        owner: Option<&str>,
     ) -> Result<PlaybackPlan, TranscodeError> {
         self.expire_idle();
         // A hover preview is an enhancement, not a prerequisite for actual
@@ -607,6 +616,9 @@ impl TranscodeManager {
         // viewer waits on the playback screen.
         if !preferences.preview {
             self.cancel_previews();
+            if let Some(owner) = owner {
+                self.cancel_unclaimed_for_owner(owner);
+            }
         }
         let enforce_budget = self.should_throttle(is_lan);
         let available = if enforce_budget {
@@ -626,6 +638,7 @@ impl TranscodeManager {
                         source_peak,
                         enforce_budget,
                         is_lan,
+                        owner,
                     )?;
                     return Ok(PlaybackPlan {
                         mode: PlaybackMode::Direct,
@@ -668,6 +681,7 @@ impl TranscodeManager {
                         budget_exempt: is_lan,
                     },
                     preferences.preview,
+                    owner,
                 )
                 .await;
         }
@@ -703,20 +717,25 @@ impl TranscodeManager {
                 budget_exempt: is_lan,
             },
             preferences.preview,
+            owner,
         )
         .await
     }
 
     pub fn open_direct(&self, session_id: &str) -> Option<(String, Arc<SessionRateLimiter>)> {
         let mut state = self.state.lock().unwrap();
-        let session = state.sessions.get_mut(session_id)?;
-        let SessionKind::Direct { entry_key } = &session.kind else {
-            return None;
+        let opened = {
+            let session = state.sessions.get_mut(session_id)?;
+            let SessionKind::Direct { entry_key } = &session.kind else {
+                return None;
+            };
+            let entry_key = entry_key.clone();
+            session.last_access = Instant::now();
+            session.in_use += 1;
+            (entry_key, Arc::clone(&session.rate_limiter))
         };
-        let entry_key = entry_key.clone();
-        session.last_access = Instant::now();
-        session.in_use += 1;
-        Some((entry_key, Arc::clone(&session.rate_limiter)))
+        state.claimed.insert(session_id.to_string());
+        Some(opened)
     }
 
     pub fn open_hls(&self, session_id: &str, relative_path: &str) -> Option<SessionFile> {
@@ -724,36 +743,40 @@ impl TranscodeManager {
             return None;
         }
         let mut state = self.state.lock().unwrap();
-        let session = state.sessions.get_mut(session_id)?;
-        if session.cancelled.load(Ordering::Relaxed) {
-            return None;
-        }
-        let SessionKind::Hls { directory, child } = &mut session.kind else {
-            return None;
-        };
-        let path = directory.join(relative_path);
-        // Once ffmpeg has exited, make sure every media playlist carries an
-        // `#EXT-X-ENDLIST` tag. A clean exit already writes one, but a
-        // mid-stream ffmpeg failure (for example a transient VideoToolbox
-        // session-pool error) leaves the last-written playlist open-ended for
-        // good. ExoPlayer keeps reloading an open-ended playlist and, once it
-        // stops advancing, aborts playback with `PlaylistStuckException`
-        // instead of ending cleanly (#126). Terminating the playlist turns
-        // that into an ordinary end-of-stream.
-        if relative_path.ends_with(".m3u8") {
-            let exited = child
-                .as_mut()
-                .map(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
-                .unwrap_or(false);
-            if exited {
-                finalize_hls_playlists(directory);
+        let (path, rate_limiter) = {
+            let session = state.sessions.get_mut(session_id)?;
+            if session.cancelled.load(Ordering::Relaxed) {
+                return None;
             }
-        }
-        session.last_access = Instant::now();
-        session.in_use += 1;
+            let SessionKind::Hls { directory, child } = &mut session.kind else {
+                return None;
+            };
+            let path = directory.join(relative_path);
+            // Once ffmpeg has exited, make sure every media playlist carries an
+            // `#EXT-X-ENDLIST` tag. A clean exit already writes one, but a
+            // mid-stream ffmpeg failure (for example a transient VideoToolbox
+            // session-pool error) leaves the last-written playlist open-ended for
+            // good. ExoPlayer keeps reloading an open-ended playlist and, once it
+            // stops advancing, aborts playback with `PlaylistStuckException`
+            // instead of ending cleanly (#126). Terminating the playlist turns
+            // that into an ordinary end-of-stream.
+            if relative_path.ends_with(".m3u8") {
+                let exited = child
+                    .as_mut()
+                    .map(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
+                    .unwrap_or(false);
+                if exited {
+                    finalize_hls_playlists(directory);
+                }
+            }
+            session.last_access = Instant::now();
+            session.in_use += 1;
+            (path, Arc::clone(&session.rate_limiter))
+        };
+        state.claimed.insert(session_id.to_string());
         Some(SessionFile {
             path,
-            rate_limiter: Arc::clone(&session.rate_limiter),
+            rate_limiter,
             session_id: session_id.to_string(),
         })
     }
@@ -804,6 +827,7 @@ impl TranscodeManager {
         reserved_bps: u64,
         enforce_budget: bool,
         budget_exempt: bool,
+        owner: Option<&str>,
     ) -> Result<String, TranscodeError> {
         let mut state = self.state.lock().unwrap();
         let already_reserved: u64 = state
@@ -831,6 +855,9 @@ impl TranscodeManager {
                 in_use: 0,
             },
         );
+        if let Some(owner) = owner {
+            state.owners.insert(id.clone(), owner.to_string());
+        }
         Ok(id)
     }
 
@@ -849,6 +876,45 @@ impl TranscodeManager {
         }
     }
 
+    /// A foreground retry from one authenticated TV replaces only that TV's
+    /// reservations which were never opened. This is the gap where a lost
+    /// `/play` response or client crash used to leave FFmpeg consuming the
+    /// transcode limit even though the TV had no session id with which to
+    /// call `/stop`. Claimed streams and every other TV are untouched.
+    fn cancel_unclaimed_for_owner(&self, owner: &str) {
+        let abandoned = {
+            let state = self.state.lock().unwrap();
+            state
+                .owners
+                .iter()
+                .filter(|(id, session_owner)| {
+                    session_owner.as_str() == owner && !state.claimed.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        for id in abandoned {
+            self.remove_unclaimed_session_for_owner(&id, owner);
+        }
+    }
+
+    fn remove_unclaimed_session_for_owner(&self, id: &str, owner: &str) {
+        let removed = {
+            let mut state = self.state.lock().unwrap();
+            // Recheck while holding the removal lock: the player may have
+            // opened and claimed this session after the candidate list was
+            // collected but before this iteration reached it.
+            if state.claimed.contains(id) || state.owners.get(id).map(String::as_str) != Some(owner)
+            {
+                None
+            } else {
+                state.owners.remove(id);
+                state.sessions.remove(id)
+            }
+        };
+        Self::cleanup_removed_session(removed);
+    }
+
     async fn start_hls(
         &self,
         entry: &EntryRecord,
@@ -857,6 +923,7 @@ impl TranscodeManager {
         variants: &[Rendition],
         reservation: HlsReservation,
         preview: bool,
+        owner: Option<&str>,
     ) -> Result<PlaybackPlan, TranscodeError> {
         let HlsReservation {
             reserved_bps,
@@ -917,7 +984,17 @@ impl TranscodeManager {
                     in_use: 0,
                 },
             );
+            if let Some(owner) = owner {
+                state.owners.insert(id.clone(), owner.to_string());
+            }
         }
+
+        // Async cancellation can happen at every await below (most notably
+        // when the peer disconnects during a long startup). Without a drop
+        // guard that leaves a child-less session in the map forever, and it
+        // still counts against max_sessions. Arm cleanup until the child is
+        // successfully installed and the plan is ready to return.
+        let mut pending = PendingSessionGuard::new(self, id.clone());
 
         let result = self
             .spawn_ffmpeg(
@@ -964,6 +1041,8 @@ impl TranscodeManager {
             self.remove_session(&id);
             return Err(TranscodeError::Superseded);
         }
+
+        pending.disarm();
 
         Ok(PlaybackPlan {
             mode: PlaybackMode::Hls,
@@ -1386,7 +1465,16 @@ impl TranscodeManager {
     }
 
     fn remove_session(&self, id: &str) {
-        let removed = self.state.lock().unwrap().sessions.remove(id);
+        let removed = {
+            let mut state = self.state.lock().unwrap();
+            state.owners.remove(id);
+            state.claimed.remove(id);
+            state.sessions.remove(id)
+        };
+        Self::cleanup_removed_session(removed);
+    }
+
+    fn cleanup_removed_session(removed: Option<Session>) {
         if let Some(Session {
             kind:
                 SessionKind::Hls {
@@ -1402,6 +1490,37 @@ impl TranscodeManager {
                 let _ = child.start_kill();
             }
             let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+/// Cancellation-safe ownership of a just-reserved HLS session. Tokio drops
+/// the `start_hls` future when its request stream disappears; `Drop` must then
+/// remove the reservation and terminate any encoder started so far.
+struct PendingSessionGuard<'a> {
+    manager: &'a TranscodeManager,
+    session_id: String,
+    armed: bool,
+}
+
+impl<'a> PendingSessionGuard<'a> {
+    fn new(manager: &'a TranscodeManager, session_id: String) -> Self {
+        Self {
+            manager,
+            session_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingSessionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.manager.remove_session(&self.session_id);
         }
     }
 }
@@ -1831,6 +1950,80 @@ mod tests {
     }
 
     #[test]
+    fn retry_preempts_only_unclaimed_sessions_from_the_same_owner() {
+        let manager = TranscodeManager::new(TranscodeConfig::disabled(
+            std::env::temp_dir().join(format!("swarm-owner-preemption-test-{}", session_id())),
+        ));
+        let session = || Session {
+            kind: SessionKind::Direct {
+                entry_key: "movie".into(),
+            },
+            preview: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reserved_bps: 128_000,
+            budget_exempt: true,
+            rate_limiter: Arc::new(SessionRateLimiter::new(0)),
+            last_access: Instant::now(),
+            in_use: 0,
+        };
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.sessions.insert("abandoned".into(), session());
+            state.sessions.insert("playing".into(), session());
+            state.sessions.insert("other-tv".into(), session());
+            state
+                .owners
+                .insert("abandoned".into(), "living-room".into());
+            state.owners.insert("playing".into(), "living-room".into());
+            state.owners.insert("other-tv".into(), "bedroom".into());
+            state.claimed.insert("playing".into());
+        }
+
+        manager.cancel_unclaimed_for_owner("living-room");
+        manager.remove_unclaimed_session_for_owner("playing", "living-room");
+        manager.remove_unclaimed_session_for_owner("other-tv", "living-room");
+
+        let state = manager.state.lock().unwrap();
+        assert!(!state.sessions.contains_key("abandoned"));
+        assert!(state.sessions.contains_key("playing"));
+        assert!(state.sessions.contains_key("other-tv"));
+        assert!(!state.owners.contains_key("abandoned"));
+    }
+
+    #[test]
+    fn dropping_pending_hls_start_removes_its_capacity_reservation() {
+        let root =
+            std::env::temp_dir().join(format!("swarm-pending-session-test-{}", session_id()));
+        let session_dir = root.join("pending");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let manager = TranscodeManager::new(TranscodeConfig::disabled(root));
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.sessions.insert(
+                "pending".into(),
+                Session {
+                    kind: SessionKind::Hls {
+                        directory: session_dir.clone(),
+                        child: None,
+                    },
+                    preview: false,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    reserved_bps: 128_000,
+                    budget_exempt: true,
+                    rate_limiter: Arc::new(SessionRateLimiter::new(0)),
+                    last_access: Instant::now(),
+                    in_use: 0,
+                },
+            );
+        }
+
+        drop(PendingSessionGuard::new(&manager, "pending".into()));
+
+        assert_eq!(manager.active_sessions(), 0);
+        assert!(!session_dir.exists());
+    }
+
+    #[test]
     fn direct_play_requires_container_codec_and_budget_compatibility() {
         let mut compatible = entry();
         compatible.relative_path = "movies/example.mp4".into();
@@ -2005,6 +2198,7 @@ mod tests {
                 4_160_000,
                 true,
                 false,
+                None,
             )
             .unwrap();
         let second = manager
@@ -2015,6 +2209,7 @@ mod tests {
                 2_128_000,
                 true,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(manager.reserved_bps(), 6_288_000);
@@ -2026,6 +2221,7 @@ mod tests {
                 1_096_000,
                 true,
                 false,
+                None,
             ),
             Err(TranscodeError::Bandwidth)
         ));
@@ -2063,6 +2259,7 @@ mod tests {
                 3_000_000,
                 true,
                 false,
+                None,
             )
             .unwrap();
         let activity = manager.activity();
@@ -2143,7 +2340,7 @@ mod tests {
         prefs.prefer_direct = false;
 
         let plan = manager
-            .plan(&source_entry, &source, &prefs, false)
+            .plan(&source_entry, &source, &prefs, false, None)
             .await
             .unwrap();
         assert_eq!(plan.mode, PlaybackMode::Hls);
@@ -2158,7 +2355,7 @@ mod tests {
 
         manager.release(session);
         let lan_plan = manager
-            .plan(&source_entry, &source, &prefs, true)
+            .plan(&source_entry, &source, &prefs, true, None)
             .await
             .unwrap();
         let lan_relative = lan_plan.path.splitn(4, '/').nth(3).unwrap();
@@ -2171,7 +2368,7 @@ mod tests {
 
         prefs.preview = true;
         let preview_plan = manager
-            .plan(&source_entry, &source, &prefs, false)
+            .plan(&source_entry, &source, &prefs, false, None)
             .await
             .unwrap();
         assert_eq!(preview_plan.mode, PlaybackMode::Hls);
@@ -2278,7 +2475,7 @@ mod tests {
         prefs.prefer_direct = false;
 
         let plan = manager
-            .plan(&source_entry, &source, &prefs, false)
+            .plan(&source_entry, &source, &prefs, false, None)
             .await
             .unwrap();
         assert_eq!(plan.mode, PlaybackMode::Hls);
