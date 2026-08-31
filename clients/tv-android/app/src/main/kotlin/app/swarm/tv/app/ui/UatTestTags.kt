@@ -59,6 +59,7 @@ object UatTestTags {
     // SeasonScreen.
     const val SEASON_SCREEN_SHOW_TITLE = "uat_season_screen_show_title"
     const val SEASON_SCREEN_WATCHLIST_BUTTON = "uat_season_screen_watchlist_button"
+    const val SEASON_SCREEN_RESUME_BUTTON = "uat_season_screen_resume_button"
     const val SEASON_CARD_PREFIX = "uat_season_card_" // + season number
     const val EPISODE_ITEM_PREFIX = "uat_episode_item_" // + episode entryKey
 

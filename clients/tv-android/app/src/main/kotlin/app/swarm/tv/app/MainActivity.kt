@@ -97,6 +97,7 @@ import app.swarm.tv.app.ui.screens.playbackHttpResponseCode
 import app.swarm.tv.app.ui.screens.serverOfflineMediaSourceFactory
 import app.swarm.tv.app.ui.screens.shouldRecoverExpiredPlaybackSession
 import app.swarm.tv.app.ui.screens.SeasonScreen
+import app.swarm.tv.app.ui.screens.resumeEpisode
 import app.swarm.tv.app.ui.screens.ShowShelfScreen
 import app.swarm.tv.app.ui.screens.SwarmDashboardScreen
 import app.swarm.tv.app.ui.screens.SwarmSettingsScreen
@@ -1002,7 +1003,14 @@ private fun SwarmApp(
                     onBack = onBackFromShowShelf,
                     initialFocusKey = lastFocusedShowKey,
                 )
-            is UiState.ShowSeasons ->
+            is UiState.ShowSeasons -> {
+                // The most recently started-but-unfinished episode of this
+                // show, if any — surfaces a Resume button on the season list
+                // even when the show has aged out of the 6-item Continue
+                // Watching row (#152).
+                val resumeTarget = remember(state.show, watchStates) {
+                    resumeEpisode(state.show, watchStates)
+                }
                 SeasonScreen(
                     state.show,
                     seasonArtworkUrl = seasonArtworkUrl,
@@ -1013,7 +1021,9 @@ private fun SwarmApp(
                     onSelectSeason = onSelectShowSeason,
                     isWatchlisted = WatchlistKeys.show(state.show) in watchlistKeys,
                     onToggleWatchlist = { onToggleShowWatchlist(state.show) },
+                    onResume = resumeTarget?.let { episode -> { onPlayPaused(episode) } },
                 )
+            }
             is UiState.Player ->
                 if (state.entry.entry.kind == MediaKind.TRACK) {
                     MusicPlayerScreen(
