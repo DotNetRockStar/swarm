@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read Codex ChatGPT quota through the local Codex app-server."""
+"""Read Codex ChatGPT quota for the full UAT cron's optional AI triage."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def main() -> int:
                 "id": 1,
                 "params": {
                     "clientInfo": {
-                        "name": "swarm_issue_worker",
-                        "title": "SWARM issue worker",
+                        "name": "swarm_full_uat_cron",
+                        "title": "SWARM full UAT cron",
                         "version": "1.0.0",
                     }
                 },
@@ -100,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

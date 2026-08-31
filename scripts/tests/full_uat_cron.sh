@@ -69,9 +69,8 @@
 #      Codex CLI has spare quota, ask it (read-only — no file edits, no
 #      shell access) to post a plain-text triage comment on that same
 #      issue: likely root cause and where to look. Alternates which
-#      provider gets asked, the same "prefer whichever one didn't run last
-#      time" rule scripts/issue_worker/swarm_issue_worker.py uses for
-#      follow-up passes, falling back to the other if the preferred one is
+#      provider gets asked, preferring whichever one didn't run last time
+#      and falling back to the other if the preferred one is
 #      over quota, and skipping the triage step entirely (silently, no
 #      GitHub noise) if neither has capacity right now.
 #   7. On a clean pass: if a tracking issue is currently open, post a
@@ -101,9 +100,9 @@
 #   SWARM_STUN_PORT               local rendezvous HTTP port to health-check (default 8080) — same var tv_e2e_suite.sh/tv_uat_suite.sh already use
 #   SWARM_UAT_BATOCERA_HOST       SMB host whose mount is required before testing (default batocera.local)
 #   SWARM_UAT_TRIAGE_ENABLED      1 to run AI triage on failure, 0 to only post the raw report (default 1)
-#   SWARM_MIN_REMAINING_PERCENT   minimum remaining Claude/Codex quota (session+week / rate-limit windows) required to use a provider for triage (default 10) — same var/default swarm_issue_worker.py uses
-#   SWARM_CLAUDE_MODEL / SWARM_CLAUDE_EFFORT   Claude model+effort for triage (default claude-sonnet-5 / high) — same vars swarm_issue_worker.py uses
-#   SWARM_CODEX_MODEL / SWARM_CODEX_EFFORT     Codex model+effort for triage (default gpt-5.6-sol / high) — same vars swarm_issue_worker.py uses
+#   SWARM_MIN_REMAINING_PERCENT   minimum remaining Claude/Codex quota (session+week / rate-limit windows) required to use a provider for triage (default 10)
+#   SWARM_CLAUDE_MODEL / SWARM_CLAUDE_EFFORT   Claude model+effort for triage (default claude-sonnet-5 / high)
+#   SWARM_CODEX_MODEL / SWARM_CODEX_EFFORT     Codex model+effort for triage (default gpt-5.6-sol / high)
 #   CLAUDE_BIN / CODEX_BIN         executables to invoke (default: whatever `claude`/`codex` resolve to on PATH)
 
 set -uo pipefail
@@ -246,9 +245,8 @@ smb_share_connected() {
     return 0
 }
 
-# Bash port of swarm_issue_worker.py's claude_capacity() — same command,
-# same /usage output parsing, same threshold — so "has capacity" means the
-# same thing here as it does for the issue worker.
+# Checks Claude's session and weekly quota with the same threshold used for
+# Codex below.
 claude_capacity() {
     [ -n "$CLAUDE_BIN" ] || { log "Claude capacity check: claude not found in PATH."; return 2; }
     local usage_json
@@ -275,12 +273,11 @@ sys.exit(0 if (session_remaining >= min_remaining and week_remaining >= min_rema
 " 2>>"$LOG_FILE"
 }
 
-# Bash port of swarm_issue_worker.py's codex_capacity() — same script,
-# same availability formula.
+# Checks Codex's rate-limit windows and spend controls.
 codex_capacity() {
     [ -n "$CODEX_BIN" ] || { log "Codex capacity check: codex not found in PATH."; return 2; }
     local limits_json
-    if ! limits_json="$(python3 "$REPO_ROOT/scripts/issue_worker/codex_rate_limits.py" --codex-bin "$CODEX_BIN" 2>>"$LOG_FILE")"; then
+    if ! limits_json="$(python3 "$REPO_ROOT/scripts/tests/codex_rate_limits.py" --codex-bin "$CODEX_BIN" 2>>"$LOG_FILE")"; then
         log "Codex capacity check: rate-limit request failed."
         return 2
     fi
@@ -312,10 +309,8 @@ sys.exit(0 if available else 1)
 # Prints "claude" or "codex" on stdout and returns 0 if a provider with
 # capacity was found; returns 1 with nothing printed if neither has spare
 # quota right now. Alternates from whichever provider ran the previous
-# triage — same "prefer the one that didn't run last time" rule
-# swarm_issue_worker.py's choose_provider() applies to follow-up passes —
-# falling back to the other provider if the preferred one is over quota,
-# and preferring Claude first when there is no previous triage yet.
+# triage, falling back to the other provider if the preferred one is over
+# quota and preferring Claude first when there is no previous triage yet.
 choose_triage_provider() {
     local preferred="claude"
     case "$STATE_LAST_TRIAGE_PROVIDER" in

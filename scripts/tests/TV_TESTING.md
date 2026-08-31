@@ -87,9 +87,9 @@ in one ticket; a new failure after the old issue was closed opens a fresh
 one.
 
 **A word of caution from real experience:** assigning this tracking issue
-to yourself opts it into any other automation (e.g.
-`scripts/issue_worker/`) that watches for issues assigned to you — that
-automation cannot verify a fix against `tv_uat_suite.sh`'s real-hardware
+to yourself can opt it into external automation that watches for issues
+assigned to you. That automation cannot verify a fix against
+`tv_uat_suite.sh`'s real-hardware
 failures (it has no access to the physical Fire TV), so a "fix" it merges
 can easily leave the exact same failures in place, this cron re-reports
 them as a new comment, and the other automation reads that as more work to
@@ -114,9 +114,8 @@ On a failure, if a Claude or Codex CLI has spare quota, it also asks one of
 them — read-only, no file edits, no shell access — to post a plain-text
 triage comment (likely cause, where to look) on the same tracking issue.
 Which provider gets asked alternates every failure, preferring whichever
-one didn't run the previous triage — the same rule
-`scripts/issue_worker/swarm_issue_worker.py` uses for follow-up passes —
-falling back to the other if the preferred one is over quota, and skipping
+one didn't run the previous triage, falling back to the other if the
+preferred one is over quota, and skipping
 the triage step entirely (silently, no GitHub noise) if neither has
 capacity right now.
 
