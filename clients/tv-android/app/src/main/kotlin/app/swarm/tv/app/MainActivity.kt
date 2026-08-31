@@ -866,6 +866,7 @@ private fun SwarmApp(
                     errorMessage = state.error,
                     onUpdateBaseUrl = onUpdateBaseUrl,
                     onUpdateDeviceName = onUpdateDeviceName,
+                    onAddServer = { onStartActivation(state.deviceName) },
                     onBack = onBackFromSettings,
                     kidModeSettings = kidModeSettings,
                     availableGenres = state.availableGenres,

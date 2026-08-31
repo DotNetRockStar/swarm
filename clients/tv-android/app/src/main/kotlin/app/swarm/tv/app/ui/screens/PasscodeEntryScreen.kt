@@ -13,12 +13,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import app.swarm.tv.R
+import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.components.SwarmLoadingIndicator
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.app.ui.theme.SwarmAccent
@@ -42,7 +44,11 @@ fun ActivationRequestScreen(onCancel: () -> Unit) {
         Spacer(Modifier.height(18.dp))
         Text("This should only take a moment.", color = SwarmMuted, fontSize = 15.sp)
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onCancel, colors = swarmActionButtonColors()) { Text("Cancel") }
+        Button(
+            onClick = onCancel,
+            modifier = Modifier.testTag(UatTestTags.ACTIVATION_CANCEL_BUTTON),
+            colors = swarmActionButtonColors(),
+        ) { Text("Cancel") }
     }
 }
 
@@ -65,7 +71,13 @@ fun ActivationCodeScreen(
         Spacer(Modifier.height(10.dp))
         Text("Enter this temporary code on the media server's Swarm page", color = SwarmMuted, fontSize = 15.sp)
         Spacer(Modifier.height(26.dp))
-        Text(code.chunked(4).joinToString("  "), color = SwarmAccent, fontSize = 46.sp, fontWeight = FontWeight.Black)
+        Text(
+            code.chunked(4).joinToString("  "),
+            modifier = Modifier.testTag(UatTestTags.ACTIVATION_CODE),
+            color = SwarmAccent,
+            fontSize = 46.sp,
+            fontWeight = FontWeight.Black,
+        )
         Spacer(Modifier.height(14.dp))
         Text("Waiting for approval · expires $expiresAt", color = SwarmMuted, fontSize = 13.sp)
         errorMessage?.let {
@@ -73,6 +85,10 @@ fun ActivationCodeScreen(
             Text(it, color = SwarmError, fontSize = 14.sp)
         }
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onCancel, colors = swarmActionButtonColors()) { Text("Cancel") }
+        Button(
+            onClick = onCancel,
+            modifier = Modifier.testTag(UatTestTags.ACTIVATION_CANCEL_BUTTON),
+            colors = swarmActionButtonColors(),
+        ) { Text("Cancel") }
     }
 }
