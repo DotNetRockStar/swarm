@@ -302,6 +302,20 @@ private fun UiState.embeddedCatalog(): UiState.Catalog? = when (this) {
     else -> null
 }
 
+/**
+ * Screens that show hover-preview-eligible browse cards: the browse page
+ * itself and the three "Browse All" full grids (#159). Hover previews are
+ * negotiated/released against this catalog's devices regardless of which of
+ * those the user is currently on.
+ */
+private fun UiState.browsePreviewCatalog(): UiState.Catalog? = when (this) {
+    is UiState.Catalog -> this
+    is UiState.MovieShelf -> catalog
+    is UiState.ShowShelf -> catalog
+    is UiState.ArtistShelf -> catalog
+    else -> null
+}
+
 /** Catalog state relevant to diagnostics, including screens that wrap their
  * browse origin for playback transitions. */
 private fun UiState.diagnosticCatalog(): UiState.Catalog? = when (this) {
@@ -1689,7 +1703,7 @@ class SwarmViewModel(
      * immediately instead of leaking a transcode/upload slot.
      */
     fun startBrowsePreview(entry: MergedEntry) {
-        if (_state.value !is UiState.Catalog) return
+        if (_state.value.browsePreviewCatalog() == null) return
         requestedBrowsePreview = entry
         if (_browsePreview.value?.entryKey == entry.entry.entryKey || browsePreviewWorker?.isActive == true) return
 
@@ -1699,7 +1713,7 @@ class SwarmViewModel(
                 if (_browsePreview.value?.entryKey == requested.entry.entryKey) return@launch
                 browsePreviewReleaseJob?.join()
 
-                val catalog = _state.value as? UiState.Catalog ?: return@launch
+                val catalog = _state.value.browsePreviewCatalog() ?: return@launch
                 val serverId = requested.sources.firstOrNull() ?: return@launch
                 val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute)
                     ?: return@launch
@@ -1733,7 +1747,9 @@ class SwarmViewModel(
                     continue
                 }
 
-                if (requestedBrowsePreview?.entry?.entryKey != requested.entry.entryKey || _state.value !is UiState.Catalog) {
+                if (requestedBrowsePreview?.entry?.entryKey != requested.entry.entryKey ||
+                    _state.value.browsePreviewCatalog() == null
+                ) {
                     runCatching {
                         releasePlaybackSessionNow(catalog, serverId, selection.sessionId)
                     }.onFailure { Log.w(logTag, "failed to release superseded browse preview", it) }

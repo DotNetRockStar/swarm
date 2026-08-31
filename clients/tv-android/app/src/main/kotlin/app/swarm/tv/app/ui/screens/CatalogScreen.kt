@@ -113,7 +113,6 @@ import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
 import app.swarm.tv.core.rest.SwarmDevice
 import app.swarm.tv.core.watch.WatchState
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Mirrors the media server's own browse-page filter (`media.js`'s `kindFilter`) — same four choices, same meaning. */
@@ -135,6 +134,36 @@ internal data class CatalogBrowseState(
  * can't usefully scroll an unbounded row, and every row already has a full
  * grid destination one click away. */
 private const val MAX_SHELF_ITEMS = 20
+
+/**
+ * Sentinel [initialFocusMovieKey]/[initialFocusShowKey]/[initialFocusArtistKey]
+ * value meaning "focus this row's Browse All tile". Set by MainActivity when
+ * the user entered a [MovieShelfScreen]/[ShowShelfScreen]/[ArtistShelfScreen]
+ * via that tile, so pressing Back out of the grid returns focus to the tile
+ * that opened it rather than defaulting to the filter rail (#159). No real
+ * entry key can collide with it — entry keys are server-derived paths.
+ */
+internal const val BROWSE_ALL_TILE_FOCUS_KEY = "__browse_all_tile__"
+
+/**
+ * Which index (if any) a top-level shelf row should restore D-pad focus to.
+ * A remembered entry key resolves to that card's position; the
+ * [BROWSE_ALL_TILE_FOCUS_KEY] sentinel resolves to the Browse All tile's
+ * position (the item right after the [MAX_SHELF_ITEMS] visible cards), but
+ * only in the horizontal-shelf layout that actually has a tile — the
+ * genre-filtered full grid has none, so it falls back to first-card focus.
+ */
+internal fun <T> shelfRestoreIndex(
+    items: List<T>,
+    focusKey: String?,
+    genreFiltered: Boolean,
+    keyOf: (T) -> String,
+): Int? = when {
+    focusKey == null -> null
+    focusKey == BROWSE_ALL_TILE_FOCUS_KEY ->
+        if (genreFiltered) null else items.size.coerceAtMost(MAX_SHELF_ITEMS).takeIf { items.size > MAX_SHELF_ITEMS }
+    else -> items.indexOfFirst { keyOf(it) == focusKey }.takeIf { it >= 0 }
+}
 
 /** Last-watched-wins cap on the Continue Watching row. */
 private const val MAX_CONTINUE_WATCHING = 6
@@ -210,33 +239,17 @@ internal fun CatalogScreen(
     initialBrowseState: CatalogBrowseState = CatalogBrowseState(),
     onBrowseStateChange: (CatalogBrowseState) -> Unit = {},
 ) {
-    var focusedPreviewEntry by remember { mutableStateOf<MergedEntry?>(null) }
-    var expandedPreviewEntryKey by remember { mutableStateOf<String?>(null) }
-    val previewFinished: (String) -> Unit = { sessionId ->
-        if (preview?.sessionId == sessionId && preview.entryKey == expandedPreviewEntryKey) {
-            expandedPreviewEntryKey = null
-        }
-        onPreviewFinished(sessionId)
-    }
-    val previewFocusChanged: (MergedEntry, Boolean) -> Unit = { entry, focused ->
-        if (focused) {
-            focusedPreviewEntry = entry
-        } else if (focusedPreviewEntry?.entry?.entryKey == entry.entry.entryKey) {
-            focusedPreviewEntry = null
-        }
-    }
-    // Warm the stream halfway through the dwell, but keep the card at poster
-    // width and the player paused/hidden until all four seconds have elapsed.
-    // Moving focus cancels both stages and releases any session already made.
-    LaunchedEffect(focusedPreviewEntry?.entry?.entryKey) {
-        onStopPreview()
-        expandedPreviewEntryKey = null
-        val entry = focusedPreviewEntry ?: return@LaunchedEffect
-        delay(2_000)
-        onStartPreview(entry)
-        delay(2_000)
-        expandedPreviewEntryKey = entry.entry.entryKey
-    }
+    // The two-stage warm-up/expand hover-preview flow, shared verbatim with
+    // the "Browse All" grids (#159) — see [rememberBrowsePreviewCoordinator].
+    val previewCoordinator = rememberBrowsePreviewCoordinator(
+        preview = preview,
+        onStartPreview = onStartPreview,
+        onStopPreview = onStopPreview,
+        onPreviewFinished = onPreviewFinished,
+    )
+    val expandedPreviewEntryKey = previewCoordinator.expandedPreviewEntryKey
+    val previewFinished = previewCoordinator.onPreviewFinished
+    val previewFocusChanged = previewCoordinator.onPreviewFocusChanged
     // searchText is what's live in the field as the user types; appliedSearchQuery
     // is what actually drives filtering below. Keeping them separate is the fix for
     // a real bug: when a single `searchQuery` backed both the field and the
@@ -282,11 +295,9 @@ internal fun CatalogScreen(
     val currentBrowseState by rememberUpdatedState(
         CatalogBrowseState(searchText, appliedSearchQuery, kindFilter, genreFilter, ratingFilter, likedOnly),
     )
+    // Preview teardown on exit is handled by [rememberBrowsePreviewCoordinator].
     DisposableEffect(Unit) {
-        onDispose {
-            onStopPreview()
-            onBrowseStateChange(currentBrowseState)
-        }
+        onDispose { onBrowseStateChange(currentBrowseState) }
     }
     val anyFilterActive = kindFilter != KindFilter.ALL || genreFilter != null || ratingFilter != null || likedOnly
     // Keep navigation from the controls separate from initial/restored focus.
@@ -631,15 +642,17 @@ internal fun CatalogScreen(
                         // -1 (not found) becomes null: "nothing to restore in
                         // this particular row" is exactly the same case as
                         // "nothing was ever remembered" from the row's own
-                        // point of view.
-                        val movieRestoreIndex = remember(movies, initialFocusMovieKey) {
-                            initialFocusMovieKey?.let { key -> movies.indexOfFirst { it.entry.entryKey == key }.takeIf { it >= 0 } }
+                        // point of view. A [BROWSE_ALL_TILE_FOCUS_KEY] sentinel
+                        // instead restores focus to that row's Browse All tile
+                        // (#159) — see [shelfRestoreIndex].
+                        val movieRestoreIndex = remember(movies, initialFocusMovieKey, genreFilter) {
+                            shelfRestoreIndex(movies, initialFocusMovieKey, genreFilter != null) { it.entry.entryKey }
                         }
-                        val showRestoreIndex = remember(shows, initialFocusShowKey) {
-                            initialFocusShowKey?.let { key -> shows.indexOfFirst { it.show == key }.takeIf { it >= 0 } }
+                        val showRestoreIndex = remember(shows, initialFocusShowKey, genreFilter) {
+                            shelfRestoreIndex(shows, initialFocusShowKey, genreFilter != null) { it.show }
                         }
-                        val artistRestoreIndex = remember(artists, initialFocusArtistKey) {
-                            initialFocusArtistKey?.let { key -> artists.indexOfFirst { it.artist == key }.takeIf { it >= 0 } }
+                        val artistRestoreIndex = remember(artists, initialFocusArtistKey, genreFilter) {
+                            shelfRestoreIndex(artists, initialFocusArtistKey, genreFilter != null) { it.artist }
                         }
 
                         // The horizontal row containing a restored card may
@@ -1406,12 +1419,14 @@ private fun ShelfHeader(label: String, fontSize: TextUnit) {
  * — replaces the old header-level "Browse all" button with an in-row tile,
  * matching the same poster-sized footprint as every other card in the row. */
 @Composable
-private fun BrowseAllTile(onClick: () -> Unit, testTag: String) {
+private fun BrowseAllTile(onClick: () -> Unit, testTag: String, focusRequester: FocusRequester? = null) {
     Card(
         onClick = onClick,
         colors = CardDefaults.colors(containerColor = SwarmSurfaceMuted),
         scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 0.99f),
-        modifier = Modifier.width(CARD_WIDTH).testTag(testTag),
+        modifier = Modifier.width(CARD_WIDTH)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .testTag(testTag),
     ) {
         Box(
             modifier = Modifier.fillMaxWidth().height(CARD_MEDIA_HEIGHT).clip(RoundedCornerShape(4.dp)),
@@ -1555,7 +1570,7 @@ private fun MovieRow(
     val artworkUrls = remember(visibleMovies, artworkUrl) { visibleMovies.map(artworkUrl) }
     PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        visibleMovies.size,
+        visibleMovies.size + if (showBrowseAllTile) 1 else 0,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1594,7 +1609,11 @@ private fun MovieRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenShelf(movies) }, testTag = UatTestTags.BROWSE_ALL_MOVIES)
+                    BrowseAllTile(
+                        onClick = { onOpenShelf(movies) },
+                        testTag = UatTestTags.BROWSE_ALL_MOVIES,
+                        focusRequester = focusRequester.takeIf { targetIndex == visibleMovies.size },
+                    )
                 }
             }
         }
@@ -1635,7 +1654,7 @@ private fun ShowShelfRow(
     }
     PrefetchArtworkRow(listState, artworkUrls)
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        visibleShows.size,
+        visibleShows.size + if (showBrowseAllTile) 1 else 0,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1668,7 +1687,11 @@ private fun ShowShelfRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenShowShelf(shows) }, testTag = UatTestTags.BROWSE_ALL_SHOWS)
+                    BrowseAllTile(
+                        onClick = { onOpenShowShelf(shows) },
+                        testTag = UatTestTags.BROWSE_ALL_SHOWS,
+                        focusRequester = focusRequester.takeIf { targetIndex == visibleShows.size },
+                    )
                 }
             }
         }
@@ -1708,7 +1731,7 @@ private fun ArtistShelfRow(
     }
     PrefetchArtworkRow(listState, artistArtwork.map { it.artistPhoto ?: it.albumCoverFallback })
     val (targetIndex, focusRequester) = rememberRowFocusTarget(
-        visibleArtists.size,
+        visibleArtists.size + if (showBrowseAllTile) 1 else 0,
         restoreFocusIndex,
         isDefaultFocusRow,
         listState,
@@ -1746,7 +1769,11 @@ private fun ArtistShelfRow(
             }
             if (showBrowseAllTile) {
                 item(key = "browse-all", contentType = "browse-all") {
-                    BrowseAllTile(onClick = { onOpenArtistShelf(artists) }, testTag = UatTestTags.BROWSE_ALL_MUSIC)
+                    BrowseAllTile(
+                        onClick = { onOpenArtistShelf(artists) },
+                        testTag = UatTestTags.BROWSE_ALL_MUSIC,
+                        focusRequester = focusRequester.takeIf { targetIndex == visibleArtists.size },
+                    )
                 }
             }
         }
