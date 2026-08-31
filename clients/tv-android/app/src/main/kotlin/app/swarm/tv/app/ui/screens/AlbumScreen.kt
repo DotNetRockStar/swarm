@@ -59,21 +59,40 @@ import app.swarm.tv.core.catalog.AlbumGroup
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 
+/**
+ * The album named [albumKey] within [artist], or null. Used to reopen this
+ * screen on a specific album's track list — after Back from the music
+ * player (#160) — instead of always dropping to the album grid.
+ */
+fun albumForKey(artist: ArtistGroup, albumKey: String?): AlbumGroup? {
+    if (albumKey == null) return null
+    return artist.albums.firstOrNull { it.album == albumKey }
+}
+
 @Composable
 fun AlbumScreen(
     artist: ArtistGroup,
     artworkUrl: (MergedEntry) -> String?,
     onPlay: (MergedEntry) -> Unit,
     onBack: () -> Unit,
+    initialAlbumKey: String? = null,
+    activeTrackKey: String? = null,
 ) {
-    var selectedAlbum by remember(artist) { mutableStateOf<AlbumGroup?>(null) }
+    // Pressing Back from the now-playing screen lands here as a brand-new
+    // AlbumScreen instance; [initialAlbumKey] (set only when a track from
+    // this artist is playing) preselects that album so Back returns to
+    // "the album and song being played" rather than the album grid. A
+    // plain open from the artist shelf leaves it null and shows the grid.
+    var selectedAlbum by remember(artist, initialAlbumKey) {
+        mutableStateOf(albumForKey(artist, initialAlbumKey))
+    }
     BackHandler { if (selectedAlbum != null) selectedAlbum = null else onBack() }
 
     val album = selectedAlbum
     if (album == null) {
         AlbumGrid(artist, artworkUrl, onOpenAlbum = { selectedAlbum = it })
     } else {
-        TrackList(artist, album, artworkUrl, onPlay)
+        TrackList(artist, album, artworkUrl, onPlay, focusTrackKey = activeTrackKey)
     }
 }
 
@@ -130,9 +149,13 @@ private fun TrackList(
     album: AlbumGroup,
     artworkUrl: (MergedEntry) -> String?,
     onPlay: (MergedEntry) -> Unit,
+    focusTrackKey: String? = null,
 ) {
-    val firstRowFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(album) { if (album.tracks.isNotEmpty()) firstRowFocusRequester.requestFocus() }
+    // Land focus on the track that is actually playing when reopened from
+    // the music player (#160); otherwise the first row.
+    val focusIndex = album.tracks.indexOfFirst { it.entry.entryKey == focusTrackKey }.coerceAtLeast(0)
+    val rowFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(album) { if (album.tracks.isNotEmpty()) rowFocusRequester.requestFocus() }
     val cover = album.coverArtworkUrl(artworkUrl)
 
     Column(modifier = Modifier.fillMaxSize().padding(40.dp)) {
@@ -155,7 +178,7 @@ private fun TrackList(
                     key = { _, track -> track.entry.entryKey },
                     contentType = { _, _ -> "track" },
                 ) { index, track ->
-                    val focusModifier = if (index == 0) Modifier.focusRequester(firstRowFocusRequester) else Modifier
+                    val focusModifier = if (index == focusIndex) Modifier.focusRequester(rowFocusRequester) else Modifier
                     TrackRow(track, focusModifier, onClick = { onPlay(track) })
                 }
             }

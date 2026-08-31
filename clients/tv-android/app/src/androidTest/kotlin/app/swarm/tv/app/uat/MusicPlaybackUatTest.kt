@@ -4,6 +4,7 @@ import android.view.KeyEvent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
 import app.swarm.tv.app.ui.UatTestTags
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,9 +56,15 @@ class MusicPlaybackUatTest : UatTestBase() {
             }
         }
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON)
-        pressBack() // player -> artist albums, with the mini-player retained
+        // #160: Back from the player returns to the *playing track's album*
+        // track list, not the album grid, with the mini-player retained.
+        pressBack()
+        composeTestRule.waitForTagPrefix(UatTestTags.TRACK_ROW_PREFIX)
+        composeTestRule.onNodeWithTag(trackTag).assertIsDisplayed()
+        composeTestRule.onNodeWithTag(UatTestTags.MINI_PLAYER_REOPEN).assertIsDisplayed()
+        pressBack() // track list -> album grid
         waitForTag(albumTag)
-        pressBack() // artist albums -> filtered Browse
+        pressBack() // album grid -> filtered Browse
         waitForTag(UatTestTags.SHELF_MUSIC)
         openFilterRail()
         selectTagWithDpad(UatTestTags.FILTER_LIKED_ONLY)
@@ -72,9 +79,11 @@ class MusicPlaybackUatTest : UatTestBase() {
         waitForTag(UatTestTags.MUSIC_PLAYER_COVER)
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON)
 
-        pressBack() // player -> artist albums
+        pressBack() // player -> playing track's album track list (#160)
+        composeTestRule.waitForTagPrefix(UatTestTags.TRACK_ROW_PREFIX)
+        pressBack() // track list -> album grid
         waitForTag(albumTag)
-        pressBack() // artist albums -> filtered Browse
+        pressBack() // album grid -> filtered Browse
         waitForTag(UatTestTags.FILTER_RAIL)
         val stillFiltered = composeTestRule.allTagsStartingWith(trackTag)
         assertFalse("unliked track should no longer appear under the Liked-only filter", stillFiltered.isNotEmpty())
@@ -97,11 +106,26 @@ class MusicPlaybackUatTest : UatTestBase() {
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_PLAY_PAUSE_BUTTON) // resume
 
         val upNextBefore = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_UP_NEXT)
+        // #160: the shuffle button cycles OFF -> shuffle album -> shuffle all.
+        assertEquals("🔀 Shuffle", composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim())
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).contains("album")
+        }
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_UP_NEXT) != upNextBefore
         }
         val upNextAfterShuffle = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_UP_NEXT)
+        selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).contains("all")
+        }
+        selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim() == "🔀 Shuffle"
+        }
+        // Leave it on "shuffle album" for the skip check below.
+        selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
 
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SKIP_BUTTON)
         // A real track transition (new file negotiation) can take longer
