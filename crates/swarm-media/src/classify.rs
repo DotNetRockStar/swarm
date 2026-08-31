@@ -340,7 +340,8 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // deliberately bracketed year is a more deliberate signal). Movies
     // often only carry the year on the enclosing folder, not the filename
     // (`Inception (2010)/Inception.1080p.mkv`), so fall back there too.
-    let (stem_clean, mut year) = extract_year_and_strip(stem);
+    let (stem_clean, stem_year) = extract_year_and_strip(stem);
+    let mut year = stem_year;
     if year.is_none() {
         year = dirs.last().and_then(|dir| extract_year_and_strip(dir).1);
     }
@@ -469,9 +470,20 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         });
     }
 
+    // Scene-style movie filenames conventionally put the release year at
+    // the boundary between the real title and technical/release metadata:
+    // `Title.2022.IMAX.1080p.BluRay...`.  Keeping the suffix made the TMDb
+    // query overly specific and caused otherwise ordinary movies to miss.
+    // Do this only in the movie fallback, after every episode path above
+    // has consumed the cleaned full stem; truncating before then would hide
+    // an SxxEyy marker in filenames such as `Show.2010.S01E01.mkv`.
+    let title = stem_year
+        .and_then(|release_year| title_before_release_year(stem, release_year))
+        .unwrap_or_else(|| clean_title(&stem_clean));
+
     Some(Classified {
         kind: MediaKind::Movie,
-        title: clean_title(&stem_clean),
+        title,
         artist: None,
         album: None,
         track_number: None,
@@ -772,6 +784,54 @@ fn extract_year_and_strip(text: &str) -> (String, Option<u32>) {
     extract_bare_year_token(&stripped)
 }
 
+/// Return the semantic movie title before the filename's release-year
+/// boundary. Bracketed years take the same precedence as
+/// [`extract_year_and_strip`]; otherwise the first occurrence of the
+/// authoritative bare year is used so duplicated years are removed along
+/// with the release suffix. An empty prefix is rejected so this extra
+/// release-boundary cleanup never replaces the normal result with emptiness.
+fn title_before_release_year(text: &str, release_year: u32) -> Option<String> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (position, &(start, opener)) in chars.iter().enumerate() {
+        let closer = match opener {
+            '[' => ']',
+            '(' => ')',
+            '{' => '}',
+            _ => continue,
+        };
+        let Some((end, _)) = chars[position + 1..]
+            .iter()
+            .find(|(_, candidate)| *candidate == closer)
+        else {
+            continue;
+        };
+        if parse_bare_year(&text[start + opener.len_utf8()..*end]) == Some(release_year) {
+            return cleaned_nonempty_prefix(&text[..start]);
+        }
+    }
+
+    let year_text = release_year.to_string();
+    let bytes = text.as_bytes();
+    let is_sep = |byte: u8| matches!(byte, b'.' | b'_' | b' ');
+    for (start, _) in text.match_indices(&year_text) {
+        let end = start + year_text.len();
+        let bounded_before = start == 0 || is_sep(bytes[start - 1]);
+        let bounded_after = end == bytes.len() || is_sep(bytes[end]);
+        if bounded_before && bounded_after {
+            if let Some(title) = cleaned_nonempty_prefix(&text[..start]) {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+fn cleaned_nonempty_prefix(prefix: &str) -> Option<String> {
+    let (without_bracket_tags, _) = extract_bracket_tags(prefix);
+    let title = clean_title(&without_bracket_tags);
+    (!title.is_empty()).then_some(title)
+}
+
 /// Find and remove a standalone `1900..=2099` year token from `text`, where
 /// tokens are separated by `.`/`_`/` ` (the same separators [clean_title]
 /// collapses to spaces) or sit at the string's start/end — covers both the
@@ -1016,7 +1076,7 @@ mod tests {
         let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.year, Some(2010));
-        assert_eq!(entry.title, "Inception 1080p");
+        assert_eq!(entry.title, "Inception");
     }
 
     #[test]
@@ -1057,14 +1117,42 @@ mod tests {
         let cloverfield =
             classify("movies/10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(cloverfield.year, Some(2016));
-        assert_eq!(
-            cloverfield.title,
-            "10 Cloverfield Lane 1080p BluRay x264-GROUP"
-        );
+        assert_eq!(cloverfield.title, "10 Cloverfield Lane");
 
         let days_later = classify("movies/28.Days.Later.2002.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(days_later.year, Some(2002));
-        assert_eq!(days_later.title, "28 Days Later 1080p BluRay x264-GROUP");
+        assert_eq!(days_later.title, "28 Days Later");
+    }
+
+    #[test]
+    fn reported_scene_release_movie_names_stop_at_the_release_year() {
+        for (filename, expected_title, expected_year) in [
+            (
+                "Social Network.2010.BD.Rip.1080p.h264.Rus.Eng.mkv",
+                "Social Network",
+                2010,
+            ),
+            (
+                "The.Prestige.2006.CUSTOM.MULTi.VF2.1080p.HDLight.AC3.5.1.H264-LiHDL.mkv",
+                "The Prestige",
+                2006,
+            ),
+            (
+                "Top.Gun.Maverick.2022.IMAX.1080p.Bluray.Atmos.TrueHD.7.1.x264-EVO.mkv",
+                "Top Gun Maverick",
+                2022,
+            ),
+            (
+                "Waterworld.1995.The.Ulysses.Cut.1080p.BluRay.HEVC.x265-RiPRG.mkv",
+                "Waterworld",
+                1995,
+            ),
+        ] {
+            let entry = classify(&format!("movies/{filename}")).unwrap();
+            assert_eq!(entry.kind, MediaKind::Movie, "{filename}");
+            assert_eq!(entry.title, expected_title, "{filename}");
+            assert_eq!(entry.year, Some(expected_year), "{filename}");
+        }
     }
 
     #[test]
@@ -1273,7 +1361,7 @@ mod tests {
         // mistaken for the year when a real trailing year is also present.
         let entry = classify("movies/1917 2019 1080p BluRay x264.mkv").unwrap();
         assert_eq!(entry.year, Some(2019));
-        assert_eq!(entry.title, "1917 1080p BluRay x264");
+        assert_eq!(entry.title, "1917");
     }
 
     #[test]
@@ -1285,7 +1373,7 @@ mod tests {
         // *different* year-shaped tokens (see the "1917" test above).
         let entry = classify("movies/Interstellar.2014.2014.1080p.BluRay.x264.YIFY.mp4").unwrap();
         assert_eq!(entry.year, Some(2014));
-        assert_eq!(entry.title, "Interstellar 1080p BluRay x264 YIFY");
+        assert_eq!(entry.title, "Interstellar");
     }
 
     #[test]
