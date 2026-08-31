@@ -171,13 +171,13 @@ run looks like:
 
 | | `tv_e2e_suite.sh` | `tv_uat_suite.sh` | `media_server_uat_tests.sh` |
 |---|---|---|---|
-| What it proves | The app launches, pairs, and completes one real catalog round-trip | Sixteen real UI scenarios: browse, detail, like/watchlist/report-a-problem, playback, music, filters | Media server command/API correctness: media roots, library scan, TV pairing approval, notifications/client-errors, metadata editing, MCP tokens |
+| What it proves | The app launches, pairs, and completes one real catalog round-trip | Seventeen real UI scenarios: browse, detail, like/watchlist/report-a-problem, playback, music, filters, STUN server activation | Media server command/API correctness: media roots, library scan, TV pairing approval, notifications/client-errors, metadata editing, MCP tokens |
 | How it asserts | Logcat/adb evidence only — **sends no D-pad input** | Real Compose UI navigation (`androidx.compose.ui.test` + `androidx.test.uiautomator`) | Real `#[tauri::command]` handlers called directly against a real, isolated `ServerCore`/SQLite/filesystem behind a mocked Tauri runtime — **no UI, no IPC layer** |
 | SQLite validation | None | Real server (`library.sqlite`) and TV-side (`swarm.db`, `SharedPreferences`) state, cross-checked | Real, per-test isolated `library.sqlite`/settings.json |
 | Hardware needed | Real Fire TV on the LAN | Real Fire TV on the LAN | None — plain `cargo test`, CI-friendly |
 | Device targeting | Preferred device by default (see below); `--all` for full fan-out | Preferred device by default (see below); `--all` for full fan-out | N/A |
 | On failure | Per-device logcat dump | Full UI-to-server evidence bundle (see below) | `cargo test`'s own panic output (assertion diff, real error text) |
-| Runtime | ~1 minute/device | Several minutes (16 scenarios, one plays real video/audio for 30s each) | ~1 second |
+| Runtime | ~1 minute/device | Several minutes (17 scenarios, one plays real video/audio for 30s each) | ~1 second |
 | Skill | `swarm-closed-loop-tv-testing` | `swarm-tv-uat-suite` | `swarm-media-server-uat-tests` |
 
 Use `tv_e2e_suite.sh` as the fast "did I break the build" check after any
@@ -251,6 +251,7 @@ already-adb-connected Amazon device > full LAN scan fan-out.
 | `NavigationSearchPersistenceUatTest` | Pure D-pad traversal; focus/back-stack restoration; title search, no-results/clear, combined filters, alphabetical Browse All; Like/watchlist persistence across a fresh Activity |
 | `ContinuePlaybackLifecycleUatTest` | Continue Watching save/resume/completion removal; acknowledged server session release; audio/subtitle selection; moving browse previews and preview-to-play handoff |
 | `KidModeUatTest` | PIN setup/rejection, media-kind filtering, restart persistence, and disable/cleanup |
+| `AddServerFromSettingsUatTest` | Configuration-page Add Server visibility; STUN activation-code creation; cancellation back to configuration |
 | `EndOfMediaUatTest` | Episode Continue Play Now/Cancel and automatic next-track playback, using a debug testing-mode near-end seek to keep the real-player scenarios bounded |
 
 The deliberately disruptive client-transport drop/recovery checks remain a

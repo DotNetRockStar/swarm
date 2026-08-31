@@ -310,6 +310,14 @@ private fun UiState.diagnosticCatalog(): UiState.Catalog? = when (this) {
     else -> embeddedCatalog()
 }
 
+/** Restores the screen that launched STUN activation and surfaces the
+ * failure in that screen's existing error area. */
+private fun UiState.withActivationError(message: String): UiState = when (this) {
+    is UiState.Dashboard -> copy(joiningServer = false, joinServerError = message)
+    is UiState.Settings -> copy(busy = false, error = message)
+    else -> this
+}
+
 /**
  * Onboarding, swarm-dashboard, merged-catalog, and playback state.
  * Registration is fully wired (real network calls against a real STUN
@@ -465,8 +473,8 @@ class SwarmViewModel(
     private var continueAfterPreloadSessionId: String? = null
     private var nextTrackPreloadJob: Job? = null
     private var nextTrackPreloadSessionId: String? = null
-    /** Dashboard to restore when Add Server's activation is cancelled or fails. */
-    private var activationReturnState: UiState.Dashboard? = null
+    /** Screen to restore when Add Server's activation is cancelled or fails. */
+    private var activationReturnState: UiState? = null
     /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
     private var cachedSwarms: List<SwarmSummary> = emptyList()
     /** Set on a successful registration or a restored session; re-sent to [connectionStore] on every edit from the config page. */
@@ -658,8 +666,8 @@ class SwarmViewModel(
      * The future device token stays in memory and is persisted only after
      * the media server explicitly approves this TV. */
     fun startActivation(deviceName: String) {
-        val dashboard = _state.value as? UiState.Dashboard
-        activationReturnState = dashboard
+        val returnState = _state.value.takeIf { it is UiState.Dashboard || it is UiState.Settings } ?: return
+        activationReturnState = returnState
         val url = baseUrl
             ?.trim()
             ?.trimEnd('/')
@@ -667,8 +675,7 @@ class SwarmViewModel(
             ?: rendezvousUrl.trim().trimEnd('/')
         if (url.isEmpty()) {
             val message = "This app build does not have a SWARM service configured."
-            _state.value = dashboard?.copy(joiningServer = false, joinServerError = message)
-                ?: connectionSetupDashboard(message)
+            _state.value = returnState.withActivationError(message)
             notify(message, ClientNotificationKind.ERROR)
             activationReturnState = null
             return
@@ -737,7 +744,7 @@ class SwarmViewModel(
             } catch (e: StunClientError) {
                 val message = e.message ?: "Could not start TV activation."
                 _state.value = activationReturnState
-                    ?.copy(joiningServer = false, joinServerError = message)
+                    ?.withActivationError(message)
                     ?: connectionSetupDashboard(message)
                 notify(message, ClientNotificationKind.ERROR)
                 activationReturnState = null

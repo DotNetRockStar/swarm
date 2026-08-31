@@ -45,6 +45,11 @@ object UatTestTags {
     const val DASHBOARD_BROWSE_BUTTON = "uat_dashboard_browse_button"
     const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
+    // SwarmSettingsScreen / STUN activation flow.
+    const val SETTINGS_ADD_SERVER_BUTTON = "uat_settings_add_server_button"
+    const val ACTIVATION_CODE = "uat_activation_code"
+    const val ACTIVATION_CANCEL_BUTTON = "uat_activation_cancel_button"
+
     // MovieDetailScreen.
     const val MOVIE_DETAIL_ARTWORK = "uat_movie_detail_artwork"
     const val MOVIE_DETAIL_YEAR = "uat_movie_detail_year"
