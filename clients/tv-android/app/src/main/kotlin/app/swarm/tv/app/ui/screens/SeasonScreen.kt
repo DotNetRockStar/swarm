@@ -49,6 +49,7 @@ import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.watch.WatchState
 
 @Composable
 fun SeasonScreen(
@@ -61,6 +62,10 @@ fun SeasonScreen(
     onSelectSeason: (SeasonGroup?) -> Unit,
     isWatchlisted: Boolean,
     onToggleWatchlist: () -> Unit,
+    /** Non-null when this show has an episode that was started but not
+     * finished — see [SeasonList]'s Resume button (#152). Resumes that
+     * episode from its saved position, Continue-Watching style. */
+    onResume: (() -> Unit)? = null,
 ) {
     BackHandler { if (selectedSeason != null) onSelectSeason(null) else onBack() }
 
@@ -71,6 +76,7 @@ fun SeasonScreen(
             seasonArtworkUrl,
             isWatchlisted,
             onToggleWatchlist,
+            onResume = onResume,
             onOpenSeason = onSelectSeason,
         )
     } else {
@@ -84,6 +90,7 @@ private fun SeasonList(
     seasonArtworkUrl: (MergedEntry) -> String?,
     isWatchlisted: Boolean,
     onToggleWatchlist: () -> Unit,
+    onResume: (() -> Unit)?,
     onOpenSeason: (SeasonGroup) -> Unit,
 ) {
     val firstCardFocusRequester = remember { FocusRequester() }
@@ -117,12 +124,23 @@ private fun SeasonList(
                     modifier = Modifier.weight(1f).padding(end = 16.dp)
                         .testTag(UatTestTags.SEASON_SCREEN_SHOW_TITLE),
                 )
-                Button(
-                    onClick = onToggleWatchlist,
-                    colors = swarmActionButtonColors(),
-                    modifier = Modifier.testTag(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON),
-                ) {
-                    Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (onResume != null) {
+                        Button(
+                            onClick = onResume,
+                            colors = swarmActionButtonColors(),
+                            modifier = Modifier.testTag(UatTestTags.SEASON_SCREEN_RESUME_BUTTON),
+                        ) {
+                            Text("▶ Resume", fontSize = 13.sp)
+                        }
+                    }
+                    Button(
+                        onClick = onToggleWatchlist,
+                        colors = swarmActionButtonColors(),
+                        modifier = Modifier.testTag(UatTestTags.SEASON_SCREEN_WATCHLIST_BUTTON),
+                    ) {
+                        Text(if (isWatchlisted) "✓ Watchlisted" else "+ Watchlist", fontSize = 13.sp)
+                    }
                 }
             }
         }
@@ -208,6 +226,24 @@ private fun EpisodeGrid(
         }
     }
 }
+
+/**
+ * The most recently started-but-unfinished episode of [show], or null when
+ * every episode is either untouched or already watched. Drives the
+ * season-list Resume button (#152): a show that was watched and stopped
+ * offers Resume here even after it has aged out of the capped Continue
+ * Watching row. "Started" means a saved position past 0s; "unfinished"
+ * means the saved state is not yet flagged watched (95%+, see [WatchState]).
+ */
+internal fun resumeEpisode(show: ShowGroup, watchStates: Map<String, WatchState>): MergedEntry? =
+    show.seasons.asSequence()
+        .flatMap { it.episodes.asSequence() }
+        .mapNotNull { episode ->
+            val saved = watchStates[episode.entry.fingerprint]
+            if (saved == null || saved.watched || saved.positionSecs <= 0.0) null else episode to saved
+        }
+        .maxByOrNull { it.second.updatedAt }
+        ?.first
 
 /**
  * Season 0 is the real-world Plex/Kodi/TheTVDB convention for a show's
