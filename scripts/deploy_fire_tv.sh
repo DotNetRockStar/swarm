@@ -81,8 +81,47 @@ fi
 # say "Amazon" (real Fire TV hardware) — disconnecting everything else so
 # the scan doesn't leave stray adb connections behind. Prints one
 # "name<TAB>ip" pair per line to stdout.
+inspect_fire_tv_candidates() {
+    local candidates="$1" ip manufacturer name found connect_failed
+    found=0
+    connect_failed=0
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        if ! "$ADB" connect "$ip:$ADB_PORT" >/dev/null 2>&1; then
+            connect_failed=1
+            continue
+        fi
+        if [ "$("$ADB" -s "$ip:$ADB_PORT" get-state 2>/dev/null || true)" != "device" ]; then
+            "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
+            continue
+        fi
+        # </dev/null on every `adb shell` call here: without it, `adb shell`
+        # reads from this loop's own input stream, so the first device can
+        # silently swallow every remaining candidate.
+        manufacturer="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.manufacturer </dev/null 2>/dev/null | tr -d '\r')"
+        if [[ "$manufacturer" != *[Aa]mazon* ]]; then
+            "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
+            continue
+        fi
+        name="$("$ADB" -s "$ip:$ADB_PORT" shell settings get global device_name </dev/null 2>/dev/null | tr -d '\r')"
+        if [ -z "$name" ] || [ "$name" = "null" ]; then
+            name="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.model </dev/null 2>/dev/null | tr -d '\r')"
+        fi
+        printf '%s\t%s\n' "${name:-Fire TV}" "$ip"
+        found=1
+        "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
+    done <<< "$candidates"
+
+    [ "$found" -eq 1 ] && return 0
+    # A reachable port with a failed `adb connect` usually means the shared
+    # macOS adb daemon was launched from an app context that cannot use the
+    # LAN. Let the caller restart it once from this terminal and retry.
+    [ "$connect_failed" -eq 1 ] && return 2
+    return 1
+}
+
 scan_lan_for_fire_tvs() {
-    local iface subnet_ip prefix live_ips open_ips ip manufacturer name
+    local iface subnet_ip prefix live_ips open_ips matches inspect_status
     subnet_ip=""
     for iface in en0 en1 eth0; do
         subnet_ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
@@ -114,31 +153,16 @@ scan_lan_for_fire_tvs() {
         'nc -z -w1 "$1" '"$ADB_PORT"' 2>/dev/null && echo "$1"' _ {} || true)"
 
     [ -n "$open_ips" ] || return 0
-    while IFS= read -r ip; do
-        [ -n "$ip" ] || continue
-        "$ADB" connect "$ip:$ADB_PORT" >/dev/null 2>&1 || continue
-        if [ "$("$ADB" -s "$ip:$ADB_PORT" get-state 2>/dev/null || true)" != "device" ]; then
-            "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
-            continue
-        fi
-        # </dev/null on every `adb shell` call here: without it, `adb shell`
-        # reads from this loop's own input stream (the `<<<` below), so the
-        # first device's shell call silently swallows every remaining IP and
-        # only device #1 is ever reported — confirmed live against 3 real
-        # Fire TVs, all found by the ping/nc scan above but only one
-        # surviving to the manufacturer check without this redirect.
-        manufacturer="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.manufacturer </dev/null 2>/dev/null | tr -d '\r')"
-        if [[ "$manufacturer" != *[Aa]mazon* ]]; then
-            "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
-            continue
-        fi
-        name="$("$ADB" -s "$ip:$ADB_PORT" shell settings get global device_name </dev/null 2>/dev/null | tr -d '\r')"
-        if [ -z "$name" ] || [ "$name" = "null" ]; then
-            name="$("$ADB" -s "$ip:$ADB_PORT" shell getprop ro.product.model </dev/null 2>/dev/null | tr -d '\r')"
-        fi
-        printf '%s\t%s\n' "${name:-Fire TV}" "$ip"
-        "$ADB" disconnect "$ip:$ADB_PORT" >/dev/null 2>&1 || true
-    done <<< "$open_ips"
+    inspect_status=0
+    matches="$(inspect_fire_tv_candidates "$open_ips")" || inspect_status=$?
+    if [ "$inspect_status" -eq 2 ]; then
+        echo "==> ADB could not reach open TV ports; restarting its local daemon and retrying ..." >&2
+        "$ADB" kill-server >/dev/null 2>&1 || true
+        "$ADB" start-server >/dev/null 2>&1
+        inspect_status=0
+        matches="$(inspect_fire_tv_candidates "$open_ips")" || inspect_status=$?
+    fi
+    [ -n "$matches" ] && printf '%s\n' "$matches"
 }
 
 SERIALS=()
