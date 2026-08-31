@@ -288,9 +288,9 @@ pub async fn run_bulk_scrape(
     })
 }
 
-/// Scene-release tags that routinely survive `classify::clean_title` (which
-/// only strips bracketed groups and a bare year — see its module doc) but
-/// choke TMDb's search matcher when left in the query: confirmed live
+/// Scene-release tags that can still arrive from embedded container titles
+/// or filenames without a release-year boundary, and choke TMDb's search
+/// matcher when left in the query: confirmed live
 /// against the real API that `"10 Cloverfield Lane 1080p BluRay x264"`
 /// returns zero results while `"10 Cloverfield Lane"` matches immediately.
 /// Not a stored-title change — this only affects the string sent to TMDb
