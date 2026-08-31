@@ -166,6 +166,59 @@ class CatalogSessionTest {
     }
 
     @Test
+    fun `refresh recovers when a credit-starved connection self-bounds its request instead of closing`() = runBlocking {
+        // Regression coverage for #140: at the end of a long movie the server
+        // stopped issuing QUIC stream credit, so kwik's createStream parked
+        // every request forever and closing the connection could not release
+        // it (unlike the #100 stall above, which close() unblocks). The
+        // transport now self-bounds stream creation, turning that into a
+        // prompt IOException — modeled here by a connection whose request()
+        // fails on its own timer regardless of close() — and refresh()'s
+        // existing retry loop then reconnects and completes.
+        val manifest = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(
+                CatalogEntry(
+                    entryKey = "movie-1",
+                    fingerprint = "media-fingerprint",
+                    kind = MediaKind.MOVIE,
+                    title = "Recovered",
+                    size = 1_024,
+                ),
+            ),
+        )
+        val starved = CreditStarvedConnection(selfBoundMs = 150L)
+        val healthy = CatalogConnection(manifest)
+        val connectionAttempts = AtomicInteger()
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                if (connectionAttempts.incrementAndGet() == 1) starved else healthy
+            },
+            manifestFetchTimeoutMs = 2_000L,
+        ).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            assertTrue(result.unreachable.isEmpty())
+            assertEquals(listOf("Recovered"), result.entries.map { it.entry.title })
+            assertTrue(connectionAttempts.get() >= 2)
+            assertTrue(starved.wasClosed())
+        }
+        proxy.close()
+    }
+
+    @Test
     fun `playback preparation abandons a stalled response and retries on a fresh connection`() = runBlocking {
         val stalling = StallingCatalogConnection()
         val healthy = PlaybackConnection("replacement-session")
@@ -347,6 +400,31 @@ class CatalogSessionTest {
         }
 
         fun wasClosed(): Boolean = synchronized(gate) { closed }
+    }
+
+    /** Models the fixed transport under #140's credit starvation: request()
+     * blocks briefly and then fails on its own bound, whether or not [close]
+     * is ever called (kwik's parked createStream ignores connection close). */
+    private class CreditStarvedConnection(private val selfBoundMs: Long) : PeerConnection, AutoCloseable {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            Thread.sleep(selfBoundMs)
+            throw IOException("peer stream creation stalled; aborted after ${selfBoundMs}ms (peer issued no stream credit)")
+        }
+
+        override fun close() {
+            closed.set(true)
+        }
+
+        fun wasClosed(): Boolean = closed.get()
     }
 
     private class MediaConnection(private val content: String) : PeerConnection {
