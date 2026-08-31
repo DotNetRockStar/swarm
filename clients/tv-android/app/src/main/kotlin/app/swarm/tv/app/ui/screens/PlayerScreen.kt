@@ -144,6 +144,7 @@ private const val SKIP_INTRO_OFFER_MS = 10_000L
 private const val INTRO_POSITION_POLL_MS = 250L
 private const val PERIODIC_POSITION_SAVE_MS = 15_000L
 internal const val BUFFERING_QUALITY_RECOVERY_MS = 30_000L
+internal const val STARTUP_BUFFERING_QUALITY_RECOVERY_MS = 4_000L
 private const val BUFFERING_VIDEO_BITRATE_PERCENT = 80L
 
 /** D-pad left/right rewind/fast-forward step. Android's own key-repeat
@@ -285,9 +286,8 @@ internal fun playbackBackAction(
 }
 
 /** A post-start HLS stall means the selected rendition has outrun the
- * connection. Startup buffering has no established quality to downgrade,
- * direct play has no alternate rendition, and pausing must never look like a
- * bandwidth problem. */
+ * connection. Direct play has no alternate rendition, and pausing must never
+ * look like a bandwidth problem. */
 internal fun shouldStartBufferingQualityRecovery(
     playbackState: Int,
     hasStartedPlayback: Boolean,
@@ -299,6 +299,19 @@ internal fun shouldStartBufferingQualityRecovery(
     playWhenReady &&
     playbackMode == PlaybackMode.HLS &&
     hasVideo
+
+/** Startup gets a short grace period before applying the same conservative
+ * HLS ceiling. Unlike mid-playback recovery there may not be a selected video
+ * format yet, so the negotiated ceiling is used as the reference bitrate. */
+internal fun shouldStartStartupQualityRecovery(
+    playbackState: Int,
+    hasStartedPlayback: Boolean,
+    playWhenReady: Boolean,
+    playbackMode: PlaybackMode,
+): Boolean = playbackState == Player.STATE_BUFFERING &&
+    !hasStartedPlayback &&
+    playWhenReady &&
+    playbackMode == PlaybackMode.HLS
 
 /** Caps video at 80% of the currently selected rendition, which forces
  * Media3 onto the next viable HLS rung. If Media3 has not exposed that
@@ -634,6 +647,7 @@ fun PlayerScreen(
     onServerOffline: (context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onPlaybackBuffering: () -> Unit,
+    onPlaybackQualityReduced: () -> Unit,
 ) {
     val context = LocalContext.current
     var showContinuePrompt by remember(sessionId) { mutableStateOf(false) }
@@ -689,18 +703,64 @@ fun PlayerScreen(
     val normalMaxVideoBitrate = remember(player) { player.trackSelectionParameters.maxVideoBitrate }
     var bufferingQualityRecoveryGeneration by remember(sessionId) { mutableStateOf(0L) }
 
+    fun reduceBufferingQuality() {
+        val currentCap = player.trackSelectionParameters.maxVideoBitrate
+        val recoveryCap = bufferingRecoveryVideoBitrateCap(
+            selectedVideoBitrate = player.videoFormat?.bitrate,
+            negotiatedMaxBitrate = maxBitrate,
+            currentMaxVideoBitrate = currentCap,
+        ) ?: return
+        if (recoveryCap >= currentCap) return
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setMaxVideoBitrate(recoveryCap)
+            .build()
+        bufferingQualityRecoveryGeneration += 1L
+        onPlaybackQualityReduced()
+    }
+
     // Each excessive-buffering transition immediately constrains adaptive
     // selection to 80% of the active rendition. Re-entering BUFFERING after a
     // recovery tightens the cap again when Media3 has already stepped down,
     // and restarts this 30-second hold. Restore only the video ceiling so any
     // audio/subtitle choice made while recovering remains intact.
-    LaunchedEffect(player, bufferingQualityRecoveryGeneration) {
-        if (bufferingQualityRecoveryGeneration == 0L) return@LaunchedEffect
+    // The 30-second hold begins only once playback is READY again. Remaining
+    // in or returning to BUFFERING cancels the countdown, preventing the old
+    // ceiling from being restored while the connection is still struggling.
+    LaunchedEffect(player, bufferingQualityRecoveryGeneration, isLoading) {
+        if (bufferingQualityRecoveryGeneration == 0L || isLoading) return@LaunchedEffect
         delay(BUFFERING_QUALITY_RECOVERY_MS)
+        if (player.playbackState != Player.STATE_READY || isLoading) return@LaunchedEffect
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .setMaxVideoBitrate(normalMaxVideoBitrate)
             .build()
+    }
+
+    // A new HLS show used to remain at its negotiated ceiling for the entire
+    // startup wait because quality recovery required a previously rendered
+    // frame. Give normal startup a brief chance, then step down if it is still
+    // buffering. Direct play and deliberately paused playback remain exempt.
+    LaunchedEffect(player, sessionId, playbackMode, hasStartedPlayback, showPauseOverlay) {
+        if (
+            !shouldStartStartupQualityRecovery(
+                player.playbackState,
+                hasStartedPlayback,
+                player.playWhenReady,
+                playbackMode,
+            )
+        ) return@LaunchedEffect
+        delay(STARTUP_BUFFERING_QUALITY_RECOVERY_MS)
+        if (
+            shouldStartStartupQualityRecovery(
+                player.playbackState,
+                hasStartedPlayback,
+                player.playWhenReady,
+                playbackMode,
+            )
+        ) {
+            reduceBufferingQuality()
+        }
     }
 
     // Keep the video surface visible while Media3 waits for data. The global
@@ -943,17 +1003,7 @@ fun PlayerScreen(
                         hasVideo = player.videoFormat != null,
                     )
                 ) {
-                    bufferingRecoveryVideoBitrateCap(
-                        selectedVideoBitrate = player.videoFormat?.bitrate,
-                        negotiatedMaxBitrate = maxBitrate,
-                        currentMaxVideoBitrate = player.trackSelectionParameters.maxVideoBitrate,
-                    )?.let { recoveryCap ->
-                        player.trackSelectionParameters = player.trackSelectionParameters
-                            .buildUpon()
-                            .setMaxVideoBitrate(recoveryCap)
-                            .build()
-                        bufferingQualityRecoveryGeneration += 1L
-                    }
+                    reduceBufferingQuality()
                 }
                 if (playbackState == Player.STATE_ENDED && hasNext) {
                     // Reached the true end, not just a credits marker (or no

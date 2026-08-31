@@ -2628,6 +2628,13 @@ class SwarmViewModel(
         notify("Buffering video…", ClientNotificationKind.WARNING)
     }
 
+    /** Makes an adaptive downgrade visible instead of asking the viewer to
+     * infer it from a subtle picture change. */
+    fun reportPlaybackQualityReduced() {
+        if (_state.value !is UiState.Player) return
+        notify("Lowering video quality to reduce buffering…", ClientNotificationKind.WARNING)
+    }
+
     /**
      * Replaces a server-side playback session that expired while Media3 was
      * paused. [sessionId] rejects a late callback from an already-disposed
