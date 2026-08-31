@@ -251,6 +251,7 @@ bundle should be enough on its own, per the user's explicit requirement.
   this suite never starts, stops, or restarts it.
 - First-time D-pad pairing is never driven by this suite either — it uses
   the same debug-only testing-mode token mechanism as the original suite.
-- The issue-worker cron requires a clean worktree. After verification, commit
-  the authorized suite/test/product changes together with a message explaining
-  the behavior and evidence; do not leave validated UAT work uncommitted.
+- The external automation worker requires a clean worktree. After verification,
+  commit the authorized suite/test/product changes together with a message
+  explaining the behavior and evidence; do not leave validated UAT work
+  uncommitted.

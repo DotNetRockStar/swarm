@@ -141,14 +141,14 @@ across runs — commenting failures and recoveries onto it while it stays
 open, filing a fresh one only after the previous one was closed — instead
 of filing a new issue every run. On a failure it also asks whichever of
 Claude/Codex has spare quota to post a read-only triage comment,
-alternating providers with the same rule `swarm_issue_worker.py` uses for
-follow-up passes. Frozen about this wrapper specifically:
+alternating providers so one provider's quota cannot starve triage coverage.
+Frozen about this wrapper specifically:
 
 - **The once-a-day, fixed-hour schedule.** This was deliberately changed
   from checking on every commit (hourly) after a real incident: the
   tracking issue got assigned (by a human action, not this script — it
-  never sets an assignee) to the account `swarm_issue_worker.py` watches,
-  which then autonomously attempted three blind code "fixes" for
+  never sets an assignee) to an automation account, which then autonomously
+  attempted three blind code "fixes" for
   hardware-dependent UAT failures it had no way to verify, each merge
   triggering this cron to re-test, fail identically, and post a new
   comment the worker read as more work to do — an hourly-triggered
@@ -184,7 +184,6 @@ follow-up passes. Frozen about this wrapper specifically:
   issue-worker and is a real scope change, not a tuning knob.
 - The provider-alternation rule itself (prefer whichever provider did not
   run the previous triage, falling back to the other if it's over quota) —
-  same reasoning as `swarm_issue_worker.py`'s own follow-up alternation:
   don't let one provider's quota silently starve triage coverage.
 - That a failed/unavailable capacity check (missing CLI, malformed
   response, over quota) always degrades to "skip AI triage for this run,"

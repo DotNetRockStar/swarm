@@ -7,11 +7,13 @@ import android.view.ViewGroup
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,9 +38,111 @@ import app.swarm.tv.app.PausePlayerWhenAppBackgrounded
 import app.swarm.tv.app.data.BrowsePreview
 import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.theme.SwarmAccentHot
+import app.swarm.tv.core.catalog.MergedEntry
 import kotlinx.coroutines.delay
 
 private const val PREVIEW_PLAY_TIME_MS = 30_000L
+
+/** Focus dwell before a hover preview begins warming its stream, then a
+ * second dwell before the card actually swaps box art for the playing
+ * preview. Shared by [CatalogScreen]'s browse rows and the "Browse All"
+ * grids (#159) so both feel identical. */
+private const val BROWSE_PREVIEW_WARMUP_MS = 2_000L
+private const val BROWSE_PREVIEW_EXPAND_MS = 2_000L
+
+/**
+ * The per-screen state machine behind hover previews, extracted from
+ * [CatalogScreen] so [MovieShelfScreen]/[ShowShelfScreen] can drive the same
+ * two-stage warm-up/expand flow against the same [BrowsePreview] the
+ * ViewModel negotiates (#159). Recreated cheaply on every recomposition; the
+ * actual state lives in the [rememberBrowsePreviewCoordinator] `remember`s.
+ */
+@Stable
+internal class BrowsePreviewCoordinator(
+    /** Entry key of the card currently showing (or about to show) its
+     * expanded inline preview, or null while nothing is expanded. */
+    val expandedPreviewEntryKey: String?,
+    /** A browse card calls this from its own `onFocusChanged`. */
+    val onPreviewFocusChanged: (MergedEntry, Boolean) -> Unit,
+    /** Forwarded to [BrowsePreviewPlayer.onFinished]; also collapses the card. */
+    val onPreviewFinished: (String) -> Unit,
+)
+
+@Composable
+internal fun rememberBrowsePreviewCoordinator(
+    preview: BrowsePreview?,
+    onStartPreview: (MergedEntry) -> Unit,
+    onStopPreview: () -> Unit,
+    onPreviewFinished: (String) -> Unit,
+): BrowsePreviewCoordinator {
+    var focusedPreviewEntry by remember { mutableStateOf<MergedEntry?>(null) }
+    var expandedPreviewEntryKey by remember { mutableStateOf<String?>(null) }
+
+    // Warm the stream halfway through the dwell, but keep the card at poster
+    // width/art and the player hidden until the full dwell has elapsed.
+    // Moving focus cancels both stages and releases any session already made.
+    LaunchedEffect(focusedPreviewEntry?.entry?.entryKey) {
+        onStopPreview()
+        expandedPreviewEntryKey = null
+        val entry = focusedPreviewEntry ?: return@LaunchedEffect
+        delay(BROWSE_PREVIEW_WARMUP_MS)
+        onStartPreview(entry)
+        delay(BROWSE_PREVIEW_EXPAND_MS)
+        expandedPreviewEntryKey = entry.entry.entryKey
+    }
+    DisposableEffect(Unit) {
+        onDispose { onStopPreview() }
+    }
+
+    return BrowsePreviewCoordinator(
+        expandedPreviewEntryKey = expandedPreviewEntryKey,
+        onPreviewFocusChanged = { entry, focused ->
+            if (focused) {
+                focusedPreviewEntry = entry
+            } else if (focusedPreviewEntry?.entry?.entryKey == entry.entry.entryKey) {
+                focusedPreviewEntry = null
+            }
+        },
+        onPreviewFinished = { sessionId ->
+            if (preview?.sessionId == sessionId && preview.entryKey == expandedPreviewEntryKey) {
+                expandedPreviewEntryKey = null
+            }
+            onPreviewFinished(sessionId)
+        },
+    )
+}
+
+/**
+ * Poster-box preview layer for the "Browse All" full grids (#159). Unlike
+ * [CatalogScreen]'s horizontal rows the card can't widen inside a fixed grid
+ * cell, so the preview simply plays zoom-cropped within the existing 2:3
+ * poster bounds: the loading indicator while a focused card's stream
+ * negotiates, then the inline video once it is ready. Call from inside the
+ * card's artwork [Box], over the [ArtworkImage].
+ */
+@Composable
+internal fun BoxScope.BrowsePreviewGridOverlay(
+    entryKey: String,
+    isFocused: Boolean,
+    isExpanded: Boolean,
+    preview: BrowsePreview?,
+    onFinished: (String) -> Unit,
+    hasVideo: Boolean = true,
+) {
+    val activePreview = preview?.takeIf { isFocused && it.entryKey == entryKey }
+    if (isExpanded && activePreview == null) {
+        PreviewLoadingIndicator(Modifier.matchParentSize())
+    }
+    activePreview?.let {
+        BrowsePreviewPlayer(
+            preview = it,
+            shouldPlay = isExpanded,
+            onFinished = onFinished,
+            modifier = Modifier.matchParentSize(),
+            hasVideo = hasVideo,
+        )
+    }
+}
 
 @Composable
 internal fun PreviewLoadingIndicator(modifier: Modifier = Modifier) {

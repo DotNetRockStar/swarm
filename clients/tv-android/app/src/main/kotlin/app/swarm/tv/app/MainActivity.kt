@@ -79,6 +79,7 @@ import app.swarm.tv.app.ui.components.rememberClientToastHostState
 import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.app.ui.screens.AlbumScreen
 import app.swarm.tv.app.ui.screens.ArtistShelfScreen
+import app.swarm.tv.app.ui.screens.BROWSE_ALL_TILE_FOCUS_KEY
 import app.swarm.tv.app.ui.screens.CatalogScreen
 import app.swarm.tv.app.ui.screens.CatalogBrowseState
 import app.swarm.tv.app.ui.screens.ExitConfirmOverlay
@@ -897,15 +898,33 @@ private fun SwarmApp(
                         lastFocusedArtistKey = null
                         onOpenMovie(entry)
                     },
-                    onOpenMovieShelf = onOpenMovieShelf,
-                    onOpenArtistShelf = onOpenArtistShelf,
+                    // A Browse All tile press remembers a per-kind sentinel so
+                    // pressing Back out of the full grid lands focus back on
+                    // that tile rather than the filter rail (#159).
+                    onOpenMovieShelf = { movies ->
+                        lastFocusedMovieKey = BROWSE_ALL_TILE_FOCUS_KEY
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = null
+                        onOpenMovieShelf(movies)
+                    },
+                    onOpenArtistShelf = { artists ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = null
+                        lastFocusedArtistKey = BROWSE_ALL_TILE_FOCUS_KEY
+                        onOpenArtistShelf(artists)
+                    },
                     onOpenArtist = { artist ->
                         lastFocusedMovieKey = null
                         lastFocusedShowKey = null
                         lastFocusedArtistKey = artist.artist
                         onOpenArtist(artist)
                     },
-                    onOpenShowShelf = onOpenShowShelf,
+                    onOpenShowShelf = { shows ->
+                        lastFocusedMovieKey = null
+                        lastFocusedShowKey = BROWSE_ALL_TILE_FOCUS_KEY
+                        lastFocusedArtistKey = null
+                        onOpenShowShelf(shows)
+                    },
                     onOpenShow = { show ->
                         lastFocusedMovieKey = null
                         lastFocusedShowKey = show.show
@@ -979,6 +998,10 @@ private fun SwarmApp(
                     },
                     onBack = onBackFromMovieShelf,
                     initialFocusKey = lastFocusedMovieKey,
+                    preview = browsePreview,
+                    onStartPreview = onStartBrowsePreview,
+                    onStopPreview = onStopBrowsePreview,
+                    onPreviewFinished = onFinishBrowsePreview,
                 )
             is UiState.MovieDetail ->
                 MovieDetailScreen(
@@ -1005,6 +1028,10 @@ private fun SwarmApp(
                     },
                     onBack = onBackFromShowShelf,
                     initialFocusKey = lastFocusedShowKey,
+                    preview = browsePreview,
+                    onStartPreview = onStartBrowsePreview,
+                    onStopPreview = onStopBrowsePreview,
+                    onPreviewFinished = onFinishBrowsePreview,
                 )
             is UiState.ShowSeasons -> {
                 // The most recently started-but-unfinished episode of this
