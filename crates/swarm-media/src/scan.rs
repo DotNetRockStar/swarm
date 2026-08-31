@@ -253,9 +253,10 @@ async fn scan_roots_scoped_inner(
     // Finish every root walk before catalog mutation, but stage the results
     // in local SQLite rather than growing an in-memory Vec with the library.
     let mut complete_roots = Vec::with_capacity(walked_roots.len());
+    let mut subtitle_sidecars: Vec<SubtitleSidecar> = Vec::new();
     for root in &walked_roots {
         check_cancelled(cancel.as_deref())?;
-        let complete = discover_media_files(
+        let (complete, sidecars) = discover_media_files(
             library,
             scan_id,
             root,
@@ -264,6 +265,8 @@ async fn scan_roots_scoped_inner(
             cancel.as_ref(),
         )
         .await?;
+        let remaining = MAX_SUBTITLE_SIDECARS.saturating_sub(subtitle_sidecars.len());
+        subtitle_sidecars.extend(sidecars.into_iter().take(remaining));
         if complete {
             complete_roots.push(*root);
         } else {
@@ -491,7 +494,124 @@ async fn scan_roots_scoped_inner(
         }
     }
 
+    // Side-loaded subtitles: match each `.srt`/`.vtt` discovered during the
+    // walk to its owning catalog entry and replace the previous external
+    // subtitle set. Only completed roots participate — a partial snapshot
+    // must not wipe a sidecar just because its directory was mid-change.
+    reconcile_external_subtitles(
+        library,
+        &complete_roots,
+        multi_root_namespace,
+        &subtitle_sidecars,
+    )
+    .await?;
+
     Ok(report)
+}
+
+/// Match every discovered subtitle sidecar to a catalog entry and rewrite
+/// the `source = "external"` rows for each completed scope. Best-effort per
+/// file: an unmatched or ambiguous sidecar is simply not offered.
+async fn reconcile_external_subtitles(
+    library: &Library,
+    complete_roots: &[&MediaRoot],
+    multi_root_namespace: bool,
+    sidecars: &[SubtitleSidecar],
+) -> Result<(), ScanError> {
+    if multi_root_namespace {
+        for root in complete_roots {
+            let label_prefix = format!("{}/", root.label);
+            let scoped: Vec<&SubtitleSidecar> = sidecars
+                .iter()
+                .filter(|s| s.relative_path.starts_with(&label_prefix))
+                .collect();
+            let records = match_subtitle_records(library, &scoped).await?;
+            library
+                .replace_external_subtitles(Some(&root.label), &records)
+                .await?;
+        }
+    } else if !complete_roots.is_empty() {
+        let scoped: Vec<&SubtitleSidecar> = sidecars.iter().collect();
+        let records = match_subtitle_records(library, &scoped).await?;
+        library.replace_external_subtitles(None, &records).await?;
+    }
+    Ok(())
+}
+
+async fn match_subtitle_records(
+    library: &Library,
+    sidecars: &[&SubtitleSidecar],
+) -> Result<Vec<crate::store::SubtitleRecord>, ScanError> {
+    use crate::subtitles::{self, SubtitleCandidate};
+    use std::collections::HashMap;
+    let mut records = Vec::new();
+    // Sidecars in the same folder share a media directory; one query per
+    // distinct directory rather than one per file.
+    let mut dir_cache: HashMap<String, Vec<crate::store::EntryRecord>> = HashMap::new();
+    for sidecar in sidecars {
+        let Some(format) = subtitles::subtitle_extension(&sidecar.relative_path) else {
+            continue;
+        };
+        let (media_dir, hints) = subtitles::subtitle_media_dir(&sidecar.relative_path);
+        let entries = match dir_cache.get(&media_dir) {
+            Some(entries) => entries,
+            None => {
+                let fetched = library.video_entries_under_dir(&media_dir).await?;
+                dir_cache.entry(media_dir.clone()).or_insert(fetched)
+            }
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        let candidates: Vec<SubtitleCandidate> = entries
+            .iter()
+            .map(|entry| SubtitleCandidate {
+                entry_key: entry.entry_key.clone(),
+                relative_path: entry.relative_path.clone(),
+                kind: entry.kind,
+                season: entry.season,
+                episode: entry.episode,
+            })
+            .collect();
+        let Some(chosen) = subtitles::match_subtitle_to_video(&sidecar.relative_path, &candidates)
+        else {
+            continue;
+        };
+        let Some(entry) = entries.iter().find(|e| e.entry_key == chosen.entry_key) else {
+            continue;
+        };
+
+        let file_name = sidecar.relative_path.rsplit('/').next().unwrap_or_default();
+        let stem = file_name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(file_name);
+        let parsed = subtitles::parse_subtitle_name(stem);
+        let label = if !parsed.label.is_empty() {
+            parsed.label
+        } else if let Some(hint) = hints.first() {
+            hint.clone()
+        } else {
+            "External subtitles".to_string()
+        };
+        // Stable, path-derived id so a rescan upserts the same row rather
+        // than churning it.
+        let id = format!(
+            "external-{}",
+            swarm_core::entry_key::entry_key(&sidecar.relative_path)
+        );
+        records.push(crate::store::SubtitleRecord {
+            id,
+            entry_key: entry.entry_key.clone(),
+            language: parsed.language.unwrap_or_else(|| "und".to_string()),
+            label,
+            source: "external".to_string(),
+            format: format.to_string(),
+            file_path: sidecar.absolute_path.clone(),
+            fingerprint: entry.fingerprint.clone(),
+        });
+    }
+    Ok(records)
 }
 
 fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), ScanError> {
@@ -683,7 +803,7 @@ async fn discover_media_files(
     multi_root_namespace: bool,
     progress: Option<&Arc<ScanProgress>>,
     cancel: Option<&Arc<AtomicBool>>,
-) -> Result<bool, ScanError> {
+) -> Result<(bool, Vec<SubtitleSidecar>), ScanError> {
     const BATCH_SIZE: usize = 256;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ScanManifestEntry>>(2);
     let root_path = root.path.clone();
@@ -716,14 +836,37 @@ async fn discover_media_files(
     if outcome.cancelled {
         return Err(ScanError::Cancelled);
     }
-    Ok(outcome.complete)
+    Ok((outcome.complete, outcome.subtitles))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 struct WalkOutcome {
     complete: bool,
     cancelled: bool,
+    /// Subtitle sidecar files (`.srt`/`.vtt`) seen during the same walk —
+    /// carried out rather than streamed like media entries because they are
+    /// sparse and matched to their owning video only after the full media
+    /// snapshot is reconciled. Capped at [`MAX_SUBTITLE_SIDECARS`].
+    subtitles: Vec<SubtitleSidecar>,
 }
+
+/// A `.srt`/`.vtt` file found beside media (or in a `Subs/` folder) during
+/// the library walk, before it is matched to a catalog entry.
+#[derive(Debug, Clone)]
+struct SubtitleSidecar {
+    /// Stored form, matching a catalog entry's `relative_path` (carries the
+    /// `{label}/` prefix in a multi-root install).
+    relative_path: String,
+    /// Absolute path on disk — what the peer subtitle route reads and, for
+    /// `.srt`, converts to WebVTT on the way out.
+    absolute_path: String,
+}
+
+/// A defensive ceiling on how many subtitle sidecars one scan will hold in
+/// memory at once. Real libraries have far fewer sidecars than media files;
+/// this only guards against a pathological tree and keeps the "bound scan
+/// memory" property the media walk's batching already has.
+const MAX_SUBTITLE_SIDECARS: usize = 100_000;
 
 /// An entry can be renamed or removed after `read_dir` returns it but before
 /// `file_type` or `metadata` runs. Only that precise race is skippable. The
@@ -756,6 +899,7 @@ fn walk_media_files(
     tx: Sender<Vec<ScanManifestEntry>>,
 ) -> std::io::Result<WalkOutcome> {
     let mut batch = Vec::with_capacity(batch_size);
+    let mut subtitles: Vec<SubtitleSidecar> = Vec::new();
     let mut stack = vec![root_path.to_path_buf()];
     let mut complete = true;
     while let Some(dir) = stack.pop() {
@@ -763,6 +907,7 @@ fn walk_media_files(
             return Ok(WalkOutcome {
                 complete,
                 cancelled: true,
+                subtitles: Vec::new(),
             });
         }
         // The root itself not existing is a real unavailable-root failure.
@@ -781,6 +926,7 @@ fn walk_media_files(
                 return Ok(WalkOutcome {
                     complete,
                     cancelled: true,
+                    subtitles: Vec::new(),
                 });
             }
             let Some(entry) = walk_value(entry, &mut complete)? else {
@@ -810,6 +956,20 @@ fn walk_media_files(
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
+            if crate::subtitles::subtitle_extension(&relative_under_root).is_some() {
+                if subtitles.len() < MAX_SUBTITLE_SIDECARS {
+                    let relative_path = if multi_root_namespace {
+                        format!("{label}/{relative_under_root}")
+                    } else {
+                        relative_under_root.clone()
+                    };
+                    subtitles.push(SubtitleSidecar {
+                        relative_path,
+                        absolute_path: path.to_string_lossy().into_owned(),
+                    });
+                }
+                continue;
+            }
             if classify::media_extension(&relative_under_root).is_some() {
                 let Some(metadata) = walk_value(entry.metadata(), &mut complete)? else {
                     continue;
@@ -845,6 +1005,7 @@ fn walk_media_files(
                         return Ok(WalkOutcome {
                             complete,
                             cancelled: false,
+                            subtitles: Vec::new(),
                         });
                     }
                 }
@@ -857,6 +1018,7 @@ fn walk_media_files(
     Ok(WalkOutcome {
         complete,
         cancelled: false,
+        subtitles,
     })
 }
 

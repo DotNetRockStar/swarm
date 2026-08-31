@@ -255,7 +255,10 @@ async fn introdb_segments_for_reports_scrape_state() {
 
     // Never scraped: no cached lookup at all.
     assert_eq!(
-        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        fx.library
+            .introdb_segments_for(&entry.entry_key)
+            .await
+            .unwrap(),
         None
     );
 
@@ -265,7 +268,10 @@ async fn introdb_segments_for_reports_scrape_state() {
         .await
         .unwrap();
     assert_eq!(
-        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        fx.library
+            .introdb_segments_for(&entry.entry_key)
+            .await
+            .unwrap(),
         Some(Vec::new())
     );
 
@@ -280,7 +286,10 @@ async fn introdb_segments_for_reports_scrape_state() {
         .await
         .unwrap();
     assert_eq!(
-        fx.library.introdb_segments_for(&entry.entry_key).await.unwrap(),
+        fx.library
+            .introdb_segments_for(&entry.entry_key)
+            .await
+            .unwrap(),
         Some(segments)
     );
 }
@@ -963,11 +972,7 @@ async fn overlapping_roots_are_scanned_once_regardless_of_configuration_order() 
             .into_iter()
             .map(|entry| entry.relative_path)
             .collect::<Vec<_>>();
-        assert_eq!(
-            paths.len(),
-            2,
-            "outer_first={outer_first}: {paths:?}"
-        );
+        assert_eq!(paths.len(), 2, "outer_first={outer_first}: {paths:?}");
         assert!(paths.iter().any(|p| p.ends_with("The Office/S01E01.mkv")));
         assert!(paths.iter().any(|p| p.ends_with("Other Show/S01E01.mkv")));
     }
@@ -1958,4 +1963,94 @@ async fn scan_finds_every_file_across_a_batch_boundary() {
     assert_eq!(second.added, 0);
     assert_eq!(second.removed, 0);
     assert_eq!(second.unchanged, FILE_COUNT as u64);
+}
+
+/// #143: subtitle sidecars — both a `Subs/` folder and a plain
+/// same-stem `.srt` beside the media — are discovered by the scan, matched
+/// to their owning entry, and registered as toggleable `external` tracks.
+#[tokio::test]
+async fn scan_registers_subtitle_sidecars_from_subs_folder_and_beside_media() {
+    let fx = fixture("subtitle-sidecars").await;
+
+    // A movie with its subtitles gathered into a `Subs` folder (DVD-rip
+    // convention) — one video in the folder, so the language file attaches
+    // even though its name ("2_English") doesn't match the video stem.
+    write(
+        &fx.root,
+        "Movies/Inception (2010)/Inception.2010.1080p.mkv",
+        b"movie bytes",
+    );
+    write(
+        &fx.root,
+        "Movies/Inception (2010)/Subs/2_English.srt",
+        b"1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+    );
+
+    // An episode with a plain sidecar beside it, disambiguated among its
+    // siblings by the SxxEyy marker in the subtitle filename.
+    write(
+        &fx.root,
+        "Shows/The Expanse/Season 2/The.Expanse.S02E05.mkv",
+        b"ep bytes",
+    );
+    write(
+        &fx.root,
+        "Shows/The Expanse/Season 2/The.Expanse.S02E06.mkv",
+        b"ep bytes 6",
+    );
+    write(
+        &fx.root,
+        "Shows/The Expanse/Season 2/The.Expanse.S02E06.en.srt",
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n",
+    );
+
+    scan_root(&fx.library, &fx.root).await.unwrap();
+
+    let movie_key = entry_key("Movies/Inception (2010)/Inception.2010.1080p.mkv");
+    let movie_subs = fx.library.subtitle_tracks(&movie_key).await.unwrap();
+    assert_eq!(
+        movie_subs.len(),
+        1,
+        "the Subs-folder file attaches to the movie"
+    );
+    assert_eq!(movie_subs[0].source, "external");
+    assert_eq!(movie_subs[0].language, "en");
+    assert_eq!(movie_subs[0].format, "srt");
+
+    let e6_key = entry_key("Shows/The Expanse/Season 2/The.Expanse.S02E06.mkv");
+    let e5_key = entry_key("Shows/The Expanse/Season 2/The.Expanse.S02E05.mkv");
+    assert_eq!(
+        fx.library.subtitle_tracks(&e6_key).await.unwrap().len(),
+        1,
+        "the SxxEyy marker pins the sidecar to episode 6"
+    );
+    assert!(
+        fx.library
+            .subtitle_tracks(&e5_key)
+            .await
+            .unwrap()
+            .is_empty(),
+        "episode 5 gets no subtitle"
+    );
+
+    // Removing the sidecar on disk clears the registered track on rescan.
+    std::fs::remove_file(
+        fx.root
+            .join("Shows/The Expanse/Season 2/The.Expanse.S02E06.en.srt"),
+    )
+    .unwrap();
+    scan_root(&fx.library, &fx.root).await.unwrap();
+    assert!(
+        fx.library
+            .subtitle_tracks(&e6_key)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a deleted sidecar is reconciled away"
+    );
+    assert_eq!(
+        fx.library.subtitle_tracks(&movie_key).await.unwrap().len(),
+        1,
+        "an untouched sidecar survives the rescan"
+    );
 }

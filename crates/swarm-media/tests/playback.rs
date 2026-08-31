@@ -510,9 +510,9 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
                 channels: 2,
                 bitrate: Some(128_000),
             }),
-        scraped_title: None,
-        episode_title: None,
-        genres: vec![],
+            scraped_title: None,
+            episode_title: None,
+            genres: vec![],
             artwork_version: 0,
             cast: vec![],
             overview: None,
@@ -564,6 +564,154 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
         let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
         assert_eq!(plan.mode, PlaybackMode::Direct);
     }
+
+    drop(service);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// #143: a side-loaded `.srt` sidecar registered as an `external` subtitle
+/// track is offered in the playback plan and served to the client as
+/// WebVTT (converted on the way out), exactly like a Whisper track.
+#[tokio::test]
+async fn external_srt_sidecar_is_offered_and_served_as_webvtt() {
+    let root = std::env::temp_dir().join(format!("swarm-playback-extsub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let media_root = root.join("media");
+    let relative_path = "Movies/Heat (1995)/Heat.1995.1080p.mp4";
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, vec![9u8; 800_000]).unwrap();
+
+    let srt_path = media_path
+        .parent()
+        .unwrap()
+        .join("Subs")
+        .join("2_English.srt");
+    std::fs::create_dir_all(srt_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &srt_path,
+        b"1\r\n00:00:01,500 --> 00:00:03,000\r\nDon't let yourself get attached\r\n",
+    )
+    .unwrap();
+
+    let library = Arc::new(
+        Library::open(root.join("library.sqlite").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let entry = EntryRecord {
+        entry_key: swarm_core::entry_key::entry_key(relative_path),
+        relative_path: relative_path.into(),
+        kind: MediaKind::Movie,
+        title: "Heat".into(),
+        size: 800_000,
+        modified_time: 0,
+        fingerprint: "heat-fp".into(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: Some(1995),
+        duration_secs: Some(10.0),
+        video: Some(VideoStreamInfo {
+            codec: "h264".into(),
+            width: 640,
+            height: 360,
+            level: Some("4.1".into()),
+            bitrate: Some(600_000),
+        }),
+        audio: Some(AudioStreamInfo {
+            codec: "aac".into(),
+            channels: 2,
+            bitrate: Some(96_000),
+        }),
+        scraped_title: None,
+        episode_title: None,
+        genres: vec![],
+        artwork_version: 0,
+        cast: vec![],
+        overview: None,
+        rating: None,
+        community_rating: None,
+        community_rating_votes: None,
+    };
+    library.upsert(&entry).await.unwrap();
+    library
+        .replace_external_subtitles(
+            None,
+            &[SubtitleRecord {
+                id: format!(
+                    "external-{}",
+                    swarm_core::entry_key::entry_key("Movies/Heat (1995)/Subs/2_English.srt")
+                ),
+                entry_key: entry.entry_key.clone(),
+                language: "en".into(),
+                label: "English".into(),
+                source: "external".into(),
+                format: "srt".into(),
+                file_path: srt_path.to_string_lossy().to_string(),
+                fingerprint: entry.fingerprint.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let service = MediaService::with_transcoding(
+        library,
+        media_root,
+        TranscodeConfig {
+            enabled: false,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 10_000_000,
+            reserve_percent: 30,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+        },
+    );
+    let negotiation = PeerRequest {
+        path: format!("/play/{}", entry.entry_key),
+        range: None,
+        if_none_match: None,
+        playback: Some(PlaybackPreferences {
+            capabilities: CapabilityProfile::fire_tv_baseline(),
+            start_position_secs: 0,
+            prefer_direct: true,
+            preview: false,
+        }),
+        error_report: None,
+        like: None,
+    };
+    let resolved = service.resolve(&negotiation).await;
+    let Body::Bytes(body) = resolved.body else {
+        panic!("playback plan must be JSON")
+    };
+    let plan: PlaybackPlan = serde_json::from_slice(&body).unwrap();
+    assert_eq!(plan.subtitles.len(), 1);
+    assert_eq!(plan.subtitles[0].source, "external");
+    assert_eq!(plan.subtitles[0].language, "en");
+
+    let served = service
+        .resolve(&request(plan.subtitles[0].path.clone()))
+        .await;
+    assert_eq!(served.header.status, 200);
+    assert_eq!(
+        served.header.content_type.as_deref(),
+        Some("text/vtt; charset=utf-8")
+    );
+    let Body::Bytes(vtt) = served.body else {
+        panic!("subtitle must be served as bytes")
+    };
+    let vtt = String::from_utf8(vtt).unwrap();
+    assert!(
+        vtt.starts_with("WEBVTT"),
+        "srt is converted to webvtt: {vtt}"
+    );
+    assert!(vtt.contains("00:00:01.500 --> 00:00:03.000"));
+    assert!(vtt.contains("Don't let yourself get attached"));
 
     drop(service);
     let _ = std::fs::remove_dir_all(root);
