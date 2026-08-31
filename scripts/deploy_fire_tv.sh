@@ -15,13 +15,16 @@
 # (some Fire OS versions require one initial `adb tcpip 5555` over USB first).
 #
 # Usage:
-#   ./scripts/deploy_fire_tv.sh                # uses $SWARM_TV_IP, the sole device already in `adb devices`, or a LAN scan + prompt
+#   ./scripts/deploy_fire_tv.sh                # $SWARM_TV_IP, then the preferred device (scripts/tests/tv_test_device.local.json), then the sole `adb devices` entry, then a LAN scan + prompt
 #   ./scripts/deploy_fire_tv.sh 192.168.0.148   # connects to this IP first (find it: Settings -> My Fire TV -> About -> Network)
 #   ./scripts/deploy_fire_tv.sh -f              # also tails logcat after a clean launch, until Ctrl+C (single target only)
 #   ./scripts/deploy_fire_tv.sh -c              # uninstall first (wipes the device's saved STUN link/swarms/token) — see below
 #
 # Env vars:
 #   SWARM_TV_IP     default target IP if none is passed as an argument (skips the LAN scan)
+#   SWARM_TV_NAME   default target device_name if no IP is given; overrides the
+#                   preferred_device_name in scripts/tests/tv_test_device.local.json
+#                   (the same preferred-device config the closed-loop TV suites use)
 #   ANDROID_HOME    default ~/Library/Android/sdk
 #   JAVA_HOME       default /opt/homebrew/opt/openjdk@17
 #   SWARM_LAN_IP    optional LAN-IP override shared with run_now.sh
@@ -55,6 +58,16 @@ for arg in "$@"; do
     esac
 done
 TARGET="${TARGET:-${SWARM_TV_IP:-}}"
+
+# When no explicit IP is given, fall back to a preferred device by name — the
+# same scripts/tests/tv_test_device.local.json the closed-loop TV suites read.
+# An env override wins for one-off runs.
+PREFERRED_DEVICE_FILE="$(dirname "${BASH_SOURCE[0]}")/tests/tv_test_device.local.json"
+PREFERRED_TV_NAME="${SWARM_TV_NAME:-}"
+if [ -z "$PREFERRED_TV_NAME" ] && [ -f "$PREFERRED_DEVICE_FILE" ]; then
+    PREFERRED_TV_NAME="$(grep -o '"preferred_device_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$PREFERRED_DEVICE_FILE" \
+        | sed 's/.*"preferred_device_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+fi
 
 # A debug deploy normally targets the local service started by run_now.sh.
 # Embed its current LAN address so a Mac DHCP change does not leave the TV
@@ -171,7 +184,41 @@ if [ -n "$TARGET" ]; then
     echo "==> Connecting to $TARGET ..."
     "$ADB" connect "$TARGET"
     SERIALS=("$TARGET")
-else
+elif [ -n "$PREFERRED_TV_NAME" ]; then
+    # Preferred device by name: check already-connected devices, then a LAN
+    # scan. If found, deploy to just that one without prompting (matches the
+    # closed-loop TV suites' default-to-preferred-device behavior).
+    echo "==> Preferred device configured (\"$PREFERRED_TV_NAME\"); looking for it ..."
+    preferred_serial=""
+    while IFS= read -r serial; do
+        [ -n "$serial" ] || continue
+        n="$("$ADB" -s "$serial" shell settings get global device_name </dev/null 2>/dev/null | tr -d '\r')"
+        if [ "$n" = "$PREFERRED_TV_NAME" ]; then
+            preferred_serial="$serial"
+            break
+        fi
+    done < <("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')
+    if [ -z "$preferred_serial" ]; then
+        while IFS=$'\t' read -r name ip; do
+            [ -n "$ip" ] || continue
+            if [ "$name" = "$PREFERRED_TV_NAME" ]; then
+                preferred_serial="$ip:$ADB_PORT"
+                break
+            fi
+        done < <(scan_lan_for_fire_tvs)
+    fi
+    if [ -n "$preferred_serial" ]; then
+        [[ "$preferred_serial" == *:* ]] || preferred_serial="$preferred_serial:$ADB_PORT"
+        echo "==> Deploying to preferred device \"$PREFERRED_TV_NAME\" ($preferred_serial)"
+        "$ADB" connect "$preferred_serial" >/dev/null 2>&1 || true
+        SERIALS=("$preferred_serial")
+    else
+        echo "Preferred device \"$PREFERRED_TV_NAME\" is not reachable right now; falling back to the LAN scan." >&2
+        PREFERRED_TV_NAME=""
+    fi
+fi
+
+if [ -z "$TARGET" ] && [ "${#SERIALS[@]}" -eq 0 ]; then
     devices="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')"
     count="$(printf '%s\n' "$devices" | grep -c . || true)"
     if [ "$count" -eq 1 ]; then
@@ -251,7 +298,22 @@ if [ "${#SERIALS[@]}" -gt 1 ] && [ "$FOLLOW" -eq 1 ]; then
 fi
 
 echo "==> Building debug APK ..."
-./gradlew :app:assembleDebug
+BUILD_LOG="$(mktemp -t swarm-fire-tv-build.XXXXXX)"
+build_status=0
+./gradlew :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
+if [ "$build_status" -ne 0 ]; then
+    if grep -Fq "is located outside the root directory" "$BUILD_LOG"; then
+        echo "==> Gradle reused outputs from a different checkout path; cleaning generated Android build files and retrying once ..."
+        ./gradlew clean
+        build_status=0
+        ./gradlew :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
+    fi
+fi
+rm -f "$BUILD_LOG"
+if [ "$build_status" -ne 0 ]; then
+    echo "Debug APK build failed." >&2
+    exit "$build_status"
+fi
 
 FAILED=()
 for SERIAL in "${SERIALS[@]}"; do
