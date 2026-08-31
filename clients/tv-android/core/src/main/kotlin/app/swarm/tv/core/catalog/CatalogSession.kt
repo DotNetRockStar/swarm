@@ -124,6 +124,12 @@ private class RouteMemory {
  */
 private const val MANIFEST_FETCH_TIMEOUT_MS = 12_000L
 
+/** The server allows a progressing foreground HLS startup up to 120 seconds.
+ * Give it a small delivery margin, then force a reconnect rather than leave
+ * the Fire TV parked on "Starting…" forever if the QUIC response stream is
+ * lost without kwik surfacing EOF. */
+private const val PLAYBACK_PREPARATION_TIMEOUT_MS = 135_000L
+
 internal typealias DirectConnector = (
     SwarmDevice,
     X509Certificate,
@@ -136,6 +142,7 @@ class CatalogSession internal constructor(
     private val directConnector: DirectConnector,
     private val onConnectionRestored: (serverId: String) -> Unit = {},
     private val manifestFetchTimeoutMs: Long = MANIFEST_FETCH_TIMEOUT_MS,
+    private val playbackPreparationTimeoutMs: Long = PLAYBACK_PREPARATION_TIMEOUT_MS,
 ) : AutoCloseable {
     constructor(
         proxy: PeerLoopbackProxy,
@@ -256,7 +263,7 @@ class CatalogSession internal constructor(
         var connection = connectionFor(device, clientCertificate, clientKey)
             ?: throw IOException("server is no longer connected")
         val response = try {
-            connection.request(path = "/play/$entryKey", playback = preferences)
+            requestPlayback(device.deviceId, connection, entryKey, preferences)
         } catch (e: IOException) {
             // A cached connection can die between browsing and pressing play
             // — confirmed live: QUIC dropped it well under a minute after its
@@ -267,13 +274,12 @@ class CatalogSession internal constructor(
             evictConnection(device.deviceId, connection)
             connection = connectionFor(device, clientCertificate, clientKey)
                 ?: throw IOException("server is no longer connected")
-            connection.request(path = "/play/$entryKey", playback = preferences)
+            requestPlayback(device.deviceId, connection, entryKey, preferences)
         }
-        val body = response.body.readBytes().decodeToString()
-        if (response.header.status != 200) {
-            throw IOException("server could not prepare playback (${response.header.status}): $body")
+        if (response.status != 200) {
+            throw IOException("server could not prepare playback (${response.status}): ${response.body}")
         }
-        val plan = SwarmJson.decodeFromString<PlaybackPlan>(body)
+        val plan = SwarmJson.decodeFromString<PlaybackPlan>(response.body)
         return PlaybackSelection(
             proxy.urlFor(device.deviceId, plan.path),
             plan.mode,
@@ -282,6 +288,49 @@ class CatalogSession internal constructor(
             plan.lyrics,
             plan.subtitles.map { track -> track.copy(path = proxy.urlFor(device.deviceId, track.path)) },
         )
+    }
+
+    private data class PlaybackResponse(val status: Int, val body: String)
+
+    /** Bounds both the response header and its small JSON body. Closing the
+     * raw connection is what unblocks kwik's blocking InputStream when the
+     * timeout/caller cancellation wins; the server observes that abandoned
+     * stream and drops its cancellation-safe transcode reservation. */
+    private suspend fun requestPlayback(
+        serverId: String,
+        connection: PeerConnection,
+        entryKey: String,
+        preferences: PlaybackPreferences,
+    ): PlaybackResponse = coroutineScope {
+        val request = async(Dispatchers.IO) {
+            runCatching {
+                val response = connection.request(path = "/play/$entryKey", playback = preferences)
+                PlaybackResponse(
+                    status = response.header.status,
+                    body = response.body.use { it.readBytes().decodeToString() },
+                )
+            }
+        }
+        try {
+            val outcome = withTimeoutOrNull(playbackPreparationTimeoutMs) { request.await() }
+                ?: kotlin.Result.failure(
+                    IOException(
+                        "playback preparation stalled; aborted after ${playbackPreparationTimeoutMs}ms",
+                    ),
+                )
+            if (outcome.isFailure) {
+                request.cancel()
+                evictConnection(serverId, connection)
+            }
+            outcome.getOrThrow()
+        } finally {
+            // Structured concurrency waits for blocking children even after
+            // cancellation. Close first so kwik's parked read actually exits.
+            if (!request.isCompleted) {
+                request.cancel()
+                evictConnection(serverId, connection)
+            }
+        }
     }
 
     /**

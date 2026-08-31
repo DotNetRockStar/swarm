@@ -11,6 +11,7 @@ import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.PunchFallback
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.client.SignalingClient
 import app.swarm.tv.core.client.StunApiClient
@@ -31,6 +32,7 @@ import app.swarm.tv.core.watch.WatchState
 import app.swarm.tv.core.watch.WatchStateStore
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.UUID
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import kotlinx.coroutines.Dispatchers
@@ -95,10 +97,13 @@ private data class PendingPlaybackReplacement(
     val player: UiState.Player,
 )
 
-/** A next-episode session negotiated while the finished episode's Continue
- * prompt is still visible. [PlayerScreen] prepares this URL in a paused
- * ExoPlayer so the server negotiation and initial buffering are both already
- * complete when the viewer accepts the handoff. */
+/** A next-episode (or next-track) session negotiated ahead of time.
+ *
+ * For episodes [PlayerScreen] prepares this URL in a paused ExoPlayer while
+ * the finished episode's Continue prompt is visible. For tracks (#160) the
+ * hoisted music player appends it as a second playlist item so ExoPlayer
+ * transitions to it with no re-buffer — the server negotiation and the
+ * initial buffering are both already done when the current song ends. */
 data class PreparedEpisodePlayback(
     val url: String,
     val title: String,
@@ -113,6 +118,7 @@ data class PreparedEpisodePlayback(
     val serverId: String,
     val sessionId: String,
     val subtitles: List<app.swarm.tv.core.peer.SubtitleTrack> = emptyList(),
+    val lyrics: TrackLyrics? = null,
 )
 
 sealed class UiState {
@@ -197,7 +203,16 @@ sealed class UiState {
     /** Music: Music row -> here (grouped, replacing the old flat-track shelf) -> [ArtistAlbums]. */
     data class ArtistShelf(val catalog: Catalog, val artists: List<ArtistGroup>) : UiState()
     /** One artist's albums; [AlbumScreen] handles the album-grid<->track-list sub-navigation locally. */
-    data class ArtistAlbums(val previous: UiState, val catalog: Catalog, val artists: List<ArtistGroup>, val artist: ArtistGroup) : UiState()
+    data class ArtistAlbums(
+        val previous: UiState,
+        val catalog: Catalog,
+        val artists: List<ArtistGroup>,
+        val artist: ArtistGroup,
+        /** Album to open straight to the track list of — set when Back from
+         * the music player returns here while a track from [artist] is
+         * playing (#160). Null on a plain open, which shows the album grid. */
+        val initialAlbum: String? = null,
+    ) : UiState()
     /** Movies: Movies row -> here (all movies, "Browse all") -> [MovieDetail]. */
     data class MovieShelf(val catalog: Catalog, val movies: List<MergedEntry>) : UiState()
     /** Movies: Movies row or [MovieShelf] -> here (detail before play) -> [Player]. [previous] is whichever of those it was opened from, so Back returns to the right one — same reasoning as [Player.previous]. */
@@ -257,6 +272,17 @@ sealed class UiState {
          * into its paused overlay instead of autoplaying — see that param's
          * own doc comment. */
         val startPaused: Boolean = false,
+        /**
+         * Tracks only: a stable id for one continuous listening session
+         * that survives auto-advancing from track to track. The hoisted
+         * music `ExoPlayer` in `SwarmApp` is keyed on this rather than
+         * [sessionId], so promoting a [preloadedNext] track keeps the same
+         * player instance and its already-buffered next item — that is what
+         * makes song-to-song transitions seamless (#160). A fresh play from
+         * a browse screen starts a new queue id; [playNext] carries it
+         * forward. Null for movies/episodes.
+         */
+        val musicQueueId: String? = null,
     ) : UiState()
 }
 
@@ -389,8 +415,8 @@ class SwarmViewModel(
     private var latestCatalogEntries: List<MergedEntry> = emptyList()
 
     /** Music-only "keep playing but pick something else" mode — see [CatalogGrouping.nextTrack] and [toggleShuffle]. */
-    private val _shuffleEnabled = MutableStateFlow(false)
-    val shuffleEnabled: StateFlow<Boolean> = _shuffleEnabled.asStateFlow()
+    private val _shuffleMode = MutableStateFlow(ShuffleMode.OFF)
+    val shuffleMode: StateFlow<ShuffleMode> = _shuffleMode.asStateFlow()
 
     /** Non-null exactly when a track is playing in the background after [minimizePlayback] — see [activePlayerSession]. */
     private val _minimizedPlayer = MutableStateFlow<UiState.Player?>(null)
@@ -437,6 +463,8 @@ class SwarmViewModel(
     private var nextEpisodePreloadJob: Job? = null
     private var nextEpisodePreloadSessionId: String? = null
     private var continueAfterPreloadSessionId: String? = null
+    private var nextTrackPreloadJob: Job? = null
+    private var nextTrackPreloadSessionId: String? = null
     /** Dashboard to restore when Add Server's activation is cancelled or fails. */
     private var activationReturnState: UiState.Dashboard? = null
     /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
@@ -1856,6 +1884,90 @@ class SwarmViewModel(
     }
 
     /**
+     * Negotiates the next track's stream while the current one is still
+     * playing so the hoisted music player can append it as a second
+     * playlist item and cross into it with no gap or buffering screen
+     * (#160). Unlike [preloadNextEpisode] the current session is *not*
+     * released first — the song is still playing — so this needs a server
+     * with a spare stream slot; if none is available the negotiation just
+     * fails quietly and [playNext] falls back to the normal path. Safe to
+     * call repeatedly (on every position tick near the end of a track); it
+     * no-ops while a preload is already done or in flight for this session.
+     */
+    fun preloadNextTrack(sessionId: String) {
+        val current = activePlayerSession() ?: return
+        if (current.sessionId != sessionId || current.entry.entry.kind != MediaKind.TRACK) return
+        val next = current.nextEntry ?: return
+        if (next.entry.fingerprint == current.entry.entry.fingerprint) return
+        if (current.preloadedNext != null || nextTrackPreloadJob?.isActive == true) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+        val serverId = next.sources.firstOrNull() ?: return
+        val device = catalog.devices.find { it.deviceId == serverId }?.let(::withPreferredLanRoute) ?: return
+
+        val job = viewModelScope.launch {
+            val resumePositionSecs = watchStateStore.get(next.entry.fingerprint)
+                ?.takeUnless { it.watched }
+                ?.positionSecs
+                ?: 0.0
+            val selection = runCatching {
+                withContext(Dispatchers.IO) {
+                    catalogSession.preparePlayback(
+                        device,
+                        next.entry.entryKey,
+                        resumePositionSecs.toLong(),
+                        clientCertificate,
+                        clientKey,
+                    )
+                }
+            }.onFailure {
+                Log.w(logTag, "next-track preload failed for ${next.entry.entryKey}", it)
+            }.getOrNull() ?: return@launch
+
+            val stillCurrent = (activePlayerSession())
+                ?.takeIf { it.sessionId == current.sessionId && it.nextEntry?.entry?.fingerprint == next.entry.fingerprint }
+            if (stillCurrent == null || stillCurrent.preloadedNext != null) {
+                runCatching { releasePlaybackSessionNow(catalog, serverId, selection.sessionId) }
+                    .onFailure { Log.w(logTag, "failed to release abandoned next-track preload", it) }
+                return@launch
+            }
+            val isHls = selection.mode == PlaybackMode.HLS
+            val following = CatalogGrouping.nextTrack(
+                next,
+                CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
+                _shuffleMode.value,
+            )
+            val prepared = PreparedEpisodePlayback(
+                url = selection.url,
+                title = next.entry.displayTitle(),
+                playbackMode = selection.mode,
+                fingerprint = next.entry.fingerprint,
+                resumePositionSecs = if (isHls) 0.0 else resumePositionSecs,
+                positionOffsetSecs = if (isHls) resumePositionSecs else 0.0,
+                maxBitrate = selection.maxBitrate,
+                mediaDurationSecs = next.entry.durationSecs,
+                entry = next,
+                nextEntry = following,
+                serverId = serverId,
+                sessionId = selection.sessionId,
+                subtitles = selection.subtitles,
+                lyrics = selection.lyrics,
+            )
+            if (_minimizedPlayer.value?.sessionId == current.sessionId) {
+                _minimizedPlayer.value = _minimizedPlayer.value?.copy(preloadedNext = prepared)
+            } else if ((_state.value as? UiState.Player)?.sessionId == current.sessionId) {
+                _state.value = (_state.value as UiState.Player).copy(preloadedNext = prepared)
+            } else {
+                runCatching { releasePlaybackSessionNow(catalog, serverId, selection.sessionId) }
+            }
+        }
+        nextTrackPreloadSessionId = sessionId
+        nextTrackPreloadJob = job
+        job.invokeOnCompletion {
+            if (nextTrackPreloadSessionId == sessionId) nextTrackPreloadSessionId = null
+        }
+    }
+
+    /**
      * Finds and plays whatever comes after the *currently active* session's
      * entry — [UiState.Player.entry] if the full player screen is showing,
      * or [minimizedPlayer]'s if music is playing in the background while
@@ -1870,18 +1982,24 @@ class SwarmViewModel(
         val next = current.nextEntry ?: return
         val catalog = current.previous.embeddedCatalog() ?: return
         val wasMinimized = _minimizedPlayer.value != null
-        if (!wasMinimized && current.entry.entry.kind == MediaKind.EPISODE) {
-            current.preloadedNext?.let { prepared ->
-                // A failed best-effort stop must not hold the old reservation
-                // until its idle timeout just because the next reservation
-                // happened to succeed anyway. Retry in the background without
-                // delaying promotion of the already-buffering player.
-                if (!current.sessionReleased) {
-                    releasePlaybackSession(catalog, current.serverId, current.sessionId)
-                }
-                _state.value = prepared.toPlayerState(current.previous)
-                return
+        // A track prepared ahead of time (#160) is promoted directly whether
+        // the full screen or the mini-player is showing — the hoisted music
+        // player, keyed on [UiState.Player.musicQueueId], already has this
+        // exact stream appended and buffered, so there is no re-negotiation
+        // and no re-buffer. An episode's preload only applies on the full
+        // screen (its buffer lives in PlayerScreen's own player).
+        val preloaded = current.preloadedNext
+        if (preloaded != null && preloaded.fingerprint == next.entry.fingerprint &&
+            (current.entry.entry.kind == MediaKind.TRACK || !wasMinimized)
+        ) {
+            if (!current.sessionReleased) {
+                releasePlaybackSession(catalog, current.serverId, current.sessionId)
             }
+            val promoted = preloaded.toPlayerState(current.previous, musicQueueId = current.musicQueueId)
+            if (wasMinimized) _minimizedPlayer.value = promoted else _state.value = promoted
+            return
+        }
+        if (!wasMinimized && current.entry.entry.kind == MediaKind.EPISODE) {
             if (nextEpisodePreloadJob?.isActive == true && nextEpisodePreloadSessionId == current.sessionId) {
                 continueAfterPreloadSessionId = current.sessionId
                 return
@@ -1899,10 +2017,28 @@ class SwarmViewModel(
             previousScreen = current.previous,
             keepMinimized = wasMinimized,
             replaceSession = current,
+            continueMusicQueueId = current.musicQueueId,
         )
     }
 
-    private fun PreparedEpisodePlayback.toPlayerState(previous: UiState) = UiState.Player(
+    /**
+     * ExoPlayer auto-advanced the hoisted music playlist to the track that
+     * [preloadNextTrack] appended — same promotion [playNext] does, but
+     * driven by the gapless transition rather than a Skip press or an ENDED
+     * callback, so a song ending never routes through the loading screen
+     * (#160). A no-op if the queued item is not what's actually current now
+     * (a race with Skip / shuffle toggle) — [onTrackPlaybackEnded] / the
+     * next [playNext] recover.
+     */
+    fun onMusicPlaylistAdvanced(advancedToUrl: String?) {
+        val current = activePlayerSession() ?: return
+        if (current.entry.entry.kind != MediaKind.TRACK) return
+        val preloaded = current.preloadedNext ?: return
+        if (advancedToUrl != null && advancedToUrl != preloaded.url) return
+        playNext()
+    }
+
+    private fun PreparedEpisodePlayback.toPlayerState(previous: UiState, musicQueueId: String? = null) = UiState.Player(
         url = url,
         title = title,
         playbackMode = playbackMode,
@@ -1917,6 +2053,8 @@ class SwarmViewModel(
         serverId = serverId,
         sessionId = sessionId,
         subtitles = subtitles,
+        lyrics = lyrics,
+        musicQueueId = musicQueueId,
         recommendations = previous.embeddedCatalog()?.entries
             ?.let { pauseRecommendations(entry, it) }
             .orEmpty(),
@@ -2002,14 +2140,29 @@ class SwarmViewModel(
         }
     }
 
-    /** Music only — movies/episodes have no shuffle concept and never call this. Flips the flag and, if a track is currently active (full-screen or minimized), immediately recomputes its `nextEntry` under the new mode so the "what's up next" the UI reflects updates right away rather than only on the *next* track change. */
+    /**
+     * Music only — movies/episodes have no shuffle concept and never call
+     * this. Cycles OFF -> shuffle album -> shuffle all songs -> OFF and, if
+     * a track is currently active (full-screen or minimized), immediately
+     * recomputes its `nextEntry` under the new mode so the "what's up next"
+     * the UI reflects updates right away rather than only on the *next*
+     * track change. Any track already buffered ahead under the old mode is
+     * dropped so the change takes effect on the very next transition.
+     */
     fun toggleShuffle() {
-        _shuffleEnabled.value = !_shuffleEnabled.value
+        _shuffleMode.value = _shuffleMode.value.next()
         val current = activePlayerSession() ?: return
         if (current.entry.entry.kind != MediaKind.TRACK) return
         val catalog = current.previous.embeddedCatalog() ?: return
-        val next = CatalogGrouping.nextTrack(current.entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), _shuffleEnabled.value)
-        val updated = current.copy(nextEntry = next)
+        val next = CatalogGrouping.nextTrack(
+            current.entry,
+            CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
+            _shuffleMode.value,
+        )
+        current.preloadedNext?.let { prepared ->
+            releasePlaybackSession(catalog, prepared.serverId, prepared.sessionId)
+        }
+        val updated = current.copy(nextEntry = next, preloadedNext = null)
         if (_minimizedPlayer.value != null) _minimizedPlayer.value = updated else _state.value = updated
     }
 
@@ -2041,7 +2194,12 @@ class SwarmViewModel(
     fun stopMinimizedPlayback() {
         val minimized = _minimizedPlayer.value ?: return
         _minimizedPlayer.value = null
-        minimized.previous.embeddedCatalog()?.let { releasePlaybackSession(it, minimized.serverId, minimized.sessionId) }
+        minimized.previous.embeddedCatalog()?.let { catalog ->
+            releasePlaybackSession(catalog, minimized.serverId, minimized.sessionId)
+            minimized.preloadedNext?.let { prepared ->
+                releasePlaybackSession(catalog, prepared.serverId, prepared.sessionId)
+            }
+        }
     }
 
     /** Best-effort, fire-and-forget release of a just-finished player's server-side bandwidth reservation — see [CatalogSession.stopPlayback]. */
@@ -2086,7 +2244,7 @@ class SwarmViewModel(
         val swarmIdSnapshot = swarmId
         val pendingReportCount = pendingClientErrors.size
         val kidModeEnabled = _kidModeSettings.value != null
-        val shuffleEnabled = _shuffleEnabled.value
+        val shuffleMode = _shuffleMode.value
         val minimizedTitle = _minimizedPlayer.value?.title
         val previewEntryKey = _browsePreview.value?.entryKey
         viewModelScope.launch {
@@ -2116,7 +2274,7 @@ class SwarmViewModel(
                     playbackError = catalogSnapshot?.playbackError,
                     pendingReportCount = pendingReportCount,
                     kidModeEnabled = kidModeEnabled,
-                    shuffleEnabled = shuffleEnabled,
+                    shuffleMode = shuffleMode.name.lowercase(),
                     minimizedTitle = minimizedTitle,
                     previewEntryKey = previewEntryKey,
                     errorDetails = context,
@@ -2235,6 +2393,7 @@ class SwarmViewModel(
         replaceSession: UiState.Player? = null,
         startPositionSecsOverride: Double? = null,
         startPaused: Boolean = false,
+        continueMusicQueueId: String? = null,
     ) {
         // ExoPlayer can report ENDED more than once around teardown, and a
         // remote button can repeat. Until negotiation commits a new Player
@@ -2345,11 +2504,11 @@ class SwarmViewModel(
             // Both of these scan the whole catalog (grouping + a sort). Keep
             // them off the main thread so the browse→player hand-off doesn't
             // stutter on a large library right as the screen swaps in (#122).
-            val shuffle = _shuffleEnabled.value
+            val shuffleMode = _shuffleMode.value
             val (nextEntry, recommendations) = withContext(Dispatchers.Default) {
                 val next = when (entry.entry.kind) {
                     MediaKind.EPISODE -> CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
-                    MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), shuffle)
+                    MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), shuffleMode)
                     MediaKind.MOVIE -> null
                 }
                 next to pauseRecommendations(entry, catalog.entries)
@@ -2360,6 +2519,14 @@ class SwarmViewModel(
             // doesn't reappear on Back after a *successful* play; nothing
             // to clear on the other, richer previousScreen types.
             val cleanedPrevious = if (previousScreen is UiState.Catalog) previousScreen.copy(playbackError = null) else previousScreen
+            // Back from the music player should return to the track's own
+            // album, not the album grid (#160): remember which album this
+            // track came from on the ArtistAlbums screen underneath.
+            val resolvedPrevious = if (entry.entry.kind == MediaKind.TRACK && cleanedPrevious is UiState.ArtistAlbums) {
+                cleanedPrevious.copy(initialAlbum = entry.entry.album ?: cleanedPrevious.initialAlbum)
+            } else {
+                cleanedPrevious
+            }
             val playerState = UiState.Player(
                 url = selection.url,
                 title = entry.entry.displayTitle(),
@@ -2371,7 +2538,7 @@ class SwarmViewModel(
                 mediaDurationSecs = entry.entry.durationSecs,
                 entry = entry,
                 nextEntry = nextEntry,
-                previous = cleanedPrevious,
+                previous = resolvedPrevious,
                 serverId = serverId,
                 sessionId = selection.sessionId,
                 lyrics = selection.lyrics,
@@ -2380,6 +2547,11 @@ class SwarmViewModel(
                 // A Resume press on the PreparingPlayback cover cancels the
                 // "open paused" behavior so the stream just starts (#122).
                 startPaused = startPaused && !preparingResumeRequested,
+                musicQueueId = if (entry.entry.kind == MediaKind.TRACK) {
+                    continueMusicQueueId ?: UUID.randomUUID().toString()
+                } else {
+                    null
+                },
             )
             // keepMinimized: an autoplay-to-next-track that started while
             // the mini-bar (not the full screen) was showing stays in the
@@ -2764,13 +2936,14 @@ class SwarmViewModel(
     /**
      * Back-press while the [UiState.PreparingPlayback] cover is up: abandon
      * the in-flight negotiation and return to the screen the play started
-     * from. The negotiation coroutine is left to finish on its own — the
-     * generation bump makes [playEntry] release any session it still manages
-     * to reserve, exactly as [stopAllStreaming] relies on.
+     * from. Cancelling closes the blocking QUIC request in [CatalogSession],
+     * allowing the server to terminate any pending transcode reservation
+     * immediately rather than waiting for negotiation or an idle timeout.
      */
     fun cancelPlaybackPreparation() {
         val current = _state.value as? UiState.PreparingPlayback ?: return
         playbackRequestGeneration++
+        playbackNegotiationJob?.cancel()
         playbackNegotiationJob = null
         preparingResumeRequested = false
         _state.value = current.previous
@@ -2818,10 +2991,11 @@ class SwarmViewModel(
         val minimized = _minimizedPlayer.value
         val pendingReplacement = pendingPlaybackReplacement?.player
 
-        // Let any in-flight /play response complete so its newly allocated
-        // session id can be stopped. The generation check in playEntry keeps
-        // that late response from ever becoming an active local player.
+        // Close an in-flight /play request while the Activity backgrounds.
+        // CatalogSession eviction unblocks its blocking QUIC read and the
+        // server owns cancellation-safe cleanup before returning a plan.
         playbackRequestGeneration++
+        playbackNegotiationJob?.cancel()
         playbackNegotiationJob = null
         preparingResumeRequested = false
         pendingPlaybackReplacement = null

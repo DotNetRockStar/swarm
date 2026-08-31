@@ -33,6 +33,55 @@ async fn rescan_picks_up_a_new_real_file_and_list_entries_reports_it() {
 }
 
 #[tokio::test]
+async fn rescan_reports_scrapeable_titles_for_scene_release_movie_names() {
+    let (test_app, root_dir) = test_app_with_media_root().await;
+    let app = test_app.handle();
+    let cases = [
+        (
+            "Social Network.2010.BD.Rip.1080p.h264.Rus.Eng.mkv",
+            "Social Network",
+            2010,
+        ),
+        (
+            "The.Prestige.2006.CUSTOM.MULTi.VF2.1080p.HDLight.AC3.5.1.H264-LiHDL.mkv",
+            "The Prestige",
+            2006,
+        ),
+        (
+            "Top.Gun.Maverick.2022.IMAX.1080p.Bluray.Atmos.TrueHD.7.1.x264-EVO.mkv",
+            "Top Gun Maverick",
+            2022,
+        ),
+        (
+            "Waterworld.1995.The.Ulysses.Cut.1080p.BluRay.HEVC.x265-RiPRG.mkv",
+            "Waterworld",
+            1995,
+        ),
+    ];
+    for (filename, _, _) in cases {
+        std::fs::write(root_dir.path().join(filename), b"fake video bytes")
+            .expect("write scene-release movie fixture");
+    }
+
+    let report = rescan(app.clone(), app.state())
+        .await
+        .expect("rescan should index scene-release movie names");
+    assert_eq!(report.added, cases.len() as u64);
+
+    let entries = list_entries(app.clone(), app.state())
+        .await
+        .expect("list_entries should return the indexed movies");
+    for (_, expected_title, expected_year) in cases {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.title == expected_title)
+            .unwrap_or_else(|| panic!("missing UAT entry for {expected_title}"));
+        assert_eq!(entry.kind, "movie", "{expected_title}");
+        assert_eq!(entry.year, Some(expected_year), "{expected_title}");
+    }
+}
+
+#[tokio::test]
 async fn rescan_is_idempotent_when_nothing_changed_on_disk() {
     let (test_app, root_dir) = test_app_with_media_root().await;
     let app = test_app.handle();

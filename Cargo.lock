@@ -4866,6 +4866,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "swarm-docs"
+version = "0.1.0"
+
+[[package]]
 name = "swarm-media"
 version = "0.1.0"
 dependencies = [

@@ -73,6 +73,7 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.core.catalog.MergedEntry
+import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.activeLyricIndex
 import app.swarm.tv.core.catalog.parseSyncedLyrics
 import app.swarm.tv.core.peer.TrackLyrics
@@ -84,7 +85,7 @@ fun MusicPlayerScreen(
     nextTitle: String?,
     isPlaying: Boolean,
     isLoading: Boolean,
-    shuffleEnabled: Boolean,
+    shuffleMode: ShuffleMode,
     isLiked: Boolean,
     artworkUrl: String?,
     artistPhotoUrl: String?,
@@ -228,7 +229,14 @@ fun MusicPlayerScreen(
                     colors = swarmActionButtonColors(),
                     modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON),
                 ) {
-                    Text(if (shuffleEnabled) "🔀 Shuffle on" else "🔀 Shuffle", fontSize = 13.sp)
+                    Text(
+                        when (shuffleMode) {
+                            ShuffleMode.OFF -> "🔀 Shuffle"
+                            ShuffleMode.ALBUM -> "🔀 Shuffle album"
+                            ShuffleMode.ALL_SONGS -> "🔀 Shuffle all"
+                        },
+                        fontSize = 13.sp,
+                    )
                 }
                 Button(
                     onClick = onTogglePlayPause,

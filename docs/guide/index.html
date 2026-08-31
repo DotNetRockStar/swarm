@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SWARM — System Guide</title>
+<meta name="description" content="Interactive, audience-switching documentation for the SWARM peer-to-peer media streaming suite: devices, media server, STUN server, LAN connections, security, technology choices, and testing.">
+<style>
+  /* ---------------------------------------------------------------------------
+     SWARM System Guide — single self-contained file, no build step, no CDN.
+     Palette mirrors apps/server/ui/style.css closely enough to feel like one
+     product without coupling to it. Dark by default; respects light preference.
+     --------------------------------------------------------------------------- */
+  :root {
+    --bg: #0f1216;
+    --bg-raised: #171c22;
+    --bg-inset: #10151a;
+    --border: #262d36;
+    --text: #e6e9ee;
+    --text-dim: #9aa4b1;
+    --accent: #4da3ff;
+    --accent-2: #7ee787;
+    --warn: #ffb454;
+    --danger: #ff6b6b;
+    --code-bg: #0b0e12;
+    --maxw: 1180px;
+    --sidebar-w: 264px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa;
+      --bg-raised: #ffffff;
+      --bg-inset: #eef1f4;
+      --border: #d4dae1;
+      --text: #1c2530;
+      --text-dim: #5b6673;
+      --accent: #0969da;
+      --accent-2: #1a7f37;
+      --warn: #9a6700;
+      --danger: #cf222e;
+      --code-bg: #f0f3f6;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+  /* ---- Header / audience switch ---- */
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar .brand {
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    font-size: 15px;
+  }
+  .topbar .brand span { color: var(--accent); }
+  .topbar .tagline {
+    color: var(--text-dim);
+    font-size: 13px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .audience-switch {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--bg-inset);
+    flex: none;
+  }
+  .audience-switch button {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 7px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .audience-switch button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  @media (prefers-color-scheme: light) {
+    .audience-switch button.active { color: #fff; }
+  }
+
+  /* ---- Layout ---- */
+  .shell {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    gap: 0;
+    max-width: var(--maxw);
+    margin: 0 auto;
+  }
+  nav.toc {
+    position: sticky;
+    top: 57px;
+    align-self: start;
+    height: calc(100vh - 57px);
+    overflow-y: auto;
+    padding: 22px 12px 60px 20px;
+    border-right: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  nav.toc h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin: 18px 0 6px;
+  }
+  nav.toc a {
+    display: block;
+    padding: 4px 8px;
+    border-radius: 6px;
+    color: var(--text-dim);
+  }
+  nav.toc a:hover { background: var(--bg-inset); color: var(--text); text-decoration: none; }
+  nav.toc a.active { background: var(--bg-inset); color: var(--accent); font-weight: 600; }
+
+  main {
+    padding: 28px 34px 120px;
+    min-width: 0;
+  }
+  main section { scroll-margin-top: 80px; padding-top: 8px; }
+  main h1 { font-size: 28px; margin: 8px 0 4px; }
+  main h2 {
+    font-size: 22px;
+    margin: 44px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  main h3 { font-size: 17px; margin: 26px 0 6px; }
+  main h4 { font-size: 14px; margin: 18px 0 4px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+  main ul, main ol { padding-left: 22px; }
+  main li { margin: 3px 0; }
+
+  table.grid {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 14px;
+  }
+  table.grid th, table.grid td {
+    border: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.grid th { background: var(--bg-inset); font-weight: 600; }
+
+  .lead {
+    font-size: 17px;
+    color: var(--text-dim);
+  }
+
+  /* ---- Callouts / audience blocks ---- */
+  .note, .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--bg-inset);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin: 14px 0;
+    font-size: 14.5px;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.security { border-left-color: var(--accent-2); }
+  .callout .k {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+  }
+
+  .card-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 14px 0;
+  }
+  .card {
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .card h3 { margin-top: 0; font-size: 15px; }
+  .card .meta { color: var(--text-dim); font-size: 12.5px; }
+
+  /* ---- Step flows ---- */
+  ol.flow {
+    counter-reset: step;
+    list-style: none;
+    padding-left: 0;
+    margin: 14px 0;
+  }
+  ol.flow > li {
+    counter-increment: step;
+    position: relative;
+    padding: 8px 0 8px 44px;
+    border-left: 2px solid var(--border);
+    margin-left: 15px;
+  }
+  ol.flow > li::before {
+    content: counter(step);
+    position: absolute;
+    left: -15px;
+    top: 8px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+  }
+  ol.flow > li:last-child { border-left-color: transparent; }
+
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    vertical-align: middle;
+  }
+  .pill.eng { border-color: var(--accent); color: var(--accent); }
+  .pill.planned { border-color: var(--warn); color: var(--warn); }
+  .pill.done { border-color: var(--accent-2); color: var(--accent-2); }
+
+  figure { margin: 16px 0; }
+  figure svg { max-width: 100%; height: auto; display: block; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 10px; }
+  figcaption { color: var(--text-dim); font-size: 13px; margin-top: 6px; }
+  .diagram text { fill: var(--text); font: 12px -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .diagram .dim { fill: var(--text-dim); }
+  .diagram .box { fill: var(--bg-raised); stroke: var(--border); }
+  .diagram .box-accent { fill: color-mix(in srgb, var(--accent) 18%, var(--bg-raised)); stroke: var(--accent); }
+  .diagram .box-warn { fill: color-mix(in srgb, var(--warn) 18%, var(--bg-raised)); stroke: var(--warn); }
+  .diagram .edge { stroke: var(--text-dim); stroke-width: 1.4; fill: none; }
+  .diagram .edge-strong { stroke: var(--accent); stroke-width: 2; fill: none; }
+
+  .aud-only-tag {
+    float: right;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+
+  /* Audience visibility — JS toggles the body class; noscript shows all. */
+  body.audience-user [data-audience="engineer"] { display: none !important; }
+  body.audience-engineer [data-audience="user"] { display: none !important; }
+
+  footer.pagefoot {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: 24px 34px 60px;
+    color: var(--text-dim);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; }
+    nav.toc {
+      position: static;
+      height: auto;
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 20px; }
+    .topbar .tagline { display: none; }
+  }
+</style>
+</head>
+<body class="audience-user">
+<noscript>
+  <div style="background:#9a6700;color:#fff;padding:10px 16px;font-size:14px;">
+    JavaScript is off, so the Engineer / User switch is disabled and every section is shown.
+  </div>
+</noscript>
+
+<header class="topbar">
+  <span class="brand">SW<span>A</span>RM</span>
+  <span class="tagline">System guide — free, strictly peer-to-peer media streaming. Your media never touches a cloud.</span>
+  <div class="audience-switch" role="group" aria-label="Documentation audience">
+    <button type="button" data-set-audience="user" class="active">User</button>
+    <button type="button" data-set-audience="engineer">Engineer</button>
+  </div>
+</header>
+
+<div class="shell">
+<nav class="toc" aria-label="Table of contents">
+  <h2>Start here</h2>
+  <a href="#overview">What SWARM is</a>
+  <a href="#audiences">Using this guide</a>
+  <a href="#glossary">Glossary</a>
+
+  <h2>The system</h2>
+  <a href="#devices">Devices &amp; roles</a>
+  <a href="#media-server">Media server</a>
+  <a href="#tv-clients">TV clients (Fire TV, Roku)</a>
+  <a href="#stun-server">STUN / rendezvous server</a>
+  <a href="#lan">LAN connections</a>
+  <a href="#internet">Connecting across the internet</a>
+  <a href="#media">Catalog &amp; playback</a>
+
+  <h2>Deep detail</h2>
+  <a href="#security">Security</a>
+  <a href="#protocol">Protocol &amp; data flows</a>
+  <a href="#technology">Technology choices</a>
+  <a href="#operations">Deployment &amp; operations</a>
+
+  <h2>Quality</h2>
+  <a href="#testing">Testing: unit, UAT, integration</a>
+  <a href="#testing-unit">Unit</a>
+  <a href="#testing-uat">UAT</a>
+  <a href="#testing-integration">Integration &amp; interop</a>
+  <a href="#roadmap">Roadmap &amp; what's not built</a>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h1>SWARM System Guide</h1>
+  <p class="lead">
+    SWARM is a free, secure, strictly peer-to-peer media streaming suite — Plex-like, but your
+    media never leaves machines you own. You stream your own music and video from your own
+    computer to your own devices, end-to-end encrypted.
+  </p>
+
+  <div class="card-row">
+    <div class="card">
+      <h3>No cloud for your media</h3>
+      <p class="meta">Video and audio flow directly device&nbsp;→&nbsp;device. There is no relay
+      server in the middle and no copy stored anywhere else.</p>
+    </div>
+    <div class="card">
+      <h3>A coordinator that can't watch</h3>
+      <p class="meta">A small hosted server helps your devices find each other. It only sees
+      connection setup — never the media, which it also could not decrypt.</p>
+    </div>
+    <div class="card">
+      <h3>Works great on your own Wi-Fi</h3>
+      <p class="meta">On the same network, devices discover each other automatically and don't
+      need the internet at all.</p>
+    </div>
+  </div>
+
+  <div data-audience="user">
+    <h3>The short version</h3>
+    <ol class="flow">
+      <li>You install the <strong>media server</strong> app on the computer that holds your movies,
+        shows, and music, and point it at your media folder.</li>
+      <li>You install the <strong>TV app</strong> on your Fire TV.</li>
+      <li>The TV shows a short code; you approve it once in the media server app.</li>
+      <li>The TV browses your whole library and plays it. If the TV and computer are on the same
+        Wi-Fi it's a direct local connection; if they're apart, SWARM connects them over the
+        internet automatically — still directly, still encrypted.</li>
+    </ol>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Three apps, three distribution models</h3>
+    <table class="grid">
+      <tr><th>App</th><th>Where it runs</th><th>Stack</th><th>Source</th></tr>
+      <tr><td><strong>STUN server</strong></td><td>Hosted (Oracle Cloud free tier; Docker + Caddy on&nbsp;:443)</td><td>Rust, Axum, utoipa/Swagger, SQLite</td><td><code>apps/stun-server</code></td></tr>
+      <tr><td><strong>Media server</strong></td><td>The user's macOS / Linux / Windows machine</td><td>Tauri (Rust core + web UI), FFmpeg/ffprobe runtime, whisper.cpp</td><td><code>apps/server</code></td></tr>
+      <tr><td><strong>TV client</strong></td><td>Fire TV (first target), Amazon Appstore</td><td>Kotlin, Compose for TV, Media3/ExoPlayer, kwik (QUIC)</td><td><code>clients/tv-android</code></td></tr>
+    </table>
+
+    <h3>Three planes</h3>
+    <p>The STUN server coordinates; media never touches it.</p>
+    <table class="grid">
+      <tr><th>Plane</th><th>Transport</th><th>Parties</th><th>Contract</th></tr>
+      <tr><td>Control / REST</td><td>HTTPS&nbsp;:443</td><td>browser + devices ↔ STUN</td><td><code>swarm-core::rest</code></td></tr>
+      <tr><td>Signaling / presence</td><td>WSS&nbsp;:443 <code>/api/v1/ws</code></td><td>devices ↔ STUN</td><td><code>swarm-core::signal</code></td></tr>
+      <tr><td>Media</td><td>QUIC over hole-punched UDP</td><td>device ↔ device</td><td><code>swarm-core::peer</code></td></tr>
+    </table>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 300" role="img" aria-label="System topology: STUN server coordinates two devices that stream media directly over QUIC">
+        <rect class="box-accent" x="270" y="20" width="180" height="54" rx="8"/>
+        <text x="360" y="42" text-anchor="middle">STUN / rendezvous</text>
+        <text x="360" y="60" text-anchor="middle" class="dim">presence · signaling · TV codes</text>
+
+        <rect class="box" x="40" y="200" width="220" height="72" rx="8"/>
+        <text x="150" y="228" text-anchor="middle">Media server</text>
+        <text x="150" y="246" text-anchor="middle" class="dim">your computer + media</text>
+        <text x="150" y="262" text-anchor="middle" class="dim">Rust core · FFmpeg</text>
+
+        <rect class="box" x="460" y="200" width="220" height="72" rx="8"/>
+        <text x="570" y="228" text-anchor="middle">TV client</text>
+        <text x="570" y="246" text-anchor="middle" class="dim">Fire TV (Roku planned)</text>
+        <text x="570" y="262" text-anchor="middle" class="dim">Media3 / ExoPlayer</text>
+
+        <path class="edge" d="M150,200 C150,120 250,70 270,55"/>
+        <path class="edge" d="M570,200 C570,120 470,70 450,55"/>
+        <text x="120" y="140" class="dim">REST + WSS</text>
+        <text x="520" y="140" class="dim">REST + WSS</text>
+
+        <path class="edge-strong" d="M260,250 L460,250"/>
+        <text x="360" y="242" text-anchor="middle">end-to-end encrypted media (QUIC / TLS 1.3)</text>
+        <text x="360" y="286" text-anchor="middle" class="dim">direct device ↔ device — no relay</text>
+      </svg>
+      <figcaption>The hosted server helps devices meet; every byte of media travels directly between them.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="audiences">
+  <h2>Using this guide</h2>
+  <p>
+    Use the <strong>User / Engineer</strong> switch in the header. It changes how much detail every
+    page shows and your choice is remembered on this browser.
+  </p>
+  <table class="grid">
+    <tr><th>User view</th><th>Engineer view</th></tr>
+    <tr>
+      <td>What each part does, what you set up, what to expect, and what "secure" means in plain terms.</td>
+      <td>Everything in the User view <em>plus</em> wire protocols, sequence diagrams, trust
+        boundaries, data schemas, technology rationale, and the full test strategy.</td>
+    </tr>
+  </table>
+  <p class="note" data-audience="engineer">
+    <span class="k">Engineer note</span>
+    Blocks like this one are Engineer-only. Sub-sections tagged
+    <span class="aud-only-tag">ENGINEER</span> in their heading are hidden entirely in User view.
+    With JavaScript disabled, everything is shown.
+  </p>
+</section>
+
+<section id="glossary">
+  <h2>Glossary</h2>
+  <table class="grid">
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><strong>Swarm</strong></td><td>A private group of your devices that are allowed to see each other and share catalogs.</td></tr>
+    <tr><td><strong>Media server</strong></td><td>The desktop app on the computer that holds your media and streams it out.</td></tr>
+    <tr><td><strong>STUN / rendezvous server</strong></td><td>The small hosted service that helps devices discover each other and punch through home routers. Also issues short-lived TV approval codes.</td></tr>
+    <tr><td><strong>Hole punching</strong></td><td>A standard technique where two devices behind home routers each send packets outward at the same moment so their routers let the other side's packets back in — creating a direct path with no middle server.</td></tr>
+    <tr><td><strong>QUIC</strong></td><td>A modern, encrypted, UDP-based transport (the same family that powers HTTP/3). SWARM carries all media over it.</td></tr>
+    <tr><td><strong>Direct play</strong></td><td>The TV plays the original file as-is because it can already decode it.</td></tr>
+    <tr><td><strong>Transcode / HLS</strong></td><td>The media server converts a file on the fly into a TV-friendly adaptive stream when direct play isn't possible.</td></tr>
+    <tr><td><strong>Pinning / TOFU</strong></td><td>"Trust On First Use": the first time two devices meet they record each other's exact security certificate, and from then on only accept that exact one.</td></tr>
+    <tr><td><strong>mDNS / DNS-SD</strong></td><td>Zero-configuration discovery on a local network — how the TV finds the media server on the same Wi-Fi without any setup.</td></tr>
+    <tr><td><strong>Fingerprint</strong></td><td>Two unrelated uses: (1) a device certificate's SHA-256 hash, used for pinning; (2) a content fingerprint that identifies the same media file across servers.</td></tr>
+  </table>
+</section>
+
+<section id="devices">
+  <h2>Devices &amp; roles</h2>
+  <p class="lead">SWARM has four kinds of participant. Only two of them ever touch your media.</p>
+
+  <div class="card-row">
+    <div class="card">
+      <h3>Media server <span class="pill done">shipping</span></h3>
+      <p class="meta">Desktop app on your computer. Holds the media, builds the catalog, decides
+      direct-play vs transcode, and serves the bytes. The only device that reads your files.</p>
+    </div>
+    <div class="card">
+      <h3>Fire TV client <span class="pill done">shipping</span></h3>
+      <p class="meta">The living-room app. Browses the merged catalog and plays. Stores only a
+      small encrypted token and its own key — never your media.</p>
+    </div>
+    <div class="card">
+      <h3>Roku client <span class="pill planned">planned</span></h3>
+      <p class="meta">Groundwork exists (a plain-HTTP playback surface) because Roku's BrightScript
+      can't speak QUIC. Not yet a shipping app.</p>
+    </div>
+    <div class="card">
+      <h3>STUN / rendezvous <span class="pill done">shipping</span></h3>
+      <p class="meta">Hosted coordinator. Sees which devices are online and relays connection-setup
+      messages. Never sees or could decrypt media.</p>
+    </div>
+    <div class="card">
+      <h3>Your browser <span class="pill done">shipping</span></h3>
+      <p class="meta">Optional account web UI on the STUN server for creating a swarm and join
+      codes. Media servers now provision their own swarms, so this is mostly a fallback.</p>
+    </div>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Repo layout <span class="aud-only-tag">ENGINEER</span></h3>
+<pre><code>crates/swarm-core/         shared contracts (REST/WSS/peer), fingerprint, entry keys — no I/O
+crates/swarm-p2p/          QUIC + pinning, identity certs, reflector client, hole punch, UPnP, loopback proxy
+crates/swarm-media/        library scan/store/delta-sync, tags, ffprobe, scrapers, HLS transcode
+crates/swarm-stun-client/  device-side STUN registration + WSS session
+apps/stun-server/          the hosted rendezvous service
+apps/server/               Tauri desktop media server (owns ServerCore + web dashboard)
+clients/tv-android/        Fire TV client — Gradle multi-module (:core pure-JVM, :app Android)
+openapi/                   generated OpenAPI + generated Kotlin client (CI gate)
+deploy/stun-server/        Docker + Compose + Caddy for the hosted STUN server
+tests/integration/         docker-composed multi-node + simulated-NAT harness
+docs/                      PROTOCOL.md, this guide, recovered reference implementations</code></pre>
+  </div>
+</section>
+
+<section id="media-server">
+  <h2>Media server</h2>
+  <p>The desktop app (macOS, Linux, Windows) that turns a folder of media into a private stream.</p>
+
+  <div data-audience="user">
+    <h3>What you do</h3>
+    <ol class="flow">
+      <li>Install and open the app. A window appears.</li>
+      <li>Choose your media folder. On macOS you can also connect straight to a NAS over SMB.</li>
+      <li>The app builds a catalog (posters, seasons, track art) in the background.</li>
+      <li>Closing the window hides it to the system tray — streaming keeps working, and the app
+        asks the OS to keep the computer awake until you pick <strong>Quit SWARM</strong>.</li>
+    </ol>
+    <h3>Optional extras</h3>
+    <ul>
+      <li><strong>Local subtitles</strong> — generate English subtitles on your own machine with a
+        downloaded speech model. Your media never leaves the computer.</li>
+      <li><strong>Bandwidth limits</strong> — cap how much of your upload SWARM may use so streaming
+        doesn't swamp the rest of your connection.</li>
+    </ul>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Architecture <span class="aud-only-tag">ENGINEER</span></h3>
+    <ul>
+      <li>Tauri app: a Rust core plus a vanilla-JS web dashboard (<code>apps/server/ui</code>, no
+        framework). The GUI process <em>owns</em> <code>ServerCore</code> — there is no separate
+        headless server binary. Hiding the window does not stop streaming.</li>
+      <li>Binds <code>0.0.0.0</code> (not just loopback) so a real LAN device can reach it.</li>
+      <li>Persists media, scraper, streaming, and AI settings in
+        <code>&lt;app data dir&gt;/settings.json</code>; peer trust and pairing state in
+        <code>server-state.sqlite</code>.</li>
+      <li>Requires FFmpeg + ffprobe at runtime for probing and HLS transcode. Building the app
+        needs CMake because <code>whisper.cpp</code> is linked into the native binary.</li>
+    </ul>
+    <h4>Durable background work</h4>
+    <p>Long-running jobs (local Whisper subtitles, and the pattern for future analysis/waveform
+      work) run as a relational-SQLite job queue with checkpoints: completed sections survive an
+      app restart, the worker pauses automatically while a client is streaming, and a live
+      progress panel sits at the top of the dashboard's <strong>Media</strong> tab. Completed
+      WebVTT tracks then appear in the TV player's normal subtitle controls.</p>
+    <h4>Technical overrides (env vars)</h4>
+<pre><code>SWARM_PEER_BIND              peer transport bind address
+SWARM_RENDEZVOUS_URL         public STUN service URL (can be compiled into a release)
+SWARM_MAX_UPLOAD_MBPS        upload ceiling (default 10)
+SWARM_UPLOAD_RESERVE_PERCENT headroom kept out of the streaming pool (default 90, capped 90)
+SWARM_MAX_STREAMS            concurrent playback sessions (default 2)
+SWARM_FFMPEG_PATH            FFmpeg binary when not on PATH
+SWARM_TRANSCODING_DISABLED   disable HLS, keep compatible direct play</code></pre>
+    <p class="callout warn"><span class="k">Bandwidth math</span>
+      <code>usable_upload = max_upload × (100 − reserve_percent) / 100</code>. At the defaults a
+      10&nbsp;Mbps uplink leaves only a 1&nbsp;Mbps pool — below even the 360p HLS rung's
+      ~1.1&nbsp;Mbps — so raise <code>SWARM_MAX_UPLOAD_MBPS</code> to your real uplink if
+      transcoded playback should fit. Direct play only needs the source file's own bitrate to fit.</p>
+  </div>
+</section>
+
+<section id="tv-clients">
+  <h2>TV clients</h2>
+
+  <h3>Fire TV <span class="pill done">shipping</span></h3>
+  <div data-audience="user">
+    <ol class="flow">
+      <li>Install the SWARM app on your Fire TV.</li>
+      <li>On first run choose <strong>Connect through SWARM</strong> (across the internet) or pick a
+        media server the app already found on your Wi-Fi.</li>
+      <li>The TV shows a short code. Enter and approve it once in the media server app.</li>
+      <li>The TV opens your library. Pick something and play. If it stutters on your connection the
+        picture quality steps down automatically and recovers when the network frees up.</li>
+    </ol>
+  </div>
+  <div data-audience="engineer">
+    <ul>
+      <li>Native Kotlin, single-activity Jetpack Compose for TV (<code>androidx.tv:tv-material</code>),
+        minSdk&nbsp;25 (Fire OS 6+, 2018+ devices). Gradle multi-module: <code>:core</code>
+        (pure Kotlin/JVM) and <code>:app</code> (Android).</li>
+      <li><code>:core</code> hand-mirrors <code>swarm-core</code> wire types with
+        kotlinx.serialization (<code>JsonNamingStrategy.SnakeCase</code> reproduces serde's
+        <code>rename_all</code>). Every test fixture was captured from real
+        <code>serde_json::to_string</code> output, so <code>:core</code> tests are a genuine
+        cross-language compatibility proof.</li>
+      <li><code>PeerQuicClient</code> (kwik) mirrors <code>swarm_p2p::endpoint</code>: mTLS with a
+        client cert, post-handshake fingerprint pinning, one-request-per-QUIC-stream framing.</li>
+      <li><code>PeerLoopbackProxy</code> bridges standard HTTP (what Media3/ExoPlayer speaks) to the
+        peer protocol via <code>http://127.0.0.1:&lt;port&gt;/&lt;serverId&gt;/&lt;peerPath&gt;</code>
+        URLs, translating <code>Range</code> / <code>If-None-Match</code> and streaming the body back.</li>
+      <li>Secrets: <code>AndroidTokenStore</code> wraps Keystore-backed
+        <code>EncryptedSharedPreferences</code> (AES-256-GCM) for the access token;
+        <code>AndroidDeviceIdentity</code> generates a real non-exportable
+        <code>AndroidKeyStore</code> EC keypair with a self-signed cert and exposes its SHA-256
+        fingerprint.</li>
+      <li>The release manifest disables cleartext HTTP/WS (Appstore compliance); the debug build
+        allows it for local testing against non-TLS dev endpoints.</li>
+    </ul>
+  </div>
+
+  <h3>Roku <span class="pill planned">planned</span></h3>
+  <p>Roku's BrightScript has no QUIC implementation and no realistic path to build one. The
+    media server therefore also exposes an always-on plain-HTTP(S) pairing + playback surface
+    (<code>apps/server/src/http_media.rs</code>) as groundwork for a future Roku client. It is a
+    second, independent HTTP surface on <code>ServerCore</code> — not a replacement for the QUIC
+    transport every current peer uses.</p>
+  <div class="callout security" data-audience="engineer">
+    <span class="k">Engineer — why it's still safe without a device credential</span>
+    <code>/pair/begin</code> and <code>/pair/poll</code> are unauthenticated by definition (an
+    unpaired device has no credential). That is compensated for, not ignored:
+    <ul>
+      <li><code>require_lan</code> rejects anything not on a private / link-local / loopback address.</li>
+      <li><code>reject_cross_site</code> rejects any request carrying <code>Sec-Fetch-Site</code> or
+        <code>Sec-Fetch-Mode</code> headers at all — real device HTTP clients never send these;
+        only a browser's <code>fetch()</code>/XHR does. This blocks a malicious LAN webpage whose
+        own IP would pass the LAN check.</li>
+      <li>A per-IP fixed-window rate limiter caps <code>/pair/begin</code>.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="stun-server">
+  <h2>STUN / rendezvous server</h2>
+  <p>The one hosted piece. It is infrastructure, not something an ordinary user configures.</p>
+
+  <div data-audience="user">
+    <h3>What it does — and doesn't</h3>
+    <table class="grid">
+      <tr><th>It does</th><th>It never does</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Tell your devices which of your other devices are online.</li>
+            <li>Pass small "let's connect" messages between them.</li>
+            <li>Hand out the short code your TV shows so you can approve it.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>See, store, or relay any media.</li>
+            <li>Hold anything it could use to decrypt your streams.</li>
+            <li>Store your codes, tokens, or claims in readable form — it keeps only hashes.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Deployment shape <span class="aud-only-tag">ENGINEER</span></h3>
+    <ul>
+      <li>Docker Compose: the Rust service + Caddy. Caddy terminates HTTPS/WSS on TCP&nbsp;443
+        (automatic ACME certs); the service receives reflector traffic directly on UDP&nbsp;443
+        and UDP&nbsp;3478. SQLite + Caddy state in named volumes.</li>
+      <li>Hosts both signaling/reflection <em>and</em> the short-lived TV activation exchange.
+        Media servers provision their own private swarms with a stable local owner claim; TVs
+        display a temporary code only the owning media server can approve.</li>
+      <li>Stores <strong>hashes</strong> of owner claims, device tokens, activation poll tokens,
+        and codes — never their plaintext.</li>
+    </ul>
+    <h4>Reflector (reflexive address discovery)</h4>
+    <p>UDP datagram <code>b"bind"</code> → JSON reply
+      <code>{"ip": "&lt;observed ip&gt;", "port": &lt;observed port&gt;}</code> (≤512 bytes). Listens on
+      UDP/443 (primary) and UDP/3478 (fallback); live ports are advertised in
+      <code>hello_ack</code>. Byte-compatible with the retired Batocera.Drone Edge reflector.</p>
+    <h4>Signaling session</h4>
+    <ol class="flow">
+      <li>Device opens WSS, sends <code>hello {protocol_version, access_token, device_id, capabilities?}</code>.</li>
+      <li>Server validates and replies <code>hello_ack {session_id, observed_addr, reflector_ports}</code>.</li>
+      <li>Server pushes <code>presence</code> deltas for devices sharing ≥1 swarm. Media servers fold
+        <code>streaming {transcode_capacity, active_sessions, hw_accel}</code> into their presence.</li>
+      <li><code>ping</code>/<code>pong</code> keepalive (~30s, client-driven). Reconnect with capped
+        exponential backoff.</li>
+      <li><code>signal {to, payload}</code> is relayed only between devices sharing a swarm; the
+        server stamps <code>from</code> and never interprets <code>payload</code> beyond routing.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="lan">
+  <h2>LAN connections</h2>
+  <p>When your TV and media server are on the same network, SWARM prefers a direct local
+    connection and the internet service is optional.</p>
+
+  <div data-audience="user">
+    <ol class="flow">
+      <li>The media server announces itself on your Wi-Fi. The TV lists it automatically — no
+        address to type.</li>
+      <li>The first time, the media server owner opens a pairing window and the TV enters a
+        six-digit code. That establishes trust between exactly those two devices.</li>
+      <li>Every later connection reuses that saved trust and goes straight to a direct local
+        stream.</li>
+    </ol>
+    <p class="callout warn"><span class="k">If the TV can't find the server</span>
+      A VPN on the computer is the usual cause — it can hide the computer's real local address.
+      Also make sure both devices are on the same Wi-Fi (not a "guest" network).</p>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>STUN-free LAN discovery and pairing <span class="aud-only-tag">ENGINEER</span></h3>
+    <ul>
+      <li>Media servers advertise <code>_swarm-peer._udp.local.</code> over mDNS with their QUIC
+        port, certificate fingerprint, and local pairing port. Android clients browse it with
+        DNS-SD and construct the same pinned <code>SwarmDevice</code> shape a STUN roster would
+        produce — so catalog and playback traffic continue over the existing mutually
+        authenticated QUIC transport and never pass through the pairing socket.</li>
+      <li><strong>Discovery is not authorization.</strong> For a first connection the server owner
+        explicitly opens a five-minute, single-use pairing window and enters its six-digit code
+        on the client. The client submits its name and certificate fingerprint from a
+        private/link-local source address. The server persists that fingerprint in
+        <code>server-state.sqlite</code> and adds it to <code>AllowedPeers</code>. Revoking the
+        local peer removes it from both persistent storage and the live allow-list.</li>
+      <li>Both server processes bind <code>0.0.0.0</code> for LAN reachability. <code>run_now.sh</code>
+        prints a LAN URL and works around an active VPN skewing the detected local IP.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="internet">
+  <h2>Connecting across the internet</h2>
+  <p>When devices are on different networks, SWARM still connects them directly — it just needs
+    the STUN server to introduce them first.</p>
+
+  <div data-audience="user">
+    <ol class="flow">
+      <li>Both devices tell the STUN server they're online.</li>
+      <li>Each device asks the STUN server "how does my address look from outside?"</li>
+      <li>Through the STUN server they swap those addresses and then both start sending packets to
+        each other at the same moment, so each home router lets the other side in.</li>
+      <li>Once the path is open they run an encrypted connection over it and stream. The STUN
+        server is no longer involved.</li>
+      <li>If your router is too restrictive to punch through, SWARM shows a diagnostics screen
+        with guidance (enable UPnP, forward a port, or use the same network). There is
+        deliberately no fallback relay.</li>
+    </ol>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Connection establishment (initiator I → responder R) <span class="aud-only-tag">ENGINEER</span></h3>
+    <ol class="flow">
+      <li>Both sides gather candidates: <code>lan</code> (local interface addrs),
+        <code>reflexive</code> (from the reflector, socket kept open),
+        <code>forwarded</code> (UPnP/NAT-PMP-mapped or manually forwarded port — server role only).</li>
+      <li>I sends <code>signal{Offer {punch_id, candidates, cert_fingerprint}}</code>; R replies
+        <code>signal{Answer {...}}</code>.</li>
+      <li>If R has a <code>forwarded</code> candidate, I connects directly — no punching.</li>
+      <li>Otherwise simultaneous hole punch: both sides send <code>PUNCH_MAGIC</code>
+        (<code>b"swarm-punch-v1"</code>) to every remote candidate, LAN first, 20 attempts ×
+        200&nbsp;ms, while listening on the reflector socket. First received magic → reply and
+        report <code>signal{Punched {punch_id, ok: true}}</code>. Both sides proceed only after
+        mutual confirmation.</li>
+      <li>QUIC handshake (TLS&nbsp;1.3) over the punched 4-tuple. Both sides present their
+        self-signed device certs; each verifies the peer's cert SHA-256 equals the pinned
+        fingerprint. Any mismatch is fatal.</li>
+      <li>On total failure: surface the diagnostics UX (NAT type, UDP reachability, guidance).
+        There is <strong>no relay</strong> by design.</li>
+    </ol>
+    <p><strong>Route memory:</strong> persist the last successful candidate per peer and try it
+      first next time — preference changes, the trusted candidate set never widens.</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 260" role="img" aria-label="Hole punch sequence between two devices via the STUN server">
+        <rect class="box" x="30" y="20" width="150" height="34" rx="6"/><text x="105" y="42" text-anchor="middle">Device I</text>
+        <rect class="box-accent" x="285" y="20" width="150" height="34" rx="6"/><text x="360" y="42" text-anchor="middle">STUN</text>
+        <rect class="box" x="540" y="20" width="150" height="34" rx="6"/><text x="615" y="42" text-anchor="middle">Device R</text>
+        <line class="edge" x1="105" y1="54" x2="105" y2="240"/>
+        <line class="edge" x1="360" y1="54" x2="360" y2="240"/>
+        <line class="edge" x1="615" y1="54" x2="615" y2="240"/>
+        <path class="edge" d="M105,80 L358,80"/><text x="230" y="74" text-anchor="middle" class="dim">Offer (candidates, cert fp)</text>
+        <path class="edge" d="M362,105 L613,105"/><text x="490" y="99" text-anchor="middle" class="dim">relay Offer</text>
+        <path class="edge" d="M613,130 L107,130"/><text x="360" y="124" text-anchor="middle" class="dim">Answer (via STUN)</text>
+        <path class="edge-strong" d="M107,170 C300,150 420,150 613,170"/>
+        <path class="edge-strong" d="M613,195 C420,215 300,215 107,195"/>
+        <text x="360" y="235" text-anchor="middle">simultaneous PUNCH_MAGIC → QUIC / TLS 1.3, pinned certs</text>
+      </svg>
+      <figcaption>Only setup goes through STUN. The QUIC media path is direct and mutually
+        certificate-pinned.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="media">
+  <h2>Catalog &amp; playback</h2>
+
+  <div data-audience="user">
+    <ul>
+      <li><strong>One merged library.</strong> If you run more than one media server, the TV shows
+        a single combined catalog. The same movie on two servers is one entry with two sources.</li>
+      <li><strong>Best source automatically.</strong> At play time the TV picks the fastest
+        available source and falls through to another if one drops mid-stream.</li>
+      <li><strong>Direct when possible.</strong> If your device can already play the file, it plays
+        untouched. Otherwise the media server converts it on the fly to a quality that fits your
+        connection, stepping down and back up as needed.</li>
+      <li><strong>Subtitles</strong> from sidecar files next to your media, and optionally
+        generated locally on the media server.</li>
+    </ul>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Catalog identity <span class="aud-only-tag">ENGINEER</span></h3>
+    <ul>
+      <li><code>entry_key = sha256(lowercase(relative_path with / separators))[:24]</code> — per-server key.</li>
+      <li><code>fingerprint = sample-fp-v1</code> (MD5 over <code>size:u64-LE</code> + whole file if
+        ≤192&nbsp;KiB, else head/middle/tail 64&nbsp;KiB windows) — cross-server identity. Clients
+        merge manifests on fingerprint; multiple servers holding the same fingerprint become
+        alternate sources for one entry.</li>
+    </ul>
+    <h4>Source selection (client, at play time)</h4>
+    <p>Best-first with fall-through on network error, abort on definitive error:
+      online (hard gate) → direct-play-compatible → LAN-tier route → last-successful-route
+      recency → measured signaling RTT → minus transcode saturation. Mid-stream failure
+      re-resolves to the next source at the current position.</p>
+    <h4>Playback negotiation</h4>
+    <p><code>PeerRequest.playback</code> (only on <code>/play/*</code>) carries the client's
+      <code>CapabilityProfile</code>, integer resume position, and direct-play preference over the
+      pinned QUIC transport — the rendezvous service is never trusted with the playback decision.
+      A successful <code>PlaybackPlan</code> returns <code>mode</code>, a session-scoped peer
+      <code>path</code>, and a hard <code>max_bitrate</code>.</p>
+    <h4>Default HLS ladder</h4>
+    <table class="grid">
+      <tr><th>Name</th><th>Max dimensions</th><th>Avg video</th><th>Peak video</th><th>Stereo AAC</th></tr>
+      <tr><td>1080p</td><td>1920×1080</td><td>6 Mbps</td><td>8 Mbps</td><td>192 kbps</td></tr>
+      <tr><td>720p</td><td>1280×720</td><td>3 Mbps</td><td>4 Mbps</td><td>160 kbps</td></tr>
+      <tr><td>480p</td><td>854×480</td><td>1.4 Mbps</td><td>2 Mbps</td><td>128 kbps</td></tr>
+      <tr><td>360p</td><td>640×360</td><td>700 kbps</td><td>1 Mbps</td><td>96 kbps</td></tr>
+    </table>
+    <p>Rungs above the source, client limits, or remaining upload are omitted. Video is H.264
+      High/4.1, yuv420p, aligned two-second keyframes; segments target four seconds
+      (CMAF/fMP4). Music direct-plays when compatible, otherwise a single 96–192&nbsp;kbps stereo
+      AAC HLS rendition. Idle sessions and their temp segments expire after five minutes; active
+      transfers cannot expire.</p>
+    <p class="note"><span class="k">Why these codecs</span>
+      H.264 High/4.1 + AAC and fMP4/CMAF HLS were chosen because every target client (Fire TV's
+      <code>MediaCodec</code>, ExoPlayer's HLS demuxer) hardware- or natively-decodes them with no
+      negotiation beyond the <code>CapabilityProfile</code>/<code>PlaybackPlan</code> exchange.
+      Validated end-to-end on real Fire TV hardware for both direct play and forced HLS.</p>
+  </div>
+</section>
+
+<section id="security">
+  <h2>Security</h2>
+  <p class="lead">SWARM's core promise: your media flows only between devices you own, encrypted
+    end to end, and the one hosted server is structurally unable to see it.</p>
+
+  <div data-audience="user">
+    <h3>What protects your media</h3>
+    <table class="grid">
+      <tr><th>Concern</th><th>How SWARM handles it</th></tr>
+      <tr><td>Someone intercepting a stream</td><td>Every media connection is encrypted (TLS 1.3 over QUIC). Devices only accept a connection from the exact certificate they recorded when first paired.</td></tr>
+      <tr><td>The hosted server being compromised</td><td>It never carries media and holds nothing that could decrypt it. It stores only hashes of codes and tokens, so a database leak doesn't expose usable secrets.</td></tr>
+      <tr><td>A stranger's device joining your swarm</td><td>Devices join only by redeeming a short-lived, single-use code that you generate, and — for a TV — you still approve the specific device by name afterward.</td></tr>
+      <tr><td>A malicious page on your Wi-Fi</td><td>The local pairing endpoint rejects browser-originated requests and anything off your local network, and rate-limits attempts.</td></tr>
+      <tr><td>Your access token being stolen off a device</td><td>It's stored in the OS keychain / Android Keystore (encrypted at rest). You can revoke any device instantly from the media server.</td></tr>
+      <tr><td>Your NAS password</td><td>On macOS it stays in the system Keychain prompt and is never passed to or stored by SWARM.</td></tr>
+    </table>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Trust boundaries <span class="aud-only-tag">ENGINEER</span></h3>
+    <figure class="diagram">
+      <svg viewBox="0 0 720 300" role="img" aria-label="Trust boundary diagram">
+        <rect class="box-warn" x="20" y="20" width="680" height="70" rx="8"/>
+        <text x="360" y="44" text-anchor="middle">Untrusted for media — STUN / rendezvous service</text>
+        <text x="360" y="64" text-anchor="middle" class="dim">sees: presence, opaque signaling payloads, hashed tokens/codes · cannot: read or decrypt media</text>
+
+        <rect class="box-accent" x="20" y="120" width="330" height="150" rx="8"/>
+        <text x="185" y="144" text-anchor="middle">Trusted peer — media server</text>
+        <text x="185" y="166" text-anchor="middle" class="dim">device cert (key never leaves)</text>
+        <text x="185" y="184" text-anchor="middle" class="dim">reads media files</text>
+        <text x="185" y="202" text-anchor="middle" class="dim">AllowedPeers allow-list</text>
+        <text x="185" y="220" text-anchor="middle" class="dim">hashed device tokens · server-state.sqlite</text>
+
+        <rect class="box-accent" x="370" y="120" width="330" height="150" rx="8"/>
+        <text x="535" y="144" text-anchor="middle">Trusted peer — TV client</text>
+        <text x="535" y="166" text-anchor="middle" class="dim">AndroidKeyStore EC key (non-exportable)</text>
+        <text x="535" y="184" text-anchor="middle" class="dim">token in EncryptedSharedPreferences</text>
+        <text x="535" y="202" text-anchor="middle" class="dim">pins server cert fingerprint</text>
+        <text x="535" y="220" text-anchor="middle" class="dim">never stores media</text>
+
+        <path class="edge-strong" d="M350,220 L370,220"/>
+        <text x="360" y="256" text-anchor="middle">mutually pinned QUIC / TLS 1.3</text>
+      </svg>
+      <figcaption>The rendezvous service is outside the media trust boundary by construction.</figcaption>
+    </figure>
+
+    <h3>Identity &amp; trust</h3>
+    <table class="grid">
+      <tr><th>Credential</th><th>What it is</th><th>Storage</th></tr>
+      <tr>
+        <td>User session</td>
+        <td>Cookie session against the STUN web UI/API. Argon2id, opaque DB-backed, sliding expiry.</td>
+        <td>Server-side row; revoke = delete.</td>
+      </tr>
+      <tr>
+        <td>Device <code>access_token</code></td>
+        <td>Opaque 256-bit bearer issued when an 8-digit, single-use, ~15-minute, swarm-scoped join
+          code is redeemed at <code>POST /api/v1/devices/register</code>.</td>
+        <td>Hashed server-side (revocation = delete row); encrypted on-device (OS keychain /
+          Android Keystore).</td>
+      </tr>
+      <tr>
+        <td>Device certificate</td>
+        <td>Self-signed, generated on first run, private key never leaves the device. SHA-256
+          fingerprint submitted at registration (the TOFU moment) and re-confirmed inside
+          <code>signal</code> offers/answers.</td>
+        <td>OS keystore. No CA, no hostname verification.</td>
+      </tr>
+    </table>
+    <p><strong>Peer authorization</strong> = <em>shares ≥1 swarm AND the presented cert's
+      fingerprint matches the pinned roster entry</em>, enforced at QUIC accept.</p>
+
+    <h3>Transport</h3>
+    <ul>
+      <li>All media: QUIC with TLS&nbsp;1.3. Both sides present self-signed device certs; each
+        verifies the peer cert's SHA-256 equals the pinned fingerprint. Mismatch is fatal.
+        (kwik has no CA-less pinning callback, so the TV verifies
+        <code>getServerCertificateChain()</code> itself and closes on mismatch.)</li>
+      <li>Control/signaling: HTTPS/WSS terminated by Caddy with automatic ACME certificates.</li>
+      <li><code>PROTOCOL_VERSION</code> travels in <code>hello</code>; the server rejects
+        mismatches with <code>error {code: "protocol_version"}</code> so old apps get a clear
+        update prompt.</li>
+      <li>REST evolution: requests strict (<code>deny_unknown_fields</code>), responses extensible.</li>
+      <li>Release Android manifest disables cleartext HTTP/WS entirely (Appstore compliance); only
+        the debug build permits it, for local non-TLS dev endpoints.</li>
+    </ul>
+
+    <h3>Input &amp; resource safety</h3>
+    <ul>
+      <li><code>entry_key</code> values must pass <code>entry_key::is_valid_entry_key</code> before
+        any filesystem lookup.</li>
+      <li>Session ids are random 128-bit values.</li>
+      <li>Status vocabulary: 400 for missing playback preferences, 429 for exhausted
+        session/upload capacity, 503 for an unavailable/failed transcoder.</li>
+      <li>Streaming bandwidth is a server-wide reservation pool; response bodies are paced to the
+        reservation rather than bursting onto the uplink — an availability and fairness control
+        as much as a performance one.</li>
+    </ul>
+
+    <h3>What the STUN server can and cannot see</h3>
+    <table class="grid">
+      <tr><th>Can see</th><th>Cannot see</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Which devices are online and which swarms they share (presence).</li>
+            <li>Devices' observed public IP:port (reflexive discovery).</li>
+            <li>That a <code>signal</code> message went from A to B — it stamps <code>from</code>
+              and routes.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Any media byte — media never traverses it, and there is no relay.</li>
+            <li><code>signal</code> payload contents beyond routing (it never interprets them).</li>
+            <li>Playback decisions / capabilities — those travel peer-to-peer over pinned QUIC.</li>
+            <li>Plaintext codes, tokens, owner claims — only hashes are stored.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+    <p><a href="#operations">Deployment &amp; operations</a> covers hardening the hosted instance.
+      Run <code>/security-review</code> on any change touching auth, pairing, or the peer
+      transport.</p>
+  </div>
+</section>
+
+<section id="protocol">
+  <h2>Protocol &amp; data flows <span class="aud-only-tag">ENGINEER</span></h2>
+  <div data-audience="engineer">
+    <p>The authoritative spec is <a href="../PROTOCOL.md"><code>docs/PROTOCOL.md</code></a>. This
+      section is the navigable companion.</p>
+
+    <h3>Peer requests (over QUIC)</h3>
+    <p>One request per bidirectional stream. Initiator writes one JSON line
+      (<code>PeerRequest</code>), responder writes one JSON line
+      (<code>PeerResponseHeader</code>) then <code>len</code> raw body bytes.</p>
+    <table class="grid">
+      <tr><th>Path</th><th>Body</th><th>Notes</th></tr>
+      <tr><td><code>/catalog/thumbprint</code></td><td><code>CatalogThumbprint</code></td><td>whole-library version token</td></tr>
+      <tr><td><code>/catalog/manifest[?since=&lt;tp&gt;]</code></td><td><code>CatalogManifest</code></td><td>full or delta listing</td></tr>
+      <tr><td><code>/catalog/manifest.gz</code></td><td>gzip <code>CatalogManifest</code></td><td>bandwidth-efficient full listing</td></tr>
+      <tr><td><code>/art/{entry_key}/{poster|season|backdrop|cover|artist}</code></td><td>image bytes</td><td>etag / <code>if_none_match</code> honored</td></tr>
+      <tr><td><code>/play/{entry_key}</code></td><td><code>PlaybackPlan</code></td><td>request carries <code>PlaybackPreferences</code>; reserves upload, chooses direct/HLS</td></tr>
+      <tr><td><code>/stream/{session_id}/media</code></td><td>file bytes</td><td>budgeted direct play; Range → 206 + <code>content_range</code></td></tr>
+      <tr><td><code>/media/{entry_key}</code></td><td>file bytes</td><td>legacy/unnegotiated direct play; globally upload-paced</td></tr>
+      <tr><td><code>/hls/{session_id}/master.m3u8</code></td><td>multivariant playlist</td><td>ladder pruned by client limits and remaining upload</td></tr>
+      <tr><td><code>/hls/{session_id}/{rendition}/{file}</code></td><td>playlist / fMP4 bytes</td><td>four-second CMAF/fMP4; resume offset supplied during <code>/play</code></td></tr>
+      <tr><td><code>/errors/report</code></td><td>empty (204)</td><td>client problem report for server-side triage</td></tr>
+      <tr><td><code>/notifications/{device_id}</code></td><td><code>ClientResolutionNotification[]</code></td><td>resolved reports not yet dismissed</td></tr>
+      <tr><td><code>/notifications/{device_id}/{error_id}/dismiss</code></td><td>empty (204)</td><td>dismiss one resolved-problem notification</td></tr>
+      <tr><td><code>/likes/toggle</code></td><td>empty (204)</td><td>idempotent desired like state</td></tr>
+    </table>
+
+    <h3>End-to-end flow: cold start to first frame</h3>
+    <ol class="flow">
+      <li>Media server starts, scans roots, provisions its swarm, opens a WSS signaling session,
+        advertises mDNS on the LAN.</li>
+      <li>TV starts. A saved STUN session takes priority; else the most recent LAN server is
+        restored; else onboarding.</li>
+      <li>TV connects (LAN direct via pinned mDNS entry, or STUN presence → hole punch → QUIC).</li>
+      <li>TV checks <code>/catalog/thumbprint</code>; if changed, pulls
+        <code>/catalog/manifest.gz</code>; merges every reachable server via
+        <code>CatalogMerger</code> and paints the last-good manifest first.</li>
+      <li>User selects an entry → <code>/play/{entry_key}</code> with
+        <code>CapabilityProfile</code>. Server reserves from the upload pool, returns a
+        <code>PlaybackPlan</code> (direct or capability-pruned HLS master).</li>
+      <li><code>PeerLoopbackProxy</code> exposes the session path as loopback HTTP; Media3 plays.
+        HLS starts conservative (loopback hides real bandwidth) then adapts from segment timings.</li>
+    </ol>
+
+    <h3>Design lineage</h3>
+    <p>Patterns ported from Batocera Fleet Federation / Batocera.Drone: pairing/pinning, transport
+      selection, library delta-sync, transcode sessions. Recovered reference implementations live
+      in <a href="../reference/"><code>docs/reference/</code></a>. The fingerprint implementation
+      pins byte-for-byte compatibility with the original Python <code>sample-fp-v1</code>.</p>
+  </div>
+</section>
+
+<section id="technology">
+  <h2>Technology choices</h2>
+
+  <div data-audience="user">
+    <p>SWARM is built to be small, private, and free to run:</p>
+    <ul>
+      <li><strong>One trusted language for the core</strong> keeps the security-sensitive parts
+        consistent and memory-safe.</li>
+      <li><strong>A lightweight desktop app</strong> (not a heavyweight browser bundle) so the
+        media server is a small download that stays out of your way in the tray.</li>
+      <li><strong>Standard TV playback components</strong> so video uses your device's hardware
+        decoder and just works.</li>
+      <li><strong>Free hosting</strong> for the coordinator on a cloud free tier, with automatic
+        HTTPS certificates.</li>
+      <li><strong>On-device subtitles</strong> so that feature never sends your media anywhere.</li>
+    </ul>
+  </div>
+
+  <div data-audience="engineer">
+    <table class="grid">
+      <tr><th>Choice</th><th>Why</th></tr>
+      <tr><td>Rust workspace + shared <code>swarm-core</code></td><td>One memory-safe language for the security-sensitive core; contracts defined once, no I/O in the contract crate; single static binaries.</td></tr>
+      <tr><td>Tauri for the media server (vs Electron)</td><td>Native Rust core with a small web UI; far smaller footprint; the GUI process can own <code>ServerCore</code> directly.</td></tr>
+      <tr><td>QUIC — <code>quinn</code> (Rust), <code>kwik</code> (Kotlin)</td><td>UDP-based (hole-punch friendly), TLS&nbsp;1.3 built in, multiplexed streams, connection migration. <code>kwik</code> pinned at 0.10.3 — 0.11 didn't fix the real issue (a loopback-only <code>LossDetector</code> assertion), which was the test harness enabling JVM assertions kwik never ships under.</td></tr>
+      <tr><td>Self-signed device certs + fingerprint pinning (TOFU)</td><td>No CA infrastructure for a P2P mesh; authorization is "shares a swarm AND matches the pinned fingerprint", checked at QUIC accept.</td></tr>
+      <tr><td>Compose for TV + Media3/ExoPlayer</td><td>The standard, supported Fire TV stack; D-pad focus model; hardware-accelerated decode; HLS demuxer that needs no custom negotiation.</td></tr>
+      <tr><td>H.264 High/4.1 + AAC, fMP4/CMAF HLS</td><td>Every target client hardware- or natively-decodes it; removes the "which lower-bandwidth codec" question entirely. Verified on real Fire TV hardware.</td></tr>
+      <tr><td>SQLite via <code>sqlx</code> (STUN service, media server state, job queues)</td><td>Embedded, zero-admin, transactional; good enough for the row counts involved; relational schema for durable background jobs + checkpoints.</td></tr>
+      <tr><td>mDNS / DNS-SD for LAN</td><td>Zero-config discovery so the TV lists a same-Wi-Fi server with nothing typed; STUN becomes optional on-LAN.</td></tr>
+      <tr><td>Caddy in front of the STUN service</td><td>Automatic ACME certificates and HTTP→HTTPS redirect; UDP reflector ports bypass it directly.</td></tr>
+      <tr><td>whisper.cpp (<code>small.en</code>) linked natively</td><td>Local subtitle generation with no cloud dependency; needs CMake at build time but no separate executable for end users.</td></tr>
+      <tr><td>Oracle Cloud free tier + Docker Compose</td><td>The coordinator can be hosted at zero cost; Compose keeps the service + Caddy + volumes reproducible.</td></tr>
+      <tr><td>Coil 2.7.0 (not 3.x) for TV artwork</td><td>Coil 3 needs Kotlin 2.2+ / compileSdk 36; bumping the toolchain for an image loader wasn't worth it. 2.x needs no extra network-engine artifact either.</td></tr>
+      <tr><td>Generated OpenAPI + generated Kotlin client (CI gate)</td><td>The REST surface stays in sync across languages by construction; drift fails CI.</td></tr>
+    </table>
+  </div>
+</section>
+
+<section id="operations">
+  <h2>Deployment &amp; operations</h2>
+
+  <div data-audience="user">
+    <p>Most people never touch this — the hosted coordinator is run for you. If you self-host it,
+      you need a small always-on server with a domain name; it costs nothing on a cloud free
+      tier.</p>
+  </div>
+
+  <div data-audience="engineer">
+    <h3>Hosted STUN service <span class="aud-only-tag">ENGINEER</span></h3>
+    <ul>
+      <li>Prerequisites: Docker Engine + Compose v2; a public host with TCP 80/443 and UDP
+        443/3478 open through both cloud and host firewalls; a DNS A record (AAAA only if IPv6 is
+        configured).</li>
+      <li>TCP&nbsp;80 is required for Caddy's ACME HTTP challenge and the HTTP→HTTPS redirect. Do
+        not put the UDP ports behind an HTTP reverse proxy.</li>
+    </ul>
+<pre><code>cd deploy/stun-server
+cp .env.example .env          # set SWARM_DOMAIN
+docker compose config
+docker compose build --pull stun-server
+docker compose up -d
+curl --fail "https://&lt;your-domain&gt;/health"</code></pre>
+    <table class="grid">
+      <tr><th>Setting</th><th>Container value</th></tr>
+      <tr><td><code>SWARM_DATABASE_PATH</code></td><td><code>/data/swarm.sqlite</code></td></tr>
+      <tr><td><code>SWARM_HTTP_BIND</code></td><td><code>0.0.0.0:8080</code></td></tr>
+      <tr><td><code>SWARM_PUBLIC_URL</code></td><td><code>https://${SWARM_DOMAIN}</code></td></tr>
+      <tr><td><code>SWARM_REFLECTOR_PORTS</code></td><td><code>9443,3478</code> (internal 9443 mapped to public UDP 443)</td></tr>
+      <tr><td><code>SWARM_STATIC_DIR</code></td><td><code>/opt/swarm/static</code></td></tr>
+    </table>
+    <ul>
+      <li>Volumes: <code>stun-data</code> (SQLite + WAL + shm), <code>caddy-data</code> (certs +
+        keys), <code>caddy-config</code> (runtime state).</li>
+      <li>Back up <code>stun-data</code> with a SQLite-aware backup or with the service stopped —
+        do not copy only <code>swarm.sqlite</code> while running (committed transactions may still
+        be in the WAL).</li>
+      <li><code>docker compose down</code> stops without data loss; never add <code>--volumes</code>
+        unless permanent deletion is intended.</li>
+      <li>SMTP is optional; without it, verification and password-reset links are written to the
+        server log.</li>
+      <li>Swagger at <code>/api/docs</code>; account UI at the domain root.</li>
+    </ul>
+    <h3>Local full-stack testing</h3>
+    <p><code>./scripts/run_now.sh</code> builds and runs the STUN service + the Tauri media server
+      together, bound to <code>0.0.0.0</code>, self-healing stale ports, and prints a LAN URL.
+      <code>./scripts/deploy_fire_tv.sh</code> scans the LAN for Fire TVs, rebuilds/installs the
+      debug APK, and verifies the app stayed up (checks logcat for <code>FATAL EXCEPTION</code>).
+      See the <code>swarm-local-testing</code> skill.</p>
+  </div>
+</section>
+
+<section id="testing">
+  <h2>Testing: unit, UAT, integration</h2>
+  <p class="lead">SWARM is verified at five layers, from no-hardware backend checks up to real
+    Fire TV UI driven by a real D-pad.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 640 320" role="img" aria-label="Testing pyramid: unit, backend UAT, integration, e2e smoke, TV UAT">
+      <polygon class="box" points="320,20 600,300 40,300"/>
+      <line class="edge" x1="152" y1="300" x2="264" y2="76"/>
+      <line class="edge" x1="208" y1="300" x2="292" y2="132"/>
+      <line class="edge" x1="264" y1="300" x2="320" y2="188"/>
+      <line class="edge" x1="376" y1="300" x2="348" y2="244"/>
+      <text x="320" y="55" text-anchor="middle">TV UAT — real Fire TV, real D-pad</text>
+      <text x="320" y="112" text-anchor="middle">E2E smoke — real device, evidence-based</text>
+      <text x="320" y="168" text-anchor="middle">Integration &amp; interop — multi-node, simulated NAT</text>
+      <text x="320" y="224" text-anchor="middle">Backend UAT — real handlers, real SQLite, no UI</text>
+      <text x="320" y="280" text-anchor="middle">Unit — Rust workspace + Kotlin :core (cross-language proof)</text>
+    </svg>
+    <figcaption>Lower layers are fast and hermetic; upper layers trade speed for real-hardware fidelity.</figcaption>
+  </figure>
+
+  <div data-audience="engineer">
+    <p class="callout warn"><span class="k">Change control</span>
+      The five closed-loop suites and the orchestrator/cron wrapper are change-controlled. Read
+      <code>.claude/skills/swarm-e2e-suite-lockdown/</code> before editing any of their test logic
+      or pass/fail thresholds — fix the product bug or report the failure; don't rewrite the test
+      to go green.</p>
+  </div>
+
+  <h3 id="testing-unit">Unit</h3>
+  <ul>
+    <li><code>cargo test --workspace</code> — plain Rust unit tests, no server, no hardware.
+      Includes the fingerprint vectors pinned byte-for-byte against the original Python
+      <code>sample-fp-v1</code>, contract types, catalog-merge rules, entry-key validation.</li>
+    <li data-audience="engineer"><code>./gradlew :core:test</code> (JDK only, no Android SDK) —
+      wire contracts hand-mirrored from <code>swarm-core</code>, with <strong>every fixture
+      captured from real <code>serde_json::to_string</code> output</strong>, so these are a real
+      cross-language compatibility proof, not internal self-consistency. Also
+      <code>StunApiClient</code> against <code>MockWebServer</code>, and <code>CatalogMerger</code>.</li>
+    <li data-audience="engineer">This guide has its own unit-style check —
+      <code>cargo test -p swarm-docs</code> — that fails if the guide loses its audience switch,
+      grows a broken in-page link, ships a CDN dependency, or drifts from the facts in
+      <code>README.md</code> / <code>PROTOCOL.md</code>.</li>
+  </ul>
+
+  <h3 id="testing-uat">UAT (user acceptance)</h3>
+  <ul>
+    <li><strong>Backend UAT</strong> — <code>./scripts/tests/media_server_uat_tests.sh</code>
+      (wraps <code>apps/server/src/gui_tests/</code>). Real <code>#[tauri::command]</code> handlers
+      invoked directly against a real isolated <code>AppState</code> — real SQLite, real
+      filesystem, real <code>ServerCore</code> — under a mocked Tauri runtime. No hardware, no
+      LAN, ~1&nbsp;second, CI-friendly. Covers media-root lifecycle, library scan, TV pairing,
+      notifications/errors, metadata editing, MCP tokens.
+      <span data-audience="engineer">It deliberately does not drive the real WKWebView UI
+      (<code>tauri-driver</code> has no macOS backend) or route through Tauri's simulated
+      IPC/ACL.</span></li>
+    <li><strong>TV UAT</strong> — <code>./scripts/tests/tv_uat_suite.sh</code>. ~16 scenarios on a
+      real Fire TV, navigated with the real D-pad against the real local media server: stable
+      Compose tags, bounded synchronization, fresh-process persistence tests, capability-aware
+      media selection, failure-evidence bundles. Files its own GitHub issue on FAIL.</li>
+    <li><strong>Resilience</strong> — <code>./scripts/tests/tv_uat_resilience_suite.sh</code>.
+      Opt-in, disruptive transport drop/recovery, kept out of the default run by design.</li>
+  </ul>
+
+  <h3 id="testing-integration">Integration &amp; interop</h3>
+  <ul>
+    <li><strong>Multi-node integration harness</strong> — <code>tests/integration/</code>.
+      Docker-composed: <code>stun-server</code> + <code>caddy</code>, two headless server nodes,
+      one client node, per-node bridge networks + NAT containers for the hole-punch matrix. The
+      driver exercises register → presence → signal/punch → manifest sync → stream → seek,
+      asserting byte-exactness (fingerprints the received bytes) and timing budgets. Runs in CI on
+      changes to <code>crates/</code> or <code>apps/stun-server</code>.</li>
+    <li><strong>In-process peer integration tests</strong> — <code>apps/server/tests/</code>
+      (<code>lan_direct_play.rs</code>, <code>http_media.rs</code>, <code>delete_asset.rs</code>):
+      a pinned client pulls the catalog, direct-plays with byte-exact verification, and seeks via
+      Range over loopback QUIC, while an unpinned client is refused at the TLS layer.</li>
+    <li><strong>E2E smoke</strong> — <code>./scripts/tests/tv_e2e_suite.sh</code>. Local media
+      server ↔ real Fire TV(s) on the same LAN, full device fan-out, no UI navigation — every
+      assertion is evidence a real device observed. Files a GitHub issue on failure.</li>
+    <li data-audience="engineer"><strong>Cross-process contract fixtures</strong> — the Kotlin
+      <code>:core</code> types are verified against real <code>serde_json</code> output (see the
+      <code>swarm-contract-fixtures</code> skill); <code>./gradlew :core:interopTest</code> is the
+      opt-in cross-process protocol layer (some legacy fixtures skip since the headless
+      <code>swarm-serverd</code> was removed; new coverage uses an explicitly test-only
+      <code>ServerCore</code> harness).</li>
+  </ul>
+
+  <h3>Orchestration</h3>
+  <ul>
+    <li><code>./scripts/tests/full_uat_suite.sh --github-issue</code> — runs
+      <code>media_server_uat_tests.sh</code> → <code>tv_e2e_suite.sh</code> →
+      <code>tv_uat_suite.sh</code> in order, captures each one's evidence, and files a single
+      consolidated GitHub issue only when at least one test actually failed. Exit code 0 only if
+      nothing failed. <code>--skip-backend</code> / <code>--skip-e2e</code> / <code>--skip-uat</code>
+      / <code>--include-resilience</code> / <code>--device</code> / <code>--all</code> narrow or
+      widen the run.</li>
+    <li><code>./scripts/tests/full_uat_cron.sh</code> — continuous-checking wrapper around the
+      orchestrator.</li>
+  </ul>
+  <p>Full detail — scenario catalogs, evidence bundles, device targeting — is in
+    <a href="../../scripts/tests/TV_TESTING.md"><code>scripts/tests/TV_TESTING.md</code></a>.</p>
+</section>
+
+<section id="roadmap">
+  <h2>Roadmap &amp; what's not built yet</h2>
+
+  <div data-audience="user">
+    <ul>
+      <li><strong>Shipping:</strong> the media server, the Fire TV app, LAN direct play,
+        cross-network connections, adaptive-quality streaming, local subtitles.</li>
+      <li><strong>Coming:</strong> a Roku app, and more polish before the Fire TV app reaches the
+        Amazon Appstore.</li>
+    </ul>
+  </div>
+
+  <div data-audience="engineer">
+    <p>Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP →
+      server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR
+      → polish + Appstore submission.</p>
+    <table class="grid">
+      <tr><th>Area</th><th>State</th></tr>
+      <tr><td>Direct / punched QUIC playback</td><td><span class="pill done">implemented</span>, verified on real Fire TV hardware</td></tr>
+      <tr><td>Upload-budgeted HLS negotiation</td><td><span class="pill done">implemented</span></td></tr>
+      <tr><td>Real-device throughput / decoder validation at scale, product-level bandwidth controls</td><td><span class="pill planned">before Appstore submission</span></td></tr>
+      <tr><td>Roku client</td><td><span class="pill planned">planned</span> — plain-HTTP surface is the groundwork</td></tr>
+      <tr><td>TV diagnostics screen (NAT type, punch results, per-server RTT, upload allocation)</td><td><span class="pill planned">planned</span></td></tr>
+      <tr><td>Incremental per-entry catalog deltas</td><td><span class="pill planned">planned</span> — thumbprint + gzip full manifest for now</td></tr>
+      <tr><td><code>kwik</code> <code>clientCertificateKey(PrivateKey)</code> with a non-exportable AndroidKeyStore handle</td><td><span class="pill planned">open question</span> — untested on real hardware</td></tr>
+    </table>
+  </div>
+</section>
+
+</main>
+</div>
+
+<footer class="pagefoot">
+  SWARM System Guide — generated from <code>README.md</code>, <code>docs/PROTOCOL.md</code>, the
+  client/deploy READMEs, and <code>scripts/tests/TV_TESTING.md</code>. Keep it in sync when those
+  change; <code>cargo test -p swarm-docs</code> guards the structural and factual invariants.
+  Switch audiences with the control in the header.
+</footer>
+
+<script>
+  (function () {
+    "use strict";
+    var KEY = "swarm-docs-audience";
+    var VALID = ["user", "engineer"];
+    var body = document.body;
+    var buttons = Array.prototype.slice.call(document.querySelectorAll("[data-set-audience]"));
+
+    function apply(aud) {
+      if (VALID.indexOf(aud) === -1) { aud = "user"; }
+      body.classList.remove("audience-user", "audience-engineer");
+      body.classList.add("audience-" + aud);
+      buttons.forEach(function (b) {
+        b.classList.toggle("active", b.getAttribute("data-set-audience") === aud);
+        b.setAttribute("aria-pressed", String(b.getAttribute("data-set-audience") === aud));
+      });
+      try { localStorage.setItem(KEY, aud); } catch (e) {}
+    }
+
+    var initial = "user";
+    try {
+      var stored = localStorage.getItem(KEY);
+      if (stored) { initial = stored; }
+      else if (location.hash === "#engineer") { initial = "engineer"; }
+    } catch (e) {}
+    apply(initial);
+
+    buttons.forEach(function (b) {
+      b.addEventListener("click", function () {
+        apply(b.getAttribute("data-set-audience"));
+      });
+    });
+
+    // Scrollspy for the sidebar.
+    var links = Array.prototype.slice.call(document.querySelectorAll("nav.toc a"));
+    var byId = {};
+    links.forEach(function (l) {
+      var id = l.getAttribute("href").slice(1);
+      var el = document.getElementById(id);
+      if (el) { byId[id] = l; }
+    });
+    if ("IntersectionObserver" in window) {
+      var spy = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            links.forEach(function (l) { l.classList.remove("active"); });
+            var active = byId[entry.target.id];
+            if (active) { active.classList.add("active"); }
+          }
+        });
+      }, { rootMargin: "-72px 0px -70% 0px" });
+      Object.keys(byId).forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) { spy.observe(el); }
+      });
+    }
+  })();
+</script>
+</body>
+</html>

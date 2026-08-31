@@ -39,7 +39,13 @@ class EndOfMediaUatTest : UatTestBase() {
         selectTagWithDpad(UatTestTags.CONTINUE_PLAY_NOW_BUTTON)
         waitForTagGone(UatTestTags.CONTINUE_OVERLAY, timeoutMs = 15_000)
         waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 20_000)
-        focusTag(UatTestTags.PLAYER_SURFACE)
+        // Do not repair focus through the test harness here: the regression
+        // was that the ended episode's invisible native controller retained
+        // focus after this episode handoff, swallowing Select until Back
+        // was pressed. The new episode must naturally restore the surface.
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.focusedTag() == UatTestTags.PLAYER_SURFACE
+        }
         // The advanced-to episode is a real, freshly-negotiated file, not a
         // resume — give it more settle time than a simple pause/resume needs.
         Thread.sleep(3_000)
@@ -47,6 +53,32 @@ class EndOfMediaUatTest : UatTestBase() {
         waitForTag(UatTestTags.PAUSE_LABEL, timeoutMs = 10_000)
         val nextTitle = composeTestRule.textUnderTag(UatTestTags.PAUSE_TITLE)
         assertNotEquals("Play now should advance to the next episode", originalTitle, nextTitle)
+    }
+
+    @Test
+    fun testEpisodeContinueCountdownRestoresWorkingSelect() {
+        openFirstEpisodePlayer()
+        focusTag(UatTestTags.PLAYER_SURFACE)
+        pressSelect()
+        waitForTag(UatTestTags.PAUSE_LABEL)
+        val originalTitle = composeTestRule.textUnderTag(UatTestTags.PAUSE_TITLE)
+        selectTagWithDpad(UatTestTags.PAUSE_RESUME_BUTTON)
+
+        withActivity { it.seekPlaybackNearEndForUat() }
+        waitForTag(UatTestTags.CONTINUE_OVERLAY, timeoutMs = 20_000)
+        // Let the real eight-second countdown advance playback. This is the
+        // automatic transition from #154, not the explicit Play now path.
+        waitForTagGone(UatTestTags.CONTINUE_OVERLAY, timeoutMs = 30_000)
+        waitForTag(UatTestTags.PLAYER_SURFACE, timeoutMs = 20_000)
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.focusedTag() == UatTestTags.PLAYER_SURFACE
+        }
+
+        Thread.sleep(3_000)
+        pressSelect()
+        waitForTag(UatTestTags.PAUSE_LABEL, timeoutMs = 10_000)
+        val nextTitle = composeTestRule.textUnderTag(UatTestTags.PAUSE_TITLE)
+        assertNotEquals("autoplay should advance with Select immediately usable", originalTitle, nextTitle)
     }
 
     @Test

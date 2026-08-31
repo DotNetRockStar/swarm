@@ -157,7 +157,7 @@ internal fun buildClientErrorContext(
     playbackError: String?,
     pendingReportCount: Int,
     kidModeEnabled: Boolean,
-    shuffleEnabled: Boolean,
+    shuffleMode: String,
     minimizedTitle: String?,
     previewEntryKey: String?,
     errorDetails: String?,
@@ -176,7 +176,7 @@ internal fun buildClientErrorContext(
     field("playback_error", playbackError ?: "none")
     field("pending_problem_reports", pendingReportCount)
     field("family_mode", kidModeEnabled)
-    field("shuffle", shuffleEnabled)
+    field("shuffle", shuffleMode)
     field("minimized_playback", minimizedTitle ?: "none")
     field("browse_preview_entry", previewEntryKey ?: "none")
 

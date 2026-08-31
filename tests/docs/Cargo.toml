@@ -1,0 +1,13 @@
+[package]
+name = "swarm-docs"
+description = "Structural + factual guardrails for docs/guide (the interactive System Guide). Tests only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# No dependencies on purpose: this crate must stay cheap enough to run on every
+# `cargo test --workspace` without pulling extra build graph.

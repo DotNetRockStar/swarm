@@ -522,6 +522,50 @@ async fn scan_add_modify_rename_delete() {
     assert_eq!(changes[0].entry_key, track.entry_key);
 }
 
+#[tokio::test]
+async fn scan_indexes_scene_release_movies_with_scrapeable_titles() {
+    let fx = fixture("scene-release-movie-titles").await;
+    let cases = [
+        (
+            "Social Network.2010.BD.Rip.1080p.h264.Rus.Eng.mkv",
+            "Social Network",
+            2010,
+        ),
+        (
+            "The.Prestige.2006.CUSTOM.MULTi.VF2.1080p.HDLight.AC3.5.1.H264-LiHDL.mkv",
+            "The Prestige",
+            2006,
+        ),
+        (
+            "Top.Gun.Maverick.2022.IMAX.1080p.Bluray.Atmos.TrueHD.7.1.x264-EVO.mkv",
+            "Top Gun Maverick",
+            2022,
+        ),
+        (
+            "Waterworld.1995.The.Ulysses.Cut.1080p.BluRay.HEVC.x265-RiPRG.mkv",
+            "Waterworld",
+            1995,
+        ),
+    ];
+    for (filename, _, _) in cases {
+        write(&fx.root, &format!("movies/{filename}"), b"fake video bytes");
+    }
+
+    let report = scan_root(&fx.library, &fx.root).await.unwrap();
+    assert_eq!(report.added, cases.len() as u64);
+
+    let entries = fx.library.list().await.unwrap();
+    for (filename, expected_title, expected_year) in cases {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.relative_path.ends_with(filename))
+            .unwrap_or_else(|| panic!("missing scanned entry for {filename}"));
+        assert_eq!(entry.kind, MediaKind::Movie, "{filename}");
+        assert_eq!(entry.title, expected_title, "{filename}");
+        assert_eq!(entry.year, Some(expected_year), "{filename}");
+    }
+}
+
 // --- real bug, found live: a network mount dropping mid-session made an
 // unreachable root look identical to "the user deleted every file", and a
 // rescan wiped the entire local library even though the real files were
