@@ -27,7 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use swarm_core::entry_key::is_valid_entry_key;
 use swarm_core::peer::{
-    CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, SubtitleTrack,
+    CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, PlaybackPlan,
+    SubtitleTrack,
 };
 use swarm_p2p::endpoint::{read_request, write_response_header, P2pError};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -218,7 +219,7 @@ impl MediaService {
     }
 
     pub async fn resolve(&self, request: &PeerRequest) -> Resolved {
-        self.resolve_for_client(request, false, "Local request")
+        self.resolve_for_transport(request, false, "Local request", None)
             .await
     }
 
@@ -226,7 +227,7 @@ impl MediaService {
     /// admission limits and pacing because a local transfer does not spend
     /// the internet uplink the budget is meant to protect.
     pub async fn resolve_for_network(&self, request: &PeerRequest, is_lan: bool) -> Resolved {
-        self.resolve_for_client(request, is_lan, "Unknown client")
+        self.resolve_for_transport(request, is_lan, "Unknown client", None)
             .await
     }
 
@@ -237,6 +238,35 @@ impl MediaService {
         request: &PeerRequest,
         is_lan: bool,
         client: &str,
+    ) -> Resolved {
+        self.resolve_for_transport(request, is_lan, client, None)
+            .await
+    }
+
+    /// Resolve a request for an authenticated transport peer. The stable
+    /// owner identity lets a repeated playback negotiation supersede only
+    /// that peer's unclaimed reservation.
+    pub async fn resolve_for_peer(
+        &self,
+        request: &PeerRequest,
+        is_lan: bool,
+        client: &str,
+        playback_owner: &str,
+    ) -> Resolved {
+        self.resolve_for_transport(request, is_lan, client, Some(playback_owner))
+            .await
+    }
+
+    /// Resolve with separate display and reservation identities. QUIC peers
+    /// use their certificate fingerprint as `playback_owner`, so reconnecting
+    /// with a different address or sharing a friendly device name cannot
+    /// strand or cross-cancel another TV's unclaimed playback reservation.
+    async fn resolve_for_transport(
+        &self,
+        request: &PeerRequest,
+        is_lan: bool,
+        client: &str,
+        playback_owner: Option<&str>,
     ) -> Resolved {
         let request_path = request
             .path
@@ -255,7 +285,7 @@ impl MediaService {
                 } else if let Some(entry_key) = path.strip_prefix("/media/") {
                     self.media(entry_key, request, is_lan).await
                 } else if let Some(entry_key) = path.strip_prefix("/play/") {
-                    self.play(entry_key, request, is_lan).await
+                    self.play(entry_key, request, is_lan, playback_owner).await
                 } else if let Some(rest) = path.strip_prefix("/stream/") {
                     self.session_media(rest, request, is_lan).await
                 } else if let Some(rest) = path.strip_prefix("/hls/") {
@@ -463,7 +493,13 @@ impl MediaService {
         }
     }
 
-    async fn play(&self, entry_key: &str, request: &PeerRequest, is_lan: bool) -> Resolved {
+    async fn play(
+        &self,
+        entry_key: &str,
+        request: &PeerRequest,
+        is_lan: bool,
+        playback_owner: Option<&str>,
+    ) -> Resolved {
         if !is_valid_entry_key(entry_key) {
             return status(404);
         }
@@ -480,10 +516,18 @@ impl MediaService {
         }
         match self
             .transcodes
-            .plan(&entry, &media_path, preferences, is_lan)
+            .plan(&entry, &media_path, preferences, is_lan, playback_owner)
             .await
         {
             Ok(mut plan) => {
+                // Keep ownership across the post-plan metadata awaits too.
+                // If the peer disappears while lyrics/subtitles are being
+                // loaded, dropping `play()` must release the already-created
+                // transcode just like cancellation during FFmpeg startup.
+                let mut reservation = PlaybackReservationGuard::new(
+                    Arc::clone(&self.transcodes),
+                    Some(plan.session_id.clone()),
+                );
                 if entry.kind == swarm_core::peer::MediaKind::Track {
                     match self.library.track_lyrics(entry_key).await {
                         Ok(lyrics) => plan.lyrics = lyrics,
@@ -512,7 +556,9 @@ impl MediaService {
                         }
                     }
                 }
-                json_response(200, &plan)
+                let response = json_response(200, &plan);
+                reservation.disarm();
+                response
             }
             Err(error) => {
                 tracing::warn!(entry_key, %error, "playback negotiation failed");
@@ -532,9 +578,11 @@ impl MediaService {
         status(200)
     }
 
-    /// Serve only a completed track previously registered in SQLite. The
-    /// request never becomes a filesystem path, so this cannot traverse out
-    /// of the server-managed subtitle directory.
+    /// Serve a completed track previously registered in SQLite. The request
+    /// never becomes a filesystem path, so this cannot traverse out of the
+    /// stored `file_path`. Whisper/OpenSubtitles tracks are already WebVTT
+    /// on disk; a side-loaded (`source = "external"`) `.srt` sidecar is
+    /// converted to WebVTT here so the client sees one uniform format.
     async fn subtitle(&self, rest: &str) -> Resolved {
         let Some((entry_key, filename)) = rest.split_once('/') else {
             return status(404);
@@ -551,11 +599,19 @@ impl MediaService {
         let Ok(Some(entry)) = self.library.get(entry_key).await else {
             return status(404);
         };
-        if track.fingerprint != entry.fingerprint || track.format != "vtt" {
+        if track.fingerprint != entry.fingerprint {
             return status(404);
         }
-        match tokio::fs::read(&track.file_path).await {
-            Ok(bytes) => Resolved {
+        let bytes = match track.format.as_str() {
+            "vtt" => tokio::fs::read(&track.file_path).await.ok(),
+            "srt" => tokio::fs::read_to_string(&track.file_path)
+                .await
+                .ok()
+                .map(|text| crate::subtitles::srt_to_webvtt(&text).into_bytes()),
+            _ => None,
+        };
+        match bytes {
+            Some(bytes) => Resolved {
                 header: PeerResponseHeader {
                     status: 200,
                     len: bytes.len() as u64,
@@ -566,7 +622,7 @@ impl MediaService {
                 body: Body::Bytes(bytes),
                 session_id: None,
             },
-            Err(_) => status(404),
+            None => status(404),
         }
     }
 
@@ -1222,16 +1278,82 @@ pub async fn handle_stream(
     mut recv: quinn::RecvStream,
     is_lan: bool,
     client: &str,
+    playback_owner: &str,
 ) -> Result<(), P2pError> {
     let request = read_request(&mut recv).await?;
-    let resolved = service.resolve_for_client(&request, is_lan, client).await;
+    // Preparing HLS can legitimately take over a minute. If the TV closes
+    // the stream or crashes during that wait, stop polling FFmpeg and drop
+    // `plan()` immediately. Its pending-session guard then kills the encoder
+    // and removes the capacity reservation instead of leaking a child-less
+    // session until the idle timeout.
+    let stopped = send.stopped();
+    tokio::pin!(stopped);
+    let resolved = tokio::select! {
+        resolved = service.resolve_for_peer(
+            &request,
+            is_lan,
+            client,
+            playback_owner,
+        ) => resolved,
+        _ = &mut stopped => return Ok(()),
+    };
+
+    // A successful `/play` response is the only response that allocates a
+    // new session. Hold a delivery guard until QUIC confirms the peer
+    // acknowledged the complete response; write failure, STOP_SENDING, or a
+    // connection loss releases a reservation for which the TV never got an
+    // actionable session id.
+    let negotiated_session_id =
+        if request.path.starts_with("/play/") && resolved.header.status == 200 {
+            match &resolved.body {
+                Body::Bytes(bytes) => serde_json::from_slice::<PlaybackPlan>(bytes)
+                    .ok()
+                    .map(|plan| plan.session_id),
+                Body::File { .. } => None,
+            }
+        } else {
+            None
+        };
+    let mut delivery = PlaybackReservationGuard::new(
+        Arc::clone(service.transcode_manager()),
+        negotiated_session_id,
+    );
     write_response_header(&mut send, &resolved.header).await?;
     let mut body = std::pin::pin!(stream_body(resolved, service));
     while let Some(chunk) = futures_util::StreamExt::next(&mut body).await {
         send.write_all(&chunk?).await?;
     }
     send.finish().ok();
+    if matches!(send.stopped().await, Ok(None)) {
+        delivery.disarm();
+    }
     Ok(())
+}
+
+struct PlaybackReservationGuard {
+    manager: Arc<TranscodeManager>,
+    session_id: Option<String>,
+}
+
+impl PlaybackReservationGuard {
+    fn new(manager: Arc<TranscodeManager>, session_id: Option<String>) -> Self {
+        Self {
+            manager,
+            session_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session_id = None;
+    }
+}
+
+impl Drop for PlaybackReservationGuard {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take() {
+            self.manager.release(&session_id);
+        }
+    }
 }
 
 /// Serve every request stream an already-established connection sends,
@@ -1242,16 +1364,22 @@ pub async fn handle_stream(
 pub async fn serve_connection(connection: quinn::Connection, service: Arc<MediaService>) {
     let remote = connection.remote_address();
     let is_lan = is_lan_ip(remote.ip());
-    let client = swarm_p2p::endpoint::peer_fingerprint(&connection)
-        .and_then(|fingerprint| service.client_name(&fingerprint))
+    let fingerprint = swarm_p2p::endpoint::peer_fingerprint(&connection);
+    let client = fingerprint
+        .as_deref()
+        .and_then(|fingerprint| service.client_name(fingerprint))
         .unwrap_or_else(|| remote.ip().to_string());
+    let playback_owner = fingerprint.unwrap_or_else(|| remote.to_string());
     tracing::info!(%remote, is_lan, "peer connected");
     // Loop ends when accept_bi errors, i.e. the connection closed.
     while let Ok((send, recv)) = connection.accept_bi().await {
         let service = Arc::clone(&service);
         let client = client.clone();
+        let playback_owner = playback_owner.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_stream(&service, send, recv, is_lan, &client).await {
+            if let Err(err) =
+                handle_stream(&service, send, recv, is_lan, &client, &playback_owner).await
+            {
                 tracing::debug!(error = %err, "stream failed");
             }
         });

@@ -43,6 +43,12 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import java.time.Duration
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import tech.kwik.core.DatagramSocketFactory
@@ -53,6 +59,78 @@ import tech.kwik.core.log.NullLogger
 
 /** ALPN identifying the SWARM peer protocol; bump alongside the wire format. */
 const val PEER_ALPN: String = "swarm-peer/1"
+
+/**
+ * How long [PeerQuicClient.request] waits for a new bidirectional QUIC
+ * stream before giving up on the connection.
+ *
+ * kwik's `QuicConnection.createStream(true)` *blocks* — for up to 10,000
+ * days, its hard-coded internal default — whenever the peer has not issued
+ * enough stream-count credit. quinn (the Rust server) hands out that credit
+ * by advancing MAX_STREAMS as its own streams finish; if one server-side
+ * stream stalls (seen live at the very end of a long movie — issue #140),
+ * MAX_STREAMS stops advancing, the client's window is exhausted, and every
+ * subsequent request on that connection — catalog refresh, playback
+ * negotiation, artwork — parks in `createStream` forever. Closing the
+ * connection does **not** release that wait (`StreamManager.abortAll()`
+ * only touches already-created streams), so the whole app wedges with no
+ * path to recovery except a brand-new connection, which is exactly what a
+ * manual "Browse All" library reload happened to force.
+ *
+ * Bounding stream creation turns that indefinite hang into an ordinary
+ * `IOException` that [app.swarm.tv.core.catalog.CatalogSession]'s existing
+ * evict-and-reconnect logic already recovers from automatically. Kept below
+ * `CatalogSession.MANIFEST_FETCH_TIMEOUT_MS` so a starved connection fails
+ * its request outright rather than first tripping the outer per-attempt
+ * race; comfortably above any wait a healthy connection momentarily at its
+ * concurrency limit could impose.
+ */
+internal const val STREAM_CREATE_TIMEOUT_MS: Long = 10_000L
+
+/** Shared daemon pool for the [openBoundedStream] watchdog — threads are
+ * only borrowed for the (near-instant, on a healthy connection) duration of
+ * one `createStream` call and reclaimed after 60s idle. */
+private val streamCreateExecutor: ExecutorService = Executors.newCachedThreadPool { runnable ->
+    Thread(runnable, "swarm-peer-createstream").apply { isDaemon = true }
+}
+
+/**
+ * Runs [create] (a blocking `createStream` call) on a worker thread and
+ * abandons it after [timeoutMs], interrupting the blocked call — kwik's
+ * stream-credit wait is interruptible and unwinds to a `TimeoutException`
+ * internally — so a peer that has stopped issuing stream credit surfaces as
+ * a transport failure instead of an unbounded hang. See
+ * [STREAM_CREATE_TIMEOUT_MS].
+ */
+@Throws(IOException::class)
+internal fun openBoundedStream(
+    create: () -> QuicStream,
+    timeoutMs: Long = STREAM_CREATE_TIMEOUT_MS,
+    executor: ExecutorService = streamCreateExecutor,
+): QuicStream {
+    val task = executor.submit(Callable { create() })
+    return try {
+        task.get(timeoutMs, TimeUnit.MILLISECONDS)
+    } catch (timeout: TimeoutException) {
+        task.cancel(true)
+        throw IOException(
+            "peer stream creation stalled; aborted after ${timeoutMs}ms (peer issued no stream credit)",
+        )
+    } catch (interrupted: InterruptedException) {
+        task.cancel(true)
+        Thread.currentThread().interrupt()
+        throw IOException("peer stream creation interrupted", interrupted)
+    } catch (failed: ExecutionException) {
+        when (val cause = failed.cause) {
+            is IOException -> throw cause
+            null -> throw IOException("peer stream creation failed")
+            else -> throw IOException(
+                "peer stream creation failed: ${cause.message ?: cause.javaClass.simpleName}",
+                cause,
+            )
+        }
+    }
+}
 
 /** Irrelevant under pinning (no hostname check happens), kept only because kwik requires *a* host. */
 private const val SNI_PLACEHOLDER = "swarm-peer"
@@ -168,7 +246,7 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
         like: LikeToggle?,
     ): PeerResponse {
         return try {
-            val stream: QuicStream = connection.createStream(true)
+            val stream: QuicStream = openBoundedStream(create = { connection.createStream(true) })
             val requestLine = SwarmJson.encodeToString(PeerRequest(path, range, ifNoneMatch, playback, errorReport, like)) + "\n"
             stream.outputStream.use { it.write(requestLine.toByteArray(Charsets.UTF_8)) }
 

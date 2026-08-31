@@ -660,11 +660,37 @@ impl ServerCore {
             return true;
         }
         let managed_dir = self.data_dir.join("subtitles");
-        path.parent() == Some(managed_dir.as_path())
+        if path.parent() == Some(managed_dir.as_path())
             && path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(&format!("{entry_key}-")))
+        {
+            return true;
+        }
+        // A side-loaded (`source = "external"`) subtitle sidecar the scan
+        // matched to this entry: a recognized subtitle file sitting in the
+        // media file's own directory or a `Subs/` subfolder beneath it.
+        // `media_path` is already root-validated, so anything under its
+        // parent is inside a media root too.
+        if let Some(media_dir) = media_path.parent() {
+            let under_media_dir = path.starts_with(media_dir)
+                && path.components().all(|component| {
+                    matches!(
+                        component,
+                        Component::Normal(_) | Component::RootDir | Component::Prefix(_)
+                    )
+                });
+            if under_media_dir
+                && path
+                    .to_str()
+                    .and_then(swarm_media::subtitles::subtitle_extension)
+                    .is_some()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Live-swap the configured media roots and immediately reconcile the

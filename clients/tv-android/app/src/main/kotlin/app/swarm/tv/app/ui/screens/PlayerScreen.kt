@@ -840,10 +840,18 @@ fun PlayerScreen(
         },
     )
     val skipIntroFocusRequester = remember(sessionId) { FocusRequester() }
-    LaunchedEffect(playerView, showPauseOverlay, showContinuePrompt, offeredIntro) {
+    LaunchedEffect(sessionId, playerView, showPauseOverlay, showContinuePrompt, offeredIntro) {
         if (offeredIntro != null && !showPauseOverlay && !showContinuePrompt) {
             skipIntroFocusRequester.requestFocus()
         } else if (!showPauseOverlay && !showContinuePrompt) {
+            // PlayerView is deliberately reused across episode handoffs. Its
+            // native controller can still own focus after the ended episode's
+            // Continue overlay disappears, even when that controller is no
+            // longer visibly rendered. Reset both controller visibility and
+            // focus for every new session so the next Select reaches the bare
+            // video surface immediately instead of needing Back to dislodge
+            // the stale controller (#154).
+            playerView.hideController()
             playerView.requestFocus()
         }
     }

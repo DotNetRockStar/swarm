@@ -89,7 +89,7 @@ backend change.
 On the same LAN, STUN is optional: the media server advertises itself over mDNS, the TV client lists it automatically, and a short-lived six-digit code establishes certificate trust the first time. Later LAN connections reuse that persisted trust and go directly over QUIC.
 4. Clients merge the catalogs of every server in their swarms (keyed on content fingerprints, so the same file on two servers is one entry with two sources) and pick the best source at play time. Direct play when the client can decode the file; otherwise the server transcodes to HLS with an adaptive bitrate ladder.
 
-Full protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md). Design lineage: patterns ported from [Batocera Fleet Federation / Batocera.Drone](../batocera-fleet-federation/) (pairing/pinning, transport selection, library delta-sync, transcode sessions); originals of the recovered protocol references are in [docs/reference/](docs/reference/).
+Full protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md). Whole-system, audience-switching walkthrough (devices, media server, STUN server, LAN, security, technology choices, and the test strategy — toggle **User / Engineer**): [docs/guide/index.html](docs/guide/index.html), open it in a browser. Design lineage: patterns ported from [Batocera Fleet Federation / Batocera.Drone](../batocera-fleet-federation/) (pairing/pinning, transport selection, library delta-sync, transcode sessions); originals of the recovered protocol references are in [docs/reference/](docs/reference/).
 
 ## Repo layout
 
@@ -104,7 +104,8 @@ clients/tv-android/        Fire TV client — Gradle multi-module (:core, :app);
 openapi/                   generated OpenAPI + generated Kotlin client (CI gate)
 deploy/stun-server/        Docker + Compose + Caddy for the hosted STUN server
 tests/integration/         docker-composed multi-node + simulated-NAT harness
-docs/                      PROTOCOL.md, recovered reference implementations
+tests/docs/                guardrails for docs/guide — runs in `cargo test --workspace`
+docs/                      PROTOCOL.md, docs/guide/ (interactive system guide), recovered reference implementations
 ```
 
 ## Development

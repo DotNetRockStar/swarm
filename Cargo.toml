@@ -7,6 +7,7 @@ members = [
     "crates/swarm-stun-client",
     "apps/stun-server",
     "apps/server",
+    "tests/docs",
 ]
 
 [workspace.package]

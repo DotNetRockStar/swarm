@@ -2,6 +2,7 @@ package app.swarm.tv.core.client
 
 import app.swarm.tv.core.rest.DeviceRegistration
 import app.swarm.tv.core.rest.DeviceType
+import app.swarm.tv.core.rest.ActivationStatus
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -67,6 +68,48 @@ class StunApiClientTest {
         val apiError = assertInstanceOf(StunClientError.Api::class.java, error)
         assertEquals("unauthorized", apiError.code)
         assertTrue(apiError.isUnauthorized)
+    }
+
+    @Test
+    fun `create activation posts device and reuses existing bearer token`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setBody(
+                    """{"activation_id":"act-1","code":"12345678","poll_token":"poll-token","access_token":"access-token","expires_at":"2026-08-31T12:00:00Z"}""",
+                ),
+        )
+
+        val response = client.createActivation(sampleDevice(), "existing-token")
+        assertEquals("act-1", response.activationId)
+        assertEquals("12345678", response.code)
+
+        val recorded = server.takeRequest()
+        assertEquals("POST", recorded.method)
+        assertEquals("/api/v1/activations", recorded.path)
+        assertEquals("Bearer existing-token", recorded.getHeader("Authorization"))
+        assertTrue(recorded.body.readUtf8().contains("\"device\""))
+    }
+
+    @Test
+    fun `activation status polls with poll token and decodes approval`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """{"status":"approved","device_id":"dev-1","swarm":{"id":"sw-1","name":"Home"},"expires_at":"2026-08-31T12:00:00Z"}""",
+                ),
+        )
+
+        val response = client.activationStatus("act-1", "poll-token")
+        assertEquals(ActivationStatus.APPROVED, response.status)
+        assertEquals("dev-1", response.deviceId)
+        assertEquals("Home", response.swarm?.name)
+
+        val recorded = server.takeRequest()
+        assertEquals("GET", recorded.method)
+        assertEquals("/api/v1/activations/act-1", recorded.path)
+        assertEquals("Bearer poll-token", recorded.getHeader("Authorization"))
     }
 
     @Test

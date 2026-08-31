@@ -29,6 +29,7 @@ pub mod scan;
 pub mod scrape;
 pub mod serve;
 pub mod store;
+pub mod subtitles;
 pub mod tags;
 pub mod transcode;
 

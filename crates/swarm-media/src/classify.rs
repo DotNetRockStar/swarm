@@ -165,6 +165,61 @@ fn is_video_type_wrapper(name: &str) -> bool {
     VIDEO_TYPE_WRAPPER_NAMES.contains(&name.to_lowercase().as_str())
 }
 
+/// Subfolder names a movie's own bonus material is gathered into — the
+/// Plex/Kodi/Jellyfin "local extras" convention (`Movie (2019)/Featurettes/
+/// Making Of.mkv`). A video inside one of these, with no show/episode
+/// signal of its own, is part of that movie rather than a separate film.
+const EXTRAS_FOLDER_NAMES: &[&str] = &[
+    "featurettes",
+    "featurette",
+    "specials",
+    "special",
+    "extras",
+    "extra",
+    "behind the scenes",
+    "behindthescenes",
+    "deleted scenes",
+    "deletedscenes",
+    "deleted",
+    "interviews",
+    "interview",
+    "trailers",
+    "trailer",
+    "shorts",
+    "short",
+    "scenes",
+    "bonus",
+    "bonus features",
+    "bonusfeatures",
+    "other",
+    "others",
+];
+
+fn is_extras_folder(name: &str) -> bool {
+    EXTRAS_FOLDER_NAMES.contains(&name.to_lowercase().as_str())
+}
+
+/// If `dirs` places the file inside a recognized [`EXTRAS_FOLDER_NAMES`]
+/// subfolder of a movie folder, return `(movie_title, movie_year,
+/// clip_name)`. Deliberately conservative: the folder directly above the
+/// extras folder must itself carry a 4-digit year (`Title (2019)`), the
+/// dominant "this is a movie folder" convention — otherwise a stray
+/// `Trailers/` directly under a media root would start swallowing loose
+/// clips under an invented movie name. `dirs` is the file's ancestor chain
+/// with disc folders already absorbed; the outermost extras folder wins so
+/// `Movie (2019)/Extras/Interviews/x.mkv` resolves against the movie folder.
+fn movie_extra_from_dirs(dirs: &[&str], clip_stem: &str) -> Option<(String, u32, String)> {
+    let extras_idx = dirs.iter().position(|dir| is_extras_folder(dir))?;
+    let parent = dirs.get(extras_idx.checked_sub(1)?)?;
+    let (stripped, year) = extract_year_and_strip(parent);
+    let year = year?;
+    let movie_title = clean_title(&stripped);
+    if movie_title.is_empty() {
+        return None;
+    }
+    Some((movie_title, year, clean_title(clip_stem)))
+}
+
 /// The show folder immediately below a recognized Shows/TV wrapper folder
 /// somewhere in `dirs` ([VIDEO_TYPE_WRAPPER_NAMES]), if any. Scans the whole
 /// ancestor chain rather than anchoring to index 0, same robustness as
@@ -340,7 +395,8 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // deliberately bracketed year is a more deliberate signal). Movies
     // often only carry the year on the enclosing folder, not the filename
     // (`Inception (2010)/Inception.1080p.mkv`), so fall back there too.
-    let (stem_clean, mut year) = extract_year_and_strip(stem);
+    let (stem_clean, stem_year) = extract_year_and_strip(stem);
+    let mut year = stem_year;
     if year.is_none() {
         year = dirs.last().and_then(|dir| extract_year_and_strip(dir).1);
     }
@@ -469,9 +525,43 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         });
     }
 
+    // A clip in a movie's own `Featurettes`/`Specials`/`Deleted Scenes`/...
+    // subfolder is bonus material for that movie, not a film in its own
+    // right. It is catalogued as a Movie sharing the parent movie's title
+    // and year — so it groups with the feature and scrapes as the same
+    // title — with the clip's own name appended for the catalog list.
+    if let Some((movie_title, movie_year, clip)) = movie_extra_from_dirs(&dirs, &stem_clean) {
+        return Some(Classified {
+            kind: MediaKind::Movie,
+            title: if clip.is_empty() || clip.eq_ignore_ascii_case(&movie_title) {
+                movie_title
+            } else {
+                format!("{movie_title} - {clip}")
+            },
+            artist: None,
+            album: None,
+            track_number: None,
+            show_title: None,
+            season: None,
+            episode: None,
+            year: year.or(Some(movie_year)),
+        });
+    }
+
+    // Scene-style movie filenames conventionally put the release year at
+    // the boundary between the real title and technical/release metadata:
+    // `Title.2022.IMAX.1080p.BluRay...`.  Keeping the suffix made the TMDb
+    // query overly specific and caused otherwise ordinary movies to miss.
+    // Do this only in the movie fallback, after every episode path above
+    // has consumed the cleaned full stem; truncating before then would hide
+    // an SxxEyy marker in filenames such as `Show.2010.S01E01.mkv`.
+    let title = stem_year
+        .and_then(|release_year| title_before_release_year(stem, release_year))
+        .unwrap_or_else(|| clean_title(&stem_clean));
+
     Some(Classified {
         kind: MediaKind::Movie,
-        title: clean_title(&stem_clean),
+        title,
         artist: None,
         album: None,
         track_number: None,
@@ -603,6 +693,13 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
         }
     }
     None
+}
+
+/// `(season, episode)` for any episode marker in `stem` — either `SxxEyy`
+/// or `NxNN`. Public so subtitle sidecar matching ([`crate::subtitles`]) can
+/// pin a `Show.S02E06.en.srt` file to the right episode entry.
+pub fn episode_marker(stem: &str) -> Option<(u32, u32)> {
+    parse_episode_marker(stem).map(|(season, episode, _)| (season, episode))
 }
 
 /// Find an episode marker in `stem`, either shape — `SxxEyy` tried first
@@ -770,6 +867,54 @@ fn extract_year_and_strip(text: &str) -> (String, Option<u32>) {
         return (stripped, year);
     }
     extract_bare_year_token(&stripped)
+}
+
+/// Return the semantic movie title before the filename's release-year
+/// boundary. Bracketed years take the same precedence as
+/// [`extract_year_and_strip`]; otherwise the first occurrence of the
+/// authoritative bare year is used so duplicated years are removed along
+/// with the release suffix. An empty prefix is rejected so this extra
+/// release-boundary cleanup never replaces the normal result with emptiness.
+fn title_before_release_year(text: &str, release_year: u32) -> Option<String> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (position, &(start, opener)) in chars.iter().enumerate() {
+        let closer = match opener {
+            '[' => ']',
+            '(' => ')',
+            '{' => '}',
+            _ => continue,
+        };
+        let Some((end, _)) = chars[position + 1..]
+            .iter()
+            .find(|(_, candidate)| *candidate == closer)
+        else {
+            continue;
+        };
+        if parse_bare_year(&text[start + opener.len_utf8()..*end]) == Some(release_year) {
+            return cleaned_nonempty_prefix(&text[..start]);
+        }
+    }
+
+    let year_text = release_year.to_string();
+    let bytes = text.as_bytes();
+    let is_sep = |byte: u8| matches!(byte, b'.' | b'_' | b' ');
+    for (start, _) in text.match_indices(&year_text) {
+        let end = start + year_text.len();
+        let bounded_before = start == 0 || is_sep(bytes[start - 1]);
+        let bounded_after = end == bytes.len() || is_sep(bytes[end]);
+        if bounded_before && bounded_after {
+            if let Some(title) = cleaned_nonempty_prefix(&text[..start]) {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+fn cleaned_nonempty_prefix(prefix: &str) -> Option<String> {
+    let (without_bracket_tags, _) = extract_bracket_tags(prefix);
+    let title = clean_title(&without_bracket_tags);
+    (!title.is_empty()).then_some(title)
 }
 
 /// Find and remove a standalone `1900..=2099` year token from `text`, where
@@ -1016,7 +1161,7 @@ mod tests {
         let entry = classify("movies/Inception (2010)/Inception.2010.1080p.mkv").unwrap();
         assert_eq!(entry.kind, MediaKind::Movie);
         assert_eq!(entry.year, Some(2010));
-        assert_eq!(entry.title, "Inception 1080p");
+        assert_eq!(entry.title, "Inception");
     }
 
     #[test]
@@ -1057,14 +1202,42 @@ mod tests {
         let cloverfield =
             classify("movies/10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(cloverfield.year, Some(2016));
-        assert_eq!(
-            cloverfield.title,
-            "10 Cloverfield Lane 1080p BluRay x264-GROUP"
-        );
+        assert_eq!(cloverfield.title, "10 Cloverfield Lane");
 
         let days_later = classify("movies/28.Days.Later.2002.1080p.BluRay.x264-GROUP.mkv").unwrap();
         assert_eq!(days_later.year, Some(2002));
-        assert_eq!(days_later.title, "28 Days Later 1080p BluRay x264-GROUP");
+        assert_eq!(days_later.title, "28 Days Later");
+    }
+
+    #[test]
+    fn reported_scene_release_movie_names_stop_at_the_release_year() {
+        for (filename, expected_title, expected_year) in [
+            (
+                "Social Network.2010.BD.Rip.1080p.h264.Rus.Eng.mkv",
+                "Social Network",
+                2010,
+            ),
+            (
+                "The.Prestige.2006.CUSTOM.MULTi.VF2.1080p.HDLight.AC3.5.1.H264-LiHDL.mkv",
+                "The Prestige",
+                2006,
+            ),
+            (
+                "Top.Gun.Maverick.2022.IMAX.1080p.Bluray.Atmos.TrueHD.7.1.x264-EVO.mkv",
+                "Top Gun Maverick",
+                2022,
+            ),
+            (
+                "Waterworld.1995.The.Ulysses.Cut.1080p.BluRay.HEVC.x265-RiPRG.mkv",
+                "Waterworld",
+                1995,
+            ),
+        ] {
+            let entry = classify(&format!("movies/{filename}")).unwrap();
+            assert_eq!(entry.kind, MediaKind::Movie, "{filename}");
+            assert_eq!(entry.title, expected_title, "{filename}");
+            assert_eq!(entry.year, Some(expected_year), "{filename}");
+        }
     }
 
     #[test]
@@ -1273,7 +1446,7 @@ mod tests {
         // mistaken for the year when a real trailing year is also present.
         let entry = classify("movies/1917 2019 1080p BluRay x264.mkv").unwrap();
         assert_eq!(entry.year, Some(2019));
-        assert_eq!(entry.title, "1917 1080p BluRay x264");
+        assert_eq!(entry.title, "1917");
     }
 
     #[test]
@@ -1285,7 +1458,7 @@ mod tests {
         // *different* year-shaped tokens (see the "1917" test above).
         let entry = classify("movies/Interstellar.2014.2014.1080p.BluRay.x264.YIFY.mp4").unwrap();
         assert_eq!(entry.year, Some(2014));
-        assert_eq!(entry.title, "Interstellar 1080p BluRay x264 YIFY");
+        assert_eq!(entry.title, "Interstellar");
     }
 
     #[test]
@@ -1478,6 +1651,50 @@ mod tests {
         // Real, valid matches, both digit widths, case-insensitive.
         assert_eq!(parse_bare_season_folder("S06"), Some(6));
         assert_eq!(parse_bare_season_folder("s6"), Some(6));
+    }
+
+    // --- movie "local extras" subfolders ---
+    // Featurettes/Specials/Deleted Scenes/... under a movie folder hold
+    // bonus material for that movie, not separate films.
+
+    #[test]
+    fn movie_featurette_is_attributed_to_the_parent_movie() {
+        let entry = classify("movies/Inception (2010)/Featurettes/The Making Of.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.year, Some(2010));
+        assert_eq!(entry.title, "Inception - The Making Of");
+    }
+
+    #[test]
+    fn movie_extra_nested_deeper_still_resolves_to_the_movie() {
+        let entry =
+            classify("Movies/Blade Runner (1982)/Extras/Interviews/Ridley Scott.mp4").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.year, Some(1982));
+        assert_eq!(entry.title, "Blade Runner - Ridley Scott");
+    }
+
+    #[test]
+    fn extras_folder_without_a_year_bearing_parent_is_left_as_its_own_movie() {
+        // Conservative guard: no "(YYYY)" on the folder above the extras
+        // folder → treat the clip as an ordinary standalone entry rather
+        // than inventing a movie grouping.
+        let entry = classify("movies/Trailers/Upcoming Thing.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "Upcoming Thing");
+    }
+
+    #[test]
+    fn show_bonus_content_still_wins_over_the_movie_extras_branch() {
+        // A "Featurettes" folder under a Shows wrapper must still classify
+        // as episode/season-zero content, not a movie extra.
+        let entry = classify(
+            "Batocera-movies-shows/Shows/Lost (2004)/Lost (2004) S03/Featurettes/clip.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("Lost"));
+        assert_eq!(entry.season, Some(0));
     }
 
     #[test]

@@ -45,6 +45,11 @@ object UatTestTags {
     const val DASHBOARD_BROWSE_BUTTON = "uat_dashboard_browse_button"
     const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
+    // SwarmSettingsScreen / STUN activation flow.
+    const val SETTINGS_ADD_SERVER_BUTTON = "uat_settings_add_server_button"
+    const val ACTIVATION_CODE = "uat_activation_code"
+    const val ACTIVATION_CANCEL_BUTTON = "uat_activation_cancel_button"
+
     // MovieDetailScreen.
     const val MOVIE_DETAIL_ARTWORK = "uat_movie_detail_artwork"
     const val MOVIE_DETAIL_YEAR = "uat_movie_detail_year"
@@ -59,6 +64,7 @@ object UatTestTags {
     // SeasonScreen.
     const val SEASON_SCREEN_SHOW_TITLE = "uat_season_screen_show_title"
     const val SEASON_SCREEN_WATCHLIST_BUTTON = "uat_season_screen_watchlist_button"
+    const val SEASON_SCREEN_RESUME_BUTTON = "uat_season_screen_resume_button"
     const val SEASON_CARD_PREFIX = "uat_season_card_" // + season number
     const val EPISODE_ITEM_PREFIX = "uat_episode_item_" // + episode entryKey
 

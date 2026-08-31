@@ -91,6 +91,7 @@ ALL_TEST_CLASSES=(
     NavigationSearchPersistenceUatTest
     ContinuePlaybackLifecycleUatTest
     KidModeUatTest
+    AddServerFromSettingsUatTest
     EndOfMediaUatTest
 )
 

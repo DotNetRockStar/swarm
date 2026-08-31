@@ -22,6 +22,27 @@ const val UNKNOWN_SHOW = "Unknown Show"
 data class AlbumGroup(val album: String, val tracks: List<MergedEntry>)
 data class ArtistGroup(val artist: String, val albums: List<AlbumGroup>)
 
+/**
+ * How music "keep playing" chooses the track after the current one.
+ *
+ * - [OFF]: sequential — the next track on the album, then track 1 of the
+ *   next album, then the end of the artist's discography.
+ * - [ALBUM]: shuffle within the album the current track is on — "shuffle
+ *   what I'm listening to."
+ * - [ALL_SONGS]: shuffle across every track in the whole library,
+ *   regardless of artist or album.
+ *
+ * [next] cycles OFF -> ALBUM -> ALL_SONGS -> OFF, matching the single
+ * shuffle button on the music player screen.
+ */
+enum class ShuffleMode {
+    OFF,
+    ALBUM,
+    ALL_SONGS;
+
+    fun next(): ShuffleMode = entries[(ordinal + 1) % entries.size]
+}
+
 data class SeasonGroup(val season: Int?, val episodes: List<MergedEntry>)
 data class ShowGroup(val show: String, val seasons: List<SeasonGroup>)
 
@@ -120,32 +141,54 @@ object CatalogGrouping {
 
     /**
      * The track after [current], same "keep playing" concept as
-     * [nextEpisode] — sequential (next track in the same album, else track
-     * 1 of the next album, else null at the end of the artist's discography
-     * or if [current] is no longer in [artists]) when [shuffle] is false.
-     * When [shuffle] is true, picks uniformly at random from every *other*
-     * track on the same album — scoped to the album [current] is actually
-     * on, not the artist's whole discography or the whole library, so
-     * "shuffle" means "shuffle what I'm listening to," matching what a user
-     * who opened this one album to listen to it would expect. Falls back to
-     * [current] itself if the album has only one track (nothing else to
-     * shuffle to) rather than returning null and silently stopping.
+     * [nextEpisode].
+     *
+     * - [ShuffleMode.OFF]: sequential (next track in the same album, else
+     *   track 1 of the next album, else null at the end of the artist's
+     *   discography or if [current] is no longer in [artists]).
+     * - [ShuffleMode.ALBUM]: picks uniformly at random from every *other*
+     *   track on the same album — scoped to the album [current] is actually
+     *   on, so "shuffle" means "shuffle what I'm listening to."
+     * - [ShuffleMode.ALL_SONGS]: picks uniformly at random from every other
+     *   track anywhere in [artists], so a long listening session wanders
+     *   across the whole library rather than staying on one album.
+     *
+     * Both shuffle modes fall back to [current] itself when there is
+     * nothing else to shuffle to (a single-track album / library) rather
+     * than returning null and silently stopping.
      */
-    fun nextTrack(current: MergedEntry, artists: List<ArtistGroup>, shuffle: Boolean): MergedEntry? {
+    fun nextTrack(
+        current: MergedEntry,
+        artists: List<ArtistGroup>,
+        mode: ShuffleMode,
+        random: Random = Random.Default,
+    ): MergedEntry? {
         val artistIndex = artists.indexOfFirst { a -> a.albums.any { al -> al.tracks.any { it.fingerprint == current.fingerprint } } }
         if (artistIndex == -1) return null
         val artist = artists[artistIndex]
         val albumIndex = artist.albums.indexOfFirst { al -> al.tracks.any { it.fingerprint == current.fingerprint } }
         if (albumIndex == -1) return null
         val album = artist.albums[albumIndex]
-        if (shuffle) {
-            val others = album.tracks.filter { it.fingerprint != current.fingerprint }
-            return others.randomOrNull() ?: current
+        when (mode) {
+            ShuffleMode.ALBUM -> {
+                val others = album.tracks.filter { it.fingerprint != current.fingerprint }
+                return others.randomOrNull(random) ?: current
+            }
+            ShuffleMode.ALL_SONGS -> {
+                val others = artists.asSequence()
+                    .flatMap { it.albums.asSequence() }
+                    .flatMap { it.tracks.asSequence() }
+                    .filter { it.fingerprint != current.fingerprint }
+                    .toList()
+                return others.randomOrNull(random) ?: current
+            }
+            ShuffleMode.OFF -> {
+                val trackIndex = album.tracks.indexOfFirst { it.fingerprint == current.fingerprint }
+                if (trackIndex == -1) return null
+                album.tracks.getOrNull(trackIndex + 1)?.let { return it }
+                return artist.albums.getOrNull(albumIndex + 1)?.tracks?.firstOrNull()
+            }
         }
-        val trackIndex = album.tracks.indexOfFirst { it.fingerprint == current.fingerprint }
-        if (trackIndex == -1) return null
-        album.tracks.getOrNull(trackIndex + 1)?.let { return it }
-        return artist.albums.getOrNull(albumIndex + 1)?.tracks?.firstOrNull()
     }
 
     private val trackOrder = compareBy<MergedEntry>({ it.entry.trackNumber == null }, { it.entry.trackNumber ?: Int.MAX_VALUE }, { it.entry.title.lowercase() })
