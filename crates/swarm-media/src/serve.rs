@@ -578,9 +578,11 @@ impl MediaService {
         status(200)
     }
 
-    /// Serve only a completed track previously registered in SQLite. The
-    /// request never becomes a filesystem path, so this cannot traverse out
-    /// of the server-managed subtitle directory.
+    /// Serve a completed track previously registered in SQLite. The request
+    /// never becomes a filesystem path, so this cannot traverse out of the
+    /// stored `file_path`. Whisper/OpenSubtitles tracks are already WebVTT
+    /// on disk; a side-loaded (`source = "external"`) `.srt` sidecar is
+    /// converted to WebVTT here so the client sees one uniform format.
     async fn subtitle(&self, rest: &str) -> Resolved {
         let Some((entry_key, filename)) = rest.split_once('/') else {
             return status(404);
@@ -597,11 +599,19 @@ impl MediaService {
         let Ok(Some(entry)) = self.library.get(entry_key).await else {
             return status(404);
         };
-        if track.fingerprint != entry.fingerprint || track.format != "vtt" {
+        if track.fingerprint != entry.fingerprint {
             return status(404);
         }
-        match tokio::fs::read(&track.file_path).await {
-            Ok(bytes) => Resolved {
+        let bytes = match track.format.as_str() {
+            "vtt" => tokio::fs::read(&track.file_path).await.ok(),
+            "srt" => tokio::fs::read_to_string(&track.file_path)
+                .await
+                .ok()
+                .map(|text| crate::subtitles::srt_to_webvtt(&text).into_bytes()),
+            _ => None,
+        };
+        match bytes {
+            Some(bytes) => Resolved {
                 header: PeerResponseHeader {
                     status: 200,
                     len: bytes.len() as u64,
@@ -612,7 +622,7 @@ impl MediaService {
                 body: Body::Bytes(bytes),
                 session_id: None,
             },
-            Err(_) => status(404),
+            None => status(404),
         }
     }
 

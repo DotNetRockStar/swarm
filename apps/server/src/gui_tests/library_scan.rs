@@ -4,7 +4,7 @@
 //! tests go through `test_app_with_media_root`.
 
 use super::harness::test_app_with_media_root;
-use crate::{list_entries, rescan};
+use crate::{get_asset_detail, list_entries, rescan};
 use tauri::Manager;
 
 #[tokio::test]
@@ -12,8 +12,11 @@ async fn rescan_picks_up_a_new_real_file_and_list_entries_reports_it() {
     let (test_app, root_dir) = test_app_with_media_root().await;
     let app = test_app.handle();
 
-    std::fs::write(root_dir.path().join("Test Movie (2020).mp4"), b"fake video bytes")
-        .expect("write fixture movie file");
+    std::fs::write(
+        root_dir.path().join("Test Movie (2020).mp4"),
+        b"fake video bytes",
+    )
+    .expect("write fixture movie file");
 
     let report = rescan(app.clone(), app.state())
         .await
@@ -83,8 +86,11 @@ async fn rescan_is_idempotent_when_nothing_changed_on_disk() {
     let (test_app, root_dir) = test_app_with_media_root().await;
     let app = test_app.handle();
 
-    std::fs::write(root_dir.path().join("Test Movie (2020).mp4"), b"fake video bytes")
-        .expect("write fixture movie file");
+    std::fs::write(
+        root_dir.path().join("Test Movie (2020).mp4"),
+        b"fake video bytes",
+    )
+    .expect("write fixture movie file");
     rescan(app.clone(), app.state())
         .await
         .expect("first rescan should succeed");
@@ -162,5 +168,61 @@ async fn rescan_refuses_to_treat_a_fully_empty_root_as_mass_deletion() {
         entries.len(),
         1,
         "the refused scan must leave the existing catalog entry untouched"
+    );
+}
+
+/// #143: a `.srt` gathered into a movie folder's `Subs/` subfolder is
+/// discovered by the rescan, matched to the movie, and surfaced on the
+/// asset detail the Media page shows — the same path the device UI uses to
+/// offer the track for toggling.
+#[tokio::test]
+async fn rescan_picks_up_a_subtitle_sidecar_from_a_subs_folder() {
+    let (test_app, root_dir) = test_app_with_media_root().await;
+    let app = test_app.handle();
+
+    let movie_dir = root_dir.path().join("The Terminator (1984)");
+    std::fs::create_dir_all(movie_dir.join("Subs")).expect("create Subs folder");
+    std::fs::write(
+        movie_dir.join("The Terminator (1984) 1080p.mp4"),
+        b"fake video bytes",
+    )
+    .expect("write fixture movie file");
+    std::fs::write(
+        movie_dir.join("Subs").join("3_English.srt"),
+        b"1\n00:00:01,000 --> 00:00:02,000\nCome with me if you want to live\n",
+    )
+    .expect("write subtitle sidecar");
+
+    rescan(app.clone(), app.state())
+        .await
+        .expect("rescan should succeed");
+
+    let entries = list_entries(app.clone(), app.state())
+        .await
+        .expect("list_entries should succeed");
+    assert_eq!(entries.len(), 1, "only the video becomes a catalog entry");
+    let entry_key = entries[0].entry_key.clone();
+
+    let detail = get_asset_detail(app.clone(), app.state(), entry_key.clone())
+        .await
+        .expect("get_asset_detail should succeed");
+    assert!(
+        detail.subtitle_languages.contains(&"en".to_string()),
+        "the Subs-folder sidecar is offered as an English subtitle track: {:?}",
+        detail.subtitle_languages
+    );
+
+    // Deleting the sidecar clears the track on the next rescan.
+    std::fs::remove_file(movie_dir.join("Subs").join("3_English.srt")).expect("remove sidecar");
+    rescan(app.clone(), app.state())
+        .await
+        .expect("second rescan should succeed");
+    let detail = get_asset_detail(app.clone(), app.state(), entry_key)
+        .await
+        .expect("get_asset_detail should succeed");
+    assert!(
+        detail.subtitle_languages.is_empty(),
+        "a removed sidecar is reconciled away: {:?}",
+        detail.subtitle_languages
     );
 }

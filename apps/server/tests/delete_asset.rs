@@ -136,3 +136,76 @@ async fn deletion_removes_asset_companions_and_preserves_shared_artwork() {
     assert!(matches!(error, swarm_server::ServerError::EntryNotFound));
     let _ = std::fs::remove_dir_all(base);
 }
+
+/// #143: a side-loaded subtitle sidecar gathered into a movie folder's
+/// `Subs/` subfolder is registered as an `external` track by the scan, and
+/// deleting the movie also removes that sidecar (with no "unrecognized
+/// subtitle path" warning).
+#[tokio::test]
+async fn deletion_removes_a_side_loaded_subtitle_sidecar_from_a_subs_folder() {
+    let base = std::env::temp_dir().join(format!(
+        "swarm-delete-sidecar-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let media_root = base.join("media");
+    let data_dir = base.join("data");
+    let movie_dir = media_root.join("Movies/Heat (1995)");
+    let movie_file = movie_dir.join("Heat (1995) 1080p.mkv");
+    let kept_file = media_root.join("Movies/Casino (1995)/Casino (1995).mkv");
+    let sidecar = movie_dir.join("Subs/3_English.srt");
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(kept_file.parent().unwrap()).unwrap();
+    std::fs::write(&movie_file, vec![1u8; 8_192]).unwrap();
+    std::fs::write(&kept_file, vec![2u8; 8_192]).unwrap();
+    std::fs::write(
+        &sidecar,
+        b"1\n00:00:01,000 --> 00:00:02,000\nCome with me if you want to live\n",
+    )
+    .unwrap();
+
+    let core = ServerCore::start(ServerConfig {
+        media_roots: vec![MediaRoot {
+            label: "local".into(),
+            path: media_root.clone(),
+        }],
+        data_dir: data_dir.clone(),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        allowed_fingerprints: vec![],
+        token_store_mode: TokenStoreMode::FileOnly,
+        managed_rendezvous_url: None,
+    })
+    .await
+    .unwrap();
+    core.wait_for_scan().await.unwrap();
+
+    let target = core
+        .library
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.relative_path.ends_with("Heat (1995) 1080p.mkv"))
+        .unwrap();
+    let tracks = core
+        .library
+        .subtitle_tracks(&target.entry_key)
+        .await
+        .unwrap();
+    assert_eq!(tracks.len(), 1, "the Subs-folder sidecar is registered");
+    assert_eq!(tracks[0].source, "external");
+    assert_eq!(tracks[0].format, "srt");
+
+    let report = core.delete_asset(&target.entry_key).await.unwrap();
+    assert!(
+        report.cleanup_warnings.is_empty(),
+        "a matched sidecar is a recognized companion: {:?}",
+        report.cleanup_warnings
+    );
+    assert!(!movie_file.exists());
+    assert!(!sidecar.exists(), "the side-loaded sidecar is removed too");
+    assert!(kept_file.exists(), "an unrelated movie is untouched");
+
+    let _ = std::fs::remove_dir_all(base);
+}

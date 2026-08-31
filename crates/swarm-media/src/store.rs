@@ -1600,6 +1600,88 @@ impl Library {
             .collect())
     }
 
+    /// Available movie/episode entries whose file lives anywhere under
+    /// `dir` (a stored `relative_path` directory, forward slashes, with the
+    /// `{label}/` prefix in a multi-root install). An empty `dir` means the
+    /// whole library. Used by subtitle sidecar matching to gather the
+    /// candidate videos a `Subs/` file could belong to.
+    pub async fn video_entries_under_dir(&self, dir: &str) -> sqlx::Result<Vec<EntryRecord>> {
+        let rows = if dir.is_empty() {
+            sqlx::query_as::<_, EntryRow>(&format!(
+                "{ENTRY_SELECT} WHERE available = 1 AND kind IN ('movie', 'episode') \
+                 ORDER BY relative_path"
+            ))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            let prefix = format!("{dir}/");
+            sqlx::query_as::<_, EntryRow>(&format!(
+                "{ENTRY_SELECT} WHERE available = 1 AND kind IN ('movie', 'episode') \
+                 AND substr(relative_path, 1, ?) = ? ORDER BY relative_path"
+            ))
+            .bind(prefix.chars().count() as i64)
+            .bind(prefix)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(EntryRecord::from).collect())
+    }
+
+    /// Reconcile the side-loaded (`source = 'external'`) subtitle tracks for
+    /// every entry under `prefix` (`None` = whole library; `Some("label")` =
+    /// one multi-root label) to exactly `records`. Runs in one transaction
+    /// so a rescan never leaves playback seeing a half-updated sidecar set.
+    /// Whisper/OpenSubtitles tracks are never touched.
+    pub async fn replace_external_subtitles(
+        &self,
+        prefix: Option<&str>,
+        records: &[SubtitleRecord],
+    ) -> sqlx::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        match prefix {
+            Some(label) => {
+                let label_prefix = format!("{label}/");
+                sqlx::query(
+                    "DELETE FROM subtitle_tracks WHERE source = 'external' AND entry_key IN \
+                     (SELECT entry_key FROM library_entries WHERE substr(relative_path, 1, ?) = ?)",
+                )
+                .bind(label_prefix.chars().count() as i64)
+                .bind(label_prefix)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            None => {
+                sqlx::query("DELETE FROM subtitle_tracks WHERE source = 'external'")
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        let now = unix_time_ms();
+        for record in records {
+            sqlx::query(
+                "INSERT INTO subtitle_tracks \
+                 (entry_key, id, language, label, source, format, file_path, fingerprint, generated_at_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(entry_key, id) DO UPDATE SET language = excluded.language, \
+                 label = excluded.label, source = excluded.source, format = excluded.format, \
+                 file_path = excluded.file_path, fingerprint = excluded.fingerprint, \
+                 generated_at_ms = excluded.generated_at_ms",
+            )
+            .bind(&record.entry_key)
+            .bind(&record.id)
+            .bind(&record.language)
+            .bind(&record.label)
+            .bind(&record.source)
+            .bind(&record.format)
+            .bind(&record.file_path)
+            .bind(&record.fingerprint)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await
+    }
+
     pub async fn transcription_queue_status(&self) -> sqlx::Result<TranscriptionQueueStatus> {
         type Row = (i64, i64, i64, i64, i64);
         let (queued, completed, failed, total_segments, completed_segments): Row = sqlx::query_as(
