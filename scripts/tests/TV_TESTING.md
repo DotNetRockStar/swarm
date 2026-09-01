@@ -250,7 +250,7 @@ already-adb-connected Amazon device > full LAN scan fan-out.
 | `NavigationSearchPersistenceUatTest` | Pure D-pad traversal; focus/back-stack restoration; title search, no-results/clear, combined filters, alphabetical Browse All; Like/watchlist persistence across a fresh Activity |
 | `ContinuePlaybackLifecycleUatTest` | Continue Watching save/resume/completion removal; acknowledged server session release; audio/subtitle selection; moving browse previews and preview-to-play handoff |
 | `KidModeUatTest` | PIN setup/rejection, media-kind filtering, restart persistence, and disable/cleanup |
-| `AddServerFromSettingsUatTest` | Configuration-page Add Server visibility; STUN activation-code creation; cancellation back to configuration |
+| `AddServerFromDashboardUatTest` | Main SWARM page "Add Server" visibility (next to "Browse library"); STUN activation-code creation; cancellation back to the dashboard |
 | `EndOfMediaUatTest` | Episode Continue Play Now/Cancel and automatic next-track playback, using a debug testing-mode near-end seek to keep the real-player scenarios bounded |
 
 The deliberately disruptive client-transport drop/recovery checks remain a

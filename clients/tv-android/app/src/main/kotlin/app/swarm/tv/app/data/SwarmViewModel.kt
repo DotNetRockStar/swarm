@@ -325,11 +325,10 @@ private fun UiState.diagnosticCatalog(): UiState.Catalog? = when (this) {
     else -> embeddedCatalog()
 }
 
-/** Restores the screen that launched STUN activation and surfaces the
- * failure in that screen's existing error area. */
+/** Restores the dashboard that launched STUN activation and surfaces the
+ * failure in its existing error area. */
 private fun UiState.withActivationError(message: String): UiState = when (this) {
     is UiState.Dashboard -> copy(joiningServer = false, joinServerError = message)
-    is UiState.Settings -> copy(busy = false, error = message)
     else -> this
 }
 
@@ -493,8 +492,8 @@ class SwarmViewModel(
     private var continueAfterPreloadSessionId: String? = null
     private var nextTrackPreloadJob: Job? = null
     private var nextTrackPreloadSessionId: String? = null
-    /** Screen to restore when Add Server's activation is cancelled or fails. */
-    private var activationReturnState: UiState? = null
+    /** Dashboard to restore when Add Server's activation is cancelled or fails. */
+    private var activationReturnState: UiState.Dashboard? = null
     /** In-memory for the running session, same as [swarmId]/[accessToken] — see [AndroidConnectionStore]'s doc comment. */
     private var cachedSwarms: List<SwarmSummary> = emptyList()
     /** Set on a successful registration or a restored session; re-sent to [connectionStore] on every edit from the config page. */
@@ -686,7 +685,7 @@ class SwarmViewModel(
      * The future device token stays in memory and is persisted only after
      * the media server explicitly approves this TV. */
     fun startActivation(deviceName: String) {
-        val returnState = _state.value.takeIf { it is UiState.Dashboard || it is UiState.Settings } ?: return
+        val returnState = _state.value as? UiState.Dashboard ?: return
         activationReturnState = returnState
         val url = baseUrl
             ?.trim()
