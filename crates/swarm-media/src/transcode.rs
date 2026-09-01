@@ -790,7 +790,10 @@ impl TranscodeManager {
 
         if preferences.prefer_direct && !preferences.preview {
             if let Some(source_peak) = direct_peak_bps(entry) {
-                if source_peak <= client_limit && direct_compatible(entry, preferences) {
+                if source_peak <= client_limit
+                    && direct_compatible(entry, preferences)
+                    && self.direct_play_keeps_english_default(media_path, entry).await
+                {
                     let id = self.reserve(
                         SessionKind::Direct {
                             entry_key: entry.entry_key.clone(),
@@ -934,6 +937,49 @@ impl TranscodeManager {
             &client_audio_codecs,
         )
         .await
+    }
+
+    /// Direct play hands the raw container to the client, which then selects an
+    /// audio track on its own. Previews and full playback are both meant to
+    /// start in English whenever the source has an English track (regression
+    /// #191). The client asks Media3 for English, but with several embedded
+    /// audio streams a player still falls back to the container-order/default
+    /// track when nothing is a language match — so an English track that is
+    /// tagged but not first would play in the wrong language.
+    ///
+    /// Returns `false` in exactly that case, so planning falls through to the
+    /// remux/transcode path where the server pins the English track as the HLS
+    /// `DEFAULT=YES` rendition (see `var_stream_map` in `spawn_ffmpeg_attempt`).
+    /// A single audio stream, an English track that is already first, no
+    /// English track at all, or any probe failure (ffprobe missing, slow
+    /// share) all return `true` — direct play behaves as before.
+    async fn direct_play_keeps_english_default(
+        &self,
+        media_path: &Path,
+        entry: &EntryRecord,
+    ) -> bool {
+        if entry.kind == MediaKind::Track {
+            return true;
+        }
+        let options = tokio::time::timeout(
+            AUDIO_PROBE_TIMEOUT,
+            crate::probe::list_audio_streams(&self.config.ffmpeg_path, media_path),
+        )
+        .await
+        .unwrap_or_default();
+        if options.len() <= 1 {
+            return true;
+        }
+        let preferred_is_tagged_english = options
+            .iter()
+            .find(|option| option.is_preferred)
+            .and_then(|option| option.language.as_deref())
+            .is_some_and(crate::probe::is_english);
+        let preferred_is_first = matches!(
+            options.iter().position(|option| option.is_preferred),
+            Some(0) | None
+        );
+        !(preferred_is_tagged_english && !preferred_is_first)
     }
 
     pub fn open_direct(&self, session_id: &str) -> Option<(String, Arc<SessionRateLimiter>)> {
@@ -3095,6 +3141,132 @@ mod tests {
         assert!(session_dir.join("vjpn").join("index.m3u8").is_file());
 
         manager.finish_use(session);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression coverage for #191 ("previews and videos should default to
+    /// english"). A direct-playable container with several embedded audio
+    /// tracks is only handed straight to the client when English is the track
+    /// a player would pick anyway; otherwise planning must fall through to
+    /// HLS, where the server pins English as `DEFAULT=YES`.
+    #[tokio::test]
+    async fn direct_play_is_declined_when_english_audio_is_not_the_first_track() {
+        if Command::new("ffprobe")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swarm-direct-en-{}", session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Two audio tracks. `english_first` controls their container order.
+        let build_source = |name: &str, english_first: bool| {
+            let path = root.join(name);
+            let (lang0, lang1) = if english_first {
+                ("eng", "jpn")
+            } else {
+                ("jpn", "eng")
+            };
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=30:duration=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:duration=1",
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-map",
+                    "2:a",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-metadata:s:a:0",
+                    &format!("language={lang0}"),
+                    "-metadata:s:a:1",
+                    &format!("language={lang1}"),
+                    "-shortest",
+                    "-y",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap();
+            status.success().then_some(path)
+        };
+
+        let (Some(english_second), Some(english_first)) = (
+            build_source("english_second.mp4", false),
+            build_source("english_first.mp4", true),
+        ) else {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+
+        let config = TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 100_000_000,
+            reserve_percent: 0,
+            max_sessions: 2,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+            ..Default::default()
+        };
+        let manager = TranscodeManager::new(config);
+
+        let mut source_entry = entry();
+        source_entry.relative_path = "movie.mp4".into();
+        source_entry.duration_secs = Some(1.0);
+        source_entry.video.as_mut().unwrap().width = 320;
+        source_entry.video.as_mut().unwrap().height = 180;
+        source_entry.video.as_mut().unwrap().bitrate = Some(200_000);
+        source_entry.audio.as_mut().unwrap().bitrate = Some(96_000);
+        let prefs = preferences(); // prefer_direct = true
+
+        source_entry.size = english_second.metadata().unwrap().len();
+        let declined = manager
+            .plan(&source_entry, &english_second, &prefs, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            declined.mode,
+            PlaybackMode::Hls,
+            "English is the second audio track — direct play would start in Japanese"
+        );
+
+        source_entry.size = english_first.metadata().unwrap().len();
+        let direct = manager
+            .plan(&source_entry, &english_first, &prefs, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            direct.mode,
+            PlaybackMode::Direct,
+            "English is already the first audio track — direct play is safe"
+        );
+
         drop(manager);
         let _ = std::fs::remove_dir_all(&root);
     }
