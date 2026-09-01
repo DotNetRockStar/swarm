@@ -138,6 +138,30 @@
         <div id="transcodingTooltip" class="bandwidth-tooltip d-none"></div>
       </div>
       <p class="muted compact-help">CPU spent on ffmpeg transcodes versus the rest of the server process (which includes Whisper subtitle generation), as a share of this machine, sampled every 5 seconds.</p>
+      <div class="transcoding-controls">
+        <label class="select-label" for="videoEncoderModeSelect">Video encoder
+          <select id="videoEncoderModeSelect">
+            <option value="auto">Auto (hardware when available)</option>
+            <option value="hardware">Force hardware</option>
+            <option value="software">Force software</option>
+          </select>
+        </label>
+        <label class="select-label" for="maxTranscodeHeightSelect">Max transcode resolution
+          <select id="maxTranscodeHeightSelect">
+            <option value="0">Source / client limit</option>
+            <option value="1080">1080p</option>
+            <option value="2160">4K</option>
+          </select>
+        </label>
+        <label class="select-label" for="hlsSegmentSecondsSelect">HLS segment length
+          <select id="hlsSegmentSecondsSelect">
+            <option value="2">2 seconds (fastest recovery)</option>
+            <option value="4">4 seconds</option>
+            <option value="6">6 seconds (smoothest)</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted compact-help">Files the client can already play are copied without re-encoding; these settings apply only when a transcode is unavoidable.</p>
     </div>
 
     <div class="card">

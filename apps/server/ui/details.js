@@ -1,7 +1,19 @@
 // ---- Details tab: bandwidth/transcoding/cache panels + media-root config ---
 
 async function refreshDetails() {
-  await Promise.all([refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
+  await Promise.all([refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshTranscodingControls(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
+}
+
+async function refreshTranscodingControls() {
+  const settings = await invoke("get_settings");
+  const set = (id, value) => {
+    const select = document.getElementById(id);
+    select.value = value;
+    select.dataset.previous = value;
+  };
+  set("videoEncoderModeSelect", settings.video_encoder_mode || "auto");
+  set("maxTranscodeHeightSelect", String(settings.max_transcode_height ?? 0));
+  set("hlsSegmentSecondsSelect", String(settings.hls_segment_seconds ?? 4));
 }
 
 async function refreshTmdbKeyField() {
@@ -127,6 +139,48 @@ document.getElementById("autoLibraryWatchEnabledCheck").addEventListener("change
     showToast(enabled ? "Automatic library detection enabled." : "Automatic library detection disabled.", "success");
   } catch (err) {
     event.currentTarget.checked = !enabled;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("videoEncoderModeSelect").addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  const previous = select.dataset.previous || "auto";
+  const mode = select.value;
+  try {
+    await invoke("set_video_encoder_mode", { mode });
+    select.dataset.previous = mode;
+    showToast(`Video encoder set to ${select.options[select.selectedIndex].text.toLowerCase()}.`, "success");
+  } catch (err) {
+    select.value = previous;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("maxTranscodeHeightSelect").addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  const previous = select.dataset.previous || "0";
+  const height = Number(select.value);
+  try {
+    await invoke("set_max_transcode_height", { height });
+    select.dataset.previous = select.value;
+    showToast(height === 0 ? "No transcode resolution cap." : `Transcodes capped at ${height}p.`, "success");
+  } catch (err) {
+    select.value = previous;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("hlsSegmentSecondsSelect").addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  const previous = select.dataset.previous || "4";
+  const seconds = Number(select.value);
+  try {
+    await invoke("set_hls_segment_seconds", { seconds });
+    select.dataset.previous = select.value;
+    showToast(`HLS segments set to ${seconds} seconds. New streams use this length.`, "success");
+  } catch (err) {
+    select.value = previous;
     showToast(String(err), "error");
   }
 });

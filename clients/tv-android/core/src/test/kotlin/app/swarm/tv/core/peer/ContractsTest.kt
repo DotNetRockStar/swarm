@@ -59,6 +59,25 @@ class ContractsTest {
     }
 
     @Test
+    fun `video stream info decodes serde's profile bit-depth and hdr fields`() {
+        // Fixture captured from `serde_json::to_string` of a populated
+        // swarm_core::peer::VideoStreamInfo (see swarm-contract-fixtures).
+        val json =
+            """{"codec":"hevc","width":3840,"height":2160,"level":"5.1","bitrate":2500000,""" +
+                """"profile":"Main 10","bit_depth":10,"hdr":true}"""
+        val decoded = SwarmJson.decodeFromString<VideoStreamInfo>(json)
+        assertEquals(
+            VideoStreamInfo("hevc", 3840, 2160, "5.1", 2_500_000L, "Main 10", 10, true),
+            decoded,
+        )
+        // And the pre-existing shape (no new keys) still decodes with nulls.
+        val legacy = SwarmJson.decodeFromString<VideoStreamInfo>(
+            """{"codec":"h264","width":1920,"height":1080}""",
+        )
+        assertEquals(VideoStreamInfo("h264", 1920, 1080), legacy)
+    }
+
+    @Test
     fun `catalog entry with no year or cast decodes to empty defaults`() {
         val json = """{"entry_key":"k","fingerprint":"f","kind":"track","title":"Song","size":1}"""
         val entry = SwarmJson.decodeFromString<CatalogEntry>(json)

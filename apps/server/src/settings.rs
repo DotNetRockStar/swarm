@@ -541,6 +541,20 @@ pub struct Settings {
     /// Whisper's model download) that would justify defaulting it off.
     #[serde(default = "default_auto_library_watch_enabled")]
     pub auto_library_watch_enabled: bool,
+    /// Which H.264 encoder transcodes use: `"auto"` (hardware on macOS when
+    /// available and healthy), `"hardware"` (pin VideoToolbox), or
+    /// `"software"` (pin libx264). See `swarm_media::transcode::VideoEncoderMode`.
+    #[serde(default = "default_video_encoder_mode")]
+    pub video_encoder_mode: String,
+    /// Server-imposed ceiling on transcode output height regardless of what a
+    /// client advertises. `0` disables the cap (source/client-limited).
+    #[serde(default)]
+    pub max_transcode_height: u32,
+    /// HLS segment length in seconds for transcoded playback. Shorter =
+    /// faster start and rebuffer recovery, slightly more overhead. Clamped
+    /// to >= 2 wherever it is consumed.
+    #[serde(default = "default_hls_segment_seconds")]
+    pub hls_segment_seconds: u32,
 }
 
 fn default_streaming_upload_budget_enabled() -> bool {
@@ -557,6 +571,14 @@ fn default_mcp_port() -> u16 {
 
 fn default_auto_library_watch_enabled() -> bool {
     true
+}
+
+fn default_video_encoder_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_hls_segment_seconds() -> u32 {
+    4
 }
 
 // Hand-written rather than `#[derive(Default)]` so a brand-new install (no
@@ -594,6 +616,9 @@ impl Default for Settings {
             mcp_port: default_mcp_port(),
             mcp_access_token: None,
             auto_library_watch_enabled: true,
+            video_encoder_mode: default_video_encoder_mode(),
+            max_transcode_height: 0,
+            hls_segment_seconds: default_hls_segment_seconds(),
         }
     }
 }
@@ -658,6 +683,10 @@ mod tests {
         assert!(!loaded.transcription_skip_if_subtitles_exist);
         assert_eq!(loaded.mcp_access_token, None);
         assert!(loaded.auto_library_watch_enabled);
+        // Transcoding controls default in for a config that predates them.
+        assert_eq!(loaded.video_encoder_mode, "auto");
+        assert_eq!(loaded.max_transcode_height, 0);
+        assert_eq!(loaded.hls_segment_seconds, 4);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -672,6 +701,8 @@ mod tests {
         // starts out skipping anything that already has subtitles.
         assert!(!loaded.local_transcription_enabled);
         assert!(loaded.transcription_skip_if_subtitles_exist);
+        assert_eq!(loaded.video_encoder_mode, "auto");
+        assert_eq!(loaded.hls_segment_seconds, 4);
     }
 
     #[test]

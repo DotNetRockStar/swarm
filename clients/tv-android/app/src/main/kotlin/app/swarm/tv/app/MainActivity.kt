@@ -49,6 +49,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import app.swarm.tv.app.data.AndroidCapabilityProbe
 import app.swarm.tv.app.data.AndroidCatalogCache
 import app.swarm.tv.app.data.AndroidConnectionStore
 import app.swarm.tv.app.data.AndroidClientNotificationStore
@@ -106,6 +107,7 @@ import app.swarm.tv.app.ui.theme.SwarmBackground
 import app.swarm.tv.app.ui.theme.SwarmError
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.app.ui.theme.SwarmTvTheme
+import app.swarm.tv.core.capability.CapabilityProfile
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.SeasonGroup
@@ -128,6 +130,13 @@ private data class DeviceIdentity(
     val fingerprint: String,
     val certificate: X509Certificate,
     val privateKey: PrivateKey,
+)
+
+/** Identity plus the one-time decoder/display capability probe, both resolved
+ * together off the main thread before the ViewModel is built. */
+private data class StartupState(
+    val identity: DeviceIdentity,
+    val capabilities: CapabilityProfile,
 )
 
 /** How far before a song's end the next track's stream is negotiated so it
@@ -195,26 +204,31 @@ class MainActivity : ComponentActivity() {
                     // the main thread instead and hold the loading frame
                     // (same one UiState.Loading already shows a moment
                     // later) until it's ready.
-                    var identity by remember { mutableStateOf<DeviceIdentity?>(null) }
+                    var startup by remember { mutableStateOf<StartupState?>(null) }
                     LaunchedEffect(Unit) {
-                        identity = withContext(Dispatchers.IO) {
+                        startup = withContext(Dispatchers.IO) {
                             catalogCache.clearTestingResidue()
                             AndroidDeviceIdentity.clearTestingIdentity()
-                            DeviceIdentity(
+                            val identity = DeviceIdentity(
                                 fingerprint = AndroidDeviceIdentity.ensureFingerprint(),
                                 certificate = AndroidDeviceIdentity.certificate(),
                                 privateKey = AndroidDeviceIdentity.privateKey(),
                             )
+                            val capabilities = runCatching {
+                                AndroidCapabilityProbe(applicationContext).probe()
+                            }.getOrDefault(CapabilityProfile.fireTvBaseline())
+                            StartupState(identity, capabilities)
                         }
                     }
-                    val resolvedIdentity = identity
-                    if (resolvedIdentity == null) {
+                    val resolvedStartup = startup
+                    if (resolvedStartup == null) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             SwarmStartupImage()
                         }
                         return@Box
                     }
-                    val factory = remember(resolvedIdentity) {
+                    val resolvedIdentity = resolvedStartup.identity
+                    val factory = remember(resolvedStartup) {
                         object : ViewModelProvider.Factory {
                             @Suppress("UNCHECKED_CAST")
                             override fun <T : ViewModel> create(modelClass: Class<T>): T =
@@ -236,6 +250,7 @@ class MainActivity : ComponentActivity() {
                                     catalogCache,
                                     BuildConfig.SWARM_RENDEZVOUS_URL,
                                     AndroidProblemReportDiagnostics(applicationContext),
+                                    playbackCapabilities = resolvedStartup.capabilities,
                                     testingModeAvailable = BuildConfig.DEBUG,
                                     initialTestingToken = initialTestingToken,
                                     testingIdentityProvider = AndroidDeviceIdentity::testingIdentity,
