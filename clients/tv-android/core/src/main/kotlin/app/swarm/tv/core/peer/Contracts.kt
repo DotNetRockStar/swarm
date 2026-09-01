@@ -130,6 +130,8 @@ data class CatalogManifest(
     val thumbprint: String,
     val entries: List<CatalogEntry>,
     val removed: List<String> = emptyList(),
+    /** True when this is a complete replacement returned by the change feed. */
+    val reset: Boolean = false,
 )
 
 /**

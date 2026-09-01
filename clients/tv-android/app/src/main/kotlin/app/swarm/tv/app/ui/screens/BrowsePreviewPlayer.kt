@@ -42,6 +42,7 @@ import app.swarm.tv.core.catalog.MergedEntry
 import kotlinx.coroutines.delay
 
 private const val PREVIEW_PLAY_TIME_MS = 30_000L
+private const val PREVIEW_VISIBLE_STARTUP_TIMEOUT_MS = 20_000L
 
 /** Focus dwell before a hover preview begins warming its stream, then a
  * second dwell before the card actually swaps box art for the playing
@@ -76,6 +77,7 @@ internal fun rememberBrowsePreviewCoordinator(
     onPreviewFinished: (String) -> Unit,
 ): BrowsePreviewCoordinator {
     var focusedPreviewEntry by remember { mutableStateOf<MergedEntry?>(null) }
+    var previewExpansionEligibleEntryKey by remember { mutableStateOf<String?>(null) }
     var expandedPreviewEntryKey by remember { mutableStateOf<String?>(null) }
 
     // Warm the stream halfway through the dwell, but keep the card at poster
@@ -83,12 +85,23 @@ internal fun rememberBrowsePreviewCoordinator(
     // Moving focus cancels both stages and releases any session already made.
     LaunchedEffect(focusedPreviewEntry?.entry?.entryKey) {
         onStopPreview()
+        previewExpansionEligibleEntryKey = null
         expandedPreviewEntryKey = null
         val entry = focusedPreviewEntry ?: return@LaunchedEffect
         delay(BROWSE_PREVIEW_WARMUP_MS)
         onStartPreview(entry)
         delay(BROWSE_PREVIEW_EXPAND_MS)
-        expandedPreviewEntryKey = entry.entry.entryKey
+        previewExpansionEligibleEntryKey = entry.entry.entryKey
+    }
+
+    // Expand only after both dwell and negotiation have completed. Failed or
+    // stalled negotiation therefore leaves the poster visible rather than
+    // turning the card into an unbounded loading indicator.
+    LaunchedEffect(previewExpansionEligibleEntryKey, preview?.entryKey) {
+        expandedPreviewEntryKey = previewExpansionEntryKey(
+            previewExpansionEligibleEntryKey,
+            preview?.entryKey,
+        )
     }
     DisposableEffect(Unit) {
         onDispose { onStopPreview() }
@@ -252,6 +265,15 @@ internal fun BrowsePreviewPlayer(
         freezeAndRelease("30-second window complete")
     }
 
+    // Media3 can remain BUFFERING without raising onPlayerError when a proxy
+    // response stalls. Release the reservation and restore artwork instead of
+    // displaying an unbounded spinner.
+    LaunchedEffect(player, renderedFirstFrame, shouldPlay, finished) {
+        if (renderedFirstFrame || !shouldPlay || finished || !hasVideo) return@LaunchedEffect
+        delay(PREVIEW_VISIBLE_STARTUP_TIMEOUT_MS)
+        if (!renderedFirstFrame && !finished) freezeAndRelease("first-frame timeout")
+    }
+
     // If playback failed before producing a frame, leave the transparent
     // overlay empty so the card's artwork remains visible instead of replacing
     // it with a black rectangle. A successfully rendered final frame remains.
@@ -290,3 +312,6 @@ internal fun BrowsePreviewPlayer(
         }
     }
 }
+
+internal fun previewExpansionEntryKey(eligibleEntryKey: String?, previewEntryKey: String?): String? =
+    eligibleEntryKey?.takeIf { it == previewEntryKey }

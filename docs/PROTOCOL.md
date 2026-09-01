@@ -54,6 +54,8 @@ Routes:
 | `/catalog/thumbprint` | `CatalogThumbprint` | whole-library version token |
 | `/catalog/manifest[?since=<tp>]` | `CatalogManifest` | full or delta listing |
 | `/catalog/manifest.gz` | gzip-compressed `CatalogManifest` | bandwidth-efficient full listing for memory-constrained clients |
+| `/catalog/changes?since=<tp>` | `CatalogManifest` (delta, or full with `reset=true`) | long-poll: blocks up to ~20s for the library to change, then returns entries added/changed since `<tp>` plus `removed` keys; `204` if still quiet; `reset=true` full listing when `<tp>` predates the server's bounded snapshot history. Backs the TV live-update feed. |
+| `/catalog/changes.gz?since=<tp>` | gzip-compressed | as above |
 | `/art/{entry_key}/{poster\|season\|backdrop\|cover\|artist}` | image bytes | etag/`if_none_match` honored |
 | `/play/{entry_key}` | `PlaybackPlan` | request carries `PlaybackPreferences`; reserves upload and chooses direct/HLS |
 | `/stream/{session_id}/media` | file bytes | budgeted direct play; Range → 206 + `content_range` |

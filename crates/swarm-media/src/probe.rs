@@ -265,7 +265,7 @@ fn select_preferred_audio_stream(streams: &[FfprobeStream]) -> Option<usize> {
         .or_else(|| audio.filter_map(|stream| stream.index).next())
 }
 
-fn is_english(language: &str) -> bool {
+pub(crate) fn is_english(language: &str) -> bool {
     let normalized = language.trim().to_ascii_lowercase();
     let base = normalized.split(['-', '_']).next().unwrap_or(&normalized);
     matches!(base, "en" | "eng" | "english")

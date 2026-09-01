@@ -215,6 +215,10 @@ pub struct CatalogManifest {
     pub entries: Vec<CatalogEntry>,
     #[serde(default)]
     pub removed: Vec<String>,
+    /// A change response could not be based on the client's version and is
+    /// therefore a complete replacement rather than a delta.
+    #[serde(default)]
+    pub reset: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,6 +521,7 @@ mod tests {
                 }],
             }],
             removed: vec![],
+            reset: false,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         assert_eq!(
