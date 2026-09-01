@@ -1134,6 +1134,56 @@ class SwarmViewModel(
         notify("Reconnected ${device.name}.", ClientNotificationKind.SUCCESS)
     }
 
+    /**
+     * LAN counterparts of [disconnectSwarmServer] / [reconnectSwarmServer].
+     * A paired LAN server otherwise connects silently on tap with no way to
+     * drop it. Like the swarm versions these only affect this TV, and the
+     * disconnected state is scoped to the current dashboard's swarm id exactly
+     * as [connectLanServerNow] persists it.
+     */
+    fun disconnectLanServer(server: LanServer) {
+        val current = _state.value as? UiState.Dashboard ?: return
+        val fingerprint = normalizeFingerprint(server.certFingerprint)
+        _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value + fingerprint
+        catalogSession.disconnect(server.asSwarmDevice().deviceId)
+        viewModelScope.launch { disconnectedServerStore.setDisconnected(current.swarm.id, fingerprint, disconnected = true) }
+        notify("Disconnected ${server.name} from this TV.", ClientNotificationKind.WARNING)
+    }
+
+    fun reconnectLanServer(server: LanServer) {
+        val current = _state.value as? UiState.Dashboard ?: return
+        val fingerprint = normalizeFingerprint(server.certFingerprint)
+        _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value - fingerprint
+        viewModelScope.launch { disconnectedServerStore.setDisconnected(current.swarm.id, fingerprint, disconnected = false) }
+        notify("Reconnected ${server.name}.", ClientNotificationKind.SUCCESS)
+    }
+
+    /** Drops the LAN pairing entirely; the server must be re-approved with a code to return. */
+    fun forgetLanServer(server: LanServer) {
+        val current = _state.value as? UiState.Dashboard
+        val fingerprint = normalizeFingerprint(server.certFingerprint)
+        val deviceId = server.asSwarmDevice().deviceId
+        catalogSession.disconnect(deviceId)
+        catalogCache.remove(deviceId)
+        _pairedLanFingerprints.value = _pairedLanFingerprints.value - fingerprint
+        _pairedLanServers.value = _pairedLanServers.value.filterNot {
+            normalizeFingerprint(it.certFingerprint) == fingerprint
+        }
+        _disconnectedServerFingerprints.value = _disconnectedServerFingerprints.value - fingerprint
+        val wasActiveLocal = normalizeFingerprint(activeLocalServer?.certFingerprint ?: "") == fingerprint
+        viewModelScope.launch {
+            // The Room row's primary key is the raw fingerprint as it was saved.
+            lanConnectionStore.forget(server.certFingerprint)
+            current?.let { disconnectedServerStore.setDisconnected(it.swarm.id, fingerprint, disconnected = false) }
+        }
+        if (wasActiveLocal) {
+            activeLocalServer = null
+            localSession = false
+            _state.value = connectionSetupDashboard()
+        }
+        notify("Forgot ${server.name}. Add it again to reconnect.", ClientNotificationKind.WARNING)
+    }
+
     private fun effectiveCatalogDevices(roster: List<SwarmDevice>): List<SwarmDevice> {
         val disconnected = _disconnectedServerFingerprints.value
         val activeRoster = roster.filterNot { normalizeFingerprint(it.certFingerprint) in disconnected }

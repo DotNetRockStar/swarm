@@ -45,6 +45,12 @@ object UatTestTags {
     const val DASHBOARD_BROWSE_BUTTON = "uat_dashboard_browse_button"
     const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
+    // SwarmDashboardScreen: LAN server action modal.
+    const val LAN_SERVER_MODAL = "uat_lan_server_modal"
+    const val LAN_SERVER_CONNECT_BUTTON = "uat_lan_server_connect_button"
+    const val LAN_SERVER_DISCONNECT_BUTTON = "uat_lan_server_disconnect_button"
+    const val LAN_SERVER_FORGET_BUTTON = "uat_lan_server_forget_button"
+
     // SwarmSettingsScreen / STUN activation flow.
     const val SETTINGS_ADD_SERVER_BUTTON = "uat_settings_add_server_button"
     const val ACTIVATION_CODE = "uat_activation_code"
