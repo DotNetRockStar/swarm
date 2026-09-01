@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Manual start/stop control for the installed SWARM media server (macOS).
+#
+# The server is a tray app in /Applications. This wrapper launches it with the
+# right environment (peer port your TVs are paired to, absolute ffmpeg path)
+# and stops it cleanly — nothing auto-starts or auto-restarts it.
+#
+#   swarm-server start      launch it (no-op if already running)
+#   swarm-server stop       quit it
+#   swarm-server restart
+#   swarm-server status
+#   swarm-server logs [-f]   tail the server log
+#
+# Env overrides (optional):
+#   SWARM_PEER_PORT        peer QUIC port (default 8544 — matches paired TVs)
+#   SWARM_HTTP_MEDIA_PORT  HTTP media port (default 8546)
+#   SWARM_APP              path to the .app (default: auto-detect)
+
+set -euo pipefail
+
+APP_NAME="SWARM Server"
+BUNDLE_BIN="swarm-server-app"
+PEER_PORT="${SWARM_PEER_PORT:-8544}"
+HTTP_MEDIA_PORT="${SWARM_HTTP_MEDIA_PORT:-8546}"
+DATA_DIR="$HOME/Library/Application Support/app.swarm.server"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "macOS only." >&2
+    exit 1
+fi
+
+# Locate the installed bundle.
+APP=""
+for candidate in \
+    "${SWARM_APP:-}" \
+    "/Applications/$APP_NAME.app" \
+    "$HOME/Applications/$APP_NAME.app"
+do
+    [ -n "$candidate" ] && [ -d "$candidate" ] && { APP="$candidate"; break; }
+done
+if [ -z "$APP" ]; then
+    echo "Could not find \"$APP_NAME.app\". Install it first:" >&2
+    echo "  ./scripts/install_media_server.sh" >&2
+    exit 1
+fi
+EXE="$APP/Contents/MacOS/$(defaults read "$APP/Contents/Info.plist" CFBundleExecutable 2>/dev/null || echo "$BUNDLE_BIN")"
+
+FFMPEG="$(command -v ffmpeg || true)"
+if [ -n "$FFMPEG" ]; then
+    FFMPEG="$(cd "$(dirname "$FFMPEG")" && pwd)/$(basename "$FFMPEG")"
+fi
+
+server_pid() { pgrep -f "$EXE" 2>/dev/null | head -n1; }
+
+do_status() {
+    local pid; pid="$(server_pid || true)"
+    if [ -n "$pid" ]; then
+        local ver
+        ver="$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo '?')"
+        echo "running   pid $pid   v$ver"
+        local held
+        held="$( { lsof -ti "udp:$PEER_PORT" 2>/dev/null || true; lsof -ti "tcp:$PEER_PORT" -sTCP:LISTEN 2>/dev/null || true; } | sort -u | tr '\n' ' ')"
+        if printf '%s' "$held" | grep -qw "$pid" 2>/dev/null; then
+            echo "peer port $PEER_PORT   OK"
+        else
+            echo "peer port $PEER_PORT   not bound yet (held by: ${held:-nobody})"
+        fi
+    else
+        echo "stopped"
+    fi
+}
+
+do_start() {
+    if [ -n "$(server_pid || true)" ]; then
+        echo "already running (pid $(server_pid))"
+        return 0
+    fi
+    [ -x "$EXE" ] || { echo "bundle executable missing: $EXE" >&2; exit 1; }
+    echo "starting $APP_NAME on peer port $PEER_PORT ..."
+    # 'open --env' forwards the env to a *fresh* launch and gives it a real
+    # GUI session (a bare exec under a non-GUI context self-terminates).
+    local args=(-a "$APP"
+        --env "SWARM_PEER_BIND=0.0.0.0:$PEER_PORT"
+        --env "SWARM_HTTP_MEDIA_BIND=0.0.0.0:$HTTP_MEDIA_PORT"
+        --env "RUST_LOG=info")
+    [ -n "$FFMPEG" ] && args+=(--env "SWARM_FFMPEG_PATH=$FFMPEG")
+    open "${args[@]}"
+    for _ in $(seq 1 20); do
+        sleep 0.5
+        [ -n "$(server_pid || true)" ] && break
+    done
+    # give the QUIC listener a moment to bind before reporting
+    for _ in $(seq 1 10); do
+        sleep 0.5
+        lsof -ti "udp:$PEER_PORT" >/dev/null 2>&1 && break
+    done
+    do_status
+}
+
+do_stop() {
+    local pid; pid="$(server_pid || true)"
+    if [ -z "$pid" ]; then
+        echo "not running"
+        return 0
+    fi
+    echo "stopping (pid $pid) ..."
+    # AppleScript 'quit' is a clean app termination; the tray app traps a bare
+    # SIGTERM to hide instead of exit, so fall back to SIGKILL if needed.
+    osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+        sleep 0.3
+        [ -z "$(server_pid || true)" ] && { echo "stopped"; return 0; }
+    done
+    pkill -TERM -f "$EXE" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -f "$EXE" 2>/dev/null || true
+    sleep 1
+    [ -z "$(server_pid || true)" ] && echo "stopped" || echo "still running (pid $(server_pid)) — try the tray menu's Quit"
+}
+
+do_logs() {
+    local f="$DATA_DIR/logs/server.log.$(date -u +%Y-%m-%d)"
+    [ -f "$f" ] || f="$(ls -t "$DATA_DIR"/logs/server.log.* 2>/dev/null | head -1)"
+    [ -f "$f" ] || { echo "no log file yet"; return 0; }
+    if [ "${1:-}" = "-f" ]; then
+        tail -f "$f"
+    else
+        tail -n 40 "$f"
+    fi
+}
+
+case "${1:-status}" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_stop; sleep 1; do_start ;;
+    status)  do_status ;;
+    logs)    do_logs "${2:-}" ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+    *) echo "usage: swarm-server {start|stop|restart|status|logs [-f]}" >&2; exit 1 ;;
+esac
