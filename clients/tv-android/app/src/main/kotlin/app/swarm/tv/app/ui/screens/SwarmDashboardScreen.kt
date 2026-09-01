@@ -84,6 +84,9 @@ fun SwarmDashboardScreen(
     onCancelLanPairing: () -> Unit,
     onDisconnectServer: (SwarmDevice) -> Unit,
     onReconnectServer: (SwarmDevice) -> Unit,
+    onDisconnectLanServer: (LanServer) -> Unit,
+    onReconnectLanServer: (LanServer) -> Unit,
+    onForgetLanServer: (LanServer) -> Unit,
     onBackToBrowse: () -> Unit,
 ) {
     fun normalized(value: String) = value.trim().lowercase()
@@ -93,9 +96,11 @@ fun SwarmDashboardScreen(
     var showExitConfirm by remember { mutableStateOf(false) }
     var selectedSwarmServer by remember { mutableStateOf<SwarmDevice?>(null) }
     var selectedLanServer by remember { mutableStateOf<LanServer?>(null) }
+    var selectedKnownLanServer by remember { mutableStateOf<LanServer?>(null) }
     var showAddServer by remember { mutableStateOf(false) }
     val activity = LocalContext.current as? Activity
-    val modalOpen = showExitConfirm || selectedSwarmServer != null || selectedLanServer != null || showAddServer
+    val modalOpen = showExitConfirm || selectedSwarmServer != null || selectedLanServer != null ||
+        selectedKnownLanServer != null || showAddServer
     val isConnectionSetup = swarm.id == CONNECTION_SETUP_SWARM_ID
 
     val serversInSwarm = if (swarm.id == "lan") {
@@ -128,6 +133,12 @@ fun SwarmDashboardScreen(
         if (normalized(selected.certFingerprint) in paired) {
             selectedLanServer = null
         }
+    }
+    LaunchedEffect(lanServerRows, pairedLanFingerprints, selectedKnownLanServer?.certFingerprint) {
+        val selected = selectedKnownLanServer ?: return@LaunchedEffect
+        val fp = normalized(selected.certFingerprint)
+        val stillKnown = fp in paired || lanServerRows.any { normalized(it.server.certFingerprint) == fp }
+        if (!stillKnown) selectedKnownLanServer = null
     }
     BackHandler(enabled = !modalOpen) {
         if (hasConnectedServer) onBackToBrowse() else showExitConfirm = true
@@ -256,7 +267,7 @@ fun SwarmDashboardScreen(
                             busy = lanPairingBusy,
                             onClick = {
                                 if (inSwarm || isPaired) {
-                                    onConnectLan(server, deviceName)
+                                    selectedKnownLanServer = server
                                 } else {
                                     selectedLanServer = server
                                     onStartLanPairing(server, deviceName)
@@ -294,6 +305,29 @@ fun SwarmDashboardScreen(
                     onCancelLanPairing()
                     selectedLanServer = null
                 },
+            )
+        }
+
+        selectedKnownLanServer?.let { server ->
+            val isDisconnected = normalized(server.certFingerprint) in disconnected
+            val isPaired = normalized(server.certFingerprint) in paired
+            LanServerActionOverlay(
+                server = server,
+                disconnected = isDisconnected,
+                paired = isPaired,
+                onConnect = {
+                    if (isDisconnected) onReconnectLanServer(server) else onConnectLan(server, deviceName)
+                    selectedKnownLanServer = null
+                },
+                onDisconnect = {
+                    onDisconnectLanServer(server)
+                    selectedKnownLanServer = null
+                },
+                onForget = {
+                    onForgetLanServer(server)
+                    selectedKnownLanServer = null
+                },
+                onDismiss = { selectedKnownLanServer = null },
             )
         }
 
@@ -520,6 +554,70 @@ private fun ServerConnectionOverlay(
             colors = swarmActionButtonColors(),
         ) {
             Text(if (disconnected) "Connect" else "Disconnect", fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun LanServerActionOverlay(
+    server: LanServer,
+    disconnected: Boolean,
+    paired: Boolean,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onForget: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    BackHandler(onBack = onDismiss)
+    val actionFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { actionFocusRequester.requestFocus() }
+
+    ModalSurface {
+        Column(
+            modifier = Modifier.testTag(UatTestTags.LAN_SERVER_MODAL),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(server.name, color = SwarmText, fontSize = 20.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.height(6.dp))
+            Text(server.host, color = SwarmMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                when {
+                    disconnected -> "Disconnected from this TV"
+                    paired -> "Paired with this TV"
+                    else -> "Connected on your network"
+                },
+                color = SwarmMuted,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = onConnect,
+                modifier = Modifier
+                    .focusRequester(actionFocusRequester)
+                    .testTag(UatTestTags.LAN_SERVER_CONNECT_BUTTON),
+                colors = swarmActionButtonColors(),
+            ) {
+                Text(if (disconnected) "Reconnect" else "Connect", fontWeight = FontWeight.Bold)
+            }
+            if (!disconnected) {
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = onDisconnect,
+                    modifier = Modifier.testTag(UatTestTags.LAN_SERVER_DISCONNECT_BUTTON),
+                    colors = swarmActionButtonColors(),
+                ) {
+                    Text("Disconnect", fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onForget,
+                modifier = Modifier.testTag(UatTestTags.LAN_SERVER_FORGET_BUTTON),
+                colors = swarmActionButtonColors(),
+            ) {
+                Text("Forget this server", color = SwarmError, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
