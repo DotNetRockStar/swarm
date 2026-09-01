@@ -1,5 +1,6 @@
-/** Client configuration for this TV, including the STUN-backed flow for
- * adding another media server. */
+/** Client configuration for this TV. SWARM membership is managed directly
+ * from [SwarmDashboardScreen], where the "Add Server" action lives next to
+ * "Browse library". */
 package app.swarm.tv.app.ui.screens
 
 import androidx.activity.compose.BackHandler
@@ -64,7 +65,6 @@ fun SwarmSettingsScreen(
     errorMessage: String?,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
-    onAddServer: () -> Unit,
     onBack: () -> Unit,
     kidModeSettings: KidModeSettings?,
     availableGenres: List<String>,
@@ -150,23 +150,6 @@ fun SwarmSettingsScreen(
             SettingsSection.GENERAL -> SettingsPanel(
                 modifier = Modifier.fillMaxWidth().weight(1f),
             ) {
-                Text("Servers", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = onAddServer,
-                    enabled = !busy,
-                    modifier = Modifier.testTag(UatTestTags.SETTINGS_ADD_SERVER_BUTTON),
-                    colors = swarmActionButtonColors(),
-                ) {
-                    Text("Add Server", fontWeight = FontWeight.Bold)
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Show a temporary code to approve this TV from another media server through SWARM.",
-                    color = SwarmMuted,
-                    fontSize = 11.sp,
-                )
-                Spacer(Modifier.height(20.dp))
                 Text("Connection", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
                 SettingFieldRow(
