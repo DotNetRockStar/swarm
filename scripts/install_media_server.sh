@@ -130,25 +130,24 @@ launchctl_stop() {
 }
 
 launchctl_start() {
-    # Also publish the bind/ffmpeg vars session-wide so an app launched from
-    # Finder/Dock (not just this LaunchAgent) still uses the paired port. This
-    # is session-scoped; the LaunchAgent's own EnvironmentVariables are the
-    # durable copy.
+    # `open -W -a` does not forward a plist's EnvironmentVariables, so the
+    # app's config comes from these session-wide vars — which also means an
+    # app launched from Finder/Dock uses the same paired port. Session-scoped
+    # (cleared on logout); the install step re-applies them, and they are
+    # re-set here on every start.
     launchctl setenv SWARM_PEER_BIND "0.0.0.0:$PEER_PORT" 2>/dev/null || true
     launchctl setenv SWARM_HTTP_MEDIA_BIND "0.0.0.0:$HTTP_MEDIA_PORT" 2>/dev/null || true
+    launchctl setenv RUST_LOG "info" 2>/dev/null || true
     [ -n "${ffmpeg_bin:-}" ] && launchctl setenv SWARM_FFMPEG_PATH "$ffmpeg_bin" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null \
         || launchctl load "$PLIST" 2>/dev/null \
         || true
-    launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
 }
 
 service_pid() {
-    # `launchctl print gui/<uid>/<label>` includes a `pid = <n>` line while the
-    # job is running. macOS awk has no \s, so match literally.
-    launchctl print "$DOMAIN/$LABEL" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' \
-        | head -n1
+    # The LaunchAgent runs `open -W` as its job, so its own `pid` is the `open`
+    # helper, not the app — find the real app process by its executable path.
+    pgrep -f "$EXECUTABLE" 2>/dev/null | head -n1
 }
 
 # --- subcommands --------------------------------------------------------
@@ -223,8 +222,10 @@ do_install() {
         echo "The media server needs both to probe and transcode media." >&2
         exit 1
     fi
-    local ffmpeg_dir
-    ffmpeg_dir="$(cd "$(dirname "$ffmpeg_bin")" && pwd)"
+    # Resolve to an absolute path — the server derives ffprobe's path from
+    # SWARM_FFMPEG_PATH, so one absolute path covers both under launchd's
+    # minimal environment.
+    ffmpeg_bin="$(cd "$(dirname "$ffmpeg_bin")" && pwd)/$(basename "$ffmpeg_bin")"
     echo "   ffmpeg:  $ffmpeg_bin"
     echo "   ffprobe: $ffprobe_bin"
 
@@ -293,31 +294,31 @@ do_install() {
 <dict>
     <key>Label</key>
     <string>$LABEL</string>
-    <key>Program</key>
-    <string>$EXECUTABLE</string>
+    <!-- Launch via 'open', not the raw binary: a Tauri/Cocoa app started
+         straight from its executable under launchd has no proper GUI session
+         and self-terminates after ~15-30s. 'open -W' gives it a real
+         LaunchServices session and blocks for the app's lifetime, so
+         KeepAlive tracks the app. Env comes from 'launchctl setenv' (below) —
+         'open -W -a' does not forward a plist's EnvironmentVariables. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-W</string>
+        <string>-a</string>
+        <string>$APP_PATH</string>
+    </array>
     <key>RunAtLoad</key>
     <true/>
-    <!-- Always relaunch. The app has tauri-plugin-single-instance, so a Finder
-         launch just forwards to this one; a "Quit SWARM" from the tray is
-         relaunched here on the right port within seconds. To actually stop the
-         service: launchctl bootout gui/$UID/app.swarm.server -->
+    <!-- Always relaunch. tauri-plugin-single-instance makes a Finder launch
+         forward to this one; a "Quit SWARM" from the tray is relaunched here
+         within seconds. To actually stop the service:
+           launchctl bootout gui/$UID/app.swarm.server -->
     <key>KeepAlive</key>
     <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>SWARM_PEER_BIND</key>
-        <string>0.0.0.0:$PEER_PORT</string>
-        <key>SWARM_HTTP_MEDIA_BIND</key>
-        <string>0.0.0.0:$HTTP_MEDIA_PORT</string>
-        <key>SWARM_FFMPEG_PATH</key>
-        <string>$ffmpeg_bin</string>
-        <key>PATH</key>
-        <string>$ffmpeg_dir:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>RUST_LOG</key>
-        <string>info</string>
-    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>$OUT_LOG</string>
     <key>StandardErrorPath</key>
