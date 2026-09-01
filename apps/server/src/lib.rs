@@ -805,6 +805,26 @@ impl ServerCore {
             .set_upload_budget_enabled(enabled);
     }
 
+    /// Live operator override for which H.264 encoder transcodes use.
+    pub fn set_video_encoder_mode(&self, mode: swarm_media::transcode::VideoEncoderMode) {
+        self.service.transcode_manager().set_video_encoder_mode(mode);
+    }
+
+    /// Live server-imposed cap on transcode output height (`0` = no cap).
+    pub fn set_max_transcode_height(&self, height: u32) {
+        self.service
+            .transcode_manager()
+            .set_max_transcode_height(height);
+    }
+
+    /// Live HLS segment length in seconds (clamped to >= 2). Affects sessions
+    /// negotiated after the change.
+    pub fn set_hls_segment_seconds(&self, seconds: u32) {
+        self.service
+            .transcode_manager()
+            .set_hls_segment_seconds(seconds);
+    }
+
     /// Live opt-in for the server-local artwork read-through cache.
     pub fn set_artwork_disk_cache_enabled(&self, enabled: bool) {
         self.service.set_artwork_disk_cache_enabled(enabled);
@@ -1494,6 +1514,19 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
             )
         })
         .unwrap_or(false);
+    let video_encoder_mode = std::env::var("SWARM_VIDEO_ENCODER")
+        .ok()
+        .map(|value| swarm_media::transcode::VideoEncoderMode::from_str_lenient(&value))
+        .unwrap_or_default();
+    let max_transcode_height = std::env::var("SWARM_MAX_TRANSCODE_HEIGHT")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let segment_duration_secs = std::env::var("SWARM_HLS_SEGMENT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|value| value.max(2))
+        .unwrap_or(4);
     TranscodeConfig {
         enabled: !disabled,
         ffmpeg_path: PathBuf::from(
@@ -1504,6 +1537,8 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
         reserve_percent,
         max_sessions,
         idle_timeout: std::time::Duration::from_secs(300),
-        segment_duration_secs: 4,
+        segment_duration_secs,
+        video_encoder_mode,
+        max_transcode_height,
     }
 }

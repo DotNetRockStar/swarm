@@ -335,7 +335,7 @@ pub struct CastMember {
 
 /// ffprobe-derived stream facts captured at scan time; feeds the direct-play
 /// decision without touching the file again.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VideoStreamInfo {
     pub codec: String,
     pub width: u32,
@@ -344,6 +344,18 @@ pub struct VideoStreamInfo {
     pub level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u64>,
+    /// ffprobe `profile` — `"High"`, `"Main 10"`, `"Main"`. Lets the
+    /// direct-play/remux check reject a 10-bit stream a client only decodes
+    /// in 8-bit. Absent on library rows scanned before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Luma bit depth (`8`, `10`, `12`) derived from the pixel format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<u8>,
+    /// `true` when the transfer characteristics are PQ or HLG — the stream
+    /// must be tone-mapped for an SDR-only client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,6 +484,7 @@ mod tests {
                     height: 1080,
                     level: Some("4.1".into()),
                     bitrate: Some(8_000_000),
+                    ..Default::default()
                 }),
                 audio: Some(AudioStreamInfo {
                     codec: "aac".into(),

@@ -140,7 +140,7 @@ stops it, and `launchctl bootout gui/$UID/app.swarm.server` stops the service.
 The library, TV pairings, and settings carry over (same `<app data dir>`). It
 is LAN-only; internet access still needs a compiled-in `SWARM_RENDEZVOUS_URL`.
 
-The desktop app persists media, scraper, streaming, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, and `SWARM_TRANSCODING_DISABLED`.
+The desktop app persists media, scraper, streaming, transcoding, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, `SWARM_TRANSCODING_DISABLED`, `SWARM_VIDEO_ENCODER`, `SWARM_MAX_TRANSCODE_HEIGHT`, and `SWARM_HLS_SEGMENT_SECONDS`.
 
 On macOS, media roots can connect directly to a NAS from either first-run
 onboarding or **Details → Media roots**. Enter the SMB server, share name, and
@@ -163,6 +163,21 @@ Direct play (no transcode) has no such floor — it only needs the source
 file's own bitrate to fit the pool.
 FFmpeg and ffprobe must be installed on the media server; set
 `SWARM_FFMPEG_PATH` when `ffmpeg` is not on `PATH`.
+
+A transcode only runs when the client genuinely can't play the source: when
+the client's codec, resolution, bit depth, HDR, and level all fit, playback
+is direct, and on LAN a source the client can decode but whose container or
+audio track needs changing is remuxed with `-c:v copy` (no re-encode). The TV
+client probes its own decoders (`MediaCodecList`) and display (HDR, panel
+resolution) at startup and advertises the result, so an HEVC/4K/HDR-capable
+Fire TV receives those sources untouched. When a transcode is unavoidable,
+**Details → Transcoding** exposes: the video encoder (`SWARM_VIDEO_ENCODER` =
+`auto` \| `hardware` \| `software`; `auto` uses the hardware VideoToolbox
+encoder on macOS when FFmpeg has it and it has not failed recently), a
+resolution ceiling (`SWARM_MAX_TRANSCODE_HEIGHT`, `0` = no cap), and the HLS
+segment length (`SWARM_HLS_SEGMENT_SECONDS`, default `4`, minimum `2` —
+shorter recovers from a stall faster). Multichannel audio the client lists is
+copied or transcoded to AC-3 rather than always downmixed to stereo.
 
 Local English subtitle generation is optional under **Details → Local
 subtitles**. Enabling it downloads and verifies the official 466 MiB

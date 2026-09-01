@@ -37,7 +37,54 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIEW_DURATION_SECS: u64 = 32;
 const MAX_HLS_VIDEO_RENDITIONS: usize = 3;
 
-#[derive(Debug, Clone)]
+/// Which H.264 encoder the transcoder should use. `Auto` picks the hardware
+/// VideoToolbox encoder on macOS when FFmpeg advertises it and it has not
+/// failed recently; the two `Force*` variants pin the choice for operators
+/// working around a driver bug or a CPU-starved host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEncoderMode {
+    #[default]
+    Auto,
+    Hardware,
+    Software,
+}
+
+impl VideoEncoderMode {
+    pub fn from_str_lenient(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hardware" | "videotoolbox" | "hw" => Self::Hardware,
+            "software" | "libx264" | "sw" | "x264" => Self::Software,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Hardware => "hardware",
+            Self::Software => "software",
+        }
+    }
+
+    fn to_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Hardware => 1,
+            Self::Software => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Hardware,
+            2 => Self::Software,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TranscodeConfig {
     pub enabled: bool,
     pub ffmpeg_path: PathBuf,
@@ -50,6 +97,11 @@ pub struct TranscodeConfig {
     pub max_sessions: usize,
     pub idle_timeout: Duration,
     pub segment_duration_secs: u32,
+    /// Operator override for encoder selection.
+    pub video_encoder_mode: VideoEncoderMode,
+    /// Hard ceiling on transcode output height regardless of what the client
+    /// advertises. `0` means "no server-imposed cap" (source/client-limited).
+    pub max_transcode_height: u32,
 }
 
 impl TranscodeConfig {
@@ -68,9 +120,24 @@ impl TranscodeConfig {
             max_sessions: 2,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            video_encoder_mode: VideoEncoderMode::Auto,
+            max_transcode_height: 0,
         }
     }
 }
+
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How long a VideoToolbox failure suppresses hardware encoding in `Auto`
+/// mode before the next session tries hardware again. Long enough to ride out
+/// a transient session-pool exhaustion, short enough that a machine that has
+/// recovered is not stuck on software for the rest of the process's life.
+const VIDEO_TOOLBOX_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranscodeError {
@@ -112,6 +179,10 @@ struct Rendition {
 enum VideoEncoder {
     VideoToolbox,
     Libx264 { threads_per_rendition: usize },
+    /// Remux only — the source video track is already something the client
+    /// decodes, so it is copied bit-for-bit into the HLS container and no
+    /// encoder runs. Set via `encoder_override`, never picked automatically.
+    Copy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +212,12 @@ struct AudioMapEntry {
     name: String,
     language: Option<String>,
     is_default: bool,
+    /// ffprobe `codec_name` for this track — drives the copy-vs-transcode
+    /// decision. Empty when the probe could not name it (transcode to AAC).
+    codec: String,
+    /// Channel count; `0` when unknown. `> 2` is what makes a track worth
+    /// keeping instead of downmixing.
+    channels: u32,
 }
 
 fn sanitize_audio_tag(raw: &str) -> Option<String> {
@@ -164,6 +241,8 @@ fn audio_map_entries(options: Vec<AudioStreamOption>) -> Vec<AudioMapEntry> {
             name: "und".to_string(),
             language: None,
             is_default: true,
+            codec: String::new(),
+            channels: 0,
         }];
     }
     let mut seen: HashMap<String, u32> = HashMap::new();
@@ -187,6 +266,8 @@ fn audio_map_entries(options: Vec<AudioStreamOption>) -> Vec<AudioMapEntry> {
                 name,
                 language: option.language,
                 is_default: option.is_preferred,
+                codec: option.codec,
+                channels: option.channels,
             }
         })
         .collect();
@@ -267,10 +348,26 @@ fn video_variants(
     source_height: u32,
     preferences: &PlaybackPreferences,
     client_limit: u64,
+    server_height_cap: u32,
 ) -> Vec<Rendition> {
+    // `0` means the operator set no server-side ceiling. Otherwise it caps
+    // both dimensions (16:9 rungs, so a height cap bounds width too).
+    let max_height = if server_height_cap == 0 {
+        preferences.capabilities.max_height
+    } else {
+        preferences.capabilities.max_height.min(server_height_cap)
+    };
+    let max_width = if server_height_cap == 0 {
+        preferences.capabilities.max_width
+    } else {
+        preferences
+            .capabilities
+            .max_width
+            .min(server_height_cap.saturating_mul(16) / 9)
+    };
     let eligible = |rendition: &&Rendition| {
-        rendition.width <= preferences.capabilities.max_width
-            && rendition.height <= preferences.capabilities.max_height
+        rendition.width <= max_width
+            && rendition.height <= max_height
             // The lowest HLS rung is a 640x360 *bounding box*. A source can
             // legitimately be shorter than 360 while still being wider than
             // 640 (real example: The Aviator AVI is 688x288); FFmpeg's
@@ -463,7 +560,19 @@ pub struct TranscodeManager {
     state: Mutex<State>,
     global_rate_limiter: Arc<SessionRateLimiter>,
     video_toolbox_available: tokio::sync::OnceCell<bool>,
-    video_toolbox_failed: std::sync::atomic::AtomicBool,
+    /// Unix-millis of the last VideoToolbox failure; `0` = never failed. In
+    /// `Auto` mode hardware is suppressed only while this is within
+    /// `VIDEO_TOOLBOX_RETRY_COOLDOWN` of now, so a transient failure no longer
+    /// pins the process to software until restart.
+    video_toolbox_failed_at: std::sync::atomic::AtomicU64,
+    /// Live copy of `VideoEncoderMode` (as `u8`), so the dashboard toggle
+    /// takes effect on the next session without a restart.
+    video_encoder_mode: std::sync::atomic::AtomicU8,
+    /// Live copy of `TranscodeConfig::max_transcode_height`.
+    max_transcode_height: std::sync::atomic::AtomicU32,
+    /// Live copy of `TranscodeConfig::segment_duration_secs`; applies to
+    /// sessions started after a change (in-flight sessions keep their value).
+    segment_seconds: std::sync::atomic::AtomicU32,
 }
 
 impl TranscodeManager {
@@ -471,6 +580,12 @@ impl TranscodeManager {
         cleanup_stale_session_dirs(&config.session_dir);
         let global_rate_limiter = Arc::new(SessionRateLimiter::new(config.usable_upload_bps()));
         let max_upload_bps = std::sync::atomic::AtomicU64::new(config.max_upload_bps);
+        let video_encoder_mode =
+            std::sync::atomic::AtomicU8::new(config.video_encoder_mode.to_u8());
+        let max_transcode_height =
+            std::sync::atomic::AtomicU32::new(config.max_transcode_height);
+        let segment_seconds =
+            std::sync::atomic::AtomicU32::new(config.segment_duration_secs.max(2));
         let manager = Arc::new(Self {
             config,
             max_upload_bps,
@@ -478,7 +593,10 @@ impl TranscodeManager {
             state: Mutex::new(State::default()),
             global_rate_limiter,
             video_toolbox_available: tokio::sync::OnceCell::new(),
-            video_toolbox_failed: std::sync::atomic::AtomicBool::new(false),
+            video_toolbox_failed_at: std::sync::atomic::AtomicU64::new(0),
+            video_encoder_mode,
+            max_transcode_height,
+            segment_seconds,
         });
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&manager);
@@ -518,6 +636,48 @@ impl TranscodeManager {
             } else {
                 0
             });
+    }
+
+    /// Live operator override for encoder selection (dashboard toggle).
+    pub fn set_video_encoder_mode(&self, mode: VideoEncoderMode) {
+        self.video_encoder_mode
+            .store(mode.to_u8(), std::sync::atomic::Ordering::Relaxed);
+        // A deliberate mode change is a fresh start — clear any lingering
+        // hardware-failure suppression so `Auto`/`Hardware` retries at once.
+        self.video_toolbox_failed_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn video_encoder_mode(&self) -> VideoEncoderMode {
+        VideoEncoderMode::from_u8(
+            self.video_encoder_mode
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Live cap on transcode output height; `0` disables the server-imposed
+    /// ceiling. Only affects sessions negotiated after the change.
+    pub fn set_max_transcode_height(&self, height: u32) {
+        self.max_transcode_height
+            .store(height, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn max_transcode_height(&self) -> u32 {
+        self.max_transcode_height
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Live HLS segment length in seconds (clamped to >= 2). Applies to
+    /// sessions started after the change; in-flight FFmpeg keeps its value.
+    pub fn set_hls_segment_seconds(&self, seconds: u32) {
+        self.segment_seconds
+            .store(seconds.max(2), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn segment_seconds(&self) -> u32 {
+        self.segment_seconds
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(2)
     }
 
     pub fn upload_budget_enabled(&self) -> bool {
@@ -664,6 +824,8 @@ impl TranscodeManager {
             return Err(TranscodeError::Unsupported);
         }
 
+        let client_audio_codecs = preferences.capabilities.audio_codecs.clone();
+
         if entry.kind == MediaKind::Track {
             let audio_bps = 192_000u64.min(client_limit);
             if audio_bps < 96_000 {
@@ -682,6 +844,48 @@ impl TranscodeManager {
                     },
                     preferences.preview,
                     owner,
+                    None,
+                    &client_audio_codecs,
+                )
+                .await;
+        }
+
+        // The client can already decode this video track as-is — only the
+        // container or an audio codec forced a transcode. Copy the video into
+        // HLS instead of burning an encoder on it. Restricted to LAN: a remote
+        // client still wants a scaled adaptive ladder for bandwidth
+        // adaptivity, whereas on LAN bandwidth is a non-issue and the only
+        // thing a transcode buys is wasted CPU. Never for previews, which want
+        // the smallest possible first segment.
+        if is_lan
+            && !preferences.preview
+            && remux_video_compatible(entry, preferences, client_limit)
+        {
+            let video = entry.video.as_ref().expect("remux_video_compatible checked video");
+            let reserved_bps = direct_peak_bps(entry).unwrap_or(client_limit);
+            let source_rendition = Rendition {
+                name: "source",
+                width: video.width,
+                height: video.height,
+                average_video_bps: reserved_bps,
+                peak_video_bps: reserved_bps,
+                audio_bps: 192_000,
+            };
+            return self
+                .start_hls(
+                    entry,
+                    media_path,
+                    preferences.start_position_secs,
+                    std::slice::from_ref(&source_rendition),
+                    HlsReservation {
+                        reserved_bps,
+                        enforce_budget,
+                        budget_exempt: is_lan,
+                    },
+                    preferences.preview,
+                    owner,
+                    Some(VideoEncoder::Copy),
+                    &client_audio_codecs,
                 )
                 .await;
         }
@@ -691,16 +895,24 @@ impl TranscodeManager {
             .as_ref()
             .map(|video| video.height)
             .unwrap_or(preferences.capabilities.max_height);
-        let mut variants = video_variants(source_height, preferences, client_limit);
+        let mut variants = video_variants(
+            source_height,
+            preferences,
+            client_limit,
+            self.max_transcode_height(),
+        );
         if variants.is_empty() {
             return Err(TranscodeError::Bandwidth);
         }
-        // An on-LAN player does not need an adaptive upload ladder. Encoding
-        // only the best compatible rendition gets the first playable segment
-        // out promptly and avoids multiplying decoder/encoder work on the
-        // desktop, while remote clients retain the full adaptive ladder.
-        if is_lan && !preferences.preview {
+        // An on-LAN player does not need the full upload ladder, but it does
+        // need somewhere to adapt down to when the encoder can't keep
+        // real-time — a single rung dead-ends in a hard playback error
+        // instead of degrading. Keep the best rung plus the lowest as an
+        // escape hatch; drop the intermediate ones.
+        if is_lan && !preferences.preview && variants.len() > 2 {
+            let lowest = variants[variants.len() - 1];
             variants.truncate(1);
+            variants.push(lowest);
         }
         // LADDER is high-to-low. The first entry is the reservation ceiling;
         // all remaining entries let ExoPlayer adapt downward without using
@@ -718,6 +930,8 @@ impl TranscodeManager {
             },
             preferences.preview,
             owner,
+            None,
+            &client_audio_codecs,
         )
         .await
     }
@@ -915,6 +1129,7 @@ impl TranscodeManager {
         Self::cleanup_removed_session(removed);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_hls(
         &self,
         entry: &EntryRecord,
@@ -924,6 +1139,8 @@ impl TranscodeManager {
         reservation: HlsReservation,
         preview: bool,
         owner: Option<&str>,
+        encoder_override: Option<VideoEncoder>,
+        client_audio_codecs: &[String],
     ) -> Result<PlaybackPlan, TranscodeError> {
         let HlsReservation {
             reserved_bps,
@@ -1005,6 +1222,8 @@ impl TranscodeManager {
                 reserved_bps,
                 &directory,
                 preview,
+                encoder_override,
+                client_audio_codecs,
                 &cancelled,
             )
             .await;
@@ -1064,6 +1283,8 @@ impl TranscodeManager {
         reserved_bps: u64,
         directory: &Path,
         preview: bool,
+        encoder_override: Option<VideoEncoder>,
+        client_audio_codecs: &[String],
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Child, TranscodeError> {
         let has_audio = entry.audio.is_some();
@@ -1086,6 +1307,12 @@ impl TranscodeManager {
                 name: "audio".to_string(),
                 language: None,
                 is_default: true,
+                codec: entry
+                    .audio
+                    .as_ref()
+                    .map(|audio| audio.codec.clone())
+                    .unwrap_or_default(),
+                channels: entry.audio.as_ref().map(|audio| audio.channels).unwrap_or(0),
             }]
         } else {
             let options = tokio::time::timeout(
@@ -1102,7 +1329,10 @@ impl TranscodeManager {
             return Err(TranscodeError::Superseded);
         }
 
-        let encoder = self.preferred_video_encoder(variants.len()).await;
+        let encoder = match encoder_override {
+            Some(encoder) => encoder,
+            None => self.preferred_video_encoder(variants.len()).await,
+        };
         if cancelled.load(Ordering::Relaxed) {
             return Err(TranscodeError::Superseded);
         }
@@ -1117,6 +1347,7 @@ impl TranscodeManager {
                 has_audio,
                 &audio_tracks,
                 encoder,
+                client_audio_codecs,
                 cancelled,
             )
             .await;
@@ -1129,10 +1360,11 @@ impl TranscodeManager {
 
         // An encoder can be advertised by FFmpeg but unavailable at runtime
         // (for example, a temporarily exhausted VideoToolbox session pool).
-        // Remember the failure for this server process, preserve its log, and
-        // retry the same session with the bounded portable encoder.
-        self.video_toolbox_failed
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Timestamp the failure so `Auto` mode backs off hardware for a
+        // cooldown window (not forever), preserve its log, and retry this
+        // session with the bounded portable encoder.
+        self.video_toolbox_failed_at
+            .store(now_unix_millis(), std::sync::atomic::Ordering::Relaxed);
         reset_hls_attempt(directory)?;
         self.spawn_ffmpeg_attempt(
             media_path,
@@ -1144,40 +1376,73 @@ impl TranscodeManager {
             has_audio,
             &audio_tracks,
             self.software_video_encoder(variants.len()),
+            client_audio_codecs,
             cancelled,
         )
         .await
     }
 
-    async fn preferred_video_encoder(&self, rendition_count: usize) -> VideoEncoder {
-        if rendition_count > 0
-            && cfg!(target_os = "macos")
-            && !self
-                .video_toolbox_failed
-                .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            let available = self
-                .video_toolbox_available
-                .get_or_init(|| async {
-                    let output = tokio::time::timeout(
-                        Duration::from_secs(3),
-                        Command::new(&self.config.ffmpeg_path)
-                            .args(["-hide_banner", "-encoders"])
-                            .output(),
-                    )
-                    .await;
-                    matches!(
-                        output,
-                        Ok(Ok(output)) if output.status.success()
-                            && encoder_listing_has_videotoolbox(&output.stdout)
-                    )
-                })
+    /// `true` while a recent VideoToolbox failure should still suppress
+    /// hardware encoding in `Auto` mode.
+    fn video_toolbox_in_cooldown(&self) -> bool {
+        let failed_at = self
+            .video_toolbox_failed_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        failed_at != 0
+            && now_unix_millis().saturating_sub(failed_at)
+                < VIDEO_TOOLBOX_RETRY_COOLDOWN.as_millis() as u64
+    }
+
+    async fn ffmpeg_lists_videotoolbox(&self) -> bool {
+        *self
+            .video_toolbox_available
+            .get_or_init(|| async {
+                let output = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    Command::new(&self.config.ffmpeg_path)
+                        .args(["-hide_banner", "-encoders"])
+                        .output(),
+                )
                 .await;
-            if *available {
-                return VideoEncoder::VideoToolbox;
+                matches!(
+                    output,
+                    Ok(Ok(output)) if output.status.success()
+                        && encoder_listing_has_videotoolbox(&output.stdout)
+                )
+            })
+            .await
+    }
+
+    async fn preferred_video_encoder(&self, rendition_count: usize) -> VideoEncoder {
+        if rendition_count == 0 {
+            return self.software_video_encoder(rendition_count);
+        }
+        match self.video_encoder_mode() {
+            VideoEncoderMode::Software => self.software_video_encoder(rendition_count),
+            VideoEncoderMode::Hardware => {
+                // Operator pinned hardware — honor it whenever FFmpeg has the
+                // encoder at all, ignoring the auto-mode cooldown. A genuine
+                // spawn failure still falls back per-attempt in `spawn_ffmpeg`.
+                if self.ffmpeg_lists_videotoolbox().await {
+                    VideoEncoder::VideoToolbox
+                } else {
+                    tracing::warn!(
+                        "video encoder forced to hardware but this FFmpeg has no h264_videotoolbox; using libx264"
+                    );
+                    self.software_video_encoder(rendition_count)
+                }
+            }
+            VideoEncoderMode::Auto => {
+                if cfg!(target_os = "macos")
+                    && !self.video_toolbox_in_cooldown()
+                    && self.ffmpeg_lists_videotoolbox().await
+                {
+                    VideoEncoder::VideoToolbox
+                } else {
+                    self.software_video_encoder(rendition_count)
+                }
             }
         }
-        self.software_video_encoder(rendition_count)
     }
 
     fn software_video_encoder(&self, rendition_count: usize) -> VideoEncoder {
@@ -1204,6 +1469,7 @@ impl TranscodeManager {
         has_audio: bool,
         audio_tracks: &[AudioMapEntry],
         encoder: VideoEncoder,
+        client_audio_codecs: &[String],
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Child, TranscodeError> {
         let log_path = directory.join("ffmpeg.log");
@@ -1234,6 +1500,8 @@ impl TranscodeManager {
                 name: "audio".to_string(),
                 language: None,
                 is_default: true,
+                codec: String::new(),
+                channels: 0,
             });
             command
                 .arg("-vn")
@@ -1256,89 +1524,91 @@ impl TranscodeManager {
                 std::fs::create_dir_all(directory.join(format!("v{}", audio.name)))
                     .map_err(TranscodeError::Workspace)?;
             }
-            let split_labels = (0..variants.len())
-                .map(|index| format!("[split{index}]"))
-                .collect::<String>();
-            let mut filter = format!("[0:v:0]split={}{};", variants.len(), split_labels);
-            for (index, rendition) in variants.iter().enumerate() {
-                filter.push_str(&format!(
-                    "[split{index}]scale=w={}:h={}:force_original_aspect_ratio=decrease:force_divisible_by=2[v{index}];",
-                    rendition.width, rendition.height
-                ));
-            }
-            filter.pop();
-            command
-                .arg("-filter_complex_threads")
-                .arg("2")
-                .arg("-filter_complex")
-                .arg(filter);
-            for (index, rendition) in variants.iter().enumerate() {
-                command.arg("-map").arg(format!("[v{index}]"));
-                command.arg(format!("-c:v:{index}")).arg(match encoder {
-                    VideoEncoder::VideoToolbox => "h264_videotoolbox",
-                    VideoEncoder::Libx264 { .. } => "libx264",
-                });
-                if let VideoEncoder::Libx264 {
-                    threads_per_rendition,
-                } = encoder
-                {
-                    command
-                        .arg(format!("-preset:v:{index}"))
-                        .arg(if preview { "ultrafast" } else { "veryfast" })
-                        .arg(format!("-threads:v:{index}"))
-                        .arg(threads_per_rendition.to_string());
-                    if preview {
-                        command.arg(format!("-tune:v:{index}")).arg("zerolatency");
-                    }
+            if encoder == VideoEncoder::Copy {
+                // Remux: the client already decodes this exact track, so it is
+                // copied bit-for-bit — no scale filter, no encoder. `variants`
+                // holds the single synthetic "source" rung.
+                command
+                    .arg("-map")
+                    .arg("0:v:0")
+                    .arg("-c:v:0")
+                    .arg("copy");
+            } else {
+                let split_labels = (0..variants.len())
+                    .map(|index| format!("[split{index}]"))
+                    .collect::<String>();
+                let mut filter = format!("[0:v:0]split={}{};", variants.len(), split_labels);
+                for (index, rendition) in variants.iter().enumerate() {
+                    filter.push_str(&format!(
+                        "[split{index}]scale=w={}:h={}:force_original_aspect_ratio=decrease:force_divisible_by=2[v{index}];",
+                        rendition.width, rendition.height
+                    ));
                 }
+                filter.pop();
                 command
-                    .arg(format!("-profile:v:{index}"))
-                    .arg("high")
-                    .arg(format!("-level:v:{index}"))
-                    .arg("4.1")
-                    .arg(format!("-pix_fmt:v:{index}"))
-                    .arg("yuv420p");
-                command
-                    .arg(format!("-b:v:{index}"))
-                    .arg(rendition.average_video_bps.to_string())
-                    .arg(format!("-maxrate:v:{index}"))
-                    .arg(rendition.peak_video_bps.to_string())
-                    .arg(format!("-bufsize:v:{index}"))
-                    .arg((rendition.peak_video_bps * 2).to_string());
-                if matches!(encoder, VideoEncoder::Libx264 { .. }) {
-                    command.arg(format!("-sc_threshold:v:{index}")).arg("0");
-                }
-                command
-                    .arg(format!("-force_key_frames:v:{index}"))
-                    .arg(if preview {
-                        "expr:gte(t,n_forced*1)"
-                    } else {
-                        "expr:gte(t,n_forced*2)"
+                    .arg("-filter_complex_threads")
+                    .arg("2")
+                    .arg("-filter_complex")
+                    .arg(filter);
+                for (index, rendition) in variants.iter().enumerate() {
+                    command.arg("-map").arg(format!("[v{index}]"));
+                    command.arg(format!("-c:v:{index}")).arg(match encoder {
+                        VideoEncoder::VideoToolbox => "h264_videotoolbox",
+                        VideoEncoder::Libx264 { .. } => "libx264",
+                        VideoEncoder::Copy => unreachable!("copy handled above"),
                     });
-            }
-            // Every embedded audio track is transcoded exactly once and
-            // shared across all video renditions through a common `agroup`
-            // below, instead of the old one-audio-encode-per-video-rendition
-            // scheme — that duplication only ever carried the single
-            // server-picked track anyway, so a viewer could never choose a
-            // different one (#55). The top rung's audio bitrate covers every
-            // track since HLS only ever streams whichever one is currently
-            // selected, never all of them at once.
-            if has_audio {
-                let audio_bps = variants[0].audio_bps;
-                for (index, audio) in audio_tracks.iter().enumerate() {
+                    if let VideoEncoder::Libx264 {
+                        threads_per_rendition,
+                    } = encoder
+                    {
+                        command
+                            .arg(format!("-preset:v:{index}"))
+                            .arg(if preview { "ultrafast" } else { "veryfast" })
+                            .arg(format!("-threads:v:{index}"))
+                            .arg(threads_per_rendition.to_string());
+                        if preview {
+                            command.arg(format!("-tune:v:{index}")).arg("zerolatency");
+                        }
+                    }
                     command
-                        .arg("-map")
-                        .arg(&audio.source_map)
-                        .arg(format!("-c:a:{index}"))
-                        .arg("aac")
-                        .arg(format!("-b:a:{index}"))
-                        .arg(audio_bps.to_string())
-                        .arg(format!("-ac:a:{index}"))
-                        .arg("2")
-                        .arg(format!("-ar:a:{index}"))
-                        .arg("48000");
+                        .arg(format!("-profile:v:{index}"))
+                        .arg("high")
+                        .arg(format!("-level:v:{index}"))
+                        .arg("4.1")
+                        .arg(format!("-pix_fmt:v:{index}"))
+                        .arg("yuv420p");
+                    command
+                        .arg(format!("-b:v:{index}"))
+                        .arg(rendition.average_video_bps.to_string())
+                        .arg(format!("-maxrate:v:{index}"))
+                        .arg(rendition.peak_video_bps.to_string())
+                        .arg(format!("-bufsize:v:{index}"))
+                        .arg((rendition.peak_video_bps * 2).to_string());
+                    if matches!(encoder, VideoEncoder::Libx264 { .. }) {
+                        command.arg(format!("-sc_threshold:v:{index}")).arg("0");
+                    }
+                    command
+                        .arg(format!("-force_key_frames:v:{index}"))
+                        .arg(if preview {
+                            "expr:gte(t,n_forced*1)"
+                        } else {
+                            "expr:gte(t,n_forced*2)"
+                        });
                 }
+            }
+            // Every embedded audio track is mapped exactly once and shared
+            // across all video renditions through a common `agroup` below,
+            // instead of the old one-audio-encode-per-video-rendition scheme
+            // (#55). Each track is copied when the client can take it as-is,
+            // kept as AC-3 5.1 when only the codec needs changing, or downmixed
+            // to AAC stereo as the universal fallback.
+            if has_audio {
+                append_audio_track_args(
+                    &mut command,
+                    audio_tracks,
+                    client_audio_codecs,
+                    variants[0].audio_bps,
+                );
             }
         }
 
@@ -1378,7 +1648,7 @@ impl TranscodeManager {
             .arg(if preview {
                 "1".to_string()
             } else {
-                self.config.segment_duration_secs.max(2).to_string()
+                self.segment_seconds().to_string()
             })
             .arg("-hls_init_time")
             .arg("1")
@@ -1699,11 +1969,18 @@ fn direct_compatible(entry: &EntryRecord, preferences: &PlaybackPreferences) -> 
             if video.width > capabilities.max_width || video.height > capabilities.max_height {
                 return false;
             }
-            if !capabilities
+            let canonical = canonical_video_codec(&video.codec);
+            let Some(token) = capabilities
                 .video_codecs
                 .iter()
-                .any(|supported| codec_matches(supported, &video.codec))
-            {
+                .find(|supported| codec_matches(supported, &canonical))
+            else {
+                return false;
+            };
+            if !source_level_within(video.level.as_deref(), token) {
+                return false;
+            }
+            if requires_video_reencode_for_client(video, Some(token), capabilities.hdr) {
                 return false;
             }
         }
@@ -1726,6 +2003,189 @@ fn codec_matches(supported: &str, actual: &str) -> bool {
         .next()
         .unwrap_or(supported)
         .eq_ignore_ascii_case(actual)
+}
+
+/// Fold ffprobe's various names for the same codec down to the token the
+/// capability profile uses (`h264`, `hevc`).
+fn canonical_video_codec(codec: &str) -> String {
+    match codec.trim().to_ascii_lowercase().as_str() {
+        "avc" | "avc1" | "h264" | "x264" => "h264".to_string(),
+        "hevc" | "h265" | "hev1" | "hvc1" | "x265" => "hevc".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `"4.2"`/`"42"`/`"5.1"` → `42`/`42`/`51`; `None` when unparseable.
+fn parse_codec_level(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    if let Some((major, minor)) = raw.split_once('.') {
+        Some(major.trim().parse::<u32>().ok()? * 10 + minor.trim().parse::<u32>().ok()?)
+    } else {
+        raw.parse::<u32>().ok()
+    }
+}
+
+/// A client codec token carries an optional `@level` suffix (`h264:high@4.2`).
+/// Permissive when either side's level is unknown — ExoPlayer copes or adapts.
+fn source_level_within(source_level: Option<&str>, client_token: &str) -> bool {
+    let Some(max) = client_token.rsplit('@').next().and_then(parse_codec_level) else {
+        return true;
+    };
+    // `rsplit('@').next()` on a token with no `@` yields the whole token,
+    // which `parse_codec_level` rejects — so we only get here with a real cap.
+    match source_level.and_then(parse_codec_level) {
+        Some(source) => source <= max,
+        None => true,
+    }
+}
+
+fn client_token_allows_high_bit_depth(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    ["main10", "main 10", "high10", "high 10", "10le", "hdr", "p10"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// `true` when re-encoding this stream is unavoidable for correctness — HDR
+/// to an SDR-only client, or a bit depth the client's decoder profile can't
+/// take. Used to bar both direct-play and remux.
+fn requires_video_reencode_for_client(
+    video: &swarm_core::peer::VideoStreamInfo,
+    client_token: Option<&str>,
+    client_hdr: bool,
+) -> bool {
+    if video.hdr == Some(true) && !client_hdr {
+        return true;
+    }
+    if video.bit_depth.unwrap_or(8) > 8
+        && !client_token.is_some_and(client_token_allows_high_bit_depth)
+    {
+        return true;
+    }
+    false
+}
+
+/// The client can already decode this exact video track (codec, resolution,
+/// level, bit depth, HDR) — only the container or an audio codec is why
+/// direct-play was refused. Copy the video into HLS instead of re-encoding.
+fn remux_video_compatible(
+    entry: &EntryRecord,
+    preferences: &PlaybackPreferences,
+    client_limit: u64,
+) -> bool {
+    let Some(video) = entry.video.as_ref() else {
+        return false;
+    };
+    let canonical = canonical_video_codec(&video.codec);
+    // fMP4 (our HLS segment type) carries H.264 and HEVC; nothing else.
+    if !matches!(canonical.as_str(), "h264" | "hevc") {
+        return false;
+    }
+    let caps = &preferences.capabilities;
+    let Some(token) = caps
+        .video_codecs
+        .iter()
+        .find(|token| codec_matches(token, &canonical))
+    else {
+        return false;
+    };
+    if video.width > caps.max_width || video.height > caps.max_height {
+        return false;
+    }
+    if !source_level_within(video.level.as_deref(), token) {
+        return false;
+    }
+    if requires_video_reencode_for_client(video, Some(token), caps.hdr) {
+        return false;
+    }
+    matches!(direct_peak_bps(entry), Some(peak) if peak <= client_limit)
+}
+
+/// HLS fMP4 can carry these audio codecs untouched.
+fn audio_codec_is_fmp4_muxable(codec: &str) -> bool {
+    matches!(
+        canonical_audio_codec(codec).as_str(),
+        "aac" | "ac3" | "eac3"
+    )
+}
+
+fn canonical_audio_codec(codec: &str) -> String {
+    match codec.trim().to_ascii_lowercase().as_str() {
+        "aac" | "aac_latm" | "mp4a" => "aac".to_string(),
+        "ac3" | "ac-3" => "ac3".to_string(),
+        "eac3" | "e-ac-3" | "ec-3" => "eac3".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioDelivery {
+    /// `-c:a copy` — source track kept bit-for-bit.
+    Copy,
+    /// Transcode to AC-3 5.1 so a surround client keeps surround.
+    Ac3Surround,
+    /// Transcode to AAC-LC stereo — the universal fallback.
+    AacStereo,
+}
+
+/// Preserve surround where the client can actually take it; downmix to AAC
+/// stereo only when there is no better option or the probe told us nothing.
+fn choose_audio_delivery(
+    source_codec: &str,
+    source_channels: u32,
+    client_audio_codecs: &[String],
+) -> AudioDelivery {
+    let canonical = canonical_audio_codec(source_codec);
+    let client_supports =
+        |name: &str| client_audio_codecs.iter().any(|token| codec_matches(token, name));
+    if source_channels > 2 && audio_codec_is_fmp4_muxable(&canonical) && client_supports(&canonical)
+    {
+        return AudioDelivery::Copy;
+    }
+    if source_channels > 2 && client_supports("ac3") {
+        return AudioDelivery::Ac3Surround;
+    }
+    AudioDelivery::AacStereo
+}
+
+/// Appends `-map`/`-c:a`/… for every embedded audio track, one HLS audio
+/// rendition each (shared across the video group via `var_stream_map`).
+fn append_audio_track_args(
+    command: &mut Command,
+    audio_tracks: &[AudioMapEntry],
+    client_audio_codecs: &[String],
+    aac_bitrate: u64,
+) {
+    for (index, audio) in audio_tracks.iter().enumerate() {
+        command.arg("-map").arg(&audio.source_map);
+        match choose_audio_delivery(&audio.codec, audio.channels, client_audio_codecs) {
+            AudioDelivery::Copy => {
+                command.arg(format!("-c:a:{index}")).arg("copy");
+            }
+            AudioDelivery::Ac3Surround => {
+                command
+                    .arg(format!("-c:a:{index}"))
+                    .arg("ac3")
+                    .arg(format!("-b:a:{index}"))
+                    .arg("640000")
+                    .arg(format!("-ac:a:{index}"))
+                    .arg("6")
+                    .arg(format!("-ar:a:{index}"))
+                    .arg("48000");
+            }
+            AudioDelivery::AacStereo => {
+                command
+                    .arg(format!("-c:a:{index}"))
+                    .arg("aac")
+                    .arg(format!("-b:a:{index}"))
+                    .arg(aac_bitrate.to_string())
+                    .arg(format!("-ac:a:{index}"))
+                    .arg("2")
+                    .arg(format!("-ar:a:{index}"))
+                    .arg("48000");
+            }
+        }
+    }
 }
 
 fn session_id() -> String {
@@ -1793,6 +2253,7 @@ mod tests {
                 height: 1080,
                 level: Some("4.1".into()),
                 bitrate: Some(5_800_000),
+                ..Default::default()
             }),
             audio: Some(AudioStreamInfo {
                 codec: "aac".into(),
@@ -1831,6 +2292,7 @@ mod tests {
             max_sessions: 2,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         };
         assert_eq!(config.usable_upload_bps(), 7_000_000);
     }
@@ -2035,26 +2497,134 @@ mod tests {
     }
 
     #[test]
+    fn direct_play_rejects_hdr_and_10bit_for_an_sdr_client() {
+        let mut hdr = entry();
+        hdr.relative_path = "movies/example.mp4".into();
+        hdr.video.as_mut().unwrap().hdr = Some(true);
+        assert!(
+            !direct_compatible(&hdr, &preferences()),
+            "an HDR stream must not direct-play to an SDR-only client"
+        );
+
+        let mut ten_bit = entry();
+        ten_bit.relative_path = "movies/example.mp4".into();
+        ten_bit.video.as_mut().unwrap().bit_depth = Some(10);
+        assert!(!direct_compatible(&ten_bit, &preferences()));
+    }
+
+    #[test]
+    fn remux_compatible_when_only_the_container_blocks_direct_play() {
+        // entry() is H.264 1080p in an .mkv — direct-play is refused purely on
+        // the container, which the client cannot demux but ffmpeg can remux.
+        let mkv = {
+            let mut entry = entry();
+            entry.video.as_mut().unwrap().bitrate = Some(4_000_000);
+            entry
+        };
+        assert!(!direct_compatible(&mkv, &preferences()));
+        assert!(remux_video_compatible(&mkv, &preferences(), u64::MAX));
+    }
+
+    #[test]
+    fn remux_rejected_for_a_codec_the_client_cannot_decode() {
+        let mut mpeg4 = entry();
+        mpeg4.video.as_mut().unwrap().codec = "mpeg4".into();
+        assert!(!remux_video_compatible(&mpeg4, &preferences(), u64::MAX));
+
+        // HEVC source, HEVC-capable client → remux is on the table.
+        let mut hevc_entry = entry();
+        hevc_entry.video.as_mut().unwrap().codec = "hevc".into();
+        hevc_entry.video.as_mut().unwrap().level = Some("5.1".into());
+        hevc_entry.video.as_mut().unwrap().bitrate = Some(6_000_000);
+        let mut hevc_client = preferences();
+        hevc_client.capabilities.video_codecs = vec!["hevc:main@5.1".into()];
+        assert!(remux_video_compatible(
+            &hevc_entry,
+            &hevc_client,
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn source_level_check_is_permissive_only_when_a_bound_is_known() {
+        assert!(source_level_within(Some("4.1"), "h264:high@4.2"));
+        assert!(!source_level_within(Some("5.1"), "h264:high@4.2"));
+        assert!(source_level_within(Some("9.9"), "h264")); // no @level on the token
+        assert!(source_level_within(None, "h264:high@4.2")); // unknown source level
+    }
+
+    #[test]
+    fn audio_delivery_keeps_surround_the_client_can_take_and_downmixes_otherwise() {
+        let ac3 = vec!["aac".to_string(), "ac3".to_string()];
+        // 5.1 AC-3 to an AC-3 client → copy it.
+        assert_eq!(
+            choose_audio_delivery("ac3", 6, &ac3),
+            AudioDelivery::Copy
+        );
+        // 5.1 DTS to an AC-3 client → transcode to AC-3, not stereo AAC.
+        assert_eq!(
+            choose_audio_delivery("dts", 6, &ac3),
+            AudioDelivery::Ac3Surround
+        );
+        // 5.1 anything to an AAC-only client → stereo downmix.
+        assert_eq!(
+            choose_audio_delivery("eac3", 6, &["aac".to_string()]),
+            AudioDelivery::AacStereo
+        );
+        // Stereo source → always plain AAC stereo.
+        assert_eq!(
+            choose_audio_delivery("ac3", 2, &ac3),
+            AudioDelivery::AacStereo
+        );
+        // Probe told us nothing → safe fallback.
+        assert_eq!(
+            choose_audio_delivery("", 0, &ac3),
+            AudioDelivery::AacStereo
+        );
+    }
+
+    #[test]
+    fn lan_plan_keeps_a_low_fallback_rung() {
+        // 720p source, remote client: full ladder of three.
+        let mut source = entry();
+        source.video.as_mut().unwrap().width = 1280;
+        source.video.as_mut().unwrap().height = 720;
+        let prefs = preferences();
+        let remote = video_variants(720, &prefs, u64::MAX, 0);
+        assert_eq!(remote.len(), 3);
+        // The LAN pruning in plan() keeps the top rung plus the lowest.
+        let mut lan = remote.clone();
+        if lan.len() > 2 {
+            let lowest = lan[lan.len() - 1];
+            lan.truncate(1);
+            lan.push(lowest);
+        }
+        assert_eq!(lan.len(), 2);
+        assert_eq!(lan[0], remote[0]);
+        assert_eq!(lan[1], remote[remote.len() - 1]);
+    }
+
+    #[test]
     fn preview_uses_one_lightweight_rendition() {
         let mut prefs = preferences();
         prefs.preview = true;
         prefs.prefer_direct = false;
 
-        let variants = video_variants(1080, &prefs, u64::MAX);
+        let variants = video_variants(1080, &prefs, u64::MAX, 0);
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].name, "preview-540p");
         assert_eq!(variants[0].height, 540);
         assert_eq!(variants[0].peak_total(), 1_496_000);
 
         prefs.capabilities.max_height = 480;
-        let variants = video_variants(1080, &prefs, u64::MAX);
+        let variants = video_variants(1080, &prefs, u64::MAX, 0);
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].name, "preview-480p");
     }
 
     #[test]
     fn full_hd_ladder_uses_three_spread_out_renditions() {
-        let variants = video_variants(1080, &preferences(), u64::MAX);
+        let variants = video_variants(1080, &preferences(), u64::MAX, 0);
 
         assert_eq!(
             variants
@@ -2067,7 +2637,7 @@ mod tests {
 
     #[test]
     fn lower_resolution_sources_keep_their_intermediate_rendition() {
-        let variants = video_variants(480, &preferences(), u64::MAX);
+        let variants = video_variants(480, &preferences(), u64::MAX, 0);
 
         assert_eq!(
             variants
@@ -2100,7 +2670,7 @@ mod tests {
     fn low_height_widescreen_video_still_gets_the_lowest_hls_rendition() {
         let prefs = preferences();
 
-        let variants = video_variants(288, &prefs, u64::MAX);
+        let variants = video_variants(288, &prefs, u64::MAX, 0);
 
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].name, "360p");
@@ -2188,6 +2758,7 @@ mod tests {
             max_sessions: 3,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         });
         assert_eq!(manager.global_rate_limiter().rate_bps(), 7_000_000);
         let first = manager
@@ -2248,6 +2819,7 @@ mod tests {
             max_sessions: 3,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         });
         assert_eq!(manager.activity(), TranscodeActivity::default());
 
@@ -2326,6 +2898,7 @@ mod tests {
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         };
         let manager = TranscodeManager::new(config);
         let mut source_entry = entry();
@@ -2361,8 +2934,23 @@ mod tests {
         let lan_relative = lan_plan.path.splitn(4, '/').nth(3).unwrap();
         let lan_session = lan_plan.path.split('/').nth(2).unwrap();
         let lan_file = manager.open_hls(lan_session, lan_relative).unwrap();
-        let lan_master = std::fs::read_to_string(lan_file.path).unwrap();
+        let lan_master = std::fs::read_to_string(&lan_file.path).unwrap();
         assert_eq!(lan_master.matches("#EXT-X-STREAM-INF").count(), 1);
+        // The source is H.264 the client can already decode — on LAN it is
+        // remuxed (`-c:v copy`, single "source" rung), not re-encoded, so real
+        // ffmpeg has to accept the copy command and flush a playable segment.
+        assert!(
+            lan_master.contains("vsource/index.m3u8"),
+            "LAN plan for a client-compatible codec must remux, not transcode: {lan_master}"
+        );
+        let lan_source_playlist = std::fs::read_to_string(
+            lan_file.path.parent().unwrap().join("vsource/index.m3u8"),
+        )
+        .unwrap();
+        assert!(
+            lan_source_playlist.contains("#EXTINF"),
+            "real ffmpeg must accept `-c:v copy` and flush a segment"
+        );
         manager.finish_use(lan_session);
         manager.release(lan_session);
 
@@ -2461,6 +3049,7 @@ mod tests {
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         };
         let manager = TranscodeManager::new(config);
         let mut source_entry = entry();

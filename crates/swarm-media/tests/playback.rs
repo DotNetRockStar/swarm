@@ -59,6 +59,7 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: Some(AudioStreamInfo {
             codec: "aac".into(),
@@ -109,6 +110,7 @@ async fn playback_negotiation_returns_a_budgeted_direct_session_with_range_suppo
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         },
     );
     let negotiation = PeerRequest {
@@ -260,6 +262,7 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: Some(AudioStreamInfo {
             codec: "aac".into(),
@@ -293,6 +296,7 @@ async fn stop_releases_the_reservation_so_a_retry_no_longer_needs_the_idle_timeo
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         },
     );
     let negotiate = || PeerRequest {
@@ -394,6 +398,7 @@ async fn dropping_a_stream_body_early_still_releases_the_session() {
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: Some(AudioStreamInfo {
             codec: "aac".into(),
@@ -428,6 +433,7 @@ async fn dropping_a_stream_body_early_still_releases_the_session() {
             max_sessions: 1,
             idle_timeout: Duration::from_millis(50),
             segment_duration_secs: 4,
+            ..Default::default()
         },
     ));
     let negotiate = || PeerRequest {
@@ -573,6 +579,7 @@ async fn direct_play_sessions_are_not_limited_by_max_sessions() {
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         },
     );
 
@@ -658,6 +665,7 @@ async fn external_srt_sidecar_is_offered_and_served_as_webvtt() {
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(600_000),
+            ..Default::default()
         }),
         audio: Some(AudioStreamInfo {
             codec: "aac".into(),
@@ -707,6 +715,7 @@ async fn external_srt_sidecar_is_offered_and_served_as_webvtt() {
             max_sessions: 1,
             idle_timeout: Duration::from_secs(300),
             segment_duration_secs: 4,
+            ..Default::default()
         },
     );
     let negotiation = PeerRequest {

@@ -26,15 +26,58 @@ struct FfprobeStream {
     index: Option<usize>,
     codec_type: Option<String>,
     codec_name: Option<String>,
+    /// ffprobe usually reports this as a string ("High", "Main 10") but a few
+    /// codecs/versions emit a bare number — accept either so one odd stream
+    /// never sinks the whole probe.
+    #[serde(default, deserialize_with = "deserialize_stringy_option")]
+    profile: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     level: Option<i64>,
+    #[serde(default)]
+    pix_fmt: Option<String>,
+    #[serde(default)]
+    color_transfer: Option<String>,
     channels: Option<u32>,
     bit_rate: Option<String>,
     #[serde(default)]
     tags: FfprobeTags,
     #[serde(default)]
     disposition: FfprobeDisposition,
+}
+
+fn deserialize_stringy_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<serde_json::Value>::deserialize(deserializer)? {
+        Some(serde_json::Value::String(value)) => Some(value),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+/// 10/12-bit pixel formats (`yuv420p10le`, `p010le`, `yuv444p12le`, …) all
+/// carry the bit count as digits right after the plane layout.
+fn bit_depth_from_pix_fmt(pix_fmt: &str) -> Option<u8> {
+    if pix_fmt.contains("12") {
+        Some(12)
+    } else if pix_fmt.contains("10") {
+        Some(10)
+    } else if pix_fmt.is_empty() {
+        None
+    } else {
+        Some(8)
+    }
+}
+
+/// PQ (`smpte2084`) and HLG (`arib-std-b67`) are the two HDR transfer
+/// characteristics ffprobe reports; everything else is SDR.
+fn is_hdr_transfer(color_transfer: &str) -> bool {
+    matches!(
+        color_transfer.trim().to_ascii_lowercase().as_str(),
+        "smpte2084" | "arib-std-b67"
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -96,6 +139,20 @@ pub async fn probe(path: &Path) -> Option<MediaInfo> {
                         .as_deref()
                         .and_then(|b| b.parse().ok())
                         .or(container_bitrate),
+                    profile: stream
+                        .profile
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+                        .map(str::to_string),
+                    bit_depth: stream
+                        .pix_fmt
+                        .as_deref()
+                        .and_then(bit_depth_from_pix_fmt),
+                    hdr: stream
+                        .color_transfer
+                        .as_deref()
+                        .map(is_hdr_transfer),
                 });
             }
             Some("audio") if info.audio.is_none() => {
@@ -120,6 +177,13 @@ pub struct AudioStreamOption {
     pub index: usize,
     pub language: Option<String>,
     pub is_preferred: bool,
+    /// ffprobe `codec_name` (`aac`, `ac3`, `eac3`, `dts`, …). Empty when the
+    /// probe could not name it — the caller then transcodes rather than risk
+    /// an unsupported passthrough.
+    pub codec: String,
+    /// Channel count; `0` when unknown. `> 2` is what makes a track worth
+    /// preserving instead of downmixing to stereo.
+    pub channels: u32,
 }
 
 /// Every embedded audio stream ffmpeg can map, in container order. Empty on
@@ -135,7 +199,7 @@ pub async fn list_audio_streams(ffmpeg_path: &Path, media_path: &Path) -> Vec<Au
             "-select_streams",
             "a",
             "-show_entries",
-            "stream=index,codec_type:stream_tags=language:stream_disposition=default",
+            "stream=index,codec_type,codec_name,channels:stream_tags=language:stream_disposition=default",
         ])
         .arg(media_path)
         .output()
@@ -160,6 +224,8 @@ pub async fn list_audio_streams(ffmpeg_path: &Path, media_path: &Path) -> Vec<Au
                 index,
                 language: stream.tags.language.clone(),
                 is_preferred: Some(index) == preferred,
+                codec: stream.codec_name.clone().unwrap_or_default(),
+                channels: stream.channels.unwrap_or(0),
             })
         })
         .collect()
@@ -248,5 +314,35 @@ mod tests {
             assert!(is_english(language), "did not recognize {language}");
         }
         assert!(!is_english("spa"));
+    }
+
+    #[test]
+    fn bit_depth_reads_the_digits_in_the_pixel_format() {
+        assert_eq!(bit_depth_from_pix_fmt("yuv420p"), Some(8));
+        assert_eq!(bit_depth_from_pix_fmt("yuv420p10le"), Some(10));
+        assert_eq!(bit_depth_from_pix_fmt("p010le"), Some(10));
+        assert_eq!(bit_depth_from_pix_fmt("yuv444p12le"), Some(12));
+        assert_eq!(bit_depth_from_pix_fmt(""), None);
+    }
+
+    #[test]
+    fn hdr_transfer_matches_pq_and_hlg_only() {
+        assert!(is_hdr_transfer("smpte2084"));
+        assert!(is_hdr_transfer("arib-std-b67"));
+        assert!(is_hdr_transfer("SMPTE2084"));
+        assert!(!is_hdr_transfer("bt709"));
+        assert!(!is_hdr_transfer(""));
+    }
+
+    #[test]
+    fn a_numeric_profile_does_not_break_stream_parsing() {
+        let parsed = streams(
+            r#"{"streams":[
+                {"index":0,"codec_type":"video","codec_name":"h264","profile":578,"pix_fmt":"yuv420p10le","color_transfer":"smpte2084"}
+            ]}"#,
+        );
+        assert_eq!(parsed[0].profile.as_deref(), Some("578"));
+        assert_eq!(parsed[0].pix_fmt.as_deref(), Some("yuv420p10le"));
+        assert_eq!(parsed[0].color_transfer.as_deref(), Some("smpte2084"));
     }
 }

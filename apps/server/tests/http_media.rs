@@ -103,6 +103,7 @@ fn direct_play_entry(entry_key: &str, relative_path: &str, size: u64) -> EntryRe
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: None,
         scraped_title: None,
@@ -174,6 +175,7 @@ async fn pair_negotiate_and_range_fetch_media_over_real_http() {
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: None,
         scraped_title: None,
@@ -311,6 +313,7 @@ async fn browse_catalog_and_fetch_artwork_over_real_http() {
             height: 360,
             level: Some("4.1".into()),
             bitrate: Some(700_000),
+            ..Default::default()
         }),
         audio: None,
         scraped_title: None,

@@ -247,6 +247,13 @@ impl AppState {
                 core.set_local_transcription_enabled(settings.local_transcription_enabled);
                 core.set_transcription_pause_while_streaming(settings.transcription_pause_while_streaming);
                 core.set_transcription_skip_if_subtitles_exist(settings.transcription_skip_if_subtitles_exist);
+                core.set_video_encoder_mode(
+                    swarm_media::transcode::VideoEncoderMode::from_str_lenient(
+                        &settings.video_encoder_mode,
+                    ),
+                );
+                core.set_max_transcode_height(settings.max_transcode_height);
+                core.set_hls_segment_seconds(settings.hls_segment_seconds);
                 start_media_root_recovery(Arc::clone(&core), recovery_settings_dir.clone());
                 start_auto_library_watch(Arc::clone(&core), recovery_settings_dir);
                 if settings.mcp_enabled {
@@ -678,6 +685,9 @@ struct SettingsView {
     mcp_port: u16,
     mcp_access_token: Option<String>,
     auto_library_watch_enabled: bool,
+    video_encoder_mode: String,
+    max_transcode_height: u32,
+    hls_segment_seconds: u32,
 }
 
 #[tauri::command]
@@ -696,7 +706,62 @@ async fn get_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Set
         mcp_port: settings.mcp_port,
         mcp_access_token: settings.mcp_access_token,
         auto_library_watch_enabled: settings.auto_library_watch_enabled,
+        video_encoder_mode: settings.video_encoder_mode,
+        max_transcode_height: settings.max_transcode_height,
+        hls_segment_seconds: settings.hls_segment_seconds,
     })
+}
+
+#[tauri::command]
+async fn set_video_encoder_mode<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    mode: String,
+) -> Result<(), String> {
+    let parsed = swarm_media::transcode::VideoEncoderMode::from_str_lenient(&mode);
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.video_encoder_mode = parsed.as_str().to_string();
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    if let Some(core) = state.core.get() {
+        core.set_video_encoder_mode(parsed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_max_transcode_height<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    height: u32,
+) -> Result<(), String> {
+    // The UI offers 0 (source), 1080, 2160; accept anything and let the
+    // transcoder treat 0 as "no cap".
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.max_transcode_height = height;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    if let Some(core) = state.core.get() {
+        core.set_max_transcode_height(height);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_hls_segment_seconds<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    seconds: u32,
+) -> Result<(), String> {
+    let seconds = seconds.max(2);
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.hls_segment_seconds = seconds;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    if let Some(core) = state.core.get() {
+        core.set_hls_segment_seconds(seconds);
+    }
+    Ok(())
 }
 
 /// Takes effect on the auto-watcher's next tick (at most
@@ -2438,6 +2503,9 @@ fn main() {
             set_streaming_upload_budget_enabled,
             set_artwork_disk_cache_enabled,
             set_auto_library_watch_enabled,
+            set_video_encoder_mode,
+            set_max_transcode_height,
+            set_hls_segment_seconds,
             set_local_transcription_enabled,
             set_transcription_pause_while_streaming,
             set_transcription_skip_if_subtitles_exist,
