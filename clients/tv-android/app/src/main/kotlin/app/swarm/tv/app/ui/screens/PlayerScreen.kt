@@ -37,6 +37,7 @@ import android.content.res.ColorStateList
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageButton
 import androidx.activity.compose.BackHandler
@@ -65,6 +66,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -284,6 +286,19 @@ internal fun playbackBackAction(
     controlsVisible -> PlaybackBackAction.HIDE_CONTROLS
     else -> PlaybackBackAction.PAUSE
 }
+
+/** Media3's `PlayerControlView` parks D-pad focus on one of its own transport
+ * buttons and never hands it back when the controller hides — whether the
+ * viewer dismissed it or it simply timed out on its own after being shown
+ * mid-playback or during an episode autoplay handoff. Those buttons live
+ * outside the Compose focus tree, so the surface's `onPreviewKeyEvent` stops
+ * seeing Select and the remote looks dead until Back moves focus off the
+ * now-invisible controller. Reclaim focus for the bare video surface whenever
+ * the controller goes away and no Compose overlay legitimately owns it (#154). */
+internal fun shouldReclaimSurfaceFocusOnControllerHidden(
+    controllerVisible: Boolean,
+    overlayOwnsFocus: Boolean,
+): Boolean = !controllerVisible && !overlayOwnsFocus
 
 /** A post-start HLS stall means the selected rendition has outrun the
  * connection. Direct play has no alternate rendition, and pausing must never
@@ -872,6 +887,44 @@ fun PlayerScreen(
             applySwarmPlaybackControlColors(this)
         }
     }
+    // Focus target for the bare, playing video surface. Requested through
+    // Compose (not the native View) so the surface's onPreviewKeyEvent regains
+    // ownership of Select after the native controller — whose buttons sit
+    // outside the Compose focus tree — releases it (#154).
+    val videoSurfaceFocusRequester = remember { FocusRequester() }
+    val reclaimVideoSurfaceFocus: () -> Unit = {
+        playerView.hideController()
+        playerView.requestFocus()
+        // The requester is not attached until the surface enters composition;
+        // an early controller-hide callback must not crash playback over it.
+        runCatching { videoSurfaceFocusRequester.requestFocus() }
+        Unit
+    }
+    // The native controller hangs onto D-pad focus after it disappears — on
+    // its own timeout just as much as via Back — leaving Select landing on an
+    // invisible transport button until Back dislodges it. Pull focus back to
+    // the video surface every time the controller hides while playback (not a
+    // Compose overlay) should own the remote (#154).
+    val overlayOwnsFocus by rememberUpdatedState(
+        showPauseOverlay || showContinuePrompt || offeredIntro != null,
+    )
+    DisposableEffect(playerView) {
+        val listener = PlayerView.ControllerVisibilityListener { visibility ->
+            if (shouldReclaimSurfaceFocusOnControllerHidden(
+                    controllerVisible = visibility == View.VISIBLE,
+                    overlayOwnsFocus = overlayOwnsFocus,
+                )
+            ) {
+                reclaimVideoSurfaceFocus()
+            }
+        }
+        playerView.setControllerVisibilityListener(listener)
+        onDispose {
+            playerView.setControllerVisibilityListener(
+                null as PlayerView.ControllerVisibilityListener?,
+            )
+        }
+    }
     // Back dismisses the native playback controls before it affects the
     // video. From the bare playing surface it pauses; from the Compose pause
     // or Continue overlay it exits to the screen/card playback came from.
@@ -891,10 +944,7 @@ fun PlayerScreen(
                     continuePromptCreditsSegment?.let { dismissedCreditsSegment = it }
                     continuePromptCreditsSegment = null
                 }
-                PlaybackBackAction.HIDE_CONTROLS -> {
-                    playerView.hideController()
-                    playerView.requestFocus()
-                }
+                PlaybackBackAction.HIDE_CONTROLS -> reclaimVideoSurfaceFocus()
                 PlaybackBackAction.PAUSE -> player.pause()
             }
         },
@@ -911,8 +961,7 @@ fun PlayerScreen(
             // focus for every new session so the next Select reaches the bare
             // video surface immediately instead of needing Back to dislodge
             // the stale controller (#154).
-            playerView.hideController()
-            playerView.requestFocus()
+            reclaimVideoSurfaceFocus()
         }
     }
     val loudnessEnhancer = remember(player) {
@@ -1153,6 +1202,7 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .testTag(UatTestTags.PLAYER_SURFACE)
+                .focusRequester(videoSurfaceFocusRequester)
                 .focusable()
                 .onKeyEvent {
                     val event = it.nativeKeyEvent
