@@ -24,16 +24,56 @@ class PlayerBufferingQualityTest {
     }
 
     @Test
-    fun `startup paused and direct-play buffering do not downgrade`() {
-        assertFalse(
-            shouldStartBufferingQualityRecovery(
+    fun `prolonged HLS startup buffering becomes eligible for recovery`() {
+        assertTrue(
+            shouldStartStartupQualityRecovery(
                 Player.STATE_BUFFERING,
                 hasStartedPlayback = false,
                 playWhenReady = true,
                 PlaybackMode.HLS,
-                hasVideo = true,
             ),
         )
+        assertEquals(4_000L, STARTUP_BUFFERING_QUALITY_RECOVERY_MS)
+    }
+
+    @Test
+    fun `paused direct-play ready and post-start states do not trigger startup recovery`() {
+        assertFalse(
+            shouldStartStartupQualityRecovery(
+                Player.STATE_BUFFERING,
+                hasStartedPlayback = false,
+                playWhenReady = false,
+                PlaybackMode.HLS,
+            ),
+        )
+        assertFalse(
+            shouldStartStartupQualityRecovery(
+                Player.STATE_BUFFERING,
+                hasStartedPlayback = false,
+                playWhenReady = true,
+                PlaybackMode.DIRECT,
+            ),
+        )
+        assertFalse(
+            shouldStartStartupQualityRecovery(
+                Player.STATE_READY,
+                hasStartedPlayback = false,
+                playWhenReady = true,
+                PlaybackMode.HLS,
+            ),
+        )
+        assertFalse(
+            shouldStartStartupQualityRecovery(
+                Player.STATE_BUFFERING,
+                hasStartedPlayback = true,
+                playWhenReady = true,
+                PlaybackMode.HLS,
+            ),
+        )
+    }
+
+    @Test
+    fun `paused and direct-play mid-playback buffering do not downgrade`() {
         assertFalse(
             shouldStartBufferingQualityRecovery(
                 Player.STATE_BUFFERING,

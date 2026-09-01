@@ -50,6 +50,10 @@ class PeerLoopbackProxy private constructor(
     private val executor: ExecutorService,
 ) : AutoCloseable {
     private val connections = ConcurrentHashMap<String, PeerConnection>()
+    // HLS opens a fresh loopback request for every segment. Reuse one copy
+    // buffer per cached worker thread instead of allocating 64 KiB per
+    // request and forcing constant garbage collection on memory-limited TVs.
+    private val copyBuffers = ThreadLocal.withInitial { ByteArray(COPY_BUFFER_BYTES) }
 
     val port: Int get() = serverSocket.localPort
 
@@ -212,7 +216,7 @@ class PeerLoopbackProxy private constructor(
         builder.append("Connection: close\r\n\r\n")
         output.write(builder.toString().toByteArray(Charsets.US_ASCII))
 
-        val buffer = ByteArray(COPY_BUFFER_BYTES)
+        val buffer = copyBuffers.get()
         while (true) {
             val read = body.read(buffer)
             if (read < 0) break

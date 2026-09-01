@@ -86,6 +86,27 @@ const val PEER_ALPN: String = "swarm-peer/1"
  * concurrency limit could impose.
  */
 internal const val STREAM_CREATE_TIMEOUT_MS: Long = 10_000L
+internal const val STREAM_READ_TIMEOUT_MS: Long = 30_000L
+
+/**
+ * Kwik 0.10.3 waits `Long.MAX_VALUE` milliseconds for the next stream frame.
+ * Android's monitor implementation reports every such wait as "end time
+ * exceeds INT32_MAX", producing hundreds of lines during one HLS startup,
+ * and a genuinely stalled body can then block forever. Kwik exposes no public
+ * read-timeout setting, so constrain its single process-wide timeout field at
+ * connection setup. Failure is non-fatal: transport still works with Kwik's
+ * default, while supported versions gain a bounded, recoverable read.
+ */
+internal fun configureKwikStreamReadTimeout(timeoutMs: Long = STREAM_READ_TIMEOUT_MS): Boolean {
+    if (timeoutMs <= 0) return false
+    return runCatching {
+        val input = Class.forName("tech.kwik.core.stream.StreamInputStreamImpl")
+        val timeout = input.getDeclaredField("waitForNextFrameTimeout")
+        timeout.isAccessible = true
+        timeout.setLong(null, timeoutMs)
+        timeout.getLong(null) == timeoutMs
+    }.getOrDefault(false)
+}
 
 /** Shared daemon pool for the [openBoundedStream] watchdog — threads are
  * only borrowed for the (near-instant, on a healthy connection) duration of
@@ -199,6 +220,7 @@ class PeerQuicClient private constructor(private val connection: QuicClientConne
             logger: Logger = NullLogger(),
             localSocketPort: Int? = null,
         ): PeerQuicClient {
+            configureKwikStreamReadTimeout()
             val builder = QuicClientConnection.newBuilder()
                 .host(host)
                 .port(port)

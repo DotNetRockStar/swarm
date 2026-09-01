@@ -343,6 +343,7 @@ class MainActivity : ComponentActivity() {
                         onServerOffline = viewModel::reportServerOffline,
                         onPlaybackRuntimeError = viewModel::reportPlaybackRuntimeError,
                         onPlaybackBuffering = viewModel::reportPlaybackBuffering,
+                        onPlaybackQualityReduced = viewModel::reportPlaybackQualityReduced,
                         onOpenSettings = viewModel::openSettings,
                         onUpdateBaseUrl = viewModel::updateBaseUrl,
                         onUpdateDeviceName = viewModel::updateDeviceName,
@@ -486,6 +487,7 @@ private fun SwarmApp(
     onServerOffline: (sessionId: String, context: String?) -> Unit,
     onPlaybackRuntimeError: (message: String, context: String?) -> Unit,
     onPlaybackBuffering: () -> Unit,
+    onPlaybackQualityReduced: () -> Unit,
     onOpenSettings: () -> Unit,
     onUpdateBaseUrl: (baseUrl: String) -> Unit,
     onUpdateDeviceName: (name: String) -> Unit,
@@ -1111,6 +1113,7 @@ private fun SwarmApp(
                         onServerOffline = { context -> onServerOffline(state.sessionId, context) },
                         onPlaybackRuntimeError = onPlaybackRuntimeError,
                         onPlaybackBuffering = onPlaybackBuffering,
+                        onPlaybackQualityReduced = onPlaybackQualityReduced,
                     )
                 }
         }
