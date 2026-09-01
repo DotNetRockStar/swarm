@@ -445,6 +445,76 @@ class CatalogSessionTest {
         }
     }
 
+    @Test
+    fun `preparePlayback sends the probed capability profile, not the baseline`() = runBlocking {
+        val capturing = CapturingPlaybackConnection("session-1")
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = SwarmDevice(
+            deviceId = "server-1",
+            name = "Media server",
+            deviceType = DeviceType.SERVER,
+            certFingerprint = "ab".repeat(32),
+            online = true,
+            metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+        )
+        val probed = app.swarm.tv.core.capability.CapabilityProfile(
+            containers = listOf("mp4", "hls", "mkv"),
+            videoCodecs = listOf("h264:high", "hevc:main10"),
+            audioCodecs = listOf("aac", "ac3", "eac3"),
+            maxWidth = 3840,
+            maxHeight = 2160,
+            maxBitrate = 60_000_000,
+            hdr = true,
+        )
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ -> capturing },
+            playbackPreparationTimeoutMs = 100L,
+        ).use { session ->
+            session.preparePlayback(
+                device,
+                "0123456789abcdef01234567",
+                0,
+                identity.certificate,
+                identity.privateKey,
+                capabilities = probed,
+            )
+        }
+        proxy.close()
+
+        assertEquals(probed, capturing.received?.capabilities)
+    }
+
+    private class CapturingPlaybackConnection(private val sessionId: String) : PeerConnection {
+        @Volatile
+        var received: PlaybackPreferences? = null
+
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            received = playback
+            val body = SwarmJson.encodeToString(
+                PlaybackPlan(
+                    mode = PlaybackMode.HLS,
+                    path = "/hls/$sessionId/master.m3u8",
+                    maxBitrate = 8_192_000,
+                    sessionId = sessionId,
+                ),
+            ).toByteArray()
+            return PeerResponse(
+                PeerResponseHeader(status = 200, len = body.size.toLong()),
+                ByteArrayInputStream(body),
+            )
+        }
+    }
+
     private class PlaybackConnection(private val sessionId: String) : PeerConnection {
         override fun request(
             path: String,

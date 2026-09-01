@@ -58,6 +58,13 @@ data class VideoStreamInfo(
     val height: Int,
     val level: String? = null,
     val bitrate: Long? = null,
+    /** ffprobe `profile` ("High", "Main 10"); absent on rows scanned before
+     * the server captured it. Mirrors `swarm-core::peer::VideoStreamInfo`. */
+    val profile: String? = null,
+    /** Luma bit depth (8/10/12) derived from the pixel format. */
+    val bitDepth: Int? = null,
+    /** `true` when the transfer characteristics are PQ or HLG. */
+    val hdr: Boolean? = null,
 )
 
 @Serializable

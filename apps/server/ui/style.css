@@ -232,6 +232,13 @@ td.mono {
 }
 .cache-chart-controls label { margin: 0 0 5px; }
 .cache-chart-controls select { width: auto; min-width: 180px; padding: 6px 10px; }
+.transcoding-controls { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; }
+.select-label { display: flex; flex-direction: column; gap: 5px; font-size: .78rem; color: var(--muted); }
+.select-label select { padding: 6px 10px; min-width: 200px; }
+@media (max-width: 640px) {
+  .transcoding-controls { flex-direction: column; }
+  .select-label select { width: 100%; }
+}
 .cache-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: .76rem; }
 .cache-chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .cache-legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }

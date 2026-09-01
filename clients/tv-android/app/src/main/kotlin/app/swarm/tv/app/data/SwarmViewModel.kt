@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.CatalogGrouping
+import app.swarm.tv.core.capability.CapabilityProfile
 import app.swarm.tv.core.catalog.CatalogSession
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.PunchFallback
@@ -370,6 +371,11 @@ class SwarmViewModel(
     private val catalogCache: AndroidCatalogCache,
     private val rendezvousUrl: String,
     private val problemReportDiagnostics: ProblemReportDiagnostics,
+    /** This device's real decoder/display capabilities, probed once at
+     * startup. Sent with every playback negotiation so the server only
+     * transcodes what this hardware genuinely cannot play. Defaults to the
+     * conservative baseline for tests and until the probe completes. */
+    private val playbackCapabilities: CapabilityProfile = CapabilityProfile.fireTvBaseline(),
     private val testingModeAvailable: Boolean = false,
     private val initialTestingToken: String? = null,
     private val testingIdentityProvider: (() -> ClientIdentity)? = null,
@@ -1726,6 +1732,7 @@ class SwarmViewModel(
                             startPositionSecs = startPositionSecs,
                             clientCertificate = clientCertificate,
                             clientKey = clientKey,
+                            capabilities = playbackCapabilities,
                             preview = true,
                         )
                     }
@@ -1852,6 +1859,7 @@ class SwarmViewModel(
                         resumePositionSecs.toLong(),
                         clientCertificate,
                         clientKey,
+                        capabilities = playbackCapabilities,
                     )
                 }
             }.onFailure {
@@ -1940,6 +1948,7 @@ class SwarmViewModel(
                         resumePositionSecs.toLong(),
                         clientCertificate,
                         clientKey,
+                        capabilities = playbackCapabilities,
                     )
                 }
             }.onFailure {
@@ -2495,6 +2504,7 @@ class SwarmViewModel(
                         resumePositionSecs.toLong(),
                         clientCertificate,
                         clientKey,
+                        capabilities = playbackCapabilities,
                     )
                 }
             }.getOrElse { error ->
@@ -3075,7 +3085,7 @@ class SwarmViewModel(
      */
     private suspend fun establishSignaling(baseUrl: String, accessToken: String, deviceId: String) {
         val (signalingClient, signalRx) = try {
-            SignalingClient.connect(baseUrl, accessToken, deviceId)
+            SignalingClient.connect(baseUrl, accessToken, deviceId, capabilities = playbackCapabilities)
         } catch (e: Exception) {
             return
         }
