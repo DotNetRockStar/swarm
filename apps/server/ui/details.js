@@ -816,15 +816,26 @@ async function refreshMediaRoots() {
     list.innerHTML = roots.map(r => {
       const status = healthByLabel.get(r.label);
       const protocol = status?.network_protocol;
+      const permissionDenied = Boolean(status && !status.available && status.permission_denied);
       let reconnectButton = "";
-      if (status && !status.available && protocol === "SMB") {
+      if (status && !status.available && protocol === "SMB" && !permissionDenied) {
         reconnectButton = `<button class="secondary" data-repair-smb="${esc(r.label)}"><i class="bi bi-tools"></i>Repair SMB</button>`;
       }
+      if (permissionDenied) {
+        reconnectButton = `<button class="secondary" data-grant-file-access><i class="bi bi-shield-lock"></i>Open macOS Settings</button>`;
+      }
+      const statusLabel = status
+        ? (status.available ? "Connected" : (permissionDenied ? "Permission needed" : "Unavailable"))
+        : "";
+      const permissionHint = permissionDenied
+        ? `<div class="muted compact-help">macOS is blocking reads here. Grant "SWARM Server" access under Privacy &amp; Security &rarr; Files and Folders (or Full Disk Access), then Rescan — macOS remembers it.</div>`
+        : "";
       return `
       <div class="media-root-row">
         <div class="media-root-info">
-          <div class="media-root-label">${esc(r.label)}${protocol ? `<span class="media-root-protocol">${esc(protocol)}</span>` : ""}${status ? `<span class="media-root-status ${status.available ? "" : "media-root-status-unavailable"}">${status.available ? "Connected" : "Unavailable"}</span>` : ""}</div>
+          <div class="media-root-label">${esc(r.label)}${protocol ? `<span class="media-root-protocol">${esc(protocol)}</span>` : ""}${status ? `<span class="media-root-status ${status.available ? "" : "media-root-status-unavailable"}">${statusLabel}</span>` : ""}</div>
           <div class="mono muted media-root-path">${esc(r.path)}</div>
+          ${permissionHint}
         </div>
         <div class="media-root-actions">
           ${reconnectButton}
@@ -838,6 +849,17 @@ async function refreshMediaRoots() {
           const result = await invoke("remove_media_root", { label: btn.dataset.removeRoot });
           await refreshMediaRoots();
           describeRootChange(result);
+        } catch (err) {
+          showToast(String(err), "error");
+        }
+      });
+    });
+    list.querySelectorAll("[data-grant-file-access]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await invoke("open_external_url", {
+            url: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+          });
         } catch (err) {
           showToast(String(err), "error");
         }
