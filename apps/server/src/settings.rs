@@ -30,6 +30,11 @@ pub struct MediaRootHealth {
     pub path: String,
     pub available: bool,
     pub error: Option<String>,
+    /// macOS is refusing the read for want of a Files-and-Folders / network-
+    /// volume TCC grant (EPERM/EACCES), not because the path is gone or an
+    /// SMB mount dropped. Reconnecting can't fix this; only a one-time
+    /// approval in System Settings can. See GitHub #196.
+    pub permission_denied: bool,
     pub auto_reconnect: bool,
     pub network_protocol: Option<String>,
 }
@@ -37,31 +42,41 @@ pub struct MediaRootHealth {
 pub fn media_root_health(roots: &[MediaRootSetting]) -> Vec<MediaRootHealth> {
     roots
         .iter()
-        .map(|root| match media_root_readable(root) {
-            Ok(_) => MediaRootHealth {
-                label: root.label.clone(),
-                path: root.path.clone(),
-                available: true,
-                error: None,
-                auto_reconnect: root
-                    .reconnect_url
-                    .as_deref()
-                    .is_some_and(automatically_reconnectable),
-                network_protocol: root.reconnect_url.as_deref().and_then(network_protocol),
-            },
-            Err(error) => MediaRootHealth {
-                label: root.label.clone(),
-                path: root.path.clone(),
-                available: false,
-                error: Some(error.to_string()),
-                auto_reconnect: root
-                    .reconnect_url
-                    .as_deref()
-                    .is_some_and(automatically_reconnectable),
-                network_protocol: root.reconnect_url.as_deref().and_then(network_protocol),
-            },
+        .map(|root| {
+            let auto_reconnect = root
+                .reconnect_url
+                .as_deref()
+                .is_some_and(automatically_reconnectable);
+            let network_protocol = root.reconnect_url.as_deref().and_then(network_protocol);
+            match media_root_readable(root) {
+                Ok(_) => MediaRootHealth {
+                    label: root.label.clone(),
+                    path: root.path.clone(),
+                    available: true,
+                    error: None,
+                    permission_denied: false,
+                    auto_reconnect,
+                    network_protocol,
+                },
+                Err(error) => MediaRootHealth {
+                    label: root.label.clone(),
+                    path: root.path.clone(),
+                    available: false,
+                    permission_denied: is_permission_denied(&error),
+                    error: Some(error.to_string()),
+                    auto_reconnect,
+                    network_protocol,
+                },
+            }
         })
         .collect()
+}
+
+/// A denied macOS TCC grant surfaces as EPERM ("Operation not permitted")
+/// or EACCES, both of which std maps to `PermissionDenied`. Kept as a named
+/// helper so the GUI's classification and its tests describe the same thing.
+fn is_permission_denied(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 fn media_root_readable(root: &MediaRootSetting) -> std::io::Result<()> {
@@ -742,11 +757,47 @@ mod tests {
         let health = media_root_health(&roots);
         assert!(health[0].available);
         assert_eq!(health[0].error, None);
+        assert!(!health[0].permission_denied);
         assert!(!health[1].available);
         assert!(health[1].error.is_some());
+        // A missing path is "not connected", never a permission problem.
+        assert!(!health[1].permission_denied);
         assert!(health[1].auto_reconnect);
         assert_eq!(health[1].network_protocol.as_deref(), Some("SMB"));
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn media_root_health_flags_a_permission_denied_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir()
+            .join(format!("swarm-root-denied-test-{}", rand::random::<u64>()));
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("movie.mkv"), b"media").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let roots = vec![MediaRootSetting {
+            label: "locked".into(),
+            path: locked.to_string_lossy().into_owned(),
+            reconnect_url: None,
+        }];
+        let health = media_root_health(&roots);
+
+        // Running as root ignores the mode bits; only assert when the read
+        // actually got refused, which is the case this test exists for.
+        if !health[0].available {
+            assert!(
+                health[0].permission_denied,
+                "a refused read should classify as permission_denied, got {:?}",
+                health[0].error
+            );
+        }
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

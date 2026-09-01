@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri's bundler merges these keys into the generated Info.plist for
+  "SWARM Server.app" (tauri-bundler reads `Info.plist` from the directory
+  that holds tauri.conf.json).
+
+  Why this file exists (GitHub #196): the media server reads whatever
+  folders the user points it at as media roots. On macOS those reads cross
+  the TCC (Transparency, Consent and Control) boundary — network volumes,
+  removable volumes, and the Desktop/Documents/Downloads folders each need
+  a per-app grant. Without a usage-description string macOS shows a generic,
+  repeatable prompt and is quick to re-ask; with one it shows a single
+  clearly-worded prompt whose "Allow"/"Don't Allow" answer it remembers for
+  this app. The user can also pre-grant the same access once under System
+  Settings -> Privacy & Security -> Files and Folders (or Full Disk Access);
+  the strings below are what that pane shows next to the SWARM Server entry.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>SWARM Server reads the media files you add as library locations, including movies and shows kept on a NAS or other network volume.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>SWARM Server reads the media files you add as library locations, including movies and shows kept on an external or removable drive.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>SWARM Server reads media files you add as library locations, which may live in your Desktop folder.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>SWARM Server reads media files you add as library locations, which may live in your Documents folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>SWARM Server reads media files you add as library locations, which may live in your Downloads folder.</string>
+</dict>
+</plist>
