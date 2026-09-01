@@ -296,21 +296,33 @@ async function refreshMediaRootHealth() {
   mediaRootHealthRefreshInFlight = true;
   const warning = document.getElementById("mediaRootWarning");
   const copy = document.getElementById("mediaRootWarningText");
+  const grantBtn = document.getElementById("mediaRootWarningGrantBtn");
   try {
     const roots = await invoke("get_media_root_health");
     const unavailable = roots.filter(root => !root.available);
     warning.classList.toggle("d-none", unavailable.length === 0);
+    const denied = unavailable.filter(root => root.permission_denied);
+    grantBtn.classList.toggle("d-none", denied.length === 0);
     if (unavailable.length > 0) {
       const noun = unavailable.length === 1 ? "location is" : "locations are";
       const recoveryPronoun = unavailable.length === 1 ? "it is" : "they are";
       const paths = unavailable
         .map(root => `<span class="media-root-warning-path">${esc(root.path)}</span>`)
         .join(", ");
-      const healing = unavailable.filter(root => root.auto_reconnect).length;
-      const recovery = healing
-        ? `SWARM is automatically trying to reconnect ${healing === unavailable.length ? recoveryPronoun : `${healing} network share${healing === 1 ? "" : "s"}`}.`
-        : "Reconnect the drive or network share.";
-      copy.innerHTML = `${unavailable.length} configured media ${noun} not readable: ${paths}. ${recovery} Playback, artwork, and subtitles will resume automatically after the share becomes available.`;
+      if (denied.length === unavailable.length) {
+        // Every failure is a macOS permission denial — reconnecting won't
+        // help, so tell the user about the one-time grant instead (#196).
+        copy.innerHTML = `macOS is blocking SWARM from reading ${unavailable.length === 1 ? "this media location" : "these media locations"}: ${paths}. Open macOS Settings &rarr; Privacy &amp; Security &rarr; Files and Folders (or Full Disk Access), turn on &ldquo;SWARM Server&rdquo;, then Rescan. macOS remembers this once.`;
+      } else {
+        const healing = unavailable.filter(root => root.auto_reconnect).length;
+        const recovery = healing
+          ? `SWARM is automatically trying to reconnect ${healing === unavailable.length ? recoveryPronoun : `${healing} network share${healing === 1 ? "" : "s"}`}.`
+          : "Reconnect the drive or network share.";
+        const permissionNote = denied.length
+          ? " Some are blocked by macOS — use Open macOS Settings to grant access once."
+          : "";
+        copy.innerHTML = `${unavailable.length} configured media ${noun} not readable: ${paths}. ${recovery}${permissionNote} Playback, artwork, and subtitles will resume automatically after the share becomes available.`;
+      }
     }
   } catch (_) {
     // Other status surfaces already report backend failures. This banner is
@@ -322,6 +334,19 @@ async function refreshMediaRootHealth() {
 
 document.getElementById("mediaRootWarningDetailsBtn").addEventListener("click", () => {
   showTab("details");
+});
+
+// The Full Disk Access pane covers network volumes, removable drives, and the
+// protected user folders in one grant — the single place a user can approve
+// SWARM's file access once, before or after macOS's own prompt (#196).
+document.getElementById("mediaRootWarningGrantBtn").addEventListener("click", async () => {
+  try {
+    await invoke("open_external_url", {
+      url: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+    });
+  } catch (err) {
+    showToast(String(err), "error");
+  }
 });
 
 for (const tab of TABS) {

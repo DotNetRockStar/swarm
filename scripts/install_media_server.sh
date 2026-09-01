@@ -173,6 +173,14 @@ do_install() {
     cp -R "$BUILT_APP" "$APP_PATH"
     xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 
+    # Re-sign with a stable local identity so macOS remembers the file-access
+    # grants the user gives the app (network volumes, Files and Folders, Full
+    # Disk Access) instead of re-asking after every update — GitHub #196.
+    # Best-effort: a failure here just leaves Tauri's ad-hoc signature in
+    # place and the app still runs.
+    echo "==> Stabilising the code signature for remembered file-access grants ..."
+    "$REPO_ROOT/scripts/macos_stable_signing.sh" "$APP_PATH" || true
+
     echo "==> Installing the 'swarm-server' command to $CMD_DST ..."
     mkdir -p "$(dirname "$CMD_DST")"
     cp "$CMD_SRC" "$CMD_DST"

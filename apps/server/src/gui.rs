@@ -362,27 +362,44 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                     needs_recovery_rescan.insert(root.label.clone());
                 }
                 if unavailable.insert(root.label.clone()) {
-                    let retry_message = if status.auto_reconnect {
-                        "SWARM will ask macOS to reconnect it automatically. It will retry a scan only if one overlapped this outage."
+                    // A macOS TCC denial is not an outage: reconnecting or
+                    // waiting never clears it, so point the user straight at
+                    // the one-time System Settings grant instead (#196).
+                    let (title, message) = if status.permission_denied {
+                        (
+                            "SWARM needs permission to read a media location",
+                            format!(
+                                "macOS is blocking SWARM Server from reading \"{}\" at {}.\n\nGrant access once: open System Settings \u{2192} Privacy & Security \u{2192} Files and Folders (or Full Disk Access), turn on \"SWARM Server\", then press Rescan. macOS remembers this choice.",
+                                root.label, root.path,
+                            ),
+                        )
                     } else {
-                        "Reconnect the storage, then use Rescan so the library is synchronized."
+                        let retry_message = if status.auto_reconnect {
+                            "SWARM will ask macOS to reconnect it automatically. It will retry a scan only if one overlapped this outage."
+                        } else {
+                            "Reconnect the storage, then use Rescan so the library is synchronized."
+                        };
+                        (
+                            "Media storage unavailable",
+                            format!(
+                                "The media root \"{}\" at {} failed a real directory/file read: {}\n\n{}",
+                                root.label,
+                                root.path,
+                                status.error.as_deref().unwrap_or("unknown I/O error"),
+                                retry_message,
+                            ),
+                        )
                     };
-                    let message = format!(
-                        "The media root \"{}\" at {} failed a real directory/file read: {}\n\n{}",
-                        root.label,
-                        root.path,
-                        status.error.as_deref().unwrap_or("unknown I/O error"),
-                        retry_message,
-                    );
                     if let Err(error) = core
                         .library
-                        .record_server_notification("error", "Media storage unavailable", &message)
+                        .record_server_notification("error", title, &message)
                         .await
                     {
                         tracing::warn!(%error, "could not save media-root failure notification");
                     }
                 }
-                let should_attempt = status.auto_reconnect
+                let should_attempt = !status.permission_denied
+                    && status.auto_reconnect
                     && last_attempt
                         .get(&reconnect_key)
                         .is_none_or(|last| last.elapsed() >= MEDIA_ROOT_RECONNECT_RETRY_INTERVAL);
