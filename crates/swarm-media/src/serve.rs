@@ -18,7 +18,7 @@ use bytes::Bytes;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures_util::stream::{self, Stream};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use swarm_core::entry_key::is_valid_entry_key;
 use swarm_core::peer::{
-    CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, PlaybackPlan,
+    CatalogEntry, CatalogManifest, CatalogThumbprint, PeerRequest, PeerResponseHeader, PlaybackPlan,
     SubtitleTrack,
 };
 use swarm_p2p::endpoint::{read_request, write_response_header, P2pError};
@@ -43,8 +43,26 @@ pub struct MediaService {
     artwork_cache_fills: [tokio::sync::Mutex<()>; 32],
     artwork_cache_monitor: ArtworkCacheMonitor,
     client_names: std::sync::RwLock<HashMap<String, String>>,
+    catalog_snapshots: std::sync::Mutex<VecDeque<CatalogSnapshot>>,
     bandwidth: Arc<BandwidthMeter>,
 }
+
+#[derive(Clone)]
+struct CatalogSnapshot {
+    thumbprint: String,
+    entries: Vec<CatalogEntry>,
+}
+
+const CATALOG_SNAPSHOT_HISTORY: usize = 16;
+const CATALOG_CHANGE_WAIT: Duration = Duration::from_secs(20);
+/// Re-check interval while a `/catalog/changes` request is parked. Each
+/// check rebuilds the whole catalog snapshot (`Library::catalog_snapshot`
+/// hashes every entry), so this is deliberately not sub-second: one browsing
+/// TV would otherwise pin a snapshot rebuild loop on the server for the full
+/// wait window, multiplied by every connected client. One second keeps the
+/// "updates show up on their own within a second or two" feel the feed is
+/// for without that cost.
+const CATALOG_CHANGE_POLL: Duration = Duration::from_secs(1);
 
 const ARTWORK_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -110,6 +128,36 @@ fn gzip_json_response(status: u16, value: &impl serde::Serialize) -> Resolved {
         },
         body: Body::Bytes(bytes),
         session_id: None,
+    }
+}
+
+fn catalog_delta(
+    previous: CatalogSnapshot,
+    thumbprint: String,
+    entries: Vec<CatalogEntry>,
+) -> CatalogManifest {
+    let old_by_key: HashMap<&str, &CatalogEntry> = previous
+        .entries
+        .iter()
+        .map(|entry| (entry.entry_key.as_str(), entry))
+        .collect();
+    let new_keys: std::collections::HashSet<String> =
+        entries.iter().map(|entry| entry.entry_key.clone()).collect();
+    let changed = entries
+        .into_iter()
+        .filter(|entry| old_by_key.get(entry.entry_key.as_str()).copied() != Some(entry))
+        .collect();
+    let removed = previous
+        .entries
+        .into_iter()
+        .filter(|entry| !new_keys.contains(entry.entry_key.as_str()))
+        .map(|entry| entry.entry_key)
+        .collect();
+    CatalogManifest {
+        thumbprint,
+        entries: changed,
+        removed,
+        reset: false,
     }
 }
 
@@ -184,6 +232,7 @@ impl MediaService {
             artwork_cache_fills: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
             artwork_cache_monitor,
             client_names: std::sync::RwLock::new(HashMap::new()),
+            catalog_snapshots: std::sync::Mutex::new(VecDeque::new()),
             bandwidth: BandwidthMeter::new(),
         }
     }
@@ -268,15 +317,16 @@ impl MediaService {
         client: &str,
         playback_owner: Option<&str>,
     ) -> Resolved {
-        let request_path = request
+        let (request_path, query) = request
             .path
             .split_once('?')
-            .map(|(path, _)| path)
-            .unwrap_or(request.path.as_str());
+            .map_or((request.path.as_str(), ""), |(path, query)| (path, query));
         match request_path {
             "/catalog/thumbprint" => self.thumbprint().await,
             "/catalog/manifest" => self.manifest(false).await,
             "/catalog/manifest.gz" => self.manifest(true).await,
+            "/catalog/changes" => self.catalog_changes(query, false).await,
+            "/catalog/changes.gz" => self.catalog_changes(query, true).await,
             "/errors/report" => self.report_error(request).await,
             "/likes/toggle" => self.set_like(request).await,
             path => {
@@ -323,15 +373,83 @@ impl MediaService {
         let Ok((thumbprint, entries)) = self.library.catalog_snapshot().await else {
             return status(500);
         };
+        self.remember_catalog_snapshot(&thumbprint, &entries);
         let manifest = CatalogManifest {
             thumbprint,
             entries,
             removed: Vec::new(),
+            reset: false,
         };
         if compressed {
             gzip_json_response(200, &manifest)
         } else {
             json_response(200, &manifest)
+        }
+    }
+
+    /// Long-held catalog request used as the server-to-TV change feed. The
+    /// response is empty after a quiet timeout, a compact delta when the
+    /// caller's snapshot is still in bounded history, or a reset snapshot
+    /// after a server restart/very stale client.
+    async fn catalog_changes(&self, query: &str, compressed: bool) -> Resolved {
+        let Some(since) = query
+            .split('&')
+            .find_map(|part| part.strip_prefix("since="))
+            .filter(|value| !value.is_empty())
+        else {
+            return status(400);
+        };
+        let deadline = tokio::time::Instant::now() + CATALOG_CHANGE_WAIT;
+        loop {
+            let Ok((thumbprint, entries)) = self.library.catalog_snapshot().await else {
+                return status(500);
+            };
+            if thumbprint != since {
+                let previous = self.catalog_snapshot(since);
+                self.remember_catalog_snapshot(&thumbprint, &entries);
+                let manifest = match previous {
+                    Some(previous) => catalog_delta(previous, thumbprint, entries),
+                    None => CatalogManifest {
+                        thumbprint,
+                        entries,
+                        removed: Vec::new(),
+                        reset: true,
+                    },
+                };
+                return if compressed {
+                    gzip_json_response(200, &manifest)
+                } else {
+                    json_response(200, &manifest)
+                };
+            }
+            self.remember_catalog_snapshot(&thumbprint, &entries);
+            if tokio::time::Instant::now() >= deadline {
+                return status(204);
+            }
+            tokio::time::sleep(CATALOG_CHANGE_POLL).await;
+        }
+    }
+
+    fn catalog_snapshot(&self, thumbprint: &str) -> Option<CatalogSnapshot> {
+        self.catalog_snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|snapshot| snapshot.thumbprint == thumbprint)
+            .cloned()
+    }
+
+    fn remember_catalog_snapshot(&self, thumbprint: &str, entries: &[CatalogEntry]) {
+        let mut snapshots = self.catalog_snapshots.lock().unwrap();
+        if snapshots.iter().any(|snapshot| snapshot.thumbprint == thumbprint) {
+            return;
+        }
+        snapshots.push_back(CatalogSnapshot {
+            thumbprint: thumbprint.to_owned(),
+            entries: entries.to_vec(),
+        });
+        while snapshots.len() > CATALOG_SNAPSHOT_HISTORY {
+            snapshots.pop_front();
         }
     }
 
@@ -1420,6 +1538,72 @@ pub async fn accept_loop(endpoint: quinn::Endpoint, service: Arc<MediaService>) 
             };
             serve_connection(connection, service).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod catalog_delta_tests {
+    use super::{catalog_delta, CatalogSnapshot};
+    use swarm_core::peer::{CatalogEntry, MediaKind};
+
+    fn entry(key: &str, title: &str) -> CatalogEntry {
+        CatalogEntry {
+            entry_key: key.into(),
+            fingerprint: format!("fp-{key}"),
+            kind: MediaKind::Movie,
+            title: title.into(),
+            size: 1,
+            duration_secs: None,
+            show_title: None,
+            season: None,
+            episode: None,
+            artist: None,
+            album: None,
+            track_number: None,
+            scraped_title: None,
+            episode_title: None,
+            genres: Vec::new(),
+            video: None,
+            audio: None,
+            artwork_etag: None,
+            year: None,
+            cast: Vec::new(),
+            overview: None,
+            rating: None,
+            community_rating: None,
+            community_rating_votes: None,
+            like_count: 0,
+            skip_segments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delta_reports_only_added_changed_and_removed_entries() {
+        let previous = CatalogSnapshot {
+            thumbprint: "old".into(),
+            entries: vec![entry("a", "A"), entry("b", "B"), entry("c", "C")],
+        };
+        // `a` unchanged, `b` retitled, `c` removed, `d` new.
+        let current = vec![entry("a", "A"), entry("b", "B2"), entry("d", "D")];
+
+        let delta = catalog_delta(previous, "new".into(), current);
+
+        assert_eq!(delta.thumbprint, "new");
+        assert!(!delta.reset);
+        let changed: Vec<&str> = delta.entries.iter().map(|e| e.entry_key.as_str()).collect();
+        assert_eq!(changed, vec!["b", "d"]);
+        assert_eq!(delta.removed, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn identical_snapshot_produces_empty_delta() {
+        let previous = CatalogSnapshot {
+            thumbprint: "old".into(),
+            entries: vec![entry("a", "A"), entry("b", "B")],
+        };
+        let delta = catalog_delta(previous, "new".into(), vec![entry("a", "A"), entry("b", "B")]);
+        assert!(delta.entries.is_empty());
+        assert!(delta.removed.is_empty());
     }
 }
 
