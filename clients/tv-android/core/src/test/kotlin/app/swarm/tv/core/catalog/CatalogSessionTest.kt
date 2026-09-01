@@ -31,6 +31,15 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class CatalogSessionTest {
+    private fun testServerDevice() = SwarmDevice(
+        deviceId = "server-1",
+        name = "Media server",
+        deviceType = DeviceType.SERVER,
+        certFingerprint = "ab".repeat(32),
+        online = true,
+        metadata = mapOf("peer_addr" to "192.168.1.2:8544"),
+    )
+
     @Test
     fun `refresh retries when the first connection cannot be established`() = runBlocking {
         val manifest = CatalogManifest(
@@ -253,6 +262,62 @@ class CatalogSessionTest {
             assertEquals(2, connectionAttempts.get())
             assertTrue(stalling.wasClosed())
         }
+        proxy.close()
+    }
+
+    @Test
+    fun `preview preparation uses its short timeout and retries on a fresh connection`() = runBlocking {
+        val stalling = StallingCatalogConnection()
+        val healthy = PlaybackConnection("preview-session")
+        val connectionAttempts = AtomicInteger()
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                if (connectionAttempts.incrementAndGet() == 1) stalling else healthy
+            },
+            playbackPreparationTimeoutMs = 10_000L,
+            previewPreparationTimeoutMs = 100L,
+        ).use { session ->
+            val selection = session.preparePlayback(
+                device,
+                "0123456789abcdef01234567",
+                0,
+                identity.certificate,
+                identity.privateKey,
+                preview = true,
+            )
+
+            assertEquals("preview-session", selection.sessionId)
+            assertEquals(2, connectionAttempts.get())
+            assertTrue(stalling.wasClosed())
+        }
+        proxy.close()
+    }
+
+    @Test
+    fun `stalled playback stop is bounded and closes the connection`() = runBlocking {
+        val stalling = StallingCatalogConnection()
+        val connectionAttempts = AtomicInteger()
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(
+            proxy,
+            directConnector = { _, _, _ ->
+                if (connectionAttempts.incrementAndGet() == 1) stalling else null
+            },
+            playbackStopTimeoutMs = 100L,
+        ).use { session ->
+            session.stopPlayback(device, "stalled-session", identity.certificate, identity.privateKey)
+        }
+
+        assertTrue(stalling.wasClosed())
+        assertEquals(2, connectionAttempts.get())
         proxy.close()
     }
 
