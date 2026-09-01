@@ -146,8 +146,11 @@ do_install() {
 
     echo
     echo "==> Building the release app (~10-20 min the first time) ..."
+    # Only the .app is needed for a local install. Skip the DMG bundle: it adds
+    # minutes, needs Finder/AppleScript access, and bundle_dmg.sh fails outright
+    # when a stale "SWARM Server" volume is still mounted from an earlier run.
     ( cd "$REPO_ROOT/apps/server" \
-        && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}" "$tauri_cli" build )
+        && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}" "$tauri_cli" build --bundles app )
     [ -d "$BUILT_APP" ] || { echo "Build did not produce $BUILT_APP" >&2; exit 1; }
 
     echo
