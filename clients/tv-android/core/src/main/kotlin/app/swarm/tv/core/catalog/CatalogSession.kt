@@ -130,6 +130,16 @@ private const val MANIFEST_FETCH_TIMEOUT_MS = 12_000L
  * lost without kwik surfacing EOF. */
 private const val PLAYBACK_PREPARATION_TIMEOUT_MS = 135_000L
 
+/** Preview preparation is intentionally capped at ten seconds by the media
+ * server. A lost QUIC response must not inherit the much longer foreground
+ * playback allowance and leave a browse card waiting for over two minutes. */
+private const val PREVIEW_PREPARATION_TIMEOUT_MS = 15_000L
+
+/** Cleanup sits directly in front of the next serialized browse preview.
+ * Bound it so a lost `/stop` response cannot prevent every later preview
+ * from starting. */
+private const val PLAYBACK_STOP_TIMEOUT_MS = 5_000L
+
 internal typealias DirectConnector = (
     SwarmDevice,
     X509Certificate,
@@ -143,6 +153,8 @@ class CatalogSession internal constructor(
     private val onConnectionRestored: (serverId: String) -> Unit = {},
     private val manifestFetchTimeoutMs: Long = MANIFEST_FETCH_TIMEOUT_MS,
     private val playbackPreparationTimeoutMs: Long = PLAYBACK_PREPARATION_TIMEOUT_MS,
+    private val previewPreparationTimeoutMs: Long = PREVIEW_PREPARATION_TIMEOUT_MS,
+    private val playbackStopTimeoutMs: Long = PLAYBACK_STOP_TIMEOUT_MS,
 ) : AutoCloseable {
     constructor(
         proxy: PeerLoopbackProxy,
@@ -263,7 +275,13 @@ class CatalogSession internal constructor(
         var connection = connectionFor(device, clientCertificate, clientKey)
             ?: throw IOException("server is no longer connected")
         val response = try {
-            requestPlayback(device.deviceId, connection, entryKey, preferences)
+            requestPlayback(
+                device.deviceId,
+                connection,
+                entryKey,
+                preferences,
+                if (preview) previewPreparationTimeoutMs else playbackPreparationTimeoutMs,
+            )
         } catch (e: IOException) {
             // A cached connection can die between browsing and pressing play
             // — confirmed live: QUIC dropped it well under a minute after its
@@ -274,7 +292,13 @@ class CatalogSession internal constructor(
             evictConnection(device.deviceId, connection)
             connection = connectionFor(device, clientCertificate, clientKey)
                 ?: throw IOException("server is no longer connected")
-            requestPlayback(device.deviceId, connection, entryKey, preferences)
+            requestPlayback(
+                device.deviceId,
+                connection,
+                entryKey,
+                preferences,
+                if (preview) previewPreparationTimeoutMs else playbackPreparationTimeoutMs,
+            )
         }
         if (response.status != 200) {
             throw IOException("server could not prepare playback (${response.status}): ${response.body}")
@@ -301,6 +325,7 @@ class CatalogSession internal constructor(
         connection: PeerConnection,
         entryKey: String,
         preferences: PlaybackPreferences,
+        timeoutMs: Long,
     ): PlaybackResponse = coroutineScope {
         val request = async(Dispatchers.IO) {
             runCatching {
@@ -312,10 +337,10 @@ class CatalogSession internal constructor(
             }
         }
         try {
-            val outcome = withTimeoutOrNull(playbackPreparationTimeoutMs) { request.await() }
+            val outcome = withTimeoutOrNull(timeoutMs) { request.await() }
                 ?: kotlin.Result.failure(
                     IOException(
-                        "playback preparation stalled; aborted after ${playbackPreparationTimeoutMs}ms",
+                        "playback preparation stalled; aborted after ${timeoutMs}ms",
                     ),
                 )
             if (outcome.isFailure) {
@@ -345,13 +370,7 @@ class CatalogSession internal constructor(
      */
     suspend fun stopPlayback(device: SwarmDevice, sessionId: String, clientCertificate: X509Certificate, clientKey: PrivateKey) {
         var connection = connectionFor(device, clientCertificate, clientKey) ?: return
-        fun stop(current: PeerConnection): Boolean = runCatching {
-            val response = current.request(path = "/stop/$sessionId")
-            response.body.readBytes()
-            response.header.status == 200
-        }.getOrDefault(false)
-
-        if (stop(connection)) return
+        if (requestStop(device.deviceId, connection, sessionId)) return
 
         // A track can end after several minutes with no control requests in
         // between, leaving the cached QUIC connection stale. Cleanup matters
@@ -359,7 +378,38 @@ class CatalogSession internal constructor(
         // leaving the old transcode reservation until its idle timeout.
         evictConnection(device.deviceId, connection)
         connection = connectionFor(device, clientCertificate, clientKey) ?: return
-        stop(connection)
+        requestStop(device.deviceId, connection, sessionId)
+    }
+
+    /** A stop is best-effort, but it must also be cancellation-safe: kwik's
+     * body read is blocking, so closing the connection is what makes a timed
+     * out cleanup return to the preview serializer. */
+    private suspend fun requestStop(
+        serverId: String,
+        connection: PeerConnection,
+        sessionId: String,
+    ): Boolean = coroutineScope {
+        val request = async(Dispatchers.IO) {
+            runCatching {
+                val response = connection.request(path = "/stop/$sessionId")
+                response.body.use { it.readBytes() }
+                response.header.status == 200
+            }
+        }
+        try {
+            val outcome = withTimeoutOrNull(playbackStopTimeoutMs) { request.await() }
+                ?: kotlin.Result.failure(IOException("playback stop stalled"))
+            if (outcome.isFailure) {
+                request.cancel()
+                evictConnection(serverId, connection)
+            }
+            outcome.getOrDefault(false)
+        } finally {
+            if (!request.isCompleted) {
+                request.cancel()
+                evictConnection(serverId, connection)
+            }
+        }
     }
 
     /**
