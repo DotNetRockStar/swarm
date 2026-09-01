@@ -8,8 +8,10 @@
 # tens of seconds and a playing TV reports "server has gone offline". This
 # script instead builds a *release* .app, installs it under ~/Applications
 # (outside ./target, so repo builds never touch it), and registers a
-# LaunchAgent that starts it at login and relaunches it if it *crashes* — a
-# deliberate Quit from the tray menu still stops it.
+# LaunchAgent that starts it at login and keeps it alive (KeepAlive=true) on
+# the port your TVs are paired to. A "Quit SWARM" from the tray is relaunched
+# within seconds; to actually stop the service run
+#   launchctl bootout gui/$UID/app.swarm.server
 #
 # The installed app and the dev build share
 #   ~/Library/Application Support/app.swarm.server/
@@ -128,6 +130,13 @@ launchctl_stop() {
 }
 
 launchctl_start() {
+    # Also publish the bind/ffmpeg vars session-wide so an app launched from
+    # Finder/Dock (not just this LaunchAgent) still uses the paired port. This
+    # is session-scoped; the LaunchAgent's own EnvironmentVariables are the
+    # durable copy.
+    launchctl setenv SWARM_PEER_BIND "0.0.0.0:$PEER_PORT" 2>/dev/null || true
+    launchctl setenv SWARM_HTTP_MEDIA_BIND "0.0.0.0:$HTTP_MEDIA_PORT" 2>/dev/null || true
+    [ -n "${ffmpeg_bin:-}" ] && launchctl setenv SWARM_FFMPEG_PATH "$ffmpeg_bin" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null \
         || launchctl load "$PLIST" 2>/dev/null \
         || true
@@ -288,11 +297,12 @@ do_install() {
     <string>$EXECUTABLE</string>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Always relaunch. The app has tauri-plugin-single-instance, so a Finder
+         launch just forwards to this one; a "Quit SWARM" from the tray is
+         relaunched here on the right port within seconds. To actually stop the
+         service: launchctl bootout gui/$UID/app.swarm.server -->
     <key>KeepAlive</key>
-    <dict>
-        <key>Crashed</key>
-        <true/>
-    </dict>
+    <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>EnvironmentVariables</key>
