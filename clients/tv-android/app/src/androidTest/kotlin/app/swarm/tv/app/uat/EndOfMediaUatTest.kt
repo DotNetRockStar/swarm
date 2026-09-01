@@ -1,5 +1,6 @@
 package app.swarm.tv.app.uat
 
+import android.view.KeyEvent
 import app.swarm.tv.app.ui.UatTestTags
 import app.swarm.tv.core.watch.WatchState
 import kotlinx.coroutines.runBlocking
@@ -79,6 +80,25 @@ class EndOfMediaUatTest : UatTestBase() {
         waitForTag(UatTestTags.PAUSE_LABEL, timeoutMs = 10_000)
         val nextTitle = composeTestRule.textUnderTag(UatTestTags.PAUSE_TITLE)
         assertNotEquals("autoplay should advance with Select immediately usable", originalTitle, nextTitle)
+    }
+
+    @Test
+    fun testNativeControllerAutoHideKeepsSelectWorking() {
+        openFirstEpisodePlayer()
+        focusTag(UatTestTags.PLAYER_SURFACE)
+        // Reveal Media3's native transport controller, then leave it alone so
+        // it times out on its own. #154's follow-up report: once the shown
+        // controls "disappear on their own", Select stops working because the
+        // invisible controller keeps focus until Back dislodges it.
+        device.pressKeyCode(KeyEvent.KEYCODE_MENU)
+        // Default controller_show_timeout_ms is 5s; wait past it plus slack.
+        Thread.sleep(9_000)
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.focusedTag() == UatTestTags.PLAYER_SURFACE
+        }
+        pressSelect()
+        // Select must reach the surface and pause immediately, with no Back.
+        waitForTag(UatTestTags.PAUSE_LABEL, timeoutMs = 10_000)
     }
 
     @Test
