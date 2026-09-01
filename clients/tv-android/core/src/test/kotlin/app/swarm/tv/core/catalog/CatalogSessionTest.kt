@@ -381,6 +381,99 @@ class CatalogSessionTest {
         proxy.close()
     }
 
+    @Test
+    fun `pollChanges applies a server delta onto the cached manifest without a full refetch`() = runBlocking {
+        val baseline = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(
+                CatalogEntry("movie-1", "fp-1", MediaKind.MOVIE, "Alpha", 1_024),
+                CatalogEntry("movie-2", "fp-2", MediaKind.MOVIE, "Beta", 1_024),
+            ),
+        )
+        val delta = CatalogManifest(
+            thumbprint = "catalog-v2",
+            entries = listOf(
+                CatalogEntry("movie-2", "fp-2", MediaKind.MOVIE, "Beta (updated)", 1_024),
+                CatalogEntry("movie-3", "fp-3", MediaKind.MOVIE, "Gamma", 1_024),
+            ),
+            removed = listOf("movie-1"),
+        )
+        val connection = ChangeFeedConnection(baseline, delta)
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(proxy, directConnector = { _, _, _ -> connection }).use { session ->
+            session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            val poll = session.pollChanges(device, listOf(device), identity.certificate, identity.privateKey)
+
+            assertTrue(poll.supported)
+            assertEquals(
+                listOf("Beta (updated)", "Gamma"),
+                poll.entries?.map { it.entry.title }?.sorted(),
+            )
+        }
+        proxy.close()
+    }
+
+    @Test
+    fun `pollChanges reports unsupported when the server has no change feed`() = runBlocking {
+        val baseline = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(CatalogEntry("movie-1", "fp-1", MediaKind.MOVIE, "Alpha", 1_024)),
+        )
+        val connection = ChangeFeedConnection(baseline, delta = null)
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(proxy, directConnector = { _, _, _ -> connection }).use { session ->
+            session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            val poll = session.pollChanges(device, listOf(device), identity.certificate, identity.privateKey)
+
+            assertEquals(false, poll.supported)
+            assertEquals(null, poll.entries)
+        }
+        proxy.close()
+    }
+
+    /** Serves the initial catalog like [CatalogConnection], then answers the
+     * `/catalog/changes` long-poll with [delta] (or 404 everywhere when
+     * [delta] is null, modelling a server built before the change feed). */
+    private class ChangeFeedConnection(
+        private val baseline: CatalogManifest,
+        private val delta: CatalogManifest?,
+    ) : PeerConnection {
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            val request = path.substringBefore('?')
+            val body = when (request) {
+                "/catalog/thumbprint" ->
+                    """{"thumbprint":"${baseline.thumbprint}","entry_count":${baseline.entries.size}}"""
+                "/catalog/manifest.gz" -> return response(404, ByteArray(0))
+                "/catalog/manifest" -> SwarmJson.encodeToString(baseline)
+                "/catalog/changes.gz" -> return response(404, ByteArray(0))
+                "/catalog/changes" ->
+                    delta?.let { SwarmJson.encodeToString(it) } ?: return response(404, ByteArray(0))
+                else -> error("unexpected catalog request: $path")
+            }.toByteArray()
+            return response(200, body)
+        }
+
+        private fun response(status: Int, body: ByteArray) = PeerResponse(
+            PeerResponseHeader(status = status, len = body.size.toLong()),
+            ByteArrayInputStream(body),
+        )
+    }
+
     private class CatalogConnection(private val manifest: CatalogManifest) : PeerConnection {
         override fun request(
             path: String,

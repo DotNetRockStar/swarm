@@ -124,6 +124,9 @@ private class RouteMemory {
  */
 private const val MANIFEST_FETCH_TIMEOUT_MS = 12_000L
 
+/** Server-held change requests return after 20 seconds when quiet. */
+private const val CATALOG_CHANGE_FETCH_TIMEOUT_MS = 27_000L
+
 /** The server allows a progressing foreground HLS startup up to 120 seconds.
  * Give it a small delivery margin, then force a reconnect rather than leave
  * the Fire TV parked on "Starting…" forever if the QUIC response stream is
@@ -197,6 +200,10 @@ class CatalogSession internal constructor(
         val entries: List<MergedEntry>,
         val unreachable: List<SwarmDevice>,
         val failures: List<CatalogFailure> = emptyList(),
+    )
+    data class ChangePoll(
+        val entries: List<MergedEntry>? = null,
+        val supported: Boolean = true,
     )
     data class PlaybackSelection(
         val url: String,
@@ -547,6 +554,86 @@ class CatalogSession internal constructor(
         }
 
         return Result(CatalogMerger.merge(manifestsByServer), unreachable, failures)
+    }
+
+    /**
+     * Waits on one server's authenticated change feed and atomically applies
+     * its delta to the cached manifest. A quiet timeout returns no entries;
+     * callers immediately open another poll without repainting the UI.
+     */
+    suspend fun pollChanges(
+        device: SwarmDevice,
+        activeDevices: List<SwarmDevice>,
+        clientCertificate: X509Certificate,
+        clientKey: PrivateKey,
+    ): ChangePoll {
+        val baseline = cachedManifest(device.deviceId) ?: return ChangePoll()
+        val connection = connectionFor(device, clientCertificate, clientKey) ?: return ChangePoll()
+        val outcome = coroutineScope {
+            val fetch = async(Dispatchers.IO) {
+                runCatching { fetchChangesBlocking(connection, baseline.thumbprint) }
+            }
+            val result = withTimeoutOrNull(CATALOG_CHANGE_FETCH_TIMEOUT_MS) { fetch.await() }
+                ?: kotlin.Result.failure(IOException("catalog change feed stalled"))
+            if (result.isFailure) {
+                fetch.cancel()
+                evictConnection(device.deviceId, connection)
+            }
+            result
+        }.getOrElse { return ChangePoll() }
+
+        if (outcome.unsupported) return ChangePoll(supported = false)
+        val delta = outcome.manifest ?: return ChangePoll()
+        val current = manifests[device.deviceId] ?: baseline
+        // Another refresh won the race. Re-poll from its newer version
+        // instead of applying a delta based on an obsolete snapshot.
+        if (current.thumbprint != baseline.thumbprint) return ChangePoll()
+        val next = if (delta.reset) {
+            delta.copy(reset = false)
+        } else {
+            val byKey = current.entries.associateByTo(linkedMapOf()) { it.entryKey }
+            delta.removed.forEach(byKey::remove)
+            delta.entries.forEach { byKey[it.entryKey] = it }
+            CatalogManifest(delta.thumbprint, byKey.values.toList())
+        }
+        manifests[device.deviceId] = next
+        runCatching { catalogCache?.store(device.deviceId, next) }.onFailure { it.printStackTrace() }
+        val activeIds = activeDevices
+            .filter { it.deviceType != DeviceType.CLIENT }
+            .mapTo(hashSetOf()) { it.deviceId }
+        return ChangePoll(
+            entries = CatalogMerger.merge(manifests.filterKeys { it in activeIds }),
+        )
+    }
+
+    private data class ChangeResponse(
+        val manifest: CatalogManifest? = null,
+        val unsupported: Boolean = false,
+    )
+
+    private fun fetchChangesBlocking(connection: PeerConnection, thumbprint: String): ChangeResponse {
+        var response = connection.request("/catalog/changes.gz?since=$thumbprint")
+        var compressed = response.header.status == 200
+        if (response.header.status == 404) {
+            response.body.close()
+            response = connection.request("/catalog/changes?since=$thumbprint")
+            compressed = false
+        }
+        return when (response.header.status) {
+            200 -> ChangeResponse(decodeBody<CatalogManifest>(response, compressed))
+            204 -> {
+                response.body.close()
+                ChangeResponse()
+            }
+            404 -> {
+                response.body.close()
+                ChangeResponse(unsupported = true)
+            }
+            else -> {
+                response.body.close()
+                throw IOException("catalog change feed returned ${response.header.status}")
+            }
+        }
     }
 
     /** Lightweight authenticated reachability check used by the dashboard's Resync action. */

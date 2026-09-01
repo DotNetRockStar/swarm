@@ -459,6 +459,8 @@ class SwarmViewModel(
     private var browsePreviewWorker: Job? = null
     private var browsePreviewReleaseJob: Job? = null
     private var browsePreviewCatalog: UiState.Catalog? = null
+    /** Parent of one server-held catalog change poll per connected server. */
+    private var catalogUpdatesJob: Job? = null
 
     private var client: StunApiClient? = null
     private var accessToken: String? = null
@@ -1531,6 +1533,7 @@ class SwarmViewModel(
      * [current] does not need to have been published to [_state], which
      * prevents a one-frame SWARM-page flash during cold start. */
     private fun openCatalog(current: UiState.Dashboard) {
+        catalogUpdatesJob?.cancel()
         // Resolve the route again at the point of use. This covers the narrow
         // startup interleaving where discovery populated latestLanServers
         // after the dashboard was restored but before its collector refreshed
@@ -1664,7 +1667,98 @@ class SwarmViewModel(
                 }
                 notify("The media server is not reachable right now.", ClientNotificationKind.WARNING)
             }
+            if (_state.value is UiState.Catalog) startCatalogChangeFeed(connectionDevices)
         }
+    }
+
+    /**
+     * Keeps one long-held request open to each media server. Deltas are
+     * merged into the existing screen state; no loading flag or navigation
+     * transition is involved, so Compose updates only the affected content.
+     */
+    private fun startCatalogChangeFeed(devices: List<SwarmDevice>) {
+        catalogUpdatesJob?.cancel()
+        val servers = devices.filter { it.deviceType != DeviceType.CLIENT }
+        catalogUpdatesJob = viewModelScope.launch {
+            servers.forEach { server ->
+                launch {
+                    while ((_state.value.diagnosticCatalog() ?: _state.value.browsePreviewCatalog()) != null) {
+                        val poll = catalogSession.pollChanges(
+                            server,
+                            devices,
+                            clientCertificate,
+                            clientKey,
+                        )
+                        if (!poll.supported) break
+                        poll.entries?.let(::publishCatalogUpdate)
+                        // A normal quiet poll already waits twenty seconds;
+                        // this small floor prevents a failed connection from
+                        // becoming a tight reconnect loop.
+                        delay(250)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun publishCatalogUpdate(entries: List<MergedEntry>) {
+        latestCatalogEntries = entries
+        lastKnownGenres = entries.flatMap { it.entry.genres }
+            .distinct()
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+        val currentCatalog = _state.value.diagnosticCatalog() ?: _state.value.browsePreviewCatalog() ?: return
+        val updatedCatalog = currentCatalog.copy(
+            entries = applyKidModeFilter(entries),
+            loading = false,
+        )
+        _state.value = replaceEmbeddedCatalog(_state.value, updatedCatalog)
+    }
+
+    /** Rebuilds derived shelves around a new catalog while preserving the
+     * viewer's current screen, selected artist/show/season, and playback. */
+    private fun replaceEmbeddedCatalog(state: UiState, catalog: UiState.Catalog): UiState = when (state) {
+        is UiState.Catalog -> catalog
+        is UiState.ArtistShelf -> state.copy(
+            catalog = catalog,
+            artists = CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
+        )
+        is UiState.MovieShelf -> state.copy(
+            catalog = catalog,
+            movies = catalog.entries.filter { it.entry.kind == MediaKind.MOVIE },
+        )
+        is UiState.ShowShelf -> state.copy(
+            catalog = catalog,
+            shows = CatalogGrouping.groupEpisodesByShowSeason(catalog.entries),
+        )
+        is UiState.ArtistAlbums -> {
+            val artists = CatalogGrouping.groupTracksByArtistAlbum(catalog.entries)
+            state.copy(
+                previous = replaceEmbeddedCatalog(state.previous, catalog),
+                catalog = catalog,
+                artists = artists,
+                artist = artists.find { it.artist == state.artist.artist } ?: state.artist,
+            )
+        }
+        is UiState.ShowSeasons -> {
+            val shows = CatalogGrouping.groupEpisodesByShowSeason(catalog.entries)
+            val show = shows.find { it.show == state.show.show } ?: state.show
+            state.copy(
+                previous = replaceEmbeddedCatalog(state.previous, catalog),
+                catalog = catalog,
+                shows = shows,
+                show = show,
+                selectedSeason = state.selectedSeason?.let { selected ->
+                    show.seasons.find { it.season == selected.season } ?: selected
+                },
+            )
+        }
+        is UiState.MovieDetail -> state.copy(
+            previous = replaceEmbeddedCatalog(state.previous, catalog),
+            entry = catalog.entries.find { it.fingerprint == state.entry.fingerprint } ?: state.entry,
+        )
+        is UiState.PreparingPlayback -> state.copy(previous = replaceEmbeddedCatalog(state.previous, catalog))
+        is UiState.Player -> state.copy(previous = replaceEmbeddedCatalog(state.previous, catalog))
+        else -> state
     }
 
     /**
@@ -3119,6 +3213,8 @@ class SwarmViewModel(
     fun backToDashboard() {
         val current = _state.value
         if (current is UiState.Catalog) {
+            catalogUpdatesJob?.cancel()
+            catalogUpdatesJob = null
             if (localSession) {
                 _state.value = UiState.Dashboard(current.swarm, current.dashboardDevices)
             } else {
@@ -3206,6 +3302,7 @@ class SwarmViewModel(
             normalizeFingerprint(device.certFingerprint) !in _disconnectedServerFingerprints.value
 
     override fun onCleared() {
+        catalogUpdatesJob?.cancel()
         clearTestingIdentity()
         lanDiscovery.close()
         signaling?.close()

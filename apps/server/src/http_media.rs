@@ -325,6 +325,8 @@ pub async fn start(
         .route("/catalog/thumbprint", get(media_get))
         .route("/catalog/manifest", get(media_get))
         .route("/catalog/manifest.gz", get(media_get))
+        .route("/catalog/changes", get(media_get))
+        .route("/catalog/changes.gz", get(media_get))
         .route("/art/{entry_key}/{kind}", get(media_get))
         // Same resolve_for_network dispatch as everything else above, so no
         // new handler — /stop is a mutation (releases a session early), POST
