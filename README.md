@@ -119,6 +119,27 @@ cd apps/server && npm install && npm run build  # native desktop package
 
 The fingerprint tests pin byte-for-byte compatibility with the original Python `sample-fp-v1` implementation — do not change `fingerprint.rs` without regenerating vectors against `batocera.drone/app/common/fingerprint.py`.
 
+### Running the media server as an always-on macOS service
+
+`run_now.sh` is a dev harness — it runs a *debug* build out of `./target`, so
+any `cargo build`/`cargo test` in the workspace rebuilds and disturbs the live
+server (a playing TV then reports "server has gone offline"). For a machine
+that should serve 24/7, install it instead:
+
+```bash
+./scripts/install_media_server.sh              # build release .app + LaunchAgent
+./scripts/install_media_server.sh --status
+./scripts/install_media_server.sh --uninstall
+```
+
+This builds `SWARM Server.app` (release), installs it to `~/Applications`
+(outside `./target`, so repo builds never touch it), and registers a
+LaunchAgent (`~/Library/LaunchAgents/app.swarm.server.plist`) that starts it at
+login and relaunches it only if it *crashes* — Quit from the tray menu still
+stops it, and `launchctl bootout gui/$UID/app.swarm.server` stops the service.
+The library, TV pairings, and settings carry over (same `<app data dir>`). It
+is LAN-only; internet access still needs a compiled-in `SWARM_RENDEZVOUS_URL`.
+
 The desktop app persists media, scraper, streaming, transcoding, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, `SWARM_TRANSCODING_DISABLED`, `SWARM_VIDEO_ENCODER`, `SWARM_MAX_TRANSCODE_HEIGHT`, and `SWARM_HLS_SEGMENT_SECONDS`.
 
 On macOS, media roots can connect directly to a NAS from either first-run
