@@ -161,17 +161,21 @@ fun SwarmDashboardScreen(
                     Text(swarm.name, color = SwarmText, fontSize = 16.sp)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (swarm.id != "lan") {
-                        Button(
-                            onClick = {
-                                showAddServer = true
-                            },
-                            modifier = downToFirstServer.then(
+                    // Sits next to "Browse library" on the main SWARM page for
+                    // every connection kind (including a LAN-only session) —
+                    // this is the one entry point to the STUN activation flow
+                    // (#158).
+                    Button(
+                        onClick = {
+                            showAddServer = true
+                        },
+                        modifier = downToFirstServer
+                            .then(
                                 if (isConnectionSetup) Modifier.focusRequester(initialActionFocusRequester) else Modifier,
-                            ),
-                            colors = swarmActionButtonColors(),
-                        ) { Text("Add Server") }
-                    }
+                            )
+                            .testTag(UatTestTags.DASHBOARD_ADD_SERVER_BUTTON),
+                        colors = swarmActionButtonColors(),
+                    ) { Text("Add Server") }
                     Button(
                         onClick = onBrowseCatalog,
                         enabled = hasConnectedServer,
@@ -497,7 +501,9 @@ private fun AddServerOverlay(
         Button(
             onClick = onAdd,
             enabled = !busy,
-            modifier = Modifier.focusRequester(actionFocusRequester),
+            modifier = Modifier
+                .focusRequester(actionFocusRequester)
+                .testTag(UatTestTags.ADD_SERVER_START_BUTTON),
             colors = swarmActionButtonColors(),
         ) {
             Text(if (busy) "Requesting…" else "Show activation code", fontWeight = FontWeight.Bold)

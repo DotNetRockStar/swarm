@@ -42,6 +42,7 @@ object UatTestTags {
 
     // CatalogScreen: top bar.
     const val OPEN_SWARM_BUTTON = "uat_open_swarm_button"
+    const val DASHBOARD_ADD_SERVER_BUTTON = "uat_dashboard_add_server_button"
     const val DASHBOARD_BROWSE_BUTTON = "uat_dashboard_browse_button"
     const val DASHBOARD_SETTINGS_BUTTON = "uat_dashboard_settings_button"
 
@@ -51,8 +52,8 @@ object UatTestTags {
     const val LAN_SERVER_DISCONNECT_BUTTON = "uat_lan_server_disconnect_button"
     const val LAN_SERVER_FORGET_BUTTON = "uat_lan_server_forget_button"
 
-    // SwarmSettingsScreen / STUN activation flow.
-    const val SETTINGS_ADD_SERVER_BUTTON = "uat_settings_add_server_button"
+    // STUN "Add Server" activation flow (launched from SwarmDashboardScreen).
+    const val ADD_SERVER_START_BUTTON = "uat_add_server_start_button"
     const val ACTIVATION_CODE = "uat_activation_code"
     const val ACTIVATION_CANCEL_BUTTON = "uat_activation_cancel_button"
 
