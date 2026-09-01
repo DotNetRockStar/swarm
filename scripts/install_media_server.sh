@@ -213,9 +213,17 @@ do_install() {
         ( cd "$REPO_ROOT/apps/server" && npm ci )
     fi
 
+    # whisper.cpp's bundled ggml uses std::filesystem, unavailable below the
+    # 10.15 C++ deployment target. tauri.conf.json's bundle.macOS.minimumSystemVersion
+    # pins this, and MACOSX_DEPLOYMENT_TARGET below covers a plain cargo build —
+    # but the cmake crate caches CMAKE_OSX_DEPLOYMENT_TARGET in its build dir on
+    # the first configure, so an earlier build at the wrong target sticks. Drop
+    # just that crate's artifacts so it re-configures.
+    cargo clean --release -p whisper-rs-sys 2>/dev/null || true
+
     echo
     echo "==> Building the release app — this takes ~10-20 minutes the first time ..."
-    ( cd "$REPO_ROOT/apps/server" && "$tauri_cli" build )
+    ( cd "$REPO_ROOT/apps/server" && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}" "$tauri_cli" build )
     if [ ! -d "$BUILT_APP" ]; then
         echo "Build did not produce $BUILT_APP" >&2
         exit 1
