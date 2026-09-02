@@ -50,6 +50,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
@@ -584,26 +585,36 @@ class CatalogSession internal constructor(
 
         if (outcome.unsupported) return ChangePoll(supported = false)
         val delta = outcome.manifest ?: return ChangePoll()
-        val current = manifests[device.deviceId] ?: baseline
-        // Another refresh won the race. Re-poll from its newer version
-        // instead of applying a delta based on an obsolete snapshot.
-        if (current.thumbprint != baseline.thumbprint) return ChangePoll()
-        val next = if (delta.reset) {
-            delta.copy(reset = false)
-        } else {
-            val byKey = current.entries.associateByTo(linkedMapOf()) { it.entryKey }
-            delta.removed.forEach(byKey::remove)
-            delta.entries.forEach { byKey[it.entryKey] = it }
-            CatalogManifest(delta.thumbprint, byKey.values.toList())
+
+        // Applying the delta, re-serialising the whole manifest to disk, and
+        // re-merging every server's catalog are all CPU/IO-bound and grow
+        // with library size. This function is driven from a Main-dispatched
+        // coroutine, so doing that work inline stalled the UI thread on a
+        // large library — long enough to drop remote key presses and, on a
+        // memory-pressured Fire TV, trip an input-dispatch ANR (#208). Run it
+        // off the caller's dispatcher and hand back only the merged result.
+        return withContext(Dispatchers.Default) {
+            val current = manifests[device.deviceId] ?: baseline
+            // Another refresh won the race. Re-poll from its newer version
+            // instead of applying a delta based on an obsolete snapshot.
+            if (current.thumbprint != baseline.thumbprint) return@withContext ChangePoll()
+            val next = if (delta.reset) {
+                delta.copy(reset = false)
+            } else {
+                val byKey = current.entries.associateByTo(linkedMapOf()) { it.entryKey }
+                delta.removed.forEach(byKey::remove)
+                delta.entries.forEach { byKey[it.entryKey] = it }
+                CatalogManifest(delta.thumbprint, byKey.values.toList())
+            }
+            manifests[device.deviceId] = next
+            runCatching { catalogCache?.store(device.deviceId, next) }.onFailure { it.printStackTrace() }
+            val activeIds = activeDevices
+                .filter { it.deviceType != DeviceType.CLIENT }
+                .mapTo(hashSetOf()) { it.deviceId }
+            ChangePoll(
+                entries = CatalogMerger.merge(manifests.filterKeys { it in activeIds }),
+            )
         }
-        manifests[device.deviceId] = next
-        runCatching { catalogCache?.store(device.deviceId, next) }.onFailure { it.printStackTrace() }
-        val activeIds = activeDevices
-            .filter { it.deviceType != DeviceType.CLIENT }
-            .mapTo(hashSetOf()) { it.deviceId }
-        return ChangePoll(
-            entries = CatalogMerger.merge(manifests.filterKeys { it in activeIds }),
-        )
     }
 
     private data class ChangeResponse(
