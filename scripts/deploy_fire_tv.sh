@@ -7,22 +7,22 @@
 # non-zero on any failure, so it doubles as a repeatable regression check
 # after any change, not just a one-off convenience script.
 #
-# With no IP given and no device already in `adb devices`, this scans the
-# local /24 for Fire TVs (port 5555, manufacturer "Amazon") and prompts for
-# which one(s) to deploy to. That scan only finds devices that already have
+# With no explicit target, this always scans the local /24 for Fire TVs (port
+# 5555, manufacturer "Amazon"), lists every match, and prompts for which one(s)
+# to deploy to. That scan only finds devices that already have
 # ADB-over-network reachable — enable it once per device first: Settings ->
 # My Fire TV -> Developer Options -> [ADB debugging / Network debugging] ON
 # (some Fire OS versions require one initial `adb tcpip 5555` over USB first).
 #
 # Usage:
-#   ./scripts/deploy_fire_tv.sh                # $SWARM_TV_IP, then the preferred device (scripts/tests/tv_test_device.local.json), then the sole `adb devices` entry, then a LAN scan + prompt
+#   ./scripts/deploy_fire_tv.sh                # scans the LAN, lists Fire TVs, and prompts for the target(s)
 #   ./scripts/deploy_fire_tv.sh 192.168.0.148   # connects to this IP first (find it: Settings -> My Fire TV -> About -> Network)
 #   ./scripts/deploy_fire_tv.sh -f              # also tails logcat after a clean launch, until Ctrl+C (single target only)
 #   ./scripts/deploy_fire_tv.sh -c              # uninstall first (wipes the device's saved STUN link/swarms/token) — see below
 #
 # Env vars:
 #   SWARM_TV_IP     default target IP if none is passed as an argument (skips the LAN scan)
-#   SWARM_TV_NAME   default target device_name if no IP is given; overrides the
+#   SWARM_TV_NAME   preferred device_name shown in the LAN choices; overrides the
 #                   preferred_device_name in scripts/tests/tv_test_device.local.json
 #                   (the same preferred-device config the closed-loop TV suites use)
 #   ANDROID_HOME    default ~/Library/Android/sdk
@@ -37,6 +37,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../clients/tv-android"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@17}"
 ADB="$ANDROID_HOME/platform-tools/adb"
+GRADLEW="${SWARM_GRADLEW:-./gradlew}"
 PACKAGE="app.swarm.tv"
 # Fully qualified, not "$PACKAGE/.MainActivity": AGP namespace is
 # app.swarm.tv but MainActivity's real Kotlin package is app.swarm.tv.app
@@ -59,9 +60,9 @@ for arg in "$@"; do
 done
 TARGET="${TARGET:-${SWARM_TV_IP:-}}"
 
-# When no explicit IP is given, fall back to a preferred device by name — the
-# same scripts/tests/tv_test_device.local.json the closed-loop TV suites read.
-# An env override wins for one-off runs.
+# The preferred device is highlighted in the interactive list, but no longer
+# bypasses discovery or silently selects a target. An env override wins over
+# the same scripts/tests/tv_test_device.local.json the closed-loop suites read.
 PREFERRED_DEVICE_FILE="$(dirname "${BASH_SOURCE[0]}")/tests/tv_test_device.local.json"
 PREFERRED_TV_NAME="${SWARM_TV_NAME:-}"
 if [ -z "$PREFERRED_TV_NAME" ] && [ -f "$PREFERRED_DEVICE_FILE" ]; then
@@ -163,7 +164,7 @@ scan_lan_for_fire_tvs() {
 
     echo "==> Checking live hosts for adb (port $ADB_PORT) ..." >&2
     open_ips="$(printf '%s\n' "$live_ips" | xargs -P 32 -I{} bash -c \
-        'nc -z -w1 "$1" '"$ADB_PORT"' 2>/dev/null && echo "$1"' _ {} || true)"
+        'nc -z -w1 "$1" '"$ADB_PORT"' 2>/dev/null && echo "$1"' _ {} | sort || true)"
 
     [ -n "$open_ips" ] || return 0
     inspect_status=0
@@ -184,110 +185,71 @@ if [ -n "$TARGET" ]; then
     echo "==> Connecting to $TARGET ..."
     "$ADB" connect "$TARGET"
     SERIALS=("$TARGET")
-elif [ -n "$PREFERRED_TV_NAME" ]; then
-    # Preferred device by name: check already-connected devices, then a LAN
-    # scan. If found, deploy to just that one without prompting (matches the
-    # closed-loop TV suites' default-to-preferred-device behavior).
-    echo "==> Preferred device configured (\"$PREFERRED_TV_NAME\"); looking for it ..."
-    preferred_serial=""
-    while IFS= read -r serial; do
-        [ -n "$serial" ] || continue
-        n="$("$ADB" -s "$serial" shell settings get global device_name </dev/null 2>/dev/null | tr -d '\r')"
-        if [ "$n" = "$PREFERRED_TV_NAME" ]; then
-            preferred_serial="$serial"
-            break
-        fi
-    done < <("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')
-    if [ -z "$preferred_serial" ]; then
-        while IFS=$'\t' read -r name ip; do
-            [ -n "$ip" ] || continue
-            if [ "$name" = "$PREFERRED_TV_NAME" ]; then
-                preferred_serial="$ip:$ADB_PORT"
-                break
-            fi
-        done < <(scan_lan_for_fire_tvs)
-    fi
-    if [ -n "$preferred_serial" ]; then
-        [[ "$preferred_serial" == *:* ]] || preferred_serial="$preferred_serial:$ADB_PORT"
-        echo "==> Deploying to preferred device \"$PREFERRED_TV_NAME\" ($preferred_serial)"
-        "$ADB" connect "$preferred_serial" >/dev/null 2>&1 || true
-        SERIALS=("$preferred_serial")
-    else
-        echo "Preferred device \"$PREFERRED_TV_NAME\" is not reachable right now; falling back to the LAN scan." >&2
-        PREFERRED_TV_NAME=""
-    fi
 fi
 
 if [ -z "$TARGET" ] && [ "${#SERIALS[@]}" -eq 0 ]; then
-    devices="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')"
-    count="$(printf '%s\n' "$devices" | grep -c . || true)"
-    if [ "$count" -eq 1 ]; then
-        SERIALS=("$devices")
-        echo "==> Using already-connected device ${SERIALS[0]}"
-    else
-        names=()
-        ips=()
-        while IFS=$'\t' read -r name ip; do
-            [ -n "$ip" ] || continue
-            names+=("$name")
-            ips+=("$ip")
-        done < <(scan_lan_for_fire_tvs)
+    names=()
+    ips=()
+    while IFS=$'\t' read -r name ip; do
+        [ -n "$ip" ] || continue
+        names+=("$name")
+        ips+=("$ip")
+    done < <(scan_lan_for_fire_tvs)
 
-        if [ "${#ips[@]}" -eq 0 ]; then
-            echo "No device IP given, no \$SWARM_TV_IP set, \`adb devices\` doesn't show exactly one connected device, and the LAN scan found no Amazon Fire TVs." >&2
-            echo "Usage: $0 <fire-tv-ip>   (find it: Settings -> My Fire TV -> About -> Network)" >&2
-            "$ADB" devices >&2
-            exit 1
-        fi
+    if [ "${#ips[@]}" -eq 0 ]; then
+        echo "No device IP given, no \$SWARM_TV_IP set, and the LAN scan found no Amazon Fire TVs." >&2
+        echo "Usage: $0 <fire-tv-ip>   (find it: Settings -> My Fire TV -> About -> Network)" >&2
+        "$ADB" devices >&2
+        exit 1
+    fi
 
-        # Always list and prompt (even for a single match) rather than
-        # silently picking one for you — this is the only place that would
-        # otherwise deploy without an explicit choice.
-        echo "Found ${#ips[@]} Fire TV(s) on the LAN:"
-        for i in "${!ips[@]}"; do
-            printf '  %d) %s | %s\n' "$((i + 1))" "${names[$i]}" "${ips[$i]}"
+    # No implicit choice: even one match is listed and requires confirmation.
+    echo "Found ${#ips[@]} Fire TV(s) on the LAN:"
+    for i in "${!ips[@]}"; do
+        preferred=""
+        [ -n "$PREFERRED_TV_NAME" ] && [ "${names[$i]}" = "$PREFERRED_TV_NAME" ] && preferred=" (preferred)"
+        printf '  %d) %s%s | %s\n' "$((i + 1))" "${names[$i]}" "$preferred" "${ips[$i]}"
+    done
+    read -rp "Deploy to which one(s)? [1-${#ips[@]}, space/comma-separated for multiple, or 'a' for all]: " choice
+
+    # bash 3.2 has no associative arrays, so dedupe selections (e.g. "1,1")
+    # by linear-scanning SERIALS before appending.
+    add_serial() {
+        local candidate="$1" existing
+        # `${SERIALS[@]}` alone, under `set -u`, is a bash 3.2 bug
+        # (macOS's default /bin/bash) that raises "unbound variable" for
+        # a zero-length array even though SERIALS is legitimately
+        # declared — `${SERIALS[@]:-}` sidesteps it. See run_now.sh's
+        # cleanup() for the same issue.
+        for existing in "${SERIALS[@]:-}"; do
+            [ "$existing" = "$candidate" ] && return 0
         done
-        read -rp "Deploy to which one(s)? [1-${#ips[@]}, space/comma-separated for multiple, or 'a' for all]: " choice
+        SERIALS+=("$candidate")
+    }
 
-        # bash 3.2 has no associative arrays, so dedupe selections (e.g. "1,1")
-        # by linear-scanning SERIALS before appending.
-        add_serial() {
-            local candidate="$1" existing
-            # `${SERIALS[@]}` alone, under `set -u`, is a bash 3.2 bug
-            # (macOS's default /bin/bash) that raises "unbound variable" for
-            # a zero-length array even though SERIALS is legitimately
-            # declared — `${SERIALS[@]:-}` sidesteps it. See run_now.sh's
-            # cleanup() for the same issue.
-            for existing in "${SERIALS[@]:-}"; do
-                [ "$existing" = "$candidate" ] && return 0
-            done
-            SERIALS+=("$candidate")
-        }
-
-        if [[ "$choice" =~ ^[Aa](ll)?$ ]]; then
-            for ip in "${ips[@]}"; do
-                add_serial "$ip:$ADB_PORT"
-            done
-        else
-            for tok in ${choice//,/ }; do
-                if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#ips[@]}" ]; then
-                    add_serial "${ips[$((tok - 1))]}:$ADB_PORT"
-                else
-                    echo "Invalid choice: '$tok'" >&2
-                    exit 1
-                fi
-            done
-        fi
-
-        if [ "${#SERIALS[@]}" -eq 0 ]; then
-            echo "No device selected." >&2
-            exit 1
-        fi
-
-        for serial in "${SERIALS[@]}"; do
-            "$ADB" connect "$serial" >/dev/null
+    if [[ "$choice" =~ ^[Aa](ll)?$ ]]; then
+        for ip in "${ips[@]}"; do
+            add_serial "$ip:$ADB_PORT"
+        done
+    else
+        for tok in ${choice//,/ }; do
+            if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#ips[@]}" ]; then
+                add_serial "${ips[$((tok - 1))]}:$ADB_PORT"
+            else
+                echo "Invalid choice: '$tok'" >&2
+                exit 1
+            fi
         done
     fi
+
+    if [ "${#SERIALS[@]}" -eq 0 ]; then
+        echo "No device selected." >&2
+        exit 1
+    fi
+
+    for serial in "${SERIALS[@]}"; do
+        "$ADB" connect "$serial" >/dev/null
+    done
 fi
 
 # bash 3.2 (macOS's default /bin/bash) has no negative array indices, so the
@@ -300,13 +262,13 @@ fi
 echo "==> Building debug APK ..."
 BUILD_LOG="$(mktemp -t swarm-fire-tv-build.XXXXXX)"
 build_status=0
-./gradlew :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
+"$GRADLEW" :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
 if [ "$build_status" -ne 0 ]; then
     if grep -Fq "is located outside the root directory" "$BUILD_LOG"; then
         echo "==> Gradle reused outputs from a different checkout path; cleaning generated Android build files and retrying once ..."
-        ./gradlew clean
+        "$GRADLEW" clean
         build_status=0
-        ./gradlew :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
+        "$GRADLEW" :app:assembleDebug 2>&1 | tee "$BUILD_LOG" || build_status=$?
     fi
 fi
 rm -f "$BUILD_LOG"
@@ -349,7 +311,7 @@ for SERIAL in "${SERIALS[@]}"; do
     fi
 
     echo "==> Installing on $SERIAL (in place; add -c/--clean for a fresh uninstall first) ..."
-    ANDROID_SERIAL="$SERIAL" ./gradlew :app:installDebug
+    ANDROID_SERIAL="$SERIAL" "$GRADLEW" :app:installDebug
 
     echo "==> Force-stopping any previous run and clearing logcat ..."
     "$ADB" -s "$SERIAL" shell am force-stop "$PACKAGE"
