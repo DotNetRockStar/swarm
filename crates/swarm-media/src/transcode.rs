@@ -1333,21 +1333,17 @@ impl TranscodeManager {
         client_audio_codecs: &[String],
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Child, TranscodeError> {
-        let has_audio = entry.audio.is_some();
+        let scan_found_audio = entry.audio.is_some();
         // Audio language is routing metadata, not part of the codec summary
         // retained at scan time. Resolve every embedded audio stream (not
         // just one) when an HLS session is created, so both normal
         // transcodes and previews can offer the viewer every track the
         // container actually has — mapping only a single server-picked
         // track (the historic behavior) left nothing for the pause/playback
-        // screen to switch between even when the source had six (#55). A
-        // failed/missing ffprobe, or a Track (music) entry, safely retains
-        // the original single 0:a:0-mapped stream. Bound this metadata read
-        // tightly because a slow network share must not hold a hover
-        // preview in negotiation.
-        let audio_tracks: Vec<AudioMapEntry> = if !has_audio {
-            Vec::new()
-        } else if entry.kind == MediaKind::Track {
+        // screen to switch between even when the source had six (#55). Bound
+        // this metadata read tightly because a slow network share must not
+        // hold a hover preview in negotiation.
+        let audio_tracks: Vec<AudioMapEntry> = if entry.kind == MediaKind::Track {
             vec![AudioMapEntry {
                 source_map: "0:a:0".to_string(),
                 name: "audio".to_string(),
@@ -1368,8 +1364,20 @@ impl TranscodeManager {
             .await
             .ok()
             .unwrap_or_default();
-            audio_map_entries(options)
+            // Trust a fresh probe over the scan-time summary. A library scanned
+            // before ffprobe was reachable (macOS GUI `PATH`, #203) has an
+            // empty `entry.audio` even for files that really do have sound, so
+            // gating on it dropped audio from every HLS session. Skip audio
+            // only when neither the scan nor this probe found any — a genuinely
+            // silent video then still transcodes instead of failing on a dead
+            // `0:a:0` map.
+            if options.is_empty() && !scan_found_audio {
+                Vec::new()
+            } else {
+                audio_map_entries(options)
+            }
         };
+        let has_audio = !audio_tracks.is_empty();
 
         if cancelled.load(Ordering::Relaxed) {
             return Err(TranscodeError::Superseded);
@@ -3139,6 +3147,111 @@ mod tests {
         let session_dir = root.join("sessions").join(session);
         assert!(session_dir.join("veng").join("index.m3u8").is_file());
         assert!(session_dir.join("vjpn").join("index.m3u8").is_file());
+
+        manager.finish_use(session);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression coverage for #203 ("movie is playing but there is no
+    /// audio"). A library scanned while ffprobe was unreachable (macOS GUI
+    /// `PATH`) stores entries with no audio summary at all; the HLS session
+    /// must still re-probe the real file and map its sound instead of
+    /// trusting that empty summary and shipping a video-only playlist.
+    #[tokio::test]
+    async fn hls_maps_audio_even_when_the_scan_recorded_no_audio_stream() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swarm-hls-203-{}", session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .await
+            .unwrap();
+        if !generated.success() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let config = TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 10_000_000,
+            reserve_percent: 30,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+            ..Default::default()
+        };
+        let manager = TranscodeManager::new(config);
+        let mut source_entry = entry();
+        source_entry.relative_path = "source.mp4".into();
+        source_entry.size = source.metadata().unwrap().len();
+        source_entry.duration_secs = Some(2.0);
+        source_entry.video.as_mut().unwrap().width = 640;
+        source_entry.video.as_mut().unwrap().height = 360;
+        source_entry.video.as_mut().unwrap().bitrate = Some(900_000);
+        // The scan never reached ffprobe, so it stored nothing about the audio.
+        source_entry.audio = None;
+        let mut prefs = preferences();
+        prefs.prefer_direct = false;
+
+        let plan = manager
+            .plan(&source_entry, &source, &prefs, false, None)
+            .await
+            .unwrap();
+        assert_eq!(plan.mode, PlaybackMode::Hls);
+        let relative = plan.path.splitn(4, '/').nth(3).unwrap();
+        let session = plan.path.split('/').nth(2).unwrap();
+        let file = manager.open_hls(session, relative).unwrap();
+        let master = std::fs::read_to_string(&file.path).unwrap();
+        assert!(
+            master.contains("#EXT-X-MEDIA:TYPE=AUDIO"),
+            "HLS master must still carry an audio rendition: {master}"
+        );
+        // The sine track carries no language tag, so `audio_map_entries` names
+        // it "und" — prove ffmpeg actually produced that rendition on disk.
+        let session_dir = root.join("sessions").join(session);
+        assert!(
+            session_dir.join("vund").join("index.m3u8").is_file(),
+            "an audio rendition playlist should exist on disk"
+        );
 
         manager.finish_use(session);
         drop(manager);

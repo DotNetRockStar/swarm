@@ -97,7 +97,7 @@ struct FfprobeFormat {
 }
 
 pub async fn probe(path: &Path) -> Option<MediaInfo> {
-    let output = tokio::process::Command::new("ffprobe")
+    let output = tokio::process::Command::new(resolve_ffprobe_path())
         .args([
             "-v",
             "quiet",
@@ -232,11 +232,14 @@ pub async fn list_audio_streams(ffmpeg_path: &Path, media_path: &Path) -> Vec<Au
 }
 
 fn ffprobe_path_for(ffmpeg_path: &Path) -> PathBuf {
+    if let Some(configured) = std::env::var_os("SWARM_FFPROBE_PATH") {
+        return PathBuf::from(configured);
+    }
     let has_explicit_parent = ffmpeg_path
         .parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty());
     if !has_explicit_parent {
-        return PathBuf::from("ffprobe");
+        return resolve_ffprobe_path();
     }
     let extension = ffmpeg_path.extension();
     let name = if extension.is_some_and(|value| value.eq_ignore_ascii_case("exe")) {
@@ -245,6 +248,81 @@ fn ffprobe_path_for(ffmpeg_path: &Path) -> PathBuf {
         "ffprobe"
     };
     ffmpeg_path.with_file_name(name)
+}
+
+/// Locate `ffprobe`, tolerating the reduced `PATH` a macOS GUI app inherits.
+///
+/// A media server opened from Finder or launched at login gets a much smaller
+/// `PATH` than an interactive shell, so a Homebrew or MacPorts `ffprobe` can be
+/// installed and still be invisible — the same failure the server resolves for
+/// `ffmpeg` (#203), which left every scanned entry with no codec/duration facts
+/// and, downstream, no audio in HLS playback. Honour `SWARM_FFPROBE_PATH`
+/// first, then an `ffprobe` sitting next to an explicit `SWARM_FFMPEG_PATH`,
+/// then the inherited `PATH`, then the common package-manager locations used by
+/// both Apple Silicon and Intel Macs.
+fn resolve_ffprobe_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let platform_candidates = [
+        PathBuf::from("/opt/homebrew/bin/ffprobe"),
+        PathBuf::from("/usr/local/bin/ffprobe"),
+        PathBuf::from("/opt/local/bin/ffprobe"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let platform_candidates: [PathBuf; 0] = [];
+
+    let configured = std::env::var_os("SWARM_FFPROBE_PATH").or_else(|| {
+        let ffmpeg = PathBuf::from(std::env::var_os("SWARM_FFMPEG_PATH")?);
+        ffmpeg
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty())
+            .then(|| ffprobe_path_for(&ffmpeg).into_os_string())
+    });
+
+    resolve_ffprobe_path_from(configured, std::env::var_os("PATH"), &platform_candidates)
+}
+
+fn resolve_ffprobe_path_from(
+    configured: Option<std::ffi::OsString>,
+    search_path: Option<std::ffi::OsString>,
+    platform_candidates: &[PathBuf],
+) -> PathBuf {
+    if let Some(configured) = configured {
+        return PathBuf::from(configured);
+    }
+
+    let executable_name = if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+
+    search_path
+        .as_deref()
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|directory| directory.join(executable_name))
+        .chain(platform_candidates.iter().cloned())
+        .find(|candidate| is_executable_file(candidate))
+        .unwrap_or_else(|| PathBuf::from(executable_name))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn select_preferred_audio_stream(streams: &[FfprobeStream]) -> Option<usize> {
@@ -332,6 +410,67 @@ mod tests {
         assert!(is_hdr_transfer("SMPTE2084"));
         assert!(!is_hdr_transfer("bt709"));
         assert!(!is_hdr_transfer(""));
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
+
+    #[test]
+    fn configured_ffprobe_path_is_authoritative() {
+        let configured = PathBuf::from("/custom/tools/ffprobe");
+        let resolved = resolve_ffprobe_path_from(
+            Some(configured.clone().into_os_string()),
+            None,
+            &[PathBuf::from("/another/ffprobe")],
+        );
+        assert_eq!(resolved, configured);
+    }
+
+    #[test]
+    fn finds_ffprobe_in_platform_locations_when_path_does_not_contain_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "swarm-probe-resolve-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let ffprobe = directory.join(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        std::fs::write(&ffprobe, b"test executable").unwrap();
+        make_executable(&ffprobe);
+
+        let resolved = resolve_ffprobe_path_from(None, None, std::slice::from_ref(&ffprobe));
+        assert_eq!(resolved, ffprobe);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn falls_back_to_a_bare_name_when_nothing_is_found() {
+        let resolved = resolve_ffprobe_path_from(None, None, &[]);
+        let expected = if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        };
+        assert_eq!(resolved, PathBuf::from(expected));
+    }
+
+    #[test]
+    fn ffprobe_is_taken_from_beside_an_explicitly_located_ffmpeg() {
+        let sibling = ffprobe_path_for(Path::new("/opt/homebrew/bin/ffmpeg"));
+        assert_eq!(sibling, PathBuf::from("/opt/homebrew/bin/ffprobe"));
     }
 
     #[test]
