@@ -17,8 +17,16 @@ android {
         // Keystore/Compose/Media3 stack this app is built on.
         minSdk = 25
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes -PswarmVersionCode=<git height> / -PswarmVersionName=0.1.<h>
+        // (same monotonic number the server release uses). Local builds fall
+        // back to 1 / 0.1.0-dev so the update check always sees itself as
+        // current.
+        versionCode = (providers.gradleProperty("swarmVersionCode")
+            .orElse(providers.environmentVariable("SWARM_VERSION_CODE"))
+            .orNull ?: "1").toInt()
+        versionName = providers.gradleProperty("swarmVersionName")
+            .orElse(providers.environmentVariable("SWARM_VERSION_NAME"))
+            .orNull ?: "0.1.0-dev"
         // Well above the 65536 method limit (Compose + Media3 + kwik +
         // coroutines + BouncyCastle land 16 dex files), so this is
         // required for the build to link at all.
@@ -41,9 +49,31 @@ android {
 
     buildFeatures { buildConfig = true }
 
+    // Release signing. CI decodes SWARM_ANDROID_KEYSTORE_BASE64 to
+    // app/upload.keystore and provides the passwords; without them (local
+    // release builds) Gradle falls back to the debug signing config so
+    // `assembleRelease` still works, it just can't update an installed
+    // CI-signed build.
+    val keystoreFile = rootProject.file("app/upload.keystore")
+    signingConfigs {
+        if (keystoreFile.exists()) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = (providers.environmentVariable("SWARM_ANDROID_KEYSTORE_PASSWORD").orNull ?: "")
+                keyAlias = (providers.environmentVariable("SWARM_ANDROID_KEY_ALIAS").orNull ?: "")
+                keyPassword = (providers.environmentVariable("SWARM_ANDROID_KEY_PASSWORD").orNull ?: "")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = if (keystoreFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -65,7 +95,13 @@ android {
     // exception happens during analysis, before any result is produced).
     // `compileDebugKotlin`/`assembleDebug` both succeed cleanly and are the
     // real verification signal for now — revisit lint on the next AGP/
-    // Kotlin bump.
+    // Kotlin bump. `checkReleaseBuilds = false` is what lets
+    // `assembleRelease` (and thus the CI APK job) run at all, since it
+    // otherwise triggers the same crash via `lintVitalRelease`.
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 
     // Fire TV Appstore submissions are APKs targeting armeabi-v7a / arm64-v8a
     // (see the project plan's Fire TV client section).

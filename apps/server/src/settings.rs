@@ -570,6 +570,12 @@ pub struct Settings {
     /// to >= 2 wherever it is consumed.
     #[serde(default = "default_hls_segment_seconds")]
     pub hls_segment_seconds: u32,
+    /// How the app applies new releases from GitHub: `"off"`, `"notify"`
+    /// (surface a banner; the user installs), or `"auto"` (download in the
+    /// background and install on the next quit — never mid-session, since the
+    /// server holds live playback connections). Defaults to `"notify"`.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: String,
 }
 
 fn default_streaming_upload_budget_enabled() -> bool {
@@ -594,6 +600,10 @@ fn default_video_encoder_mode() -> String {
 
 fn default_hls_segment_seconds() -> u32 {
     4
+}
+
+fn default_auto_update() -> String {
+    "notify".to_string()
 }
 
 // Hand-written rather than `#[derive(Default)]` so a brand-new install (no
@@ -634,6 +644,7 @@ impl Default for Settings {
             video_encoder_mode: default_video_encoder_mode(),
             max_transcode_height: 0,
             hls_segment_seconds: default_hls_segment_seconds(),
+            auto_update: default_auto_update(),
         }
     }
 }

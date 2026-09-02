@@ -9,6 +9,10 @@
          HTTP<->QUIC bridge) in a later pass; declared now so the manifest
          shape doesn't need revisiting for Appstore review twice. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- In-app update: download the new APK and hand it to the system
+         installer. "Apps from Unknown Sources" must already be on for the
+         sideloaded install to have happened at all. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Fire TV / Android TV compliance: this app is fully usable with only
          a D-pad remote, so a touchscreen must not be required. -->
@@ -67,5 +71,18 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Serves the downloaded APK to the system package installer via a
+             content:// URI (a file:// URI throws FileUriExposedException on
+             SDK 24+). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/provider_paths" />
+        </provider>
     </application>
 </manifest>

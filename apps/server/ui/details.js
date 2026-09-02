@@ -1,8 +1,79 @@
 // ---- Details tab: bandwidth/transcoding/cache panels + media-root config ---
 
 async function refreshDetails() {
-  await Promise.all([refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshTranscodingControls(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache()]);
+  await Promise.all([refreshMediaRoots(), refreshTmdbKeyField(), refreshOpenSubtitlesKeyField(), refreshTranscriptionSetting(), refreshTranscodingControls(), refreshBandwidth(), refreshTranscoding(), refreshArtworkCache(), refreshSoftwareUpdate()]);
 }
+
+let softwareUpdatePending = null;
+
+async function refreshSoftwareUpdate() {
+  const settings = await invoke("get_settings");
+  const select = document.getElementById("autoUpdateModeSelect");
+  select.value = settings.auto_update || "notify";
+  select.dataset.previous = select.value;
+  const status = document.getElementById("softwareUpdateStatus");
+  if (!softwareUpdatePending) {
+    status.textContent = `Running version ${settings.app_version}.`;
+  }
+}
+
+function showPendingUpdate(summary) {
+  softwareUpdatePending = summary;
+  const status = document.getElementById("softwareUpdateStatus");
+  status.textContent = `Version ${summary.version} is available.` + (summary.notes ? ` ${summary.notes.trim().split("\n")[0]}` : "");
+  document.getElementById("installUpdateBtn").classList.remove("d-none");
+}
+
+document.getElementById("autoUpdateModeSelect").addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  const previous = select.dataset.previous || "notify";
+  const mode = select.value;
+  try {
+    await invoke("set_auto_update", { mode });
+    select.dataset.previous = mode;
+    showToast("Update preference saved.", "success");
+  } catch (err) {
+    select.value = previous;
+    showToast(String(err), "error");
+  }
+});
+
+document.getElementById("checkUpdateBtn").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  document.getElementById("softwareUpdateStatus").textContent = "Checking for updates…";
+  try {
+    const summary = await invoke("check_for_update");
+    if (summary) {
+      showPendingUpdate(summary);
+    } else {
+      softwareUpdatePending = null;
+      document.getElementById("installUpdateBtn").classList.add("d-none");
+      document.getElementById("softwareUpdateStatus").textContent = "SWARM Server is up to date.";
+    }
+  } catch (err) {
+    showToast(String(err), "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("installUpdateBtn").addEventListener("click", async (event) => {
+  event.currentTarget.disabled = true;
+  showToast("Downloading update… the server will restart when it's ready.", "success");
+  try {
+    await invoke("install_update"); // process restarts on success
+  } catch (err) {
+    event.currentTarget.disabled = false;
+    showToast(String(err), "error");
+  }
+});
+
+listen("update-available", (event) => showPendingUpdate(event.payload));
+listen("update-staged", (event) => {
+  document.getElementById("softwareUpdateStatus").textContent =
+    `Version ${event.payload.version} is installed and will run after the next restart.`;
+});
 
 async function refreshTranscodingControls() {
   const settings = await invoke("get_settings");

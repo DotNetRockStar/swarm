@@ -17,7 +17,7 @@ path = "src/bin/migrate_whisper_subtitles.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:keepawake", "dep:rmcp", "dep:schemars"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:keepawake", "dep:rmcp", "dep:schemars"]
 
 [dependencies]
 swarm-core = { workspace = true }
@@ -52,6 +52,8 @@ tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
 keepawake = { version = "0.6.1", optional = true }
 rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }
 schemars = { version = "1", optional = true }
