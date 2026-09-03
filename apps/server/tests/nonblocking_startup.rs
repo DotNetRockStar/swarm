@@ -60,13 +60,19 @@ async fn start_returns_quickly_regardless_of_library_size() {
         .unwrap();
     let big_elapsed = started.elapsed();
 
+    // The invariant is "start() does not scale with library size", not any
+    // one absolute number — a shared CI runner is far slower and noisier than
+    // a dev laptop, so assert relatively (the 1000-file start is not
+    // dramatically slower than the empty one) with only a loose absolute
+    // backstop for the "scan awaited inline again" regression this guards.
     assert!(
-        empty_elapsed < Duration::from_millis(300),
-        "empty-root start() took {empty_elapsed:?}"
+        empty_elapsed < Duration::from_secs(5),
+        "empty-root start() took {empty_elapsed:?} — something other than scanning is blocking"
     );
     assert!(
-        big_elapsed < Duration::from_millis(300),
-        "1000-file start() took {big_elapsed:?} — \
+        big_elapsed < empty_elapsed + Duration::from_millis(750)
+            && big_elapsed < Duration::from_secs(5),
+        "1000-file start() took {big_elapsed:?} vs {empty_elapsed:?} for an empty root — \
         looks like the initial scan is being awaited inline again"
     );
 
@@ -103,8 +109,10 @@ async fn other_commands_stay_responsive_during_the_initial_scan() {
         .unwrap();
 
     // Deliberately not waiting for the scan here — status() must respond
-    // promptly regardless of whether it's still in flight.
-    let status = tokio::time::timeout(Duration::from_millis(500), core.status())
+    // regardless of whether it's still in flight. The timeout only has to
+    // distinguish "responds" from "hangs on scan_lock", so a CI-safe 2s is
+    // plenty — a real regression blocks until the whole 1000-file scan ends.
+    let status = tokio::time::timeout(Duration::from_secs(2), core.status())
         .await
         .expect("status() must not block on an in-progress scan")
         .unwrap();

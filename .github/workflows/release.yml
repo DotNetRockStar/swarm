@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # ---------------------------------------------------------------- tests ----
+  test-rust:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+        continue-on-error: true
+      - run: cargo clippy --workspace --all-targets
+        continue-on-error: true
+      - run: cargo test --workspace --locked
+
+  test-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/tv-android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
+
+  # ------------------------------------------------------------- releases ----
+  version:
+    if: github.event_name != 'pull_request'
+    needs: [test-rust, test-android]
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.v.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: echo "value=0.1.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+  release-server:
+    needs: version
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Stamp version
+        run: |
+          V="${{ needs.version.outputs.value }}"
+          tmp="$(mktemp)"
+          jq --arg v "$V" '.version = $v' apps/server/tauri.conf.json > "$tmp" && mv "$tmp" apps/server/tauri.conf.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build, sign, and publish the server
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.SERVER_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.SERVER_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        with:
+          projectPath: apps/server
+          tagName: v${{ needs.version.outputs.value }}
+          releaseName: SWARM ${{ needs.version.outputs.value }}
+          releaseBody: "Automated build. SWARM Server updates itself; signed Fire TV Appstore submission APKs are attached below."
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+
+  release-tv:
+    needs: [version, release-server]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/tv-android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.SWARM_ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > app/upload.keystore
+      - name: Assemble signed release APKs
+        env:
+          SWARM_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SWARM_ANDROID_KEYSTORE_PASSWORD }}
+          SWARM_ANDROID_KEY_ALIAS: ${{ secrets.SWARM_ANDROID_KEY_ALIAS }}
+          SWARM_ANDROID_KEY_PASSWORD: ${{ secrets.SWARM_ANDROID_KEY_PASSWORD }}
+        run: |
+          V="${{ needs.version.outputs.value }}"
+          H="${V##*.}"
+          ./gradlew :app:assembleRelease -PswarmVersionCode="$H" -PswarmVersionName="$V"
+      - name: Publish Fire TV Appstore submission APKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ needs.version.outputs.value }}"
+          OUT=app/build/outputs/apk/release
+          declare -A ABI=( [arm64-v8a]=arm64-v8a [armeabi-v7a]=armeabi-v7a )
+          for abi in "${!ABI[@]}"; do
+            apk=$(ls "$OUT"/*"$abi"*.apk 2>/dev/null | head -1)
+            [ -n "$apk" ] || { echo "no APK for $abi"; exit 1; }
+            newname="swarm-tv-$V-$abi.apk"
+            cp "$apk" "$OUT/$newname"
+            gh release upload "v$V" "$OUT/$newname" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+  prune:
+    needs: [release-server, release-tv]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[20:] | .[].tagName' \
+          | while read -r tag; do
+              [ -n "$tag" ] || continue
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done
+
+  # File a tracked issue when the pipeline breaks on main, so SWARM Automation
+  # picks it up (assigned to the worker's configured assignee, labelled
+  # ci-failure). PR failures are the author's to fix in the PR and are skipped.
+  report-failure:
+    needs: [test-rust, test-android, version, release-server, release-tv]
+    if: failure() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: File or update the CI-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ASSIGNEE: ${{ vars.SWARM_ISSUE_ASSIGNEE || 'DotNetRockStar' }}
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short HEAD)"
+          subject="$(git log -1 --pretty=%s)"
+          failed_jobs="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')"
+          [ -n "$failed_jobs" ] || failed_jobs="unknown"
+
+          gh label create ci-failure --repo "$REPO" --color B60205 \
+            --description "Release pipeline failure filed by CI" --force >/dev/null 2>&1 || true
+
+          body_file="$RUNNER_TEMP/ci-failure.md"
+          {
+            printf 'The release pipeline failed on `main`.\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| Run | %s |\n' "$RUN_URL"
+            printf '| Commit | `%s` — %s |\n' "$short_sha" "$subject"
+            printf '| Failed jobs | **%s** |\n\n' "$failed_jobs"
+            printf '## Task\n\n'
+            printf 'Open the run above, read the failed job log, and fix the root cause on a branch.\n\n'
+            printf -- '- A test/build regression from the triggering commit -> fix the code.\n'
+            printf -- '- A missing tool on the runner (e.g. ffmpeg) -> install it in the workflow or make the test skip cleanly.\n'
+            printf -- '- A signing/secret problem in `release-server` / `release-tv` -> operator setup, not a code bug: comment saying so and stop.\n\n'
+            printf 'Close this issue once the pipeline is green again.\n'
+          } > "$body_file"
+
+          # Keep a single open issue — comment on it instead of piling up duplicates.
+          existing="$(gh issue list --repo "$REPO" --state open --label ci-failure \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body_file"
+            echo "Updated existing issue #$existing"
+          else
+            gh issue create --repo "$REPO" \
+              --title "CI: release pipeline failed ($failed_jobs) at $short_sha" \
+              --body-file "$body_file" \
+              --label ci-failure \
+              --assignee "$ASSIGNEE"
+          fi

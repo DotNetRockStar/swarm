@@ -635,12 +635,22 @@ async fn hls_master_and_nested_rendition_playlist_serve_over_real_http() {
         ])
         .arg(&media_path)
         .status()
-        .await
-        .unwrap();
-    if !generated.success() {
-        eprintln!("skipping: ffmpeg could not generate the test fixture");
-        let _ = std::fs::remove_dir_all(&base);
-        return;
+        .await;
+    match generated {
+        // ffmpeg absent entirely (a bare CI runner) — skip, same as a
+        // fixture-generation failure. The doc comment above promises this.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: ffmpeg is not installed");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        Err(error) => panic!("could not launch ffmpeg: {error}"),
+        Ok(status) if !status.success() => {
+            eprintln!("skipping: ffmpeg could not generate the test fixture");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        Ok(_) => {}
     }
 
     let config = test_config(&media_root, base.join("server-data"));

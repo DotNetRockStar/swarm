@@ -7,9 +7,36 @@
 
 use super::harness::test_app;
 use crate::{
-    get_settings, set_hls_segment_seconds, set_max_transcode_height, set_video_encoder_mode,
+    get_settings, set_auto_update, set_hls_segment_seconds, set_max_transcode_height,
+    set_video_encoder_mode,
 };
 use tauri::Manager;
+
+#[tokio::test]
+async fn auto_update_mode_persists_and_rejects_unknown_values() {
+    let test_app = test_app();
+    let app = test_app.handle();
+
+    assert_eq!(
+        get_settings(app.clone()).await.unwrap().auto_update,
+        "notify",
+        "default is notify"
+    );
+
+    set_auto_update(app.clone(), "auto".to_string())
+        .await
+        .expect("set auto");
+    assert_eq!(get_settings(app.clone()).await.unwrap().auto_update, "auto");
+
+    assert!(set_auto_update(app.clone(), "sometimes".to_string())
+        .await
+        .is_err());
+    assert_eq!(
+        get_settings(app.clone()).await.unwrap().auto_update,
+        "auto",
+        "a rejected value leaves the previous one intact"
+    );
+}
 
 #[tokio::test]
 async fn video_encoder_mode_persists_and_normalizes() {

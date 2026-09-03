@@ -210,6 +210,21 @@
       </div>
       <p id="openSubtitlesKeyStatus" class="note"></p>
     </div>
+
+    <div class="card">
+      <h2 class="info-trigger" data-info="software-update" tabindex="0" role="button"><i class="bi bi-arrow-repeat heading-icon"></i>Software update <i class="bi bi-info-circle info-affordance"></i></h2>
+      <p class="muted compact-help">New versions publish automatically after each change passes tests. Updates swap in place; playback keeps running and the new version takes effect the next time the server restarts.</p>
+      <div class="row">
+        <select id="autoUpdateModeSelect">
+          <option value="off">Don't check for updates</option>
+          <option value="notify">Notify me when one is available</option>
+          <option value="auto">Download automatically, apply on restart</option>
+        </select>
+        <button id="checkUpdateBtn" class="secondary"><i class="bi bi-search"></i>Check now</button>
+      </div>
+      <p id="softwareUpdateStatus" class="note"></p>
+      <button id="installUpdateBtn" class="d-none"><i class="bi bi-download"></i>Install &amp; restart</button>
+    </div>
   </div>
 
   <div id="tabPanel-swarm" class="d-none">

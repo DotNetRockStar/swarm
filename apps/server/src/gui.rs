@@ -705,6 +705,8 @@ struct SettingsView {
     video_encoder_mode: String,
     max_transcode_height: u32,
     hls_segment_seconds: u32,
+    auto_update: String,
+    app_version: String,
 }
 
 #[tauri::command]
@@ -726,6 +728,8 @@ async fn get_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Set
         video_encoder_mode: settings.video_encoder_mode,
         max_transcode_height: settings.max_transcode_height,
         hls_segment_seconds: settings.hls_segment_seconds,
+        auto_update: settings.auto_update,
+        app_version: app.package_info().version.to_string(),
     })
 }
 
@@ -794,6 +798,122 @@ async fn set_auto_library_watch_enabled<R: tauri::Runtime>(
     let mut settings = settings::load(&dir);
     settings.auto_library_watch_enabled = enabled;
     settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+// ----- Software update ---------------------------------------------------
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSummary {
+    current_version: String,
+    version: String,
+    notes: String,
+    pub_date: String,
+}
+
+impl UpdateSummary {
+    fn from_update(update: &tauri_plugin_updater::Update) -> Self {
+        UpdateSummary {
+            current_version: update.current_version.clone(),
+            version: update.version.clone(),
+            notes: update.body.clone().unwrap_or_default(),
+            pub_date: update.date.map(|date| date.to_string()).unwrap_or_default(),
+        }
+    }
+}
+
+async fn pending_update<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    app.updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn strip_quarantine() {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bundle) = exe.ancestors().nth(3) {
+            let _ = std::process::Command::new("/usr/bin/xattr")
+                .args(["-dr", "com.apple.quarantine"])
+                .arg(bundle)
+                .status();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strip_quarantine() {}
+
+#[tauri::command]
+async fn set_auto_update<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    mode: String,
+) -> Result<(), String> {
+    if !matches!(mode.as_str(), "off" | "notify" | "auto") {
+        return Err(format!("unknown update mode: {mode}"));
+    }
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.auto_update = mode;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_for_update<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<UpdateSummary>, String> {
+    Ok(pending_update(&app)
+        .await?
+        .map(|update| UpdateSummary::from_update(&update)))
+}
+
+/// Downloads and applies the update, then relaunches. The caller is expected
+/// to warn the user first — this drops any live playback connection.
+#[tauri::command]
+async fn install_update<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let Some(update) = pending_update(&app).await? else {
+        return Err("No update is available.".into());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    strip_quarantine();
+    app.restart()
+}
+
+/// Honour `auto_update` once at startup, off the main thread. `"auto"`
+/// downloads now and installs on the next quit (never mid-session — the
+/// server holds live connections); `"notify"` emits `update-available`.
+fn spawn_startup_update_check<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let mode = match app_data_dir(&app) {
+            Ok(dir) => settings::load(&dir).auto_update,
+            Err(_) => return,
+        };
+        if mode == "off" {
+            return;
+        }
+        let Ok(Some(update)) = pending_update(&app).await else {
+            return;
+        };
+        if mode == "auto" {
+            // Swap the bundle in place now but do NOT restart: the running
+            // server keeps its mapped binary and any live playback, and the
+            // new version takes effect the next time the user quits and
+            // relaunches. `notify` mode still gets the last word if the user
+            // opens the window before quitting.
+            let _ = update.download_and_install(|_, _| {}, || {}).await;
+            strip_quarantine();
+            let _ = app.emit("update-staged", UpdateSummary::from_update(&update));
+        } else {
+            let _ = app.emit("update-available", UpdateSummary::from_update(&update));
+        }
+    });
 }
 
 /// Does not initialize `ServerCore`, so the warning can render even when a
@@ -2480,9 +2600,12 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             init_logging(app.handle());
             install_tray(app)?;
+            spawn_startup_update_check(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -2520,6 +2643,9 @@ fn main() {
             set_streaming_upload_budget_enabled,
             set_artwork_disk_cache_enabled,
             set_auto_library_watch_enabled,
+            set_auto_update,
+            check_for_update,
+            install_update,
             set_video_encoder_mode,
             set_max_transcode_height,
             set_hls_segment_seconds,

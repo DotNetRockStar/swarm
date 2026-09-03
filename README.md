@@ -258,6 +258,35 @@ Building against a real device specifically needs the **debug** build —
 the release manifest intentionally disables cleartext HTTP/WS traffic for
 Appstore compliance, and `run_now.sh` serves plain (non-TLS) endpoints.
 
+## Releases and self-update
+
+`.github/workflows/release.yml` runs on every push to `main`: it runs the Rust
+workspace tests and the Android unit tests, then (on green) builds and publishes
+a single GitHub Release `v0.1.<n>` where `<n>` is the commit count:
+
+- **SWARM Server** — a self-signed `.app` + updater artifacts (`.app.tar.gz`,
+  `.sig`, `latest.json`) + `.dmg`. The app updates itself in place; the
+  **Details → Software update** card offers *off / notify / auto* and a
+  "Check now" button. `auto` swaps the bundle in the background and the new
+  version runs after the next restart — playback is never interrupted.
+- **Fire TV client** — signed split APKs (`arm64-v8a`, `armeabi-v7a`) ready for
+  submission to the Amazon Developer Console. Amazon re-signs published APKs,
+  so Fire TV updates are delivered entirely by the Amazon Appstore rather than
+  by an in-app updater. Each release uses the same monotonically increasing
+  version code as the server release.
+
+macOS builds are **not** notarized (self-signed only); a fresh `.dmg` install
+needs one right-click → Open, but in-place updates of an approved app do not.
+
+One-time setup: `scripts/ci/generate-signing-material.sh` generates the macOS
+certificate, the server updater keypair, and the Android upload keystore, and
+sets the repository secrets.
+
+Publishing a Fire TV update remains an operator step: download both APKs from
+the GitHub Release, upload them as a new version in the Amazon Developer
+Console, target the appropriate ABI devices, and submit the version for review.
+Once Amazon approves it, the Appstore manages delivery to installed Fire TVs.
+
 ## Roadmap
 
 Phases 0–6 with exit criteria are tracked in the project plan: contracts → STUN MVP → server library + LAN direct play → TV client MVP → cross-network hole punch → transcode/ABR → polish + Appstore submission. Direct/punched QUIC playback and upload-budgeted HLS negotiation are implemented; real-device throughput/decoder validation and product-level server bandwidth controls remain before Appstore submission.
