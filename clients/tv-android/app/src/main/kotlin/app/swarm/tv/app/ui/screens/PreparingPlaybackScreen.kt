@@ -56,6 +56,9 @@ fun PreparingPlaybackScreen(
     artworkUrl: String?,
     startPaused: Boolean,
     resumeRequested: Boolean,
+    /** The session finished negotiating while this cover was still up — the
+     * Resume button now starts playback instantly rather than after a wait. */
+    ready: Boolean,
     onResume: () -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -125,7 +128,11 @@ fun PreparingPlaybackScreen(
                     Text("▶  Resume", color = Color(0xFF04263A), fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(12.dp))
-                Text("Getting your stream ready…", color = SwarmMuted, fontSize = 13.sp)
+                Text(
+                    if (ready) "Ready to play" else "Getting your stream ready…",
+                    color = SwarmMuted,
+                    fontSize = 13.sp,
+                )
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(
