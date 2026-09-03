@@ -23,17 +23,10 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import android.os.Build
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
-import app.swarm.tv.app.update.ApkInstaller
-import app.swarm.tv.core.update.UpdateChecker
-import app.swarm.tv.core.update.UpdateStatus
-import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -180,8 +173,6 @@ fun SwarmSettingsScreen(
                     fontSize = 11.sp,
                 )
 
-                Spacer(Modifier.height(20.dp))
-                SoftwareUpdateBlock()
             }
 
             SettingsSection.FAMILY -> SettingsPanel(
@@ -238,70 +229,6 @@ fun SwarmSettingsScreen(
 }
 
 private enum class SettingsSection { GENERAL, FAMILY, NOTIFICATIONS, TESTING }
-
-/**
- * Self-contained "check for updates" control: fetches `tv-latest.json`,
- * compares version codes, downloads + verifies the APK for this device, then
- * launches the system installer. Manual only — an auto-check on launch is a
- * follow-up that needs a persisted throttle.
- */
-@Composable
-private fun SoftwareUpdateBlock() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-
-    val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
-    val currentVersionCode = remember {
-        androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(packageInfo)
-    }
-
-    Text("Software update", color = SwarmText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-    Spacer(Modifier.height(6.dp))
-    Text(
-        "Version ${packageInfo.versionName}. " +
-            "New versions publish automatically after each change passes tests.",
-        color = SwarmMuted,
-        fontSize = 11.sp,
-    )
-    Spacer(Modifier.height(10.dp))
-    Button(
-        onClick = {
-            if (busy) return@Button
-            busy = true
-            status = "Checking for updates…"
-            scope.launch {
-                when (val result = UpdateChecker().check(currentVersionCode, Build.SUPPORTED_ABIS.toList())) {
-                    is UpdateStatus.UpToDate -> status = "This is the latest version."
-                    is UpdateStatus.Error -> status = result.message
-                    is UpdateStatus.Available -> {
-                        status = "Downloading ${result.manifest.versionName}…"
-                        try {
-                            val apk = UpdateChecker().download(
-                                result.asset,
-                                ApkInstaller.stagingFile(context, result.manifest.versionCode),
-                            )
-                            status = "Ready to install ${result.manifest.versionName}."
-                            ApkInstaller.install(context, apk)
-                        } catch (error: Exception) {
-                            status = "Update failed: ${error.message ?: "download error"}"
-                        }
-                    }
-                }
-                busy = false
-            }
-        },
-        enabled = !busy,
-        colors = swarmActionButtonColors(),
-    ) {
-        Text(if (busy) "Working…" else "Check for updates", fontWeight = FontWeight.Bold)
-    }
-    if (status.isNotEmpty()) {
-        Spacer(Modifier.height(6.dp))
-        Text(status, color = SwarmMuted, fontSize = 12.sp)
-    }
-}
 
 @Composable
 private fun NotificationInbox(

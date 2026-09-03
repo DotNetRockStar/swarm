@@ -269,11 +269,11 @@ a single GitHub Release `v0.1.<n>` where `<n>` is the commit count:
   **Details → Software update** card offers *off / notify / auto* and a
   "Check now" button. `auto` swaps the bundle in the background and the new
   version runs after the next restart — playback is never interrupted.
-- **Fire TV client** — signed split APKs (`arm64-v8a`, `armeabi-v7a`) +
-  `tv-latest.json`. In the app, **Settings → General → Software update →
-  Check for updates** fetches the manifest, downloads and checksum-verifies the
-  APK for the device's ABI, and hands it to the system installer (installs as an
-  update — same signing key).
+- **Fire TV client** — signed split APKs (`arm64-v8a`, `armeabi-v7a`) ready for
+  submission to the Amazon Developer Console. Amazon re-signs published APKs,
+  so Fire TV updates are delivered entirely by the Amazon Appstore rather than
+  by an in-app updater. Each release uses the same monotonically increasing
+  version code as the server release.
 
 macOS builds are **not** notarized (self-signed only); a fresh `.dmg` install
 needs one right-click → Open, but in-place updates of an approved app do not.
@@ -281,6 +281,11 @@ needs one right-click → Open, but in-place updates of an approved app do not.
 One-time setup: `scripts/ci/generate-signing-material.sh` generates the macOS
 certificate, the server updater keypair, and the Android upload keystore, and
 sets the repository secrets.
+
+Publishing a Fire TV update remains an operator step: download both APKs from
+the GitHub Release, upload them as a new version in the Amazon Developer
+Console, target the appropriate ABI devices, and submit the version for review.
+Once Amazon approves it, the Appstore manages delivery to installed Fire TVs.
 
 ## Roadmap
 

@@ -19,8 +19,7 @@ android {
         targetSdk = 35
         // CI passes -PswarmVersionCode=<git height> / -PswarmVersionName=0.1.<h>
         // (same monotonic number the server release uses). Local builds fall
-        // back to 1 / 0.1.0-dev so the update check always sees itself as
-        // current.
+        // back to 1 / 0.1.0-dev for local development builds.
         versionCode = (providers.gradleProperty("swarmVersionCode")
             .orElse(providers.environmentVariable("SWARM_VERSION_CODE"))
             .orNull ?: "1").toInt()
@@ -52,8 +51,8 @@ android {
     // Release signing. CI decodes SWARM_ANDROID_KEYSTORE_BASE64 to
     // app/upload.keystore and provides the passwords; without them (local
     // release builds) Gradle falls back to the debug signing config so
-    // `assembleRelease` still works, it just can't update an installed
-    // CI-signed build.
+    // `assembleRelease` still works. Only CI-signed artifacts are intended
+    // for submission to the Amazon Appstore.
     val keystoreFile = rootProject.file("app/upload.keystore")
     signingConfigs {
         if (keystoreFile.exists()) {

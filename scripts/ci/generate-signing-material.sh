@@ -10,13 +10,12 @@
 #      install still needs one right-click -> Open.
 #   2. A Tauri updater keypair (minisign) for the server. The public half is
 #      written into apps/server/tauri.conf.json; the private half is a secret.
-#   3. An Android upload keystore for the Fire TV APK, so CI-signed builds
-#      install as updates over an existing install.
+#   3. An Android upload keystore for Fire TV APKs submitted to Amazon.
 #
-# Re-running rotates everything. Rotating the macOS cert or the Android
-# keystore means every already-installed copy must be reinstalled once.
-# Rotating the updater key means shipping the new pubkey before old clients
-# can verify new updates. Only rotate on purpose.
+# Re-running rotates everything. Rotating the macOS cert can invalidate the
+# identity of existing installs. Rotating the updater key means shipping the
+# new pubkey before old clients can verify new updates. Keep the Android upload
+# key stable for reproducible submission artifacts. Only rotate on purpose.
 #
 # Usage:  scripts/ci/generate-signing-material.sh [--print-only]
 
@@ -26,7 +25,7 @@ REPO="SWARM-Media-Steaming/swarm"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRINT_ONLY="${1:-}"
 
-for tool in openssl gh npx keytool base64; do
+for tool in openssl gh npx keytool base64 jq; do
     command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
 done
 
