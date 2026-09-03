@@ -12,6 +12,7 @@ import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.PunchFallback
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.RepeatMode
 import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.client.SignalingClient
@@ -452,6 +453,10 @@ class SwarmViewModel(
     /** Music-only "keep playing but pick something else" mode — see [CatalogGrouping.nextTrack] and [toggleShuffle]. */
     private val _shuffleMode = MutableStateFlow(ShuffleMode.OFF)
     val shuffleMode: StateFlow<ShuffleMode> = _shuffleMode.asStateFlow()
+
+    /** Music-only repeat button state — see [RepeatMode] and [toggleRepeat]. */
+    private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
+    val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
 
     /** Non-null exactly when a track is playing in the background after [minimizePlayback] — see [activePlayerSession]. */
     private val _minimizedPlayer = MutableStateFlow<UiState.Player?>(null)
@@ -2082,6 +2087,10 @@ class SwarmViewModel(
     fun preloadNextTrack(sessionId: String) {
         val current = activePlayerSession() ?: return
         if (current.sessionId != sessionId || current.entry.entry.kind != MediaKind.TRACK) return
+        // Repeat-song loops the current stream in the player itself, so
+        // there is nothing to negotiate ahead — don't reserve a spare
+        // server slot for a track that won't play until the user skips.
+        if (_repeatMode.value == RepeatMode.ONE) return
         val next = current.nextEntry ?: return
         if (next.entry.fingerprint == current.entry.entry.fingerprint) return
         if (current.preloadedNext != null || nextTrackPreloadJob?.isActive == true) return
@@ -2121,6 +2130,7 @@ class SwarmViewModel(
                 next,
                 CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
                 _shuffleMode.value,
+                _repeatMode.value,
             )
             val prepared = PreparedEpisodePlayback(
                 url = selection.url,
@@ -2337,6 +2347,31 @@ class SwarmViewModel(
      */
     fun toggleShuffle() {
         _shuffleMode.value = _shuffleMode.value.next()
+        recomputeActiveTrackSuccessor()
+    }
+
+    /**
+     * Music only — the repeat button. Cycles OFF -> repeat song -> repeat
+     * album -> OFF. Repeat-song loops the current stream in the hoisted
+     * player itself (see [app.swarm.tv.app.MainActivity]); repeat-album is
+     * expressed through [CatalogGrouping.nextTrack]/[CatalogGrouping.previousTrack]
+     * wrapping inside the current album, so like [toggleShuffle] this
+     * recomputes the active track's `nextEntry` and drops any track already
+     * buffered ahead under the old mode.
+     */
+    fun toggleRepeat() {
+        _repeatMode.value = _repeatMode.value.next()
+        recomputeActiveTrackSuccessor()
+    }
+
+    /**
+     * Re-derives the active music session's `nextEntry` under the current
+     * [_shuffleMode]/[_repeatMode] and releases any preloaded successor
+     * negotiated under the previous settings, so a shuffle/repeat change
+     * takes effect on the very next transition instead of only after the
+     * one already queued.
+     */
+    private fun recomputeActiveTrackSuccessor() {
         val current = activePlayerSession() ?: return
         if (current.entry.entry.kind != MediaKind.TRACK) return
         val catalog = current.previous.embeddedCatalog() ?: return
@@ -2344,12 +2379,41 @@ class SwarmViewModel(
             current.entry,
             CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
             _shuffleMode.value,
+            _repeatMode.value,
         )
         current.preloadedNext?.let { prepared ->
             releasePlaybackSession(catalog, prepared.serverId, prepared.sessionId)
         }
         val updated = current.copy(nextEntry = next, preloadedNext = null)
         if (_minimizedPlayer.value != null) _minimizedPlayer.value = updated else _state.value = updated
+    }
+
+    /**
+     * Music "previous" — plays the track before the active one
+     * ([CatalogGrouping.previousTrack]); a no-op if there is nothing
+     * before it. The "restart the current song instead when more than a
+     * few seconds in" rule lives on [app.swarm.tv.app.ui.screens.MusicPlayerScreen],
+     * which seeks the hoisted player to zero without involving the
+     * ViewModel. Unlike [playNext] there is no preloaded predecessor, so
+     * this always renegotiates a fresh stream.
+     */
+    fun playPrevious() {
+        val current = activePlayerSession() ?: return
+        if (current.entry.entry.kind != MediaKind.TRACK) return
+        val catalog = current.previous.embeddedCatalog() ?: return
+        val previous = CatalogGrouping.previousTrack(
+            current.entry,
+            CatalogGrouping.groupTracksByArtistAlbum(catalog.entries),
+            _repeatMode.value,
+        ) ?: return
+        playEntry(
+            previous,
+            catalog,
+            previousScreen = current.previous,
+            keepMinimized = _minimizedPlayer.value != null,
+            replaceSession = current,
+            continueMusicQueueId = current.musicQueueId,
+        )
     }
 
     /**
@@ -2693,10 +2757,11 @@ class SwarmViewModel(
             // them off the main thread so the browse→player hand-off doesn't
             // stutter on a large library right as the screen swaps in (#122).
             val shuffleMode = _shuffleMode.value
+            val repeatMode = _repeatMode.value
             val (nextEntry, recommendations) = withContext(Dispatchers.Default) {
                 val next = when (entry.entry.kind) {
                     MediaKind.EPISODE -> CatalogGrouping.nextEpisode(entry, CatalogGrouping.groupEpisodesByShowSeason(catalog.entries))
-                    MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), shuffleMode)
+                    MediaKind.TRACK -> CatalogGrouping.nextTrack(entry, CatalogGrouping.groupTracksByArtistAlbum(catalog.entries), shuffleMode, repeatMode)
                     MediaKind.MOVIE -> null
                 }
                 next to pauseRecommendations(entry, catalog.entries)
