@@ -108,6 +108,11 @@ const INFO_TOPICS = {
     body: "SWARM can generate English subtitles locally with Whisper. The first run downloads and verifies a compact model of about 142 MB. Processing can take roughly as long as the video—or considerably longer on older CPUs—and uses sustained CPU. SWARM always pauses this work during library scans, and by default also pauses while anyone is streaming. Work is saved in ten-minute sections and resumes after disabling, closing, or restarting the app. Each generated subtitle is saved next to its source file, named after it with a \"-whisper-english-subtitles.vtt\" suffix, so it travels with the media. Use a movie or episode's Manage panel to generate a subtitle for just that one item, or turn on bulk generation here for the whole library — optionally skipping anything that already has a subtitle.",
     link: "https://github.com/ggerganov/whisper.cpp", linkLabel: "Learn about Whisper.cpp",
   },
+  "software-update": {
+    icon: "bi-arrow-repeat", title: "Software update",
+    body: "New versions of SWARM Server publish automatically after each change passes tests. \"Notify me\" surfaces a message here when one is available and you choose when to install. \"Download automatically\" fetches it in the background and swaps it in place — playback is never interrupted and the new version runs the next time the server restarts. \"Check now\" works in any mode. Builds are signed with a self-signed certificate (not an Apple Developer ID); an in-place update keeps the macOS file-access grants you already gave, but a fresh install from a .dmg still needs one right-click → Open.",
+    link: "", linkLabel: "",
+  },
   "opensubtitles-downloads": {
     icon: "bi-cloud-arrow-down", title: "Subtitle downloads",
     body: "Use an OpenSubtitles.com API key to search for an existing subtitle for one movie or episode. SWARM downloads it only when you request it, converts it to a TV-compatible format, stores it on this server, and offers it alongside locally generated subtitles during playback. OpenSubtitles applies its own account and daily download limits.",

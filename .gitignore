@@ -14,6 +14,9 @@ clients/tv-android/**/build/
 clients/tv-android/**/bin/
 clients/tv-android/local.properties
 clients/tv-android/*/gen/
+clients/tv-android/app/upload.keystore
+*.p12
+*.keystore
 deploy/**/.env
 nohup.out
 /scripts/tests/tv_test_device.local.json
