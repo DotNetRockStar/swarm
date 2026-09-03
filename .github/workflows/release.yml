@@ -74,6 +74,9 @@ jobs:
           jq --arg v "$V" '.version = $v' apps/server/tauri.conf.json > "$tmp" && mv "$tmp" apps/server/tauri.conf.json
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install server tooling
+        working-directory: apps/server
+        run: npm ci
       - name: Build, sign, and publish the server
         uses: tauri-apps/tauri-action@v0
         env:
