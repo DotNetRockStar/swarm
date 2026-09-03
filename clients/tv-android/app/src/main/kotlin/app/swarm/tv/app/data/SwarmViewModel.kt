@@ -150,10 +150,13 @@ sealed class UiState {
      * deliberately keep a plain video backdrop and report progress through the
      * shared toast surface.
      *
-     * When negotiation finishes first, this swaps to the real paused
-     * [Player]/[PauseOverlay] with no visible seam. If the viewer presses
-     * Resume here before then, [resumeRequested] flips and playback begins the
-     * instant the session is ready instead of opening paused.
+     * When negotiation finishes first for a plain play, this swaps to the real
+     * [Player] with no visible seam. For a "Continue Watching" ([startPaused])
+     * start the negotiated session is instead held in [prepared] and this
+     * cover stays up until the viewer presses Resume — so they never see a
+     * second, identical pause screen appear on its own (#211). Pressing Resume
+     * before negotiation finishes flips [resumeRequested] and playback begins
+     * the instant the session is ready.
      */
     data class PreparingPlayback(
         val title: String,
@@ -164,6 +167,11 @@ sealed class UiState {
          * only a preparing indicator. */
         val startPaused: Boolean,
         val resumeRequested: Boolean = false,
+        /** A [startPaused] negotiation that completed before the viewer pressed
+         * Resume: the session is ready and parked here while this cover stays
+         * up. Committed by [resumeFromPreparingPlayback]; released by
+         * [cancelPlaybackPreparation]/[stopAllStreaming] if they walk away. */
+        val prepared: Player? = null,
     ) : UiState()
     data object RequestingActivation : UiState()
     data class Activating(
@@ -1756,7 +1764,10 @@ class SwarmViewModel(
             previous = replaceEmbeddedCatalog(state.previous, catalog),
             entry = catalog.entries.find { it.fingerprint == state.entry.fingerprint } ?: state.entry,
         )
-        is UiState.PreparingPlayback -> state.copy(previous = replaceEmbeddedCatalog(state.previous, catalog))
+        is UiState.PreparingPlayback -> state.copy(
+            previous = replaceEmbeddedCatalog(state.previous, catalog),
+            prepared = state.prepared?.let { replaceEmbeddedCatalog(it, catalog) as? UiState.Player },
+        )
         is UiState.Player -> state.copy(previous = replaceEmbeddedCatalog(state.previous, catalog))
         else -> state
     }
@@ -2596,6 +2607,7 @@ class SwarmViewModel(
             // browse screen right away so the tap registers instantly, rather
             // than leaving the user on an unresponsive catalog for the whole
             // negotiation-plus-buffer wait (#122).
+            (_state.value as? UiState.PreparingPlayback)?.prepared?.let(::releaseHeldPlayback)
             _state.value = UiState.PreparingPlayback(
                 title = entry.entry.displayTitle(),
                 artworkUrl = backdropUrl(entry) ?: fullArtworkUrl(entry),
@@ -2733,7 +2745,17 @@ class SwarmViewModel(
             // the mini-bar (not the full screen) was showing stays in the
             // background instead of popping the full player back up just
             // because the track changed underneath it — see [playNext].
-            if (keepMinimized) _minimizedPlayer.value = playerState else _state.value = playerState
+            val preparingCover = _state.value as? UiState.PreparingPlayback
+            when {
+                keepMinimized -> _minimizedPlayer.value = playerState
+                // "Continue Watching": the session is ready, but the viewer
+                // hasn't pressed Resume yet. Park it behind the cover they are
+                // already looking at instead of swapping in a second,
+                // identical pause screen on a timer (#211).
+                playerState.startPaused && preparingCover != null ->
+                    _state.value = preparingCover.copy(prepared = playerState)
+                else -> _state.value = playerState
+            }
             if (pendingPlaybackReplacement?.requestGeneration == requestGeneration) pendingPlaybackReplacement = null
         }
     }
@@ -3129,21 +3151,36 @@ class SwarmViewModel(
         playbackNegotiationJob?.cancel()
         playbackNegotiationJob = null
         preparingResumeRequested = false
+        current.prepared?.let(::releaseHeldPlayback)
         _state.value = current.previous
     }
 
     /**
-     * Resume pressed on the [UiState.PreparingPlayback] cover while the
-     * session is still being negotiated: record the intent so [playEntry]
-     * starts playing the moment it is ready instead of opening paused, and
-     * swap the button for a "Starting…" indicator. A no-op once negotiation
-     * has already handed off to the real paused player.
+     * Releases a [UiState.PreparingPlayback.prepared] session that was
+     * negotiated while the cover was up but that the viewer abandoned without
+     * ever pressing Resume (#211).
+     */
+    private fun releaseHeldPlayback(player: UiState.Player) {
+        if (player.sessionReleased) return
+        player.previous.embeddedCatalog()?.let { catalog ->
+            releasePlaybackSession(catalog, player.serverId, player.sessionId)
+        }
+    }
+
+    /**
+     * Resume pressed on the [UiState.PreparingPlayback] cover. If negotiation
+     * already finished, its parked session ([UiState.PreparingPlayback.prepared])
+     * is committed and starts playing straight away — no intervening pause
+     * overlay (#211). If it is still in flight, the intent is recorded so
+     * [playEntry] starts playback the moment the session is ready instead of
+     * opening paused, and the button becomes a "Starting…" indicator.
      */
     fun resumeFromPreparingPlayback() {
         val current = _state.value as? UiState.PreparingPlayback ?: return
         if (!current.startPaused || current.resumeRequested) return
         preparingResumeRequested = true
-        _state.value = current.copy(resumeRequested = true)
+        val prepared = current.prepared
+        _state.value = prepared?.copy(startPaused = false) ?: current.copy(resumeRequested = true)
     }
 
     fun stopPlayback() {
@@ -3192,7 +3229,9 @@ class SwarmViewModel(
                 _state.value = pendingReplacement.previous
             }
             _state.value is UiState.PreparingPlayback -> {
-                _state.value = (_state.value as UiState.PreparingPlayback).previous
+                val preparing = _state.value as UiState.PreparingPlayback
+                preparing.prepared?.let(::releaseHeldPlayback)
+                _state.value = preparing.previous
             }
         }
 

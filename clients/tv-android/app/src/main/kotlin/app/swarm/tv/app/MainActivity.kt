@@ -846,6 +846,7 @@ private fun SwarmApp(
                     artworkUrl = state.artworkUrl,
                     startPaused = state.startPaused,
                     resumeRequested = state.resumeRequested,
+                    ready = state.prepared != null,
                     onResume = onResumePreparingPlayback,
                     onCancel = onCancelPlaybackPreparation,
                 )

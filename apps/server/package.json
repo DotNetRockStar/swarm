@@ -2,6 +2,7 @@
   "name": "swarm-desktop-server",
   "private": true,
   "scripts": {
+    "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build"
   },
