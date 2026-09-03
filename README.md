@@ -140,7 +140,7 @@ stops it, and `launchctl bootout gui/$UID/app.swarm.server` stops the service.
 The library, TV pairings, and settings carry over (same `<app data dir>`). It
 is LAN-only; internet access still needs a compiled-in `SWARM_RENDEZVOUS_URL`.
 
-The desktop app persists media, scraper, streaming, transcoding, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, `SWARM_TRANSCODING_DISABLED`, `SWARM_VIDEO_ENCODER`, `SWARM_MAX_TRANSCODE_HEIGHT`, and `SWARM_HLS_SEGMENT_SECONDS`.
+The desktop app persists media, scraper, streaming, transcoding, and AI settings in `<app data dir>/settings.json`. Technical overrides are `SWARM_PEER_BIND`, `SWARM_RENDEZVOUS_URL` (the public SWARM service, which can also be compiled into a release), `SWARM_MAX_UPLOAD_MBPS`, `SWARM_UPLOAD_RESERVE_PERCENT`, `SWARM_MAX_STREAMS`, `SWARM_FFMPEG_PATH`, `SWARM_FFPROBE_PATH`, `SWARM_TRANSCODING_DISABLED`, `SWARM_VIDEO_ENCODER`, `SWARM_MAX_TRANSCODE_HEIGHT`, and `SWARM_HLS_SEGMENT_SECONDS`.
 
 On macOS, media roots can connect directly to a NAS from either first-run
 onboarding or **Details → Media roots**. Enter the SMB server, share name, and
@@ -161,8 +161,12 @@ rung needs, so raise `SWARM_MAX_UPLOAD_MBPS` to match your real uplink (or
 lower `SWARM_UPLOAD_RESERVE_PERCENT`) if transcoded playback should fit.
 Direct play (no transcode) has no such floor — it only needs the source
 file's own bitrate to fit the pool.
-FFmpeg and ffprobe must be installed on the media server; set
-`SWARM_FFMPEG_PATH` when `ffmpeg` is not on `PATH`.
+FFmpeg and ffprobe must be installed on the media server. The server searches
+`PATH` plus the usual Homebrew/MacPorts locations (a macOS GUI launch inherits
+a reduced `PATH`), so a normal install is found automatically; set
+`SWARM_FFMPEG_PATH` (and, if it lives elsewhere, `SWARM_FFPROBE_PATH`) to
+override. When ffprobe cannot be located, scanned entries carry no codec facts
+and transcoded playback silently drops audio.
 
 A transcode only runs when the client genuinely can't play the source: when
 the client's codec, resolution, bit depth, HDR, and level all fit, playback

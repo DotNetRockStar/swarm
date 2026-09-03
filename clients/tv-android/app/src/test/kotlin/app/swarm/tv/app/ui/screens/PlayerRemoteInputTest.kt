@@ -2,10 +2,46 @@ package app.swarm.tv.app.ui.screens
 
 import android.view.KeyEvent
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class PlayerRemoteInputTest {
+    @Test
+    fun `bare surface reclaims focus whenever the native controller hides`() {
+        // Auto-hide timeout or Back — either way, focus must leave the
+        // now-invisible transport buttons so the next Select is seen (#154).
+        assertTrue(
+            shouldReclaimSurfaceFocusOnControllerHidden(
+                controllerVisible = false,
+                overlayOwnsFocus = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `a visible controller keeps its own focus`() {
+        assertFalse(
+            shouldReclaimSurfaceFocusOnControllerHidden(
+                controllerVisible = true,
+                overlayOwnsFocus = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `a Compose overlay keeps focus when the controller hides`() {
+        // The pause / continue / skip-intro overlays legitimately own the
+        // remote; don't yank focus back to the video surface underneath them.
+        assertFalse(
+            shouldReclaimSurfaceFocusOnControllerHidden(
+                controllerVisible = false,
+                overlayOwnsFocus = true,
+            ),
+        )
+    }
+
     @Test
     fun `Fire TV transport buttons map to playback actions`() {
         assertEquals(RemotePlaybackAction.TOGGLE_PLAY_PAUSE, remotePlaybackAction(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))

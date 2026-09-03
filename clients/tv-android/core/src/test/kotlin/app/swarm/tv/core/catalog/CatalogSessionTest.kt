@@ -418,6 +418,49 @@ class CatalogSessionTest {
     }
 
     @Test
+    fun `pollChanges persists and re-merges off the caller's thread`() = runBlocking {
+        // The change feed is pumped from a Main-dispatched coroutine. Applying
+        // the delta, re-serialising the whole manifest to disk and re-merging
+        // every server used to run inline on that thread, which stalled the UI
+        // long enough on a large library to drop remote input and ANR the app
+        // on a memory-pressured Fire TV (#208).
+        val baseline = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(CatalogEntry("movie-1", "fp-1", MediaKind.MOVIE, "Alpha", 1_024)),
+        )
+        val delta = CatalogManifest(
+            thumbprint = "catalog-v2",
+            entries = listOf(CatalogEntry("movie-2", "fp-2", MediaKind.MOVIE, "Beta", 1_024)),
+        )
+        val connection = ChangeFeedConnection(baseline, delta)
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+        val callerThread = Thread.currentThread()
+        val storeThread = AtomicReference<Thread?>()
+        val cache = object : CatalogCache {
+            override suspend fun load(serverId: String): CatalogManifest? = null
+            override suspend fun store(serverId: String, manifest: CatalogManifest) {
+                storeThread.set(Thread.currentThread())
+            }
+        }
+
+        CatalogSession(proxy, catalogCache = cache, directConnector = { _, _, _ -> connection }).use { session ->
+            session.refresh(listOf(device), identity.certificate, identity.privateKey)
+            storeThread.set(null)
+
+            val poll = session.pollChanges(device, listOf(device), identity.certificate, identity.privateKey)
+
+            assertEquals(listOf("Alpha", "Beta"), poll.entries?.map { it.entry.title }?.sorted())
+        }
+        proxy.close()
+
+        val recorded = storeThread.get()
+        assertTrue(recorded != null, "pollChanges never persisted the merged manifest")
+        assertTrue(recorded !== callerThread, "catalog persist/merge must run off the caller's thread (#208)")
+    }
+
+    @Test
     fun `pollChanges reports unsupported when the server has no change feed`() = runBlocking {
         val baseline = CatalogManifest(
             thumbprint = "catalog-v1",

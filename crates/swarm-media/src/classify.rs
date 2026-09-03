@@ -548,6 +548,14 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         });
     }
 
+    // Some personal libraries append cast/genre/language descriptors after
+    // the real title behind a spaced dash, before the release year:
+    // `01 Die Hard - Bruce Willis Action 1988 Eng Subs 1080p [H264-mp4]`.
+    // Drop that suffix so the title is just `Die Hard` — see
+    // [strip_descriptor_dash_suffix] for how conservatively this fires.
+    let movie_stem = strip_descriptor_dash_suffix(stem, stem_year);
+    let (movie_stem_clean, _) = extract_year_and_strip(movie_stem);
+
     // Scene-style movie filenames conventionally put the release year at
     // the boundary between the real title and technical/release metadata:
     // `Title.2022.IMAX.1080p.BluRay...`.  Keeping the suffix made the TMDb
@@ -556,8 +564,11 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // has consumed the cleaned full stem; truncating before then would hide
     // an SxxEyy marker in filenames such as `Show.2010.S01E01.mkv`.
     let title = stem_year
-        .and_then(|release_year| title_before_release_year(stem, release_year))
-        .unwrap_or_else(|| clean_title(&stem_clean));
+        .and_then(|release_year| title_before_release_year(movie_stem, release_year))
+        .unwrap_or_else(|| clean_title(&movie_stem_clean));
+    // A zero-padded leading ordinal some libraries prefix onto every movie
+    // file (`01 Die Hard`, `03. The Matrix`) is not part of the title.
+    let title = strip_leading_movie_ordinal(&title).to_string();
 
     Some(Classified {
         kind: MediaKind::Movie,
@@ -915,6 +926,138 @@ fn cleaned_nonempty_prefix(prefix: &str) -> Option<String> {
     let (without_bracket_tags, _) = extract_bracket_tags(prefix);
     let title = clean_title(&without_bracket_tags);
     (!title.is_empty()).then_some(title)
+}
+
+/// Whole-word tokens that describe a *release* (genre label, language,
+/// subtitle/audio note, resolution/source/codec) and never appear in a real
+/// movie title. Used only to recognize descriptor junk sitting between the
+/// title and the release year — see [strip_descriptor_dash_suffix].
+const DESCRIPTOR_TOKENS: &[&str] = &[
+    // genre labels some libraries append after the title
+    "action",
+    "adventure",
+    "animation",
+    "biography",
+    "comedy",
+    "crime",
+    "documentary",
+    "drama",
+    "family",
+    "fantasy",
+    "horror",
+    "musical",
+    "mystery",
+    "romance",
+    "thriller",
+    "war",
+    "western",
+    "scifi",
+    // language / subtitle / audio notes
+    "eng",
+    "english",
+    "sub",
+    "subs",
+    "subbed",
+    "subtitle",
+    "subtitles",
+    "dub",
+    "dubbed",
+    "multi",
+    "dual",
+    // resolution / source / codec
+    "480p",
+    "720p",
+    "1080p",
+    "2160p",
+    "4k",
+    "uhd",
+    "hdr",
+    "bluray",
+    "bdrip",
+    "brrip",
+    "dvdrip",
+    "webrip",
+    "hdtv",
+    "hdrip",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "xvid",
+    "divx",
+    "aac",
+    "ac3",
+    "dts",
+];
+
+/// A personal-library convention: cast/genre/language descriptors appended
+/// after the real movie title behind a spaced dash — `01 Die Hard - Bruce
+/// Willis Action 1988 Eng Subs 1080p [H264-mp4]`. Returns `stem` truncated
+/// at that dash when the text after it carries BOTH the release year and a
+/// [DESCRIPTOR_TOKENS] word *before* that year (i.e. genuine junk wedged
+/// between the title and the year). Deliberately conservative, the same
+/// reasoning as [`crate::scrape`]'s `search_query_for`: a real film subtitle
+/// set off the same way (`Mission Impossible - Ghost Protocol`,
+/// `Star Wars - Episode IV - A New Hope`) carries neither signal, so it is
+/// left untouched.
+fn strip_descriptor_dash_suffix(stem: &str, release_year: Option<u32>) -> &str {
+    let Some(year) = release_year else {
+        return stem;
+    };
+    let year_text = year.to_string();
+    for (index, _) in stem.match_indices(" - ") {
+        let suffix = &stem[index + 3..];
+        let Some(year_at) = bounded_token_position(suffix, &year_text) else {
+            continue;
+        };
+        let has_descriptor_before_year = suffix[..year_at]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                !word.is_empty() && DESCRIPTOR_TOKENS.contains(&word.to_ascii_lowercase().as_str())
+            });
+        if has_descriptor_before_year {
+            return &stem[..index];
+        }
+    }
+    stem
+}
+
+/// Byte offset of the first occurrence of `token` in `text` that is bounded
+/// by a non-alphanumeric byte (or the string edge) on both sides, so a
+/// four-digit year is never matched inside a longer number.
+fn bounded_token_position(text: &str, token: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let is_boundary = |b: u8| !b.is_ascii_alphanumeric();
+    for (start, _) in text.match_indices(token) {
+        let end = start + token.len();
+        let before_ok = start == 0 || is_boundary(bytes[start - 1]);
+        let after_ok = end == bytes.len() || is_boundary(bytes[end]);
+        if before_ok && after_ok {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// Strip a zero-padded leading ordinal some libraries prefix onto every
+/// movie file (`01 Die Hard`, `03. The Matrix`). Only a *zero-padded*
+/// leading number counts — an unpadded one is far more likely to be real
+/// title text (`10 Cloverfield Lane`, `28 Days Later`, `300`, `1917`), so
+/// those are left completely alone.
+fn strip_leading_movie_ordinal(title: &str) -> &str {
+    if title.as_bytes().first() != Some(&b'0') {
+        return title;
+    }
+    let digits_end = title
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(title.len());
+    let rest = title[digits_end..].trim_start_matches([' ', '-', '.', '_']);
+    if rest.is_empty() || rest.len() == title.len() - digits_end {
+        // The whole string was digits, or no separator followed them.
+        return title;
+    }
+    rest
 }
 
 /// Find and remove a standalone `1900..=2099` year token from `text`, where
@@ -1705,5 +1848,76 @@ mod tests {
         let entry = classify("Shows/The Expanse/Season 2/The.Expanse.S02E05.Home.mkv").unwrap();
         assert_eq!(entry.season, Some(2));
         assert_eq!(entry.episode, Some(5));
+    }
+
+    // --- personal-library movie filenames: leading ordinal + descriptor
+    //     suffix wedged between the title and the release year ---
+    // Reported in #199: "01 Die Hard - Bruce Willis Action 1988 Eng Subs
+    // 1080p [H264-mp4].mp4" scraped as the literal title "01 Die Hard -
+    // Bruce Willis Action" instead of "Die Hard".
+
+    #[test]
+    fn reported_ordinal_and_cast_genre_suffix_movie_name_reduces_to_the_bare_title() {
+        let entry =
+            classify("movies/01 Die Hard - Bruce Willis Action 1988 Eng Subs 1080p [H264-mp4].mp4")
+                .unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "Die Hard");
+        assert_eq!(entry.year, Some(1988));
+    }
+
+    #[test]
+    fn zero_padded_leading_ordinal_alone_is_stripped_from_a_movie_title() {
+        let entry = classify("movies/03. The Matrix 1999 1080p BluRay.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "The Matrix");
+        assert_eq!(entry.year, Some(1999));
+    }
+
+    #[test]
+    fn unpadded_leading_number_in_a_movie_title_is_never_treated_as_an_ordinal() {
+        // Regression guard for the existing "10 Cloverfield Lane"/"28 Days
+        // Later" behavior and bare-numeral titles like "300".
+        for (filename, expected) in [
+            (
+                "10.Cloverfield.Lane.2016.1080p.BluRay.x264-GROUP.mkv",
+                "10 Cloverfield Lane",
+            ),
+            (
+                "28.Days.Later.2002.1080p.BluRay.x264-GROUP.mkv",
+                "28 Days Later",
+            ),
+            ("300 2006 1080p BluRay.mkv", "300"),
+        ] {
+            let entry = classify(&format!("movies/{filename}")).unwrap();
+            assert_eq!(entry.title, expected, "{filename}");
+        }
+    }
+
+    #[test]
+    fn a_real_film_subtitle_set_off_by_a_dash_is_not_mistaken_for_a_descriptor_suffix() {
+        // Neither dash suffix carries a descriptor token before the year, so
+        // the whole title is kept.
+        let entry =
+            classify("movies/Star Wars - Episode IV - A New Hope 1977 1080p BluRay x264.mkv")
+                .unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "Star Wars - Episode IV - A New Hope");
+        assert_eq!(entry.year, Some(1977));
+
+        let entry =
+            classify("movies/Mission Impossible - Ghost Protocol (2011) [1080p].mkv").unwrap();
+        assert_eq!(entry.title, "Mission Impossible - Ghost Protocol");
+        assert_eq!(entry.year, Some(2011));
+    }
+
+    #[test]
+    fn descriptor_dash_suffix_needs_both_a_year_and_a_descriptor_before_it() {
+        // A dash suffix with a descriptor but no year (e.g. an unusual real
+        // subtitle) must be left alone — only the title-then-junk-then-year
+        // shape is truncated.
+        let entry = classify("movies/Whatever - Action Movie.mkv").unwrap();
+        assert_eq!(entry.title, "Whatever - Action Movie");
+        assert_eq!(entry.year, None);
     }
 }

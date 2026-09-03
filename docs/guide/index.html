@@ -591,7 +591,8 @@ SWARM_RENDEZVOUS_URL         public STUN service URL (can be compiled into a rel
 SWARM_MAX_UPLOAD_MBPS        upload ceiling (default 10)
 SWARM_UPLOAD_RESERVE_PERCENT headroom kept out of the streaming pool (default 90, capped 90)
 SWARM_MAX_STREAMS            concurrent playback sessions (default 2)
-SWARM_FFMPEG_PATH            FFmpeg binary when not on PATH
+SWARM_FFMPEG_PATH            FFmpeg binary when not on PATH (Homebrew/MacPorts are auto-detected)
+SWARM_FFPROBE_PATH           ffprobe binary when it is not beside ffmpeg
 SWARM_TRANSCODING_DISABLED   disable HLS, keep compatible direct play</code></pre>
     <p class="callout warn"><span class="k">Bandwidth math</span>
       <code>usable_upload = max_upload × (100 − reserve_percent) / 100</code>. At the defaults a

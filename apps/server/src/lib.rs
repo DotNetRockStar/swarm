@@ -1529,9 +1529,7 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
         .unwrap_or(4);
     TranscodeConfig {
         enabled: !disabled,
-        ffmpeg_path: PathBuf::from(
-            std::env::var("SWARM_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into()),
-        ),
+        ffmpeg_path: resolve_ffmpeg_path(),
         session_dir: data_dir.join("transcodes"),
         max_upload_bps: (max_upload_mbps * 1_000_000.0) as u64,
         reserve_percent,
@@ -1541,4 +1539,129 @@ pub fn transcode_config_from_env(data_dir: &std::path::Path) -> TranscodeConfig 
         video_encoder_mode,
         max_transcode_height,
     }
+}
+
+/// Resolve FFmpeg while the process still has its startup environment.
+///
+/// macOS GUI applications normally receive a much smaller `PATH` than an
+/// interactive shell, so a Homebrew or MacPorts FFmpeg can be installed and
+/// still be invisible when the server is opened from Finder or at login. Keep
+/// the documented override authoritative, then search `PATH`, then the common
+/// package-manager locations used by both Apple Silicon and Intel Macs.
+fn resolve_ffmpeg_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let platform_candidates = [
+        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+        PathBuf::from("/usr/local/bin/ffmpeg"),
+        PathBuf::from("/opt/local/bin/ffmpeg"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let platform_candidates: [PathBuf; 0] = [];
+
+    resolve_ffmpeg_path_from(
+        std::env::var_os("SWARM_FFMPEG_PATH"),
+        std::env::var_os("PATH"),
+        &platform_candidates,
+    )
+}
+
+fn resolve_ffmpeg_path_from(
+    configured: Option<std::ffi::OsString>,
+    search_path: Option<std::ffi::OsString>,
+    platform_candidates: &[PathBuf],
+) -> PathBuf {
+    if let Some(configured) = configured {
+        return PathBuf::from(configured);
+    }
+
+    let executable_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    search_path
+        .as_deref()
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|directory| directory.join(executable_name))
+        .chain(platform_candidates.iter().cloned())
+        .find(|candidate| is_executable_file(candidate))
+        .unwrap_or_else(|| PathBuf::from(executable_name))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_path_tests {
+    use super::*;
+
+    #[test]
+    fn configured_ffmpeg_path_is_authoritative() {
+        let configured = PathBuf::from("/custom/tools/ffmpeg");
+        let resolved = resolve_ffmpeg_path_from(
+            Some(configured.clone().into_os_string()),
+            None,
+            &[PathBuf::from("/another/ffmpeg")],
+        );
+
+        assert_eq!(resolved, configured);
+    }
+
+    #[test]
+    fn finds_ffmpeg_in_search_path() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let ffmpeg = second.path().join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        std::fs::write(&ffmpeg, b"test executable").unwrap();
+        make_executable(&ffmpeg);
+        let search_path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        let resolved = resolve_ffmpeg_path_from(None, Some(search_path), &[]);
+
+        assert_eq!(resolved, ffmpeg);
+    }
+
+    #[test]
+    fn finds_ffmpeg_in_platform_locations_when_path_does_not_contain_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let ffmpeg = directory.path().join("ffmpeg");
+        std::fs::write(&ffmpeg, b"test executable").unwrap();
+        make_executable(&ffmpeg);
+
+        let resolved = resolve_ffmpeg_path_from(None, None, std::slice::from_ref(&ffmpeg));
+
+        assert_eq!(resolved, ffmpeg);
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = path.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 }
