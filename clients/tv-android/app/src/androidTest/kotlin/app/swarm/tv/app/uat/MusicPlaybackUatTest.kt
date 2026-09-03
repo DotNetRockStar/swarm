@@ -48,11 +48,13 @@ class MusicPlaybackUatTest : UatTestBase() {
         composeTestRule.onNodeWithTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON).assertIsDisplayed()
 
         // Like round-trip through the "Liked only" filter on Browse All.
-        val initiallyLiked = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON).contains("Liked")
+        // #161: the wordless transport row shows the liked state as a
+        // filled vs. hollow heart glyph rather than "Liked"/"Like" text.
+        val initiallyLiked = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON).contains("♥")
         if (initiallyLiked) {
             selectTagWithDpad(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON)
             composeTestRule.waitUntil(timeoutMillis = 5_000) {
-                !composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON).contains("Liked")
+                !composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON).contains("♥")
             }
         }
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON)
@@ -107,7 +109,8 @@ class MusicPlaybackUatTest : UatTestBase() {
 
         val upNextBefore = composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_UP_NEXT)
         // #160: the shuffle button cycles OFF -> shuffle album -> shuffle all.
-        assertEquals("🔀 Shuffle", composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim())
+        // #161: wordless glyphs — "🔀" / "🔀 album" / "🔀 all".
+        assertEquals("🔀", composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim())
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
             composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).contains("album")
@@ -122,7 +125,7 @@ class MusicPlaybackUatTest : UatTestBase() {
         }
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
-            composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim() == "🔀 Shuffle"
+            composeTestRule.textUnderTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON).trim() == "🔀"
         }
         // Leave it on "shuffle album" for the skip check below.
         selectTagWithDpad(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON)
