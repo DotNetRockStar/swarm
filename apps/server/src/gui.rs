@@ -296,6 +296,7 @@ impl AppState {
             updated: report.updated,
             removed: report.removed,
             unchanged: report.unchanged,
+            incomplete_roots: report.incomplete_roots,
         }))
     }
 }
@@ -492,13 +493,66 @@ fn reconnect_attempt_key(root: &MediaRootSetting) -> String {
         .unwrap_or_else(|| format!("path:{}", root.path))
 }
 
-/// How often the idle-time watcher below re-walks every media root looking
-/// for added/removed/updated files. Short enough that a change is noticed
-/// without the user having to press Rescan, long enough that a large network
-/// share isn't re-walked so often it competes with playback/transcoding for
-/// I/O — the same trade-off `ROSTER_SYNC_INTERVAL` and the 10s root-health
-/// poll make for their own much cheaper checks.
+/// Base cadence of the idle-time watcher below, which re-walks media roots
+/// looking for added/removed/updated files. Short enough that a change is
+/// noticed without the user having to press Rescan, long enough that a large
+/// network share isn't re-walked so often it competes with playback/
+/// transcoding for I/O — the same trade-off `ROSTER_SYNC_INTERVAL` and the
+/// 10s root-health poll make for their own much cheaper checks. A root whose
+/// walk keeps coming back incomplete is rescanned on a multiple of this
+/// interval instead (see `auto_library_watch_backoff_ticks`).
 const AUTO_LIBRARY_WATCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Ceiling on the exponential back-off applied to a media root whose walk
+/// keeps returning an incomplete snapshot — 32 watch ticks ≈ 8 hours at the
+/// 15-minute base cadence. A share that flaps for a whole day then costs one
+/// walk every 8 hours instead of ~96 walks, each of which was moving the
+/// catalog thumbprint and forcing every client into a full manifest reload
+/// (#222).
+const MAX_AUTO_LIBRARY_WATCH_BACKOFF_TICKS: u32 = 32;
+
+/// Watch ticks to skip before auto-rescanning a root again, given how many
+/// consecutive auto-scans of it have come back incomplete. `0` → scan every
+/// tick as before; then 1, 2, 4, 8, 16, capped at
+/// [`MAX_AUTO_LIBRARY_WATCH_BACKOFF_TICKS`].
+fn auto_library_watch_backoff_ticks(consecutive_incomplete: u32) -> u32 {
+    match consecutive_incomplete {
+        0 => 0,
+        n => (1u32 << (n - 1).min(5)).min(MAX_AUTO_LIBRARY_WATCH_BACKOFF_TICKS),
+    }
+}
+
+#[cfg(test)]
+mod auto_library_watch_backoff_tests {
+    use super::{auto_library_watch_backoff_ticks, MAX_AUTO_LIBRARY_WATCH_BACKOFF_TICKS};
+
+    #[test]
+    fn clean_scan_keeps_the_every_tick_cadence() {
+        assert_eq!(auto_library_watch_backoff_ticks(0), 0);
+    }
+
+    #[test]
+    fn incomplete_scans_back_off_exponentially_then_cap() {
+        assert_eq!(auto_library_watch_backoff_ticks(1), 1);
+        assert_eq!(auto_library_watch_backoff_ticks(2), 2);
+        assert_eq!(auto_library_watch_backoff_ticks(3), 4);
+        assert_eq!(auto_library_watch_backoff_ticks(4), 8);
+        assert_eq!(auto_library_watch_backoff_ticks(5), 16);
+        assert_eq!(auto_library_watch_backoff_ticks(6), 32);
+        assert_eq!(
+            auto_library_watch_backoff_ticks(50),
+            MAX_AUTO_LIBRARY_WATCH_BACKOFF_TICKS
+        );
+    }
+}
+
+#[derive(Default)]
+struct RootWatchBackoff {
+    /// Consecutive auto-scans of this root whose snapshot was incomplete.
+    consecutive_incomplete: u32,
+    /// Remaining watch ticks to skip before this root is scanned again.
+    ticks_until_due: u32,
+}
 
 /// Issue #37: periodically reconcile every media root against the library
 /// (reusing the exact scan/diff machinery `rescan` already exposes to the
@@ -507,24 +561,80 @@ const AUTO_LIBRARY_WATCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Scraping itself already skips movies/shows when no TMDb key is
 /// configured and always attempts music via MusicBrainz (no key needed
 /// there); see `run_bulk_scrape`'s per-kind gating, unchanged here.
+///
+/// Roots are scanned individually (`rescan_roots_by_label`) rather than in
+/// one flat `rescan(None)` so a single continuously-changing network share
+/// can be backed off an exponentially longer interval when its walk keeps
+/// coming back incomplete, instead of re-walking it — and re-churning every
+/// client's catalog — every 15 minutes (#222). A clean scan clears the
+/// back-off immediately.
 fn start_auto_library_watch(core: Arc<ServerCore>, settings_dir: PathBuf) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(AUTO_LIBRARY_WATCH_INTERVAL);
         // The first tick fires immediately; skip it since `ServerCore::start`
         // already kicked off an initial scan of its own.
         interval.tick().await;
+        let mut backoff: HashMap<String, RootWatchBackoff> = HashMap::new();
         loop {
             interval.tick().await;
-            if !settings::load(&settings_dir).auto_library_watch_enabled {
+            let settings = settings::load(&settings_dir);
+            if !settings.auto_library_watch_enabled {
                 continue;
             }
-            let report = match core.rescan(None).await {
+            // The live resolver set is authoritative for what
+            // `rescan_roots_by_label` will accept — a settings.json edited
+            // out from under a running core may not match.
+            let configured: Vec<String> = core
+                .media_roots
+                .roots()
+                .into_iter()
+                .map(|root| root.label)
+                .collect();
+            if configured.is_empty() {
+                continue;
+            }
+            backoff.retain(|label, _| configured.iter().any(|l| l == label));
+
+            // A root is due this tick unless it is still serving out a
+            // back-off from a run of incomplete scans.
+            let mut due = Vec::new();
+            for label in &configured {
+                let state = backoff.entry(label.clone()).or_default();
+                if state.ticks_until_due == 0 {
+                    due.push(label.clone());
+                } else {
+                    state.ticks_until_due -= 1;
+                }
+            }
+            if due.is_empty() {
+                continue;
+            }
+
+            let report = match core.rescan_roots_by_label(&due).await {
                 Ok(report) => report,
                 Err(error) => {
                     tracing::warn!(%error, "automatic library scan failed");
                     continue;
                 }
             };
+
+            for label in &due {
+                let state = backoff.entry(label.clone()).or_default();
+                if report.incomplete_roots.iter().any(|l| l == label) {
+                    state.consecutive_incomplete = state.consecutive_incomplete.saturating_add(1);
+                    state.ticks_until_due =
+                        auto_library_watch_backoff_ticks(state.consecutive_incomplete);
+                    tracing::info!(
+                        root = %label,
+                        consecutive_incomplete = state.consecutive_incomplete,
+                        skip_ticks = state.ticks_until_due,
+                        "media root scan keeps returning an incomplete snapshot; backing off auto-rescan"
+                    );
+                } else {
+                    *state = RootWatchBackoff::default();
+                }
+            }
+
             if report.added + report.updated + report.removed == 0 {
                 continue;
             }
@@ -542,7 +652,7 @@ fn start_auto_library_watch(core: Arc<ServerCore>, settings_dir: PathBuf) {
             if report.added + report.updated == 0 {
                 continue;
             }
-            let tmdb_api_key = settings::load(&settings_dir).tmdb_api_key;
+            let tmdb_api_key = settings.tmdb_api_key.clone();
             let scrape_result = core
                 .run_scrape(
                     ScrapeConfig {
@@ -1126,6 +1236,7 @@ async fn repair_smb_root<R: tauri::Runtime>(
             updated: report.updated,
             removed: report.removed,
             unchanged: report.unchanged,
+            incomplete_roots: report.incomplete_roots,
         })
     } else {
         None
@@ -1398,6 +1509,10 @@ struct RescanResult {
     updated: u64,
     removed: u64,
     unchanged: u64,
+    /// Labels of roots that were changing on disk during the walk, so their
+    /// contents were not reconciled this pass (#222). Empty on a clean scan.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    incomplete_roots: Vec<String>,
 }
 
 /// `scan-progress` event name emitted to the webview during [`rescan`] —
@@ -1425,11 +1540,25 @@ async fn rescan<R: tauri::Runtime>(
     let result = core.rescan(Some(tx)).await.map_err(|e| e.to_string());
     let _ = forward.await;
     let report = result?;
+    if !report.incomplete_roots.is_empty() {
+        let message = format!(
+            "These media roots were changing on disk during the scan, so their contents were left untouched this pass: {}.\n\nRescan again once they have settled.",
+            report.incomplete_roots.join(", "),
+        );
+        if let Err(error) = core
+            .library
+            .record_server_notification("warning", "Some media roots were busy during the scan", &message)
+            .await
+        {
+            tracing::warn!(%error, "could not save incomplete-rescan notification");
+        }
+    }
     Ok(RescanResult {
         added: report.added,
         updated: report.updated,
         removed: report.removed,
         unchanged: report.unchanged,
+        incomplete_roots: report.incomplete_roots,
     })
 }
 
@@ -1815,6 +1944,7 @@ async fn run_library_maintenance<R: tauri::Runtime>(
                 updated: scan.updated,
                 removed: scan.removed,
                 unchanged: scan.unchanged,
+                incomplete_roots: scan.incomplete_roots,
             },
             scrape,
             classifications,
