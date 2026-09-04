@@ -203,7 +203,7 @@ class CatalogGroupingTest {
         val b1 = track("b1", "Air", "Talkie Walkie", 1)
         val grouped = artists(a1, a2, a3, b1)
         val picks = (0..50).map {
-            CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALBUM, Random(it))?.fingerprint
+            CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALBUM, random = Random(it))?.fingerprint
         }.toSet()
         assertEquals(setOf("a2", "a3"), picks)
     }
@@ -224,7 +224,7 @@ class CatalogGroupingTest {
         val z2 = track("z2", "Zero 7", "Simple Things", 2)
         val grouped = artists(a1, a2, z1, z2)
         val picks = (0..80).map {
-            CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALL_SONGS, Random(it))?.fingerprint
+            CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALL_SONGS, random = Random(it))?.fingerprint
         }.toSet()
         assertEquals(setOf("a2", "z1", "z2"), picks)
         assertTrue(picks.any { it?.startsWith("z") == true }, "shuffle-all must be able to cross to another artist")
@@ -236,7 +236,7 @@ class CatalogGroupingTest {
         val z1 = track("z1", "Zero 7", "Simple Things", 1)
         val grouped = artists(a1, z1)
         repeat(50) { seed ->
-            assertEquals("z1", CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALL_SONGS, Random(seed))?.fingerprint)
+            assertEquals("z1", CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALL_SONGS, random = Random(seed))?.fingerprint)
         }
     }
 
@@ -253,6 +253,70 @@ class CatalogGroupingTest {
         assertEquals(ShuffleMode.ALBUM, ShuffleMode.OFF.next())
         assertEquals(ShuffleMode.ALL_SONGS, ShuffleMode.ALBUM.next())
         assertEquals(ShuffleMode.OFF, ShuffleMode.ALL_SONGS.next())
+    }
+
+    @Test
+    fun `RepeatMode cycles off to repeat song to repeat album and back`() {
+        assertEquals(RepeatMode.ONE, RepeatMode.OFF.next())
+        assertEquals(RepeatMode.ALBUM, RepeatMode.ONE.next())
+        assertEquals(RepeatMode.OFF, RepeatMode.ALBUM.next())
+    }
+
+    @Test
+    fun `nextTrack repeat ALBUM wraps to the first track instead of rolling to the next album`() {
+        val a1 = track("a1", "Air", "Moon Safari", 1)
+        val a2 = track("a2", "Air", "Moon Safari", 2)
+        val b1 = track("b1", "Air", "Talkie Walkie", 1)
+        val grouped = artists(a1, a2, b1)
+        assertEquals("a2", CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.OFF, RepeatMode.ALBUM)?.fingerprint)
+        assertEquals("a1", CatalogGrouping.nextTrack(a2, grouped, ShuffleMode.OFF, RepeatMode.ALBUM)?.fingerprint)
+    }
+
+    @Test
+    fun `nextTrack repeat ALBUM keeps shuffle-all inside the current album`() {
+        val a1 = track("a1", "Air", "Moon Safari", 1)
+        val a2 = track("a2", "Air", "Moon Safari", 2)
+        val z1 = track("z1", "Zero 7", "Simple Things", 1)
+        val grouped = artists(a1, a2, z1)
+        val picks = (0..50).map {
+            CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.ALL_SONGS, RepeatMode.ALBUM, Random(it))?.fingerprint
+        }.toSet()
+        assertEquals(setOf("a2"), picks)
+    }
+
+    @Test
+    fun `nextTrack repeat ONE behaves like OFF so an explicit skip still advances`() {
+        val a1 = track("a1", "Air", "Moon Safari", 1)
+        val a2 = track("a2", "Air", "Moon Safari", 2)
+        val grouped = artists(a1, a2)
+        assertEquals("a2", CatalogGrouping.nextTrack(a1, grouped, ShuffleMode.OFF, RepeatMode.ONE)?.fingerprint)
+        assertNull(CatalogGrouping.nextTrack(a2, grouped, ShuffleMode.OFF, RepeatMode.ONE))
+    }
+
+    @Test
+    fun `previousTrack steps back through the album then into the previous album`() {
+        val a1 = track("a1", "Air", "Moon Safari", 1)
+        val a2 = track("a2", "Air", "Moon Safari", 2)
+        val b1 = track("b1", "Air", "Talkie Walkie", 1)
+        val b2 = track("b2", "Air", "Talkie Walkie", 2)
+        val grouped = artists(a1, a2, b1, b2)
+        assertEquals("a1", CatalogGrouping.previousTrack(a2, grouped)?.fingerprint)
+        assertEquals("a2", CatalogGrouping.previousTrack(b1, grouped)?.fingerprint)
+        assertNull(CatalogGrouping.previousTrack(a1, grouped))
+    }
+
+    @Test
+    fun `previousTrack repeat ALBUM wraps to the last track of the same album`() {
+        val a1 = track("a1", "Air", "Moon Safari", 1)
+        val a2 = track("a2", "Air", "Moon Safari", 2)
+        val grouped = artists(a1, a2)
+        assertEquals("a2", CatalogGrouping.previousTrack(a1, grouped, RepeatMode.ALBUM)?.fingerprint)
+    }
+
+    @Test
+    fun `previousTrack returns null when the entry is no longer in the library`() {
+        val grouped = artists(track("a1", "Air", "Moon Safari", 1))
+        assertNull(CatalogGrouping.previousTrack(track("gone", "Someone Else", "Nowhere", 1), grouped))
     }
 
     @Test
