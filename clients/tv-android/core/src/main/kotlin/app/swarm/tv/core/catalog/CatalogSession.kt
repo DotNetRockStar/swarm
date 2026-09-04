@@ -108,8 +108,9 @@ private class RouteMemory {
 }
 
 /**
- * How long one attempt at fetching a server's catalog (`/catalog/thumbprint`
- * then, if changed, the manifest) may take before it is abandoned.
+ * The base term — and the entire budget for a small library — of how long one
+ * attempt at downloading a server's catalog body (delta or full manifest) may
+ * take before it is abandoned.
  *
  * `PeerQuicClient.request` bounds the QUIC *handshake* (`connectTimeout`) but
  * puts no bound on reading a response body: a request that stalls partway —
@@ -120,10 +121,42 @@ private class RouteMemory {
  * and surfacing as a hard "loading timed out" error even though an immediate
  * manual retry then succeeds (issue #100). Bounding each attempt turns that
  * stall into a fast per-attempt failure so [refresh]'s existing reconnect loop
- * actually gets to run. Comfortably covers a multi-megabyte manifest over a
- * slow real link; well under the outer budget so two or three attempts fit.
+ * actually gets to run.
+ *
+ * A flat 12s was too tight for a *cold* 10k+ entry manifest streamed and
+ * JSON-decoded on a starved 32-bit Fire TV Stick — it timed out, dropped the
+ * QUIC connection, retried, and hung the app (issue #223). The bound now
+ * scales with the server-reported entry count: this base plus
+ * [MANIFEST_FETCH_MS_PER_1K_ENTRIES] per thousand entries, clamped to
+ * [MANIFEST_FETCH_MAX_TIMEOUT_MS] so it stays under the outer budget and a
+ * genuine stall still converts to a fast failure.
  */
 private const val MANIFEST_FETCH_TIMEOUT_MS = 12_000L
+
+/** Added to [MANIFEST_FETCH_TIMEOUT_MS] for every 1,000 server-reported
+ * catalog entries when sizing a cold catalog-body fetch. */
+private const val MANIFEST_FETCH_MS_PER_1K_ENTRIES = 3_000L
+
+/** Ceiling for the entry-count-scaled catalog-body bound. Kept below
+ * `SwarmViewModel.CATALOG_LOAD_TIMEOUT_MS` (the whole-sequence backstop) so
+ * one full attempt on the largest library still fits inside it. */
+private const val MANIFEST_FETCH_MAX_TIMEOUT_MS = 33_000L
+
+/** The `/catalog/thumbprint` response is a few bytes; only a dead connection
+ * makes it slow, so it keeps a tight fixed bound of its own rather than
+ * borrowing the size-scaled manifest budget. */
+private const val THUMBPRINT_FETCH_TIMEOUT_MS = 10_000L
+
+/** Entry-count-scaled bound for a cold catalog-body download: a flat 12s
+ * could not stream and decode a 10k-entry manifest on a starved 32-bit Fire
+ * TV Stick (#223). [MANIFEST_FETCH_TIMEOUT_MS] plus
+ * [MANIFEST_FETCH_MS_PER_1K_ENTRIES] per thousand entries, clamped to
+ * [MANIFEST_FETCH_MAX_TIMEOUT_MS]. */
+internal fun scaledCatalogFetchTimeoutMs(entryCount: Long): Long {
+    val scaled = MANIFEST_FETCH_TIMEOUT_MS +
+        entryCount.coerceAtLeast(0) / 1_000 * MANIFEST_FETCH_MS_PER_1K_ENTRIES
+    return scaled.coerceIn(MANIFEST_FETCH_TIMEOUT_MS, MANIFEST_FETCH_MAX_TIMEOUT_MS)
+}
 
 /** Server-held change requests return after 20 seconds when quiet. */
 private const val CATALOG_CHANGE_FETCH_TIMEOUT_MS = 27_000L
@@ -155,7 +188,9 @@ class CatalogSession internal constructor(
     private val catalogCache: CatalogCache? = null,
     private val directConnector: DirectConnector,
     private val onConnectionRestored: (serverId: String) -> Unit = {},
-    private val manifestFetchTimeoutMs: Long = MANIFEST_FETCH_TIMEOUT_MS,
+    /** Non-null forces a fixed bound on every catalog fetch (tests); null
+     * uses the tight thumbprint bound plus the entry-count-scaled body bound. */
+    private val manifestFetchTimeoutMs: Long? = null,
     private val playbackPreparationTimeoutMs: Long = PLAYBACK_PREPARATION_TIMEOUT_MS,
     private val previewPreparationTimeoutMs: Long = PREVIEW_PREPARATION_TIMEOUT_MS,
     private val playbackStopTimeoutMs: Long = PLAYBACK_STOP_TIMEOUT_MS,
@@ -800,45 +835,53 @@ class CatalogSession internal constructor(
     /**
      * Checks the tiny version response before requesting the large manifest.
      * An unchanged server therefore transfers only a few bytes on every
-     * visit, while a changed/first-seen server still gets a fresh full copy.
+     * visit, while a changed/first-seen server still gets a fresh copy.
      *
-     * Bounded by [MANIFEST_FETCH_TIMEOUT_MS]: the request/read calls block on
-     * a raw QUIC stream with no read timeout of their own, so a stall is
-     * raced against a timer and, on expiry, the connection is closed to
-     * unblock the parked read and the attempt reported as a failure — see
-     * [MANIFEST_FETCH_TIMEOUT_MS]'s doc comment and issue #100.
+     * Two independently bounded phases, each raced against a timer that on
+     * expiry closes the raw connection to unblock the parked stream read and
+     * report a failure [refresh]'s retry loop can recover from (issue #100):
+     *
+     *  1. `/catalog/thumbprint` — a few bytes, so a tight fixed
+     *     [THUMBPRINT_FETCH_TIMEOUT_MS]. A match returns [cached] untouched.
+     *  2. The catalog body — a cold browse whose only change is the server
+     *     thumbprint moving (a flapping SMB share rescanning, #222/#223)
+     *     folds the compact `/catalog/changes` delta onto [cached] rather
+     *     than re-downloading the whole manifest; the full `/catalog/manifest`
+     *     is the fallback for a first-ever browse, a server-history miss, or
+     *     an older server. Bounded by an entry-count-scaled budget — see
+     *     [MANIFEST_FETCH_TIMEOUT_MS]'s doc comment and issue #223.
      */
     private suspend fun fetchCurrentManifest(
         serverId: String,
         connection: PeerConnection,
         cached: CatalogManifest?,
     ): kotlin.Result<CatalogManifest> {
-        val result: kotlin.Result<FetchedManifest> = coroutineScope {
-            // The fetch swallows its own failure into a Result so a stalled
-            // attempt that only completes *after* we've stopped awaiting it
-            // (below) can never propagate an unconsumed exception out of this
-            // coroutineScope.
-            val fetch = async(Dispatchers.IO) {
-                runCatching { fetchManifestBlocking(serverId, connection, cached) }
-            }
-            val outcome = withTimeoutOrNull(manifestFetchTimeoutMs) { fetch.await() }
-                ?: kotlin.Result.failure(
-                    IOException("catalog manifest fetch stalled; aborted after ${manifestFetchTimeoutMs}ms"),
-                )
-            if (outcome.isFailure) {
-                // Stale connection (peer restarted, network dropped) or a
-                // stalled fetch — drop the raw connection so the next refresh
-                // (or a ReconnectingConnection handling an artwork fetch in
-                // the meantime) reconnects. Evicting also closes it, which
-                // makes any blocking stream read still parked inside `fetch`
-                // throw so this coroutineScope can finish instead of leaking
-                // an IO thread until process exit. The proxy registration
-                // itself stays — see ReconnectingConnection's doc comment.
-                fetch.cancel()
-                evictConnection(serverId, connection)
-            }
-            outcome
+        val thumbprintTimeoutMs = manifestFetchTimeoutMs ?: THUMBPRINT_FETCH_TIMEOUT_MS
+        val remote = racedFetch(
+            serverId,
+            connection,
+            thumbprintTimeoutMs,
+            "catalog thumbprint fetch stalled; aborted after ${thumbprintTimeoutMs}ms",
+        ) { fetchThumbprintBlocking(connection) }
+        remote.exceptionOrNull()?.let {
+            it.printStackTrace()
+            return kotlin.Result.failure(it)
         }
+        val thumbprint = remote.getOrThrow()
+        if (cached != null &&
+            thumbprint.thumbprint == cached.thumbprint &&
+            thumbprint.entryCount == cached.entries.size.toLong()
+        ) {
+            return kotlin.Result.success(cached)
+        }
+
+        val bodyTimeoutMs = manifestFetchTimeoutMs ?: scaledCatalogFetchTimeoutMs(thumbprint.entryCount)
+        val result = racedFetch(
+            serverId,
+            connection,
+            bodyTimeoutMs,
+            "catalog manifest fetch stalled; aborted after ${bodyTimeoutMs}ms",
+        ) { fetchCatalogBodyBlocking(serverId, connection, cached, thumbprint.thumbprint) }
         result.exceptionOrNull()?.printStackTrace()
         // Persisting the freshly downloaded copy is a suspend call, so it
         // can't live inside the blocking fetch above.
@@ -851,26 +894,59 @@ class CatalogSession internal constructor(
         return result.map { it.manifest }
     }
 
+    /**
+     * Runs [block] on [Dispatchers.IO] under a [timeoutMs] race. The block
+     * swallows its own failure into a [kotlin.Result] so a stalled attempt
+     * that only completes *after* we stop awaiting it can never propagate an
+     * unconsumed exception out of this [coroutineScope]. On timeout or
+     * failure the raw connection is evicted — which also closes it, making
+     * any blocking stream read still parked inside [block] throw so the scope
+     * can finish instead of leaking an IO thread until process exit. The
+     * proxy registration itself stays — see [ReconnectingConnection].
+     */
+    private suspend fun <T> racedFetch(
+        serverId: String,
+        connection: PeerConnection,
+        timeoutMs: Long,
+        stallMessage: String,
+        block: () -> T,
+    ): kotlin.Result<T> = coroutineScope {
+        val fetch = async(Dispatchers.IO) { runCatching { block() } }
+        val outcome = withTimeoutOrNull(timeoutMs) { fetch.await() }
+            ?: kotlin.Result.failure(IOException(stallMessage))
+        if (outcome.isFailure) {
+            fetch.cancel()
+            evictConnection(serverId, connection)
+        }
+        outcome
+    }
+
     /** A catalog manifest plus whether this refresh actually re-downloaded
      * it (vs. reusing the still-current cached copy after a thumbprint match). */
     private class FetchedManifest(val manifest: CatalogManifest, val freshlyDownloaded: Boolean)
 
-    /** The blocking half of [fetchCurrentManifest]; throws on any transport
-     * or decode failure, returns [cached] unchanged when the thumbprint
-     * matches. Runs on [Dispatchers.IO] under a timeout race. */
-    private fun fetchManifestBlocking(
+    private fun fetchThumbprintBlocking(connection: PeerConnection): CatalogThumbprint {
+        val response = connection.request("/catalog/thumbprint")
+        if (response.header.status != 200) {
+            response.body.close()
+            throw IOException("catalog thumbprint returned ${response.header.status}")
+        }
+        return decodeBody<CatalogThumbprint>(response)
+    }
+
+    /** The blocking half of phase 2; throws on any transport or decode
+     * failure. Runs on [Dispatchers.IO] under a timeout race. */
+    private fun fetchCatalogBodyBlocking(
         serverId: String,
         connection: PeerConnection,
         cached: CatalogManifest?,
+        remoteThumbprint: String,
     ): FetchedManifest {
-        val thumbprintResponse = connection.request("/catalog/thumbprint")
-        if (thumbprintResponse.header.status != 200) {
-            thumbprintResponse.body.close()
-            throw IOException("catalog thumbprint returned ${thumbprintResponse.header.status}")
-        }
-        val remote = decodeBody<CatalogThumbprint>(thumbprintResponse)
-        if (cached != null && remote.thumbprint == cached.thumbprint && remote.entryCount == cached.entries.size.toLong()) {
-            return FetchedManifest(cached, freshlyDownloaded = false)
+        if (cached != null && cached.thumbprint != remoteThumbprint) {
+            catalogDeltaBlocking(connection, cached)?.let { merged ->
+                manifests[serverId] = merged
+                return FetchedManifest(merged, freshlyDownloaded = true)
+            }
         }
 
         var response = connection.request("/catalog/manifest.gz")
@@ -889,6 +965,32 @@ class CatalogSession internal constructor(
         val manifest = decodeBody<CatalogManifest>(response, compressed)
         manifests[serverId] = manifest
         return FetchedManifest(manifest, freshlyDownloaded = true)
+    }
+
+    /**
+     * The compact delta path for a cold browse: fold `/catalog/changes` onto
+     * [cached] instead of re-downloading the whole manifest when the server
+     * thumbprint has merely moved. Returns null — the caller then pulls the
+     * full manifest — when the server has no change feed or the feed errors.
+     * A reset response already carries a full snapshot, so it is used
+     * directly rather than triggering a second download. The server answers
+     * immediately here (its snapshot already differs from `since`), so the
+     * long-poll wait never applies.
+     */
+    private fun catalogDeltaBlocking(
+        connection: PeerConnection,
+        cached: CatalogManifest,
+    ): CatalogManifest? {
+        val change = runCatching { fetchChangesBlocking(connection, cached.thumbprint) }
+            .onFailure { it.printStackTrace() }
+            .getOrNull() ?: return null
+        if (change.unsupported) return null
+        val delta = change.manifest ?: return null
+        if (delta.reset) return delta.copy(reset = false)
+        val byKey = cached.entries.associateByTo(linkedMapOf()) { it.entryKey }
+        delta.removed.forEach(byKey::remove)
+        delta.entries.forEach { byKey[it.entryKey] = it }
+        return CatalogManifest(delta.thumbprint, byKey.values.toList())
     }
 
     /** Evict only the connection that actually failed. Another worker may
