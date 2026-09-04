@@ -85,11 +85,20 @@ fun ShowShelfScreen(
     val focusIndex = remember(sortedShows, initialFocusKey) {
         initialFocusKey?.let { key -> sortedShows.indexOfFirst { it.show == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(sortedShows, focusIndex) {
-        if (sortedShows.isNotEmpty()) {
-            gridState.scrollToItem(focusIndex)
+    // Place initial focus exactly once per visit — see MovieShelfScreen's
+    // identical comment on why keying this on the sorted list (which the live
+    // catalog feed rebuilds on every delta) broke the first row's hover
+    // preview (#190).
+    var initialFocusPlaced by remember { mutableStateOf(false) }
+    LaunchedEffect(sortedShows.isEmpty()) {
+        if (!shouldPlaceBrowseAllInitialFocus(initialFocusPlaced, sortedShows.isEmpty())) return@LaunchedEffect
+        gridState.scrollToItem(focusIndex)
+        repeat(BROWSE_ALL_FOCUS_ATTEMPTS) {
             withFrameNanos {}
-            firstCardFocusRequester.requestFocus()
+            if (runCatching { firstCardFocusRequester.requestFocus() }.isSuccess) {
+                initialFocusPlaced = true
+                return@LaunchedEffect
+            }
         }
     }
 
