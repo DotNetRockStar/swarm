@@ -16,6 +16,13 @@ pub enum LrclibError {
     RateLimited(Duration),
     #[error("LRCLIB unavailable: {0}")]
     Unavailable(String),
+    /// A 4xx other than 404/429 — LRCLIB rejected *this specific request* as
+    /// malformed. Re-sending the same track/artist/album/duration will 400
+    /// again every time, so (unlike `Unavailable`, which is a transient
+    /// provider/network problem worth retrying) the caller should treat this
+    /// like a definitive no-match rather than retry it every scrape pass.
+    #[error("LRCLIB rejected the request: {0}")]
+    BadRequest(String),
 }
 
 #[derive(Clone)]
@@ -73,6 +80,12 @@ impl LrclibClient {
                 .map(Duration::from_secs)
                 .unwrap_or_else(|| Duration::from_secs(1));
             return Err(LrclibError::RateLimited(retry_after));
+        }
+        if response.status().is_client_error() {
+            return Err(LrclibError::BadRequest(format!(
+                "lookup returned {}",
+                response.status()
+            )));
         }
         if !response.status().is_success() {
             return Err(LrclibError::Unavailable(format!(

@@ -315,6 +315,11 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
         let mut needs_recovery_rescan = HashSet::<String>::new();
         let mut last_attempt = HashMap::<String, Instant>::new();
         let mut interval = tokio::time::interval(Duration::from_secs(10));
+        // Default `Burst` replays every tick missed while a slow health check
+        // or reconnect ran long, firing the whole backlog back-to-back
+        // instead of settling back onto the 10s cadence — the same thrash
+        // pattern #230 found on the auto-library-watch interval below.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let mut persisted = settings::load(&settings_dir);
@@ -440,7 +445,10 @@ fn start_media_root_recovery(core: Arc<ServerCore>, settings_dir: PathBuf) {
                     }
                     continue;
                 }
-                match core.rescan_roots_by_label(&recovered_needing_rescan).await {
+                match core
+                    .rescan_roots_by_label(&recovered_needing_rescan, false)
+                    .await
+                {
                     Ok(report) => {
                         let message = format!(
                             "Recovered: {}\nRescanned after the interrupted scan: {}\n\nResult: +{} added, {} updated, {} removed, {} unchanged.",
@@ -571,6 +579,12 @@ struct RootWatchBackoff {
 fn start_auto_library_watch(core: Arc<ServerCore>, settings_dir: PathBuf) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(AUTO_LIBRARY_WATCH_INTERVAL);
+        // Default `Burst` replays every tick missed while a scan ran past
+        // this interval's period, firing the whole backlog back-to-back —
+        // observed in the wild pinning the server in a near-continuous
+        // rescan loop for ~50 minutes after one long-running scan (#230).
+        // `Skip` just resumes the normal cadence from now instead.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The first tick fires immediately; skip it since `ServerCore::start`
         // already kicked off an initial scan of its own.
         interval.tick().await;
@@ -610,7 +624,7 @@ fn start_auto_library_watch(core: Arc<ServerCore>, settings_dir: PathBuf) {
                 continue;
             }
 
-            let report = match core.rescan_roots_by_label(&due).await {
+            let report = match core.rescan_roots_by_label(&due, false).await {
                 Ok(report) => report,
                 Err(error) => {
                     tracing::warn!(%error, "automatic library scan failed");
@@ -1228,7 +1242,10 @@ async fn repair_smb_root<R: tauri::Runtime>(
             return Err("media server stopped during SMB repair".to_string());
         };
         let report = core
-            .rescan_roots_by_label(&[label])
+            // User pressed the button: pause transcription like any other
+            // explicit rescan, unlike the automatic background watch/recovery
+            // callers above.
+            .rescan_roots_by_label(&[label], true)
             .await
             .map_err(|error| error.to_string())?;
         Some(RescanResult {
