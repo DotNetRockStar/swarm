@@ -18,3 +18,21 @@ internal fun browseAllSortKey(title: String): String {
     }
     return withoutLeadingArticle.lowercase()
 }
+
+/**
+ * Whether a full-grid "Browse All" screen
+ * ([MovieShelfScreen]/[ShowShelfScreen]/[ArtistShelfScreen]) still needs to
+ * place its one-shot initial D-pad focus: once the grid actually has content,
+ * and then never again for the rest of the visit. Re-running that placement
+ * whenever the sorted list is rebuilt — which the live catalog change feed
+ * (#147) does on every merged delta — yanked focus and scroll back to the
+ * first card and kept the first row's hover preview from ever finishing its
+ * warm-up (#190).
+ */
+internal fun shouldPlaceBrowseAllInitialFocus(alreadyPlaced: Boolean, gridIsEmpty: Boolean): Boolean =
+    !alreadyPlaced && !gridIsEmpty
+
+/** Frames the one-shot initial-focus effect will re-try `requestFocus()` for
+ * while the target grid card finishes entering composition, before giving up
+ * without spinning. */
+internal const val BROWSE_ALL_FOCUS_ATTEMPTS = 10
