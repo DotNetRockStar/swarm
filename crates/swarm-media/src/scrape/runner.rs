@@ -370,6 +370,23 @@ const SEARCH_QUERY_NOISE_TOKENS: &[&str] = &[
     "lp",
 ];
 
+/// A bare `WIDTHxHEIGHT` pixel-dimension tag (`1920x812`, `1280X720`) — the
+/// actual encoded frame size, commonly seen on BDRip encodes that crop
+/// letterbox bars off a standard resolution (`1920x812` rather than a named
+/// `1080p`/`720p` tag). Confirmed live: `"Battle For The Planet Of The Apes
+/// 1920x812 BDRip x264 DTS-HD MA"` returned zero TMDb results with the tag
+/// attached. Not in [`SEARCH_QUERY_NOISE_TOKENS`] since it isn't one fixed
+/// string — any width/height pair can appear — so it needs its own
+/// whole-word pattern check instead of a literal-list entry.
+fn is_pixel_dimension_word(word: &str) -> bool {
+    let trimmed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    let Some(x_pos) = trimmed.find(['x', 'X']) else {
+        return false;
+    };
+    let is_digit_run = |s: &str| (2..=4).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    is_digit_run(&trimmed[..x_pos]) && is_digit_run(&trimmed[x_pos + 1..])
+}
+
 /// See [`SEARCH_QUERY_NOISE_TOKENS`]. Splits on whitespace, drops every
 /// token from the first noise token onward, and rejoins — cheap and
 /// dependency-free, matching this module's existing hand-rolled style.
@@ -422,6 +439,7 @@ fn search_query_for(title: &str) -> String {
                 .get(index + 1)
                 .is_some_and(|next| next.eq_ignore_ascii_case("cut"));
         if compound_edition
+            || is_pixel_dimension_word(&lower)
             || SEARCH_QUERY_NOISE_TOKENS
                 .iter()
                 .any(|tag| lower == *tag || lower.trim_end_matches(['.', ',']) == *tag)
@@ -440,16 +458,52 @@ fn search_query_for(title: &str) -> String {
 /// A year embedded in a container title is still useful when the cleaner
 /// filename omitted it. Do not treat an all-numeric title (notably the real
 /// films "1917" and "1984") as its own release year.
+///
+/// A 4-digit run immediately followed by `x`/`X` and another digit run is a
+/// `WIDTHxHEIGHT` pixel-dimension tag (`1920x812`), not a year, even though
+/// the width half often happens to fall in the plausible year range —
+/// confirmed live: `"...1920x812 BDRip..."` was being read as year 1920,
+/// which then hard-filtered TMDb's search to zero results. Both halves of
+/// the dimension tag are skipped so a real year elsewhere in the title is
+/// still found.
 fn embedded_year_hint(title: &str) -> Option<u32> {
     if title.trim().chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    title
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|part| part.len() == 4)
-        .filter_map(|part| part.parse::<u32>().ok())
-        .filter(|year| (1900..=2099).contains(year))
-        .next_back()
+    let bytes = title.as_bytes();
+    let mut years = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let followed_by_dimension_height = end < bytes.len()
+            && matches!(bytes[end], b'x' | b'X')
+            && bytes.get(end + 1).is_some_and(u8::is_ascii_digit);
+        if followed_by_dimension_height {
+            let mut height_end = end + 1;
+            while height_end < bytes.len() && bytes[height_end].is_ascii_digit() {
+                height_end += 1;
+            }
+            i = height_end;
+            continue;
+        }
+        if end - start == 4 {
+            if let Ok(year) = title[start..end].parse::<u32>() {
+                if (1900..=2099).contains(&year) {
+                    years.push(year);
+                }
+            }
+        }
+        i = end;
+    }
+    years.into_iter().next_back()
 }
 
 fn remove_year_from_query(query: &str, year: Option<u32>) -> String {
@@ -1465,6 +1519,26 @@ mod tests {
     }
 
     #[test]
+    fn search_query_strips_pixel_dimension_tags_confirmed_to_break_tmdb_search() {
+        // Reported live in #233: BDRip encodes that crop letterbox bars use
+        // the actual encoded frame size (e.g. "1920x812") instead of a named
+        // resolution tag like "1080p", and it survived into the TMDb query
+        // since it isn't in SEARCH_QUERY_NOISE_TOKENS's literal list.
+        assert_eq!(
+            search_query_for("Battle For The Planet Of The Apes 1920x812 BDRip x264 DTS-HD MA"),
+            "Battle For The Planet Of The Apes"
+        );
+        assert_eq!(
+            search_query_for("Dawn Of The Planet Of The Apes 1920x1038 BDRip x264 DTS-HD MA"),
+            "Dawn Of The Planet Of The Apes"
+        );
+        assert_eq!(
+            search_query_for("Planet Of The Apes 1920X816 BDRip x264 DTS-HD MA"),
+            "Planet Of The Apes"
+        );
+    }
+
+    #[test]
     fn search_query_is_case_insensitive_and_matches_a_whole_token_only() {
         assert_eq!(search_query_for("The Matrix WEBRip"), "The Matrix");
         // "4k" is a noise token, but "4kids" (a hypothetical real title word)
@@ -1595,6 +1669,36 @@ mod tests {
             vec![("A Nightmare On Elm Street".into(), Some(1984))]
         );
         assert_eq!(embedded_year_hint("1984"), None);
+    }
+
+    #[test]
+    fn embedded_year_hint_ignores_pixel_dimension_tags() {
+        // "1920x812" used to be misread as release year 1920 (the width
+        // half of the dimension tag happens to fall in the valid year
+        // range), which then hard-filtered TMDb's search to zero results.
+        assert_eq!(
+            embedded_year_hint("Battle For The Planet Of The Apes 1920x812 BDRip"),
+            None
+        );
+        // A real year elsewhere in the title is still found once the
+        // dimension tag itself is skipped.
+        assert_eq!(
+            embedded_year_hint("Mortal Kombat II 2026 1920x816 BDRip"),
+            Some(2026)
+        );
+    }
+
+    #[test]
+    fn movie_search_strips_pixel_dimension_tag_and_does_not_misread_it_as_a_year() {
+        let entry = movie_entry(
+            "Battle For The Planet Of The Apes 1920x812 BDRip x264 DTS-HD MA",
+            "Battle.For.The.Planet.Of.The.Apes.1920x812.BDRip.x264.DTS-HD.MA.mkv",
+            None,
+        );
+        assert_eq!(
+            movie_search_candidates(&entry),
+            vec![("Battle For The Planet Of The Apes".into(), None)]
+        );
     }
 
     #[test]
