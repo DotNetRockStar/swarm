@@ -30,9 +30,15 @@ const STARTUP_HARD_CAP: Duration = Duration::from_secs(120);
 const STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Hover previews must fail fast instead of pinning a browse card (and a
 /// transcode slot) for the full playback budget.
-const PREVIEW_STARTUP_HARD_CAP: Duration = Duration::from_secs(10);
-const PREVIEW_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// The extra couple of seconds over the original 10s/5s absorbs the short
+/// silent pre-roll a split mid-file seek now decodes before flushing its first
+/// segment (#226).
+const PREVIEW_STARTUP_HARD_CAP: Duration = Duration::from_secs(13);
+const PREVIEW_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(7);
 const AUDIO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound on the keyframe lookup that precedes a split mid-file seek — a slow
+/// share just falls back to a plain input seek rather than holding up playback.
+const KEYFRAME_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIEW_DURATION_SECS: u64 = 32;
 const MAX_HLS_VIDEO_RENDITIONS: usize = 3;
@@ -218,6 +224,29 @@ struct AudioMapEntry {
     /// Channel count; `0` when unknown. `> 2` is what makes a track worth
     /// keeping instead of downmixing.
     channels: u32,
+}
+
+/// How a mid-file start position is handed to FFmpeg. A plain input seek is
+/// fast but rebases a re-encoded video stream and a stream-copied audio track
+/// to different origins (#226); splitting it into an input seek to the previous
+/// keyframe plus an output seek for the remainder trims both to the same point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SeekPlan {
+    input_secs: f64,
+    output_secs: f64,
+}
+
+impl SeekPlan {
+    fn input_only(secs: f64) -> Self {
+        Self {
+            input_secs: secs.max(0.0),
+            output_secs: 0.0,
+        }
+    }
+}
+
+fn format_seek_secs(secs: f64) -> String {
+    format!("{secs:.3}")
 }
 
 fn sanitize_audio_tag(raw: &str) -> Option<String> {
@@ -1390,10 +1419,13 @@ impl TranscodeManager {
         if cancelled.load(Ordering::Relaxed) {
             return Err(TranscodeError::Superseded);
         }
+        let seek = self
+            .resolve_seek_plan(media_path, start_position_secs, variants, encoder)
+            .await;
         let attempt = self
             .spawn_ffmpeg_attempt(
                 media_path,
-                start_position_secs,
+                seek,
                 variants,
                 reserved_bps,
                 directory,
@@ -1422,7 +1454,7 @@ impl TranscodeManager {
         reset_hls_attempt(directory)?;
         self.spawn_ffmpeg_attempt(
             media_path,
-            start_position_secs,
+            seek,
             variants,
             reserved_bps,
             directory,
@@ -1511,11 +1543,47 @@ impl TranscodeManager {
         }
     }
 
+    /// Decide how a mid-file start position is fed to FFmpeg. A re-encoded video
+    /// stream alongside a stream-copied audio track desyncs under a single input
+    /// `-ss` (#226), so for that combination the seek is split into an input
+    /// seek to the previous keyframe plus a short output seek. Copy/remux and
+    /// audio-only outputs, or any probe failure, keep the plain input seek.
+    async fn resolve_seek_plan(
+        &self,
+        media_path: &Path,
+        start_position_secs: u64,
+        variants: &[Rendition],
+        encoder: VideoEncoder,
+    ) -> SeekPlan {
+        let plain = SeekPlan::input_only(start_position_secs as f64);
+        if start_position_secs == 0 || variants.is_empty() || encoder == VideoEncoder::Copy {
+            return plain;
+        }
+        match tokio::time::timeout(
+            KEYFRAME_PROBE_TIMEOUT,
+            crate::probe::keyframe_at_or_before(
+                &self.config.ffmpeg_path,
+                media_path,
+                start_position_secs,
+            ),
+        )
+        .await
+        {
+            Ok(Some(keyframe)) if keyframe > 0.0 && keyframe < start_position_secs as f64 => {
+                SeekPlan {
+                    input_secs: keyframe,
+                    output_secs: start_position_secs as f64 - keyframe,
+                }
+            }
+            _ => plain,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_ffmpeg_attempt(
         &self,
         media_path: &Path,
-        start_position_secs: u64,
+        seek: SeekPlan,
         variants: &[Rendition],
         reserved_bps: u64,
         directory: &Path,
@@ -1535,10 +1603,15 @@ impl TranscodeManager {
             .arg("warning")
             .arg("-nostdin")
             .arg("-y");
-        if start_position_secs > 0 {
-            command.arg("-ss").arg(start_position_secs.to_string());
+        if seek.input_secs > 0.0 {
+            command.arg("-ss").arg(format_seek_secs(seek.input_secs));
         }
         command.arg("-i").arg(media_path);
+        if seek.output_secs > 0.0 {
+            // Output seek: trims the re-encoded video and the copied audio to
+            // the same point after the coarse input seek landed on a keyframe.
+            command.arg("-ss").arg(format_seek_secs(seek.output_secs));
+        }
         if preview {
             // The client displays 30 seconds. Stop the encoder shortly after
             // that window instead of racing through the remainder of a movie.
@@ -3251,6 +3324,163 @@ mod tests {
         assert!(
             session_dir.join("vund").join("index.m3u8").is_file(),
             "an audio rendition playlist should exist on disk"
+        );
+
+        manager.finish_use(session);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression coverage for #226 ("audio is off on some video previews"). A
+    /// mid-file preview seek that re-encodes video while stream-copying an
+    /// AC-3 5.1 track used to hand ffmpeg a single input `-ss`, which rebased
+    /// the re-encoded video to the previous keyframe but the copied audio to
+    /// the exact seek point — leaving the preview several seconds out of sync.
+    /// The split input+output seek must line the two tracks back up.
+    #[tokio::test]
+    async fn preview_mid_file_seek_keeps_copied_audio_in_sync() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("swarm-hls-226-{}", session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mkv");
+        // ~4-second GOP so a non-keyframe seek target lands well past the
+        // keyframe ffmpeg would fast-seek to, and AC-3 5.1 audio so the client
+        // baseline (which lists `ac3`) takes the stream-copy delivery path.
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=24:duration=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=30",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "96",
+                "-keyint_min",
+                "96",
+                "-sc_threshold",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "ac3",
+                "-b:a",
+                "448k",
+                "-ac",
+                "6",
+                "-shortest",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .await
+            .unwrap();
+        if !generated.success() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let config = TranscodeConfig {
+            enabled: true,
+            ffmpeg_path: "ffmpeg".into(),
+            session_dir: root.join("sessions"),
+            max_upload_bps: 10_000_000,
+            reserve_percent: 30,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(300),
+            segment_duration_secs: 4,
+            ..Default::default()
+        };
+        let manager = TranscodeManager::new(config);
+        let mut source_entry = entry();
+        source_entry.relative_path = "source.mkv".into();
+        source_entry.size = source.metadata().unwrap().len();
+        source_entry.duration_secs = Some(30.0);
+        source_entry.video.as_mut().unwrap().width = 1280;
+        source_entry.video.as_mut().unwrap().height = 720;
+        source_entry.video.as_mut().unwrap().bitrate = Some(3_000_000);
+        source_entry.audio = Some(AudioStreamInfo {
+            codec: "ac3".into(),
+            channels: 6,
+            bitrate: Some(448_000),
+        });
+        let mut prefs = preferences();
+        prefs.prefer_direct = false;
+        prefs.preview = true;
+        // A non-keyframe offset roughly a full GOP past the previous keyframe.
+        prefs.start_position_secs = 15;
+
+        let plan = manager
+            .plan(&source_entry, &source, &prefs, false, None)
+            .await
+            .unwrap();
+        assert_eq!(plan.mode, PlaybackMode::Hls);
+        let session = plan.path.split('/').nth(2).unwrap();
+        let session_dir = root.join("sessions").join(session);
+
+        let first_pts = |dir: &str| -> f64 {
+            let playlist = std::fs::read_to_string(session_dir.join(dir).join("index.m3u8"))
+                .unwrap_or_else(|_| panic!("missing {dir}/index.m3u8"));
+            let init = playlist
+                .lines()
+                .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+                .and_then(|rest| rest.split('"').next())
+                .expect("playlist has no #EXT-X-MAP");
+            let segment = playlist
+                .lines()
+                .find(|line| line.ends_with(".m4s"))
+                .expect("playlist has no media segment");
+            let mut bytes = std::fs::read(session_dir.join(dir).join(init)).unwrap();
+            bytes.extend(std::fs::read(session_dir.join(dir).join(segment)).unwrap());
+            let probe_file = session_dir.join(format!("{dir}-probe.mp4"));
+            std::fs::write(&probe_file, &bytes).unwrap();
+            let output = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "packet=pts_time",
+                    "-of",
+                    "csv=p=0",
+                    "-read_intervals",
+                    "%+#1",
+                ])
+                .arg(&probe_file)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .split([',', '\n'])
+                .find_map(|field| field.trim().parse::<f64>().ok())
+                .expect("ffprobe reported no packet timestamp")
+        };
+
+        let video_start = first_pts("vpreview-540p");
+        let audio_start = first_pts("vund");
+        assert!(
+            (video_start - audio_start).abs() < 0.5,
+            "preview audio and video must start together: video={video_start} audio={audio_start}"
         );
 
         manager.finish_use(session);

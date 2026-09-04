@@ -27,6 +27,7 @@ import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -480,6 +481,127 @@ class CatalogSessionTest {
             assertEquals(null, poll.entries)
         }
         proxy.close()
+    }
+
+    @Test
+    fun `cold browse folds the compact delta onto the cached manifest instead of refetching`() = runBlocking {
+        // #223: a starved Fire TV Stick could not finish a full 10k-entry
+        // manifest inside the old flat bound whenever the server thumbprint
+        // had merely moved. The cold path now pulls the compact delta first.
+        val baseline = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(
+                CatalogEntry("movie-1", "fp-1", MediaKind.MOVIE, "Alpha", 1_024),
+                CatalogEntry("movie-2", "fp-2", MediaKind.MOVIE, "Beta", 1_024),
+            ),
+        )
+        val delta = CatalogManifest(
+            thumbprint = "catalog-v2",
+            entries = listOf(
+                CatalogEntry("movie-2", "fp-2", MediaKind.MOVIE, "Beta (updated)", 1_024),
+                CatalogEntry("movie-3", "fp-3", MediaKind.MOVIE, "Gamma", 1_024),
+            ),
+            removed = listOf("movie-1"),
+        )
+        val connection = ColdBrowseConnection("catalog-v2", remoteEntryCount = 2, delta = delta)
+        val cache = SeededCatalogCache(baseline)
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(proxy, catalogCache = cache, directConnector = { _, _, _ -> connection }).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            assertTrue(result.unreachable.isEmpty())
+            assertEquals(
+                listOf("Beta (updated)", "Gamma"),
+                result.entries.map { it.entry.title }.sorted(),
+            )
+        }
+        proxy.close()
+
+        assertTrue(connection.changesRequested.get(), "cold browse never tried the compact delta feed")
+        assertFalse(connection.manifestRequested.get(), "cold browse pulled the full manifest despite an available delta")
+    }
+
+    @Test
+    fun `an unchanged thumbprint returns the cached manifest with no catalog download`() = runBlocking {
+        val baseline = CatalogManifest(
+            thumbprint = "catalog-v1",
+            entries = listOf(CatalogEntry("movie-1", "fp-1", MediaKind.MOVIE, "Alpha", 1_024)),
+        )
+        val connection = ColdBrowseConnection("catalog-v1", remoteEntryCount = 1, delta = null)
+        val cache = SeededCatalogCache(baseline)
+        val proxy = PeerLoopbackProxy.start()
+        val identity = TestIdentity.generate()
+        val device = testServerDevice()
+
+        CatalogSession(proxy, catalogCache = cache, directConnector = { _, _, _ -> connection }).use { session ->
+            val result = session.refresh(listOf(device), identity.certificate, identity.privateKey)
+
+            assertEquals(listOf("Alpha"), result.entries.map { it.entry.title })
+        }
+        proxy.close()
+
+        assertFalse(connection.changesRequested.get())
+        assertFalse(connection.manifestRequested.get())
+    }
+
+    @Test
+    fun `cold catalog fetch budget scales with entry count and clamps`() {
+        assertEquals(12_000L, scaledCatalogFetchTimeoutMs(0))
+        assertEquals(12_000L, scaledCatalogFetchTimeoutMs(-100))
+        assertEquals(12_000L, scaledCatalogFetchTimeoutMs(500))
+        assertEquals(18_000L, scaledCatalogFetchTimeoutMs(2_000))
+        assertEquals(33_000L, scaledCatalogFetchTimeoutMs(7_000))
+        assertEquals(33_000L, scaledCatalogFetchTimeoutMs(10_712))
+    }
+
+    private class SeededCatalogCache(private val seeded: CatalogManifest) : CatalogCache {
+        override suspend fun load(serverId: String): CatalogManifest = seeded
+        override suspend fun store(serverId: String, manifest: CatalogManifest) {}
+    }
+
+    /** Serves a moved thumbprint plus a `/catalog/changes` delta, and records
+     * whether the full manifest was ever requested — the cold path (#223)
+     * must prefer the compact delta. */
+    private class ColdBrowseConnection(
+        private val remoteThumbprint: String,
+        private val remoteEntryCount: Int,
+        private val delta: CatalogManifest?,
+    ) : PeerConnection {
+        val changesRequested = AtomicBoolean(false)
+        val manifestRequested = AtomicBoolean(false)
+
+        override fun request(
+            path: String,
+            range: ByteRange?,
+            ifNoneMatch: String?,
+            playback: PlaybackPreferences?,
+            errorReport: ClientErrorReport?,
+            like: LikeToggle?,
+        ): PeerResponse {
+            val body = when (path.substringBefore('?')) {
+                "/catalog/thumbprint" ->
+                    """{"thumbprint":"$remoteThumbprint","entry_count":$remoteEntryCount}"""
+                "/catalog/changes.gz" -> return response(404, ByteArray(0))
+                "/catalog/changes" -> {
+                    changesRequested.set(true)
+                    delta?.let { SwarmJson.encodeToString(it) } ?: return response(204, ByteArray(0))
+                }
+                "/catalog/manifest.gz", "/catalog/manifest" -> {
+                    manifestRequested.set(true)
+                    return response(404, ByteArray(0))
+                }
+                else -> error("unexpected catalog request: $path")
+            }.toByteArray()
+            return response(200, body)
+        }
+
+        private fun response(status: Int, body: ByteArray) = PeerResponse(
+            PeerResponseHeader(status = status, len = body.size.toLong()),
+            ByteArrayInputStream(body),
+        )
     }
 
     /** Serves the initial catalog like [CatalogConnection], then answers the

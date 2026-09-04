@@ -231,6 +231,62 @@ pub async fn list_audio_streams(ffmpeg_path: &Path, media_path: &Path) -> Vec<Au
         .collect()
 }
 
+/// Largest video keyframe timestamp at or before `target_secs`.
+///
+/// A mid-file transcode seek is normally passed to FFmpeg as a single input
+/// `-ss`. When the video is re-encoded but an audio track is stream-copied
+/// (AC-3/E-AC-3/AAC surround the client can take untouched), FFmpeg rebases the
+/// re-encoded video to the keyframe it decoded from while rebasing the copied
+/// audio to the exact seek point — so a hover preview plays several seconds of
+/// video before its sound catches up (#226). Knowing the real keyframe lets the
+/// caller split the seek into a fast input `-ss` to this keyframe plus a short
+/// output `-ss` for the remainder, which trims both streams to the same point.
+///
+/// `None` on any probe failure (ffprobe missing, slow share, no keyframe found):
+/// the caller then falls back to the plain single input seek.
+pub async fn keyframe_at_or_before(
+    ffmpeg_path: &Path,
+    media_path: &Path,
+    target_secs: u64,
+) -> Option<f64> {
+    if target_secs == 0 {
+        return None;
+    }
+    // Movie GOPs are almost always a few seconds; 15 covers the outliers while
+    // bounding how much video FFmpeg has to decode before the first segment.
+    let window_start = target_secs.saturating_sub(15);
+    let output = tokio::process::Command::new(ffprobe_path_for(ffmpeg_path))
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-show_entries",
+            "frame=pts_time,best_effort_timestamp_time",
+            "-of",
+            "csv=p=0",
+            "-read_intervals",
+        ])
+        .arg(format!("{window_start}%{target_secs}"))
+        .arg(media_path)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ceiling = target_secs as f64 + 0.001;
+    String::from_utf8_lossy(&output.stdout)
+        .split([',', '\n'])
+        .filter_map(|field| field.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value <= ceiling)
+        .fold(None, |best: Option<f64>, value| {
+            Some(best.map_or(value, |current| current.max(value)))
+        })
+}
+
 fn ffprobe_path_for(ffmpeg_path: &Path) -> PathBuf {
     if let Some(configured) = std::env::var_os("SWARM_FFPROBE_PATH") {
         return PathBuf::from(configured);
