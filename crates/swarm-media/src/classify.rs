@@ -359,15 +359,29 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         // `Artist/Compilation/<Real Release>/track.mp3`) is skipped so the
         // real album name underneath it is used instead of the category
         // label — see CATEGORY_FOLDER_NAMES.
-        let artist = dirs
-            .first()
-            .map(|s| clean_title(strip_discography_suffix(s)));
-        let album = match dirs.get(1) {
-            Some(second) if is_category_folder(second) && dirs.len() >= 3 => {
-                Some(clean_title(dirs[2]))
-            }
-            Some(second) => Some(clean_title(second)),
-            None => None,
+        //
+        // No artist folder at all (a flat single-folder library, or files
+        // dropped directly under a bare MEDIA_TYPE_WRAPPER_NAMES root) means
+        // there is nothing here to anchor from, so fall back to parsing the
+        // same information out of the filename instead — see
+        // `parse_flat_track_fields`. The scraper (`scrape_tracks` in
+        // `scrape/runner.rs`) requires both artist and album before it will
+        // even attempt a MusicBrainz lookup, so without this fallback every
+        // track in a flat library is permanently skipped.
+        let (artist, album, track_number, title) = if dirs.is_empty() {
+            parse_flat_track_fields(&title, track_number)
+        } else {
+            let artist = dirs
+                .first()
+                .map(|s| clean_title(strip_discography_suffix(s)));
+            let album = match dirs.get(1) {
+                Some(second) if is_category_folder(second) && dirs.len() >= 3 => {
+                    Some(clean_title(dirs[2]))
+                }
+                Some(second) => Some(clean_title(second)),
+                None => None,
+            };
+            (artist, album, track_number, title)
         };
         return Some(Classified {
             kind: MediaKind::Track,
@@ -824,6 +838,69 @@ fn split_track_number(stem: &str) -> (Option<u32>, String) {
     (digits.parse().ok(), clean_title(trimmed))
 }
 
+/// Recover artist/album/track-number from the filename itself when there is
+/// no artist folder to anchor from (see the `classify` call site). Real flat
+/// libraries — everything dropped in one folder with no per-artist/per-album
+/// structure, the dominant shape produced by older ripping/download tools —
+/// encode the same fields with `" - "` as the separator:
+/// `Artist - Album - Track.mp3`, `Artist - Album - 03 - Track.mp3`, or just
+/// `Artist - Track.mp3` for a single/loose track. `title` has already been
+/// through [`clean_title`] (so `.`/`_` separators read the same as spaces)
+/// and had any *leading* digit-run track number stripped by
+/// [`split_track_number`]; this only looks for one placed as its own
+/// segment in the middle (`Artist - Album - 03 - Track`), since a leading
+/// one is already handled before this runs.
+///
+/// A file with no `" - "` at all carries no recoverable signal, so it's
+/// returned unchanged (`artist`/`album` stay `None`, same as before this
+/// fallback existed) rather than guessed at. A two-segment name is read as
+/// `Artist - Track` rather than `Album - Track`, since a loose/single track
+/// with no album is the far more common real-world case than a lone track
+/// carrying only its album name. This is a best-effort heuristic, not a
+/// guarantee — a genuine one-word title that happens to contain " - " (e.g.
+/// `"Come As You Are - Live Version"`) reads as an artist/title split, but
+/// the alternative is the status quo: a flat-library track never enters
+/// `scrape_tracks` in `scrape/runner.rs` at all (it requires both artist and
+/// album to be non-empty), so it's never scraped no matter what.
+fn parse_flat_track_fields(
+    title: &str,
+    track_number: Option<u32>,
+) -> (Option<String>, Option<String>, Option<u32>, String) {
+    let mut segments: Vec<&str> = title
+        .split(" - ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return (None, None, track_number, title.to_string());
+    }
+
+    let mut track_number = track_number;
+    if track_number.is_none() && segments.len() > 2 {
+        let interior = &segments[1..segments.len() - 1];
+        if let Some(offset) = interior
+            .iter()
+            .position(|s| !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            let index = offset + 1;
+            if let Ok(number) = segments[index].parse() {
+                track_number = Some(number);
+                segments.remove(index);
+            }
+        }
+    }
+
+    if segments.len() < 2 {
+        return (None, None, track_number, clean_title(&segments.join(" - ")));
+    }
+
+    let artist = Some(clean_title(segments[0]));
+    let album = (segments.len() > 2).then(|| clean_title(segments[1]));
+    let title_start = if segments.len() > 2 { 2 } else { 1 };
+    let title = clean_title(&segments[title_start..].join(" - "));
+    (artist, album, track_number, title)
+}
+
 /// Remove every top-level `[...]`, `(...)`, `{...}` span from `text`
 /// (mismatched/unterminated brackets are left as literal text, and a nested
 /// span is swallowed whole by its enclosing one — non-nested filenames are
@@ -1246,6 +1323,78 @@ mod tests {
         let entry = classify("Artist/Song.mp3").unwrap();
         assert_eq!(entry.artist.as_deref(), Some("Artist"));
         assert_eq!(entry.album, None);
+    }
+
+    #[test]
+    fn flat_library_track_recovers_artist_and_album_from_the_filename() {
+        // No artist folder at all — the dominant shape produced by older
+        // ripping/download tools that dump everything into one folder.
+        // Without the filename fallback this permanently fails to scrape
+        // (`scrape_tracks` requires both artist and album non-empty).
+        let entry = classify("Pink Floyd - The Wall - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.kind, MediaKind::Track);
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, None);
+    }
+
+    #[test]
+    fn flat_library_track_with_a_leading_track_number_is_still_recovered() {
+        let entry = classify("01 - Pink Floyd - The Wall - Comfortably Numb.flac").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, Some(1));
+    }
+
+    #[test]
+    fn flat_library_track_with_an_embedded_middle_track_number_is_recovered() {
+        // Some flat-library tools place the track number as its own
+        // dash-separated segment rather than as a filename prefix.
+        let entry = classify("Pink Floyd - The Wall - 06 - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, Some(6));
+    }
+
+    #[test]
+    fn flat_library_loose_track_with_no_album_reads_as_artist_and_title() {
+        let entry = classify("Radiohead - Creep.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Radiohead"));
+        assert_eq!(entry.album, None);
+        assert_eq!(entry.title, "Creep");
+    }
+
+    #[test]
+    fn flat_library_track_under_a_bare_music_wrapper_is_also_recovered() {
+        let entry = classify("Music/Pink Floyd - The Wall - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+    }
+
+    #[test]
+    fn flat_library_track_with_no_separator_is_left_unrecovered() {
+        // No "-" at all carries no recoverable signal; stays exactly as
+        // before this fallback existed rather than guessing.
+        let entry = classify("Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist, None);
+        assert_eq!(entry.album, None);
+        assert_eq!(entry.title, "Comfortably Numb");
+    }
+
+    #[test]
+    fn folder_based_classification_is_unaffected_by_dashes_in_the_title() {
+        // A real artist/album folder structure must never be overridden by
+        // the flat-filename fallback, even when the title itself contains
+        // " - " (e.g. a live-version suffix).
+        let entry =
+            classify("Nirvana/Unplugged In New York/01 - Come As You Are - Live.flac").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Nirvana"));
+        assert_eq!(entry.album.as_deref(), Some("Unplugged In New York"));
+        assert_eq!(entry.title, "Come As You Are - Live");
+        assert_eq!(entry.track_number, Some(1));
     }
 
     #[test]
