@@ -956,6 +956,17 @@ async fn scrape_track_lyrics(
             Err(LrclibError::Unavailable(reason)) => {
                 tracing::warn!(entry_key = %entry.entry_key, title = %entry.title, %reason, "lrclib unavailable, will retry next run");
             }
+            Err(LrclibError::BadRequest(reason)) => {
+                // A 400 is deterministic for this exact request — retrying it
+                // every scrape pass forever just re-runs the same rejected
+                // lookup (#230). Cache it the same way as a definitive
+                // no-match so it is naturally retried after the same 30-day
+                // cooldown, in case it was actually a transient upstream bug.
+                tracing::warn!(entry_key = %entry.entry_key, title = %entry.title, %reason, "lrclib rejected the lookup; caching as no-match");
+                library
+                    .mark_track_lyrics_not_found(&entry.entry_key)
+                    .await?
+            }
         }
     }
     Ok(())
