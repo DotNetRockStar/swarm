@@ -23,7 +23,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,11 +62,19 @@ fun ArtistShelfScreen(
     val focusIndex = remember(sortedArtists, initialFocusKey) {
         initialFocusKey?.let { key -> sortedArtists.indexOfFirst { it.artist == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(sortedArtists, focusIndex) {
-        if (sortedArtists.isNotEmpty()) {
-            gridState.scrollToItem(focusIndex)
+    // Place initial focus exactly once per visit so a live catalog delta
+    // (#147) can't yank focus and scroll back to the first card — same fix
+    // and reasoning as MovieShelfScreen (#190).
+    var initialFocusPlaced by remember { mutableStateOf(false) }
+    LaunchedEffect(sortedArtists.isEmpty()) {
+        if (!shouldPlaceBrowseAllInitialFocus(initialFocusPlaced, sortedArtists.isEmpty())) return@LaunchedEffect
+        gridState.scrollToItem(focusIndex)
+        repeat(BROWSE_ALL_FOCUS_ATTEMPTS) {
             withFrameNanos {}
-            firstCardFocusRequester.requestFocus()
+            if (runCatching { firstCardFocusRequester.requestFocus() }.isSuccess) {
+                initialFocusPlaced = true
+                return@LaunchedEffect
+            }
         }
     }
 

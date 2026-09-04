@@ -43,6 +43,29 @@ enum class ShuffleMode {
     fun next(): ShuffleMode = entries[(ordinal + 1) % entries.size]
 }
 
+/**
+ * The music player's repeat button, independent of [ShuffleMode].
+ *
+ * - [OFF]: "keep playing" advances normally and stops at the end of the
+ *   artist's discography (or wherever [nextTrack] runs out).
+ * - [ONE]: repeat the current song. Handled by the hoisted ExoPlayer's
+ *   own `REPEAT_MODE_ONE` so the loop is gapless; [nextTrack] still
+ *   reports the real following track so an explicit Skip press advances.
+ * - [ALBUM]: repeat the current album — [nextTrack]/[previousTrack] wrap
+ *   around the album the current track is on instead of crossing into
+ *   the neighbouring album, and never return null at the album edge.
+ *
+ * [next] cycles OFF -> ONE -> ALBUM -> OFF, matching the two on-states
+ * ("repeat song", "repeat album") the single repeat button steps through.
+ */
+enum class RepeatMode {
+    OFF,
+    ONE,
+    ALBUM;
+
+    fun next(): RepeatMode = entries[(ordinal + 1) % entries.size]
+}
+
 data class SeasonGroup(val season: Int?, val episodes: List<MergedEntry>)
 data class ShowGroup(val show: String, val seasons: List<SeasonGroup>)
 
@@ -156,11 +179,19 @@ object CatalogGrouping {
      * Both shuffle modes fall back to [current] itself when there is
      * nothing else to shuffle to (a single-track album / library) rather
      * than returning null and silently stopping.
+     *
+     * [repeat] layers on top: [RepeatMode.ALBUM] keeps selection inside
+     * the current album (a sequential run wraps back to track 1 at the
+     * end, and an [ShuffleMode.ALL_SONGS] request is narrowed to the
+     * album) so the album loops forever; [RepeatMode.ONE] is handled by
+     * the player itself, so it behaves like [RepeatMode.OFF] here on
+     * purpose — an explicit Skip should still move to the next song.
      */
     fun nextTrack(
         current: MergedEntry,
         artists: List<ArtistGroup>,
         mode: ShuffleMode,
+        repeat: RepeatMode = RepeatMode.OFF,
         random: Random = Random.Default,
     ): MergedEntry? {
         val artistIndex = artists.indexOfFirst { a -> a.albums.any { al -> al.tracks.any { it.fingerprint == current.fingerprint } } }
@@ -169,7 +200,8 @@ object CatalogGrouping {
         val albumIndex = artist.albums.indexOfFirst { al -> al.tracks.any { it.fingerprint == current.fingerprint } }
         if (albumIndex == -1) return null
         val album = artist.albums[albumIndex]
-        when (mode) {
+        val effectiveMode = if (repeat == RepeatMode.ALBUM && mode == ShuffleMode.ALL_SONGS) ShuffleMode.ALBUM else mode
+        when (effectiveMode) {
             ShuffleMode.ALBUM -> {
                 val others = album.tracks.filter { it.fingerprint != current.fingerprint }
                 return others.randomOrNull(random) ?: current
@@ -186,9 +218,38 @@ object CatalogGrouping {
                 val trackIndex = album.tracks.indexOfFirst { it.fingerprint == current.fingerprint }
                 if (trackIndex == -1) return null
                 album.tracks.getOrNull(trackIndex + 1)?.let { return it }
+                if (repeat == RepeatMode.ALBUM) return album.tracks.firstOrNull()
                 return artist.albums.getOrNull(albumIndex + 1)?.tracks?.firstOrNull()
             }
         }
+    }
+
+    /**
+     * The track before [current] — the sequential mirror of [nextTrack]
+     * with [ShuffleMode.OFF]: previous track on the same album, else the
+     * last track of the previous album, else null at the very start of
+     * the artist's discography (or if [current] is no longer in
+     * [artists]). "Previous" deliberately ignores [ShuffleMode] — there
+     * is no playback history to walk back through — and, with [repeat] ==
+     * [RepeatMode.ALBUM], wraps to the last track of the same album
+     * instead of stopping.
+     */
+    fun previousTrack(
+        current: MergedEntry,
+        artists: List<ArtistGroup>,
+        repeat: RepeatMode = RepeatMode.OFF,
+    ): MergedEntry? {
+        val artistIndex = artists.indexOfFirst { a -> a.albums.any { al -> al.tracks.any { it.fingerprint == current.fingerprint } } }
+        if (artistIndex == -1) return null
+        val artist = artists[artistIndex]
+        val albumIndex = artist.albums.indexOfFirst { al -> al.tracks.any { it.fingerprint == current.fingerprint } }
+        if (albumIndex == -1) return null
+        val album = artist.albums[albumIndex]
+        val trackIndex = album.tracks.indexOfFirst { it.fingerprint == current.fingerprint }
+        if (trackIndex == -1) return null
+        album.tracks.getOrNull(trackIndex - 1)?.let { return it }
+        if (repeat == RepeatMode.ALBUM) return album.tracks.lastOrNull()
+        return artist.albums.getOrNull(albumIndex - 1)?.tracks?.lastOrNull()
     }
 
     private val trackOrder = compareBy<MergedEntry>({ it.entry.trackNumber == null }, { it.entry.trackNumber ?: Int.MAX_VALUE }, { it.entry.title.lowercase() })

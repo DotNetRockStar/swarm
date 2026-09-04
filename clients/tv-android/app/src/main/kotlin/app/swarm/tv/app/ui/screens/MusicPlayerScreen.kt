@@ -21,7 +21,7 @@ package app.swarm.tv.app.ui.screens
 
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.RepeatMode as AnimationRepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -73,11 +73,48 @@ import app.swarm.tv.app.ui.theme.SwarmMuted
 import app.swarm.tv.app.ui.theme.SwarmText
 import app.swarm.tv.app.ui.components.swarmActionButtonColors
 import app.swarm.tv.core.catalog.MergedEntry
+import app.swarm.tv.core.catalog.RepeatMode
 import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.activeLyricIndex
 import app.swarm.tv.core.catalog.parseSyncedLyrics
 import app.swarm.tv.core.peer.TrackLyrics
 import coil.compose.AsyncImage
+
+/** D-pad-free rewind/fast-forward step for the remote's dedicated
+ * transport keys (#161). Songs are short, so this is far smaller than
+ * [PLAYBACK_SEEK_STEP_MS]'s 60s video step. */
+internal const val MUSIC_SEEK_STEP_MS = 10_000L
+
+/** "Previous" restarts the current song once playback is more than this
+ * far in; before it, "Previous" steps to the actual previous track
+ * (#161). */
+internal const val MUSIC_PREVIOUS_RESTART_THRESHOLD_MS = 7_000L
+
+internal enum class PreviousButtonAction { RESTART_CURRENT, PREVIOUS_TRACK }
+
+/** Pure decision for what the Previous button does at [positionMs] — see
+ * [MUSIC_PREVIOUS_RESTART_THRESHOLD_MS]. */
+internal fun previousButtonAction(positionMs: Long): PreviousButtonAction =
+    if (positionMs > MUSIC_PREVIOUS_RESTART_THRESHOLD_MS) {
+        PreviousButtonAction.RESTART_CURRENT
+    } else {
+        PreviousButtonAction.PREVIOUS_TRACK
+    }
+
+/** Wordless transport-row glyphs (#161) — the button label carries all
+ * the state, no color break from [swarmActionButtonColors], per the TV
+ * UI conventions. */
+private fun shuffleGlyph(mode: ShuffleMode): String = when (mode) {
+    ShuffleMode.OFF -> "🔀"
+    ShuffleMode.ALBUM -> "🔀 album"
+    ShuffleMode.ALL_SONGS -> "🔀 all"
+}
+
+private fun repeatGlyph(mode: RepeatMode): String = when (mode) {
+    RepeatMode.OFF -> "🔁"
+    RepeatMode.ONE -> "🔂"
+    RepeatMode.ALBUM -> "🔁 album"
+}
 
 @Composable
 fun MusicPlayerScreen(
@@ -86,6 +123,7 @@ fun MusicPlayerScreen(
     isPlaying: Boolean,
     isLoading: Boolean,
     shuffleMode: ShuffleMode,
+    repeatMode: RepeatMode,
     isLiked: Boolean,
     artworkUrl: String?,
     artistPhotoUrl: String?,
@@ -95,8 +133,13 @@ fun MusicPlayerScreen(
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onToggleShuffle: () -> Unit,
+    onToggleRepeat: () -> Unit,
     onToggleLike: () -> Unit,
     onSkipNext: () -> Unit,
+    onSkipPrevious: () -> Unit,
+    onRestartTrack: () -> Unit,
+    onSeekForward: () -> Unit,
+    onSeekBack: () -> Unit,
     onMinimize: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -117,7 +160,7 @@ fun MusicPlayerScreen(
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
         targetValue = if (isPlaying) 1.04f else 1f,
-        animationSpec = infiniteRepeatable(animation = tween(2200), repeatMode = RepeatMode.Reverse),
+        animationSpec = infiniteRepeatable(animation = tween(2200), repeatMode = AnimationRepeatMode.Reverse),
         label = "now-playing-scale",
     )
 
@@ -127,15 +170,18 @@ fun MusicPlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { composeEvent ->
                 val event = composeEvent.nativeKeyEvent
-                // Only the play/pause transport keys act on this screen.
-                // Fast-forward / rewind and D-pad left/right are deliberately
-                // not wired to seeking here (#96) — they fall through to
-                // Compose so D-pad navigation keeps moving focus between the
-                // visible transport buttons.
+                // The remote's dedicated media keys act on this screen:
+                // play/pause plus the FF/REW buttons, which seek within the
+                // song (#161). D-pad left/right are still deliberately NOT
+                // seek keys here (#96) — they fall through to Compose so
+                // D-pad navigation keeps moving focus between the visible
+                // transport buttons.
                 val handler = when (remotePlaybackAction(event.keyCode)) {
                     RemotePlaybackAction.TOGGLE_PLAY_PAUSE -> onTogglePlayPause
                     RemotePlaybackAction.PLAY -> onPlay
                     RemotePlaybackAction.PAUSE -> onPause
+                    RemotePlaybackAction.SEEK_FORWARD -> onSeekForward
+                    RemotePlaybackAction.SEEK_BACK -> onSeekBack
                     else -> null
                 } ?: return@onPreviewKeyEvent false
                 if (event.action == KeyEvent.ACTION_DOWN) handler()
@@ -223,52 +269,78 @@ fun MusicPlayerScreen(
             }
 
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
+            // Wordless, media-player-style transport row (#161): every
+            // button is a glyph, and shuffle/repeat/like carry their state
+            // in the label rather than by recoloring the button.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TransportButton(
+                    glyph = shuffleGlyph(shuffleMode),
+                    testTag = UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON,
                     onClick = onToggleShuffle,
-                    colors = swarmActionButtonColors(),
-                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_SHUFFLE_BUTTON),
-                ) {
-                    Text(
-                        when (shuffleMode) {
-                            ShuffleMode.OFF -> "🔀 Shuffle"
-                            ShuffleMode.ALBUM -> "🔀 Shuffle album"
-                            ShuffleMode.ALL_SONGS -> "🔀 Shuffle all"
-                        },
-                        fontSize = 13.sp,
-                    )
-                }
-                Button(
+                )
+                TransportButton(
+                    glyph = "⏮",
+                    testTag = UatTestTags.MUSIC_PLAYER_PREVIOUS_BUTTON,
+                    onClick = {
+                        when (previousButtonAction(positionMs)) {
+                            PreviousButtonAction.RESTART_CURRENT -> onRestartTrack()
+                            PreviousButtonAction.PREVIOUS_TRACK -> onSkipPrevious()
+                        }
+                    },
+                )
+                TransportButton(
+                    glyph = if (isLoading) "…" else if (isPlaying) "⏸" else "▶",
+                    testTag = UatTestTags.MUSIC_PLAYER_PLAY_PAUSE_BUTTON,
                     onClick = onTogglePlayPause,
-                    modifier = Modifier.focusRequester(playFocusRequester)
-                        .testTag(UatTestTags.MUSIC_PLAYER_PLAY_PAUSE_BUTTON),
-                    colors = swarmActionButtonColors(),
-                ) {
-                    Text(if (isLoading) "Buffering…" else if (isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
-                }
-                Button(
+                    modifier = Modifier.focusRequester(playFocusRequester),
+                    emphasized = true,
+                )
+                TransportButton(
+                    glyph = "⏭",
+                    testTag = UatTestTags.MUSIC_PLAYER_SKIP_BUTTON,
                     onClick = onSkipNext,
-                    colors = swarmActionButtonColors(),
-                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_SKIP_BUTTON),
-                ) {
-                    Text("Skip ⏭", fontSize = 13.sp)
-                }
-                Button(
+                )
+                TransportButton(
+                    glyph = repeatGlyph(repeatMode),
+                    testTag = UatTestTags.MUSIC_PLAYER_REPEAT_BUTTON,
+                    onClick = onToggleRepeat,
+                )
+                TransportButton(
+                    glyph = if (isLiked) "♥" else "♡",
+                    testTag = UatTestTags.MUSIC_PLAYER_LIKE_BUTTON,
                     onClick = onToggleLike,
-                    colors = swarmActionButtonColors(),
-                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_LIKE_BUTTON),
-                ) {
-                    Text(if (isLiked) "♥ Liked" else "♡ Like", fontSize = 13.sp)
-                }
-                Button(
+                )
+                TransportButton(
+                    glyph = "✕",
+                    testTag = UatTestTags.MUSIC_PLAYER_CLOSE_BUTTON,
                     onClick = onClose,
-                    colors = swarmActionButtonColors(),
-                    modifier = Modifier.testTag(UatTestTags.MUSIC_PLAYER_CLOSE_BUTTON),
-                ) {
-                    Text("Close ✕", fontSize = 13.sp)
-                }
+                )
             }
         }
+    }
+}
+
+/** One glyph-only control in the transport row. [emphasized] is the
+ * play/pause button — a bigger, heavier glyph so the primary action
+ * reads at a glance. */
+@Composable
+private fun TransportButton(
+    glyph: String,
+    testTag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    emphasized: Boolean = false,
+) {
+    Button(
+        onClick = onClick,
+        colors = swarmActionButtonColors(),
+        modifier = modifier.testTag(testTag),
+    ) {
+        Text(
+            glyph,
+            fontSize = if (emphasized) 20.sp else 15.sp,
+            fontWeight = if (emphasized) FontWeight.Black else FontWeight.Normal,
+        )
     }
 }
 

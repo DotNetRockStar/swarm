@@ -22,6 +22,15 @@ pub struct ScanReport {
     pub updated: u64,
     pub removed: u64,
     pub unchanged: u64,
+    /// Labels of roots whose directory walk returned an incomplete snapshot
+    /// this pass (a continuously-changing network share — see
+    /// [`crate::scan`]'s handling below). Their manifest entries are staged
+    /// but deliberately *not* applied to the catalog, so an incomplete pass
+    /// never mutates the served catalog / thumbprint. The auto library watch
+    /// (`apps/server/src/gui.rs`) uses this to back a flapping root off an
+    /// exponentially longer rescan interval instead of re-walking it every
+    /// cycle.
+    pub incomplete_roots: Vec<String>,
 }
 
 /// Live progress for [`scan_roots`], in two phases matching its own two
@@ -253,6 +262,7 @@ async fn scan_roots_scoped_inner(
     // Finish every root walk before catalog mutation, but stage the results
     // in local SQLite rather than growing an in-memory Vec with the library.
     let mut complete_roots = Vec::with_capacity(walked_roots.len());
+    let mut incomplete_roots: Vec<String> = Vec::new();
     let mut subtitle_sidecars: Vec<SubtitleSidecar> = Vec::new();
     for root in &walked_roots {
         check_cancelled(cancel.as_deref())?;
@@ -270,13 +280,20 @@ async fn scan_roots_scoped_inner(
         if complete {
             complete_roots.push(*root);
         } else {
-            // The manifest remains useful for additions and updates, but a
-            // changing directory is not a complete snapshot and must not
-            // make absent catalog rows unavailable.
+            // A changing directory is not a complete snapshot. It must not
+            // reconcile deletions (absent rows stay available), and its
+            // partial adds/updates must not be applied either: a root that
+            // keeps coming back incomplete every pass (a network share
+            // written to continuously) would otherwise move the catalog
+            // thumbprint on every cycle and force every client into a full
+            // manifest reload. Its manifest entries are staged but skipped
+            // during catalog processing below; a later complete pass applies
+            // the real state in one go.
+            incomplete_roots.push(root.label.clone());
             tracing::warn!(
                 root = %root.label,
                 path = %root.path.display(),
-                "media root changed during scan; skipping deletion reconciliation for this root"
+                "media root changed during scan; skipping catalog reconciliation for this root"
             );
         }
     }
@@ -316,6 +333,14 @@ async fn scan_roots_scoped_inner(
         vec![None]
     };
 
+    // Catalog mutation (adds/updates just as much as deletions) is confined
+    // to roots that produced a complete snapshot this pass. A staged
+    // manifest entry under an incomplete root's `{label}/` prefix is skipped
+    // entirely during processing below, so an incomplete pass leaves the
+    // served catalog — and therefore the thumbprint — untouched.
+    let entry_in_completed_scope =
+        |relative_path: &str| path_in_completed_scope(relative_path, multi_root_namespace, &prefixes);
+
     let mut cursor = String::new();
     loop {
         check_cancelled(cancel.as_deref())?;
@@ -330,6 +355,9 @@ async fn scan_roots_scoped_inner(
             let absolute = PathBuf::from(&file.absolute_path);
             if let Some(progress) = &progress {
                 progress.tick_processing(total);
+            }
+            if !entry_in_completed_scope(&relative) {
+                continue;
             }
             let known = library.known_entry_by_path(&relative).await?;
             if let Some(known_entry) = known.as_ref() {
@@ -506,6 +534,7 @@ async fn scan_roots_scoped_inner(
     )
     .await?;
 
+    report.incomplete_roots = incomplete_roots;
     Ok(report)
 }
 
@@ -612,6 +641,28 @@ async fn match_subtitle_records(
         });
     }
     Ok(records)
+}
+
+/// Whether a staged manifest entry's stored `relative_path` belongs to a
+/// root that produced a complete snapshot this pass, and may therefore
+/// mutate the catalog. `completed_prefixes` is the same list used for
+/// deletion reconciliation: in a multi-root install, one `Some("{label}/")`
+/// per completed root; in a single-root install, `[None]` when the sole root
+/// completed and empty otherwise.
+fn path_in_completed_scope(
+    relative_path: &str,
+    multi_root_namespace: bool,
+    completed_prefixes: &[Option<String>],
+) -> bool {
+    if multi_root_namespace {
+        completed_prefixes.iter().any(|prefix| {
+            prefix
+                .as_deref()
+                .is_some_and(|prefix| relative_path.starts_with(prefix))
+        })
+    } else {
+        !completed_prefixes.is_empty()
+    }
 }
 
 fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), ScanError> {
@@ -1024,7 +1075,24 @@ fn walk_media_files(
 
 #[cfg(test)]
 mod tests {
-    use super::walk_value;
+    use super::{path_in_completed_scope, walk_value};
+
+    #[test]
+    fn single_root_scope_gates_on_the_sole_root_completing() {
+        // `[None]` = the one root completed; `[]` = it did not.
+        assert!(path_in_completed_scope("movie.mp4", false, &[None]));
+        assert!(!path_in_completed_scope("movie.mp4", false, &[]));
+    }
+
+    #[test]
+    fn multi_root_scope_only_admits_completed_root_prefixes() {
+        let completed = [Some("local/".to_string())];
+        assert!(path_in_completed_scope("local/movie.mp4", true, &completed));
+        // "share" was incomplete this pass, so nothing under it may mutate.
+        assert!(!path_in_completed_scope("share/music/song.flac", true, &completed));
+        // No completed roots at all: the whole pass is inert.
+        assert!(!path_in_completed_scope("local/movie.mp4", true, &[]));
+    }
 
     #[test]
     fn vanished_walk_entry_is_skipped_and_marks_snapshot_incomplete() {

@@ -83,11 +83,24 @@ fun MovieShelfScreen(
     val focusIndex = remember(sortedMovies, initialFocusKey) {
         initialFocusKey?.let { key -> sortedMovies.indexOfFirst { it.entry.entryKey == key }.takeIf { it >= 0 } } ?: 0
     }
-    LaunchedEffect(sortedMovies, focusIndex) {
-        if (sortedMovies.isNotEmpty()) {
-            gridState.scrollToItem(focusIndex)
+    // Place initial focus exactly once per visit. Keying this on the sorted
+    // list would re-run it every time the live catalog feed merges a delta
+    // (#147) — each of those yanks focus and scroll back to the first card,
+    // and the churn kept the first row's hover preview from ever finishing
+    // its warm-up (#190). A fresh visit gets a fresh `remember`, so returning
+    // from a movie detail still focuses the card the viewer left on.
+    var initialFocusPlaced by remember { mutableStateOf(false) }
+    LaunchedEffect(sortedMovies.isEmpty()) {
+        if (!shouldPlaceBrowseAllInitialFocus(initialFocusPlaced, sortedMovies.isEmpty())) return@LaunchedEffect
+        gridState.scrollToItem(focusIndex)
+        // A few frames of grace for the target card to enter composition and
+        // register its requester; give up quietly rather than retry forever.
+        repeat(BROWSE_ALL_FOCUS_ATTEMPTS) {
             withFrameNanos {}
-            firstCardFocusRequester.requestFocus()
+            if (runCatching { firstCardFocusRequester.requestFocus() }.isSuccess) {
+                initialFocusPlaced = true
+                return@LaunchedEffect
+            }
         }
     }
 

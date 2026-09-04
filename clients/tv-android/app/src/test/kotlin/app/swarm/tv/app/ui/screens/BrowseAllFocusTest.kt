@@ -1,7 +1,9 @@
 package app.swarm.tv.app.ui.screens
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -44,5 +46,15 @@ class BrowseAllFocusTest {
     @Test
     fun `browse-all sentinel restores nothing in the genre-filtered grid which has no tile`() {
         assertNull(shelfRestoreIndex(items, focusKey = BROWSE_ALL_TILE_FOCUS_KEY, genreFiltered = true, keyOf))
+    }
+
+    // Issue #190: the grid's initial D-pad focus must be placed once the grid
+    // has content and then never re-placed, or every live catalog delta yanks
+    // focus/scroll back to the first card and its hover preview never warms.
+    @Test
+    fun `initial grid focus waits for content then fires exactly once`() {
+        assertFalse(shouldPlaceBrowseAllInitialFocus(alreadyPlaced = false, gridIsEmpty = true))
+        assertTrue(shouldPlaceBrowseAllInitialFocus(alreadyPlaced = false, gridIsEmpty = false))
+        assertFalse(shouldPlaceBrowseAllInitialFocus(alreadyPlaced = true, gridIsEmpty = false))
     }
 }

@@ -266,12 +266,16 @@ internal fun BrowsePreviewPlayer(
     }
 
     // Media3 can remain BUFFERING without raising onPlayerError when a proxy
-    // response stalls. Release the reservation and restore artwork instead of
-    // displaying an unbounded spinner.
+    // response stalls. Give up and fall back to the card's own artwork the
+    // same way a real playback error does, rather than leaving the spinner —
+    // or, once `finished` suppresses it, a black rectangle — up for good.
     LaunchedEffect(player, renderedFirstFrame, shouldPlay, finished) {
         if (renderedFirstFrame || !shouldPlay || finished || !hasVideo) return@LaunchedEffect
         delay(PREVIEW_VISIBLE_STARTUP_TIMEOUT_MS)
-        if (!renderedFirstFrame && !finished) freezeAndRelease("first-frame timeout")
+        if (!renderedFirstFrame && !finished) {
+            failedBeforeFirstFrame = true
+            freezeAndRelease("first-frame timeout")
+        }
     }
 
     // If playback failed before producing a frame, leave the transparent

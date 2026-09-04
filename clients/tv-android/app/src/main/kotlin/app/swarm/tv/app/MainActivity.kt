@@ -85,6 +85,7 @@ import app.swarm.tv.app.ui.screens.CatalogScreen
 import app.swarm.tv.app.ui.screens.CatalogBrowseState
 import app.swarm.tv.app.ui.screens.ExitConfirmOverlay
 import app.swarm.tv.app.ui.screens.MiniPlayerBar
+import app.swarm.tv.app.ui.screens.MUSIC_SEEK_STEP_MS
 import app.swarm.tv.app.ui.screens.MovieDetailScreen
 import app.swarm.tv.app.ui.screens.MovieShelfScreen
 import app.swarm.tv.app.ui.screens.MusicPlayerScreen
@@ -112,6 +113,7 @@ import app.swarm.tv.core.catalog.ArtistGroup
 import app.swarm.tv.core.catalog.MergedEntry
 import app.swarm.tv.core.catalog.SeasonGroup
 import app.swarm.tv.core.catalog.ShowGroup
+import app.swarm.tv.core.catalog.RepeatMode
 import app.swarm.tv.core.catalog.ShuffleMode
 import app.swarm.tv.core.catalog.displayTitle
 import app.swarm.tv.core.peer.MediaKind
@@ -271,6 +273,7 @@ class MainActivity : ComponentActivity() {
                     val kidModeSettings by viewModel.kidModeSettings.collectAsState()
                     val resolvedProblemNotifications by viewModel.resolvedProblemNotifications.collectAsState()
                     val shuffleMode by viewModel.shuffleMode.collectAsState()
+                    val repeatMode by viewModel.repeatMode.collectAsState()
                     val minimizedPlayer by viewModel.minimizedPlayer.collectAsState()
                     val browsePreview by viewModel.browsePreview.collectAsState()
                     val lastReleasedPlaybackSession by viewModel.lastReleasedPlaybackSession.collectAsState()
@@ -323,6 +326,9 @@ class MainActivity : ComponentActivity() {
                         onRefreshNotifications = viewModel::refreshResolutionNotifications,
                         shuffleMode = shuffleMode,
                         onToggleShuffle = viewModel::toggleShuffle,
+                        repeatMode = repeatMode,
+                        onToggleRepeat = viewModel::toggleRepeat,
+                        onPlayPrevious = viewModel::playPrevious,
                         onPreloadNextTrack = viewModel::preloadNextTrack,
                         onMusicPlaylistAdvanced = viewModel::onMusicPlaylistAdvanced,
                         minimizedPlayer = minimizedPlayer,
@@ -470,6 +476,9 @@ private fun SwarmApp(
     onRefreshNotifications: () -> Unit,
     shuffleMode: ShuffleMode,
     onToggleShuffle: () -> Unit,
+    repeatMode: RepeatMode,
+    onToggleRepeat: () -> Unit,
+    onPlayPrevious: () -> Unit,
     onPreloadNextTrack: (String) -> Unit,
     onMusicPlaylistAdvanced: (String?) -> Unit,
     minimizedPlayer: UiState.Player?,
@@ -694,6 +703,16 @@ private fun SwarmApp(
             musicPositionMs = (visibleSession.positionOffsetSecs * 1000.0).toLong() + (musicPlayer?.currentPosition ?: 0L)
             delay(250)
         }
+    }
+
+    // Repeat-song loops the current stream seamlessly in ExoPlayer itself
+    // rather than renegotiating the same track on every ENDED (#161). The
+    // other two repeat states advance normally — repeat-album's wrap lives
+    // in CatalogGrouping.nextTrack, driving the same preload/advance path
+    // as any other track change.
+    LaunchedEffect(musicPlayer, repeatMode) {
+        musicPlayer?.repeatMode =
+            if (repeatMode == RepeatMode.ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     }
 
     DisposableEffect(musicPlayer) {
@@ -1086,6 +1105,7 @@ private fun SwarmApp(
                         isPlaying = musicIsPlaying,
                         isLoading = musicIsLoading,
                         shuffleMode = shuffleMode,
+                        repeatMode = repeatMode,
                         isLiked = isLiked(state.entry),
                         artworkUrl = fullArtworkUrl(state.entry),
                         artistPhotoUrl = artistPhotoUrl(state.entry),
@@ -1095,8 +1115,23 @@ private fun SwarmApp(
                         onPlay = { musicPlayer?.play() },
                         onPause = { musicPlayer?.pause() },
                         onToggleShuffle = onToggleShuffle,
+                        onToggleRepeat = onToggleRepeat,
                         onToggleLike = { onToggleLike(state.entry) },
                         onSkipNext = onPlayNext,
+                        onSkipPrevious = onPlayPrevious,
+                        onRestartTrack = { musicPlayer?.seekTo(0L) },
+                        onSeekForward = {
+                            musicPlayer?.let { p ->
+                                val target = p.currentPosition + MUSIC_SEEK_STEP_MS
+                                val end = p.duration.takeIf { it != C.TIME_UNSET }
+                                p.seekTo(if (end != null) target.coerceAtMost(end) else target)
+                            }
+                        },
+                        onSeekBack = {
+                            musicPlayer?.let { p ->
+                                p.seekTo((p.currentPosition - MUSIC_SEEK_STEP_MS).coerceAtLeast(0L))
+                            }
+                        },
                         onMinimize = onMinimizePlayback,
                         onClose = onStopPlayback,
                     )
