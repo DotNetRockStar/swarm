@@ -934,6 +934,36 @@ fn walk_value<T>(result: std::io::Result<T>, complete: &mut bool) -> std::io::Re
     }
 }
 
+/// Bounded retry for `DirEntry::file_type`/`DirEntry::metadata`-style stat
+/// calls that can be reissued safely (they just re-stat the same path).
+/// Confirmed live: a busy `smbfs` mount under concurrent load (media serving
+/// alongside a scrape run reading tags off the same share) returns transient
+/// `ENOENT` for these calls on files that are still there — `find` over the
+/// same tree moments later enumerates every one with zero errors. Without a
+/// retry, that single flaky stat condemns the whole walk as incomplete,
+/// which permanently blocks deletion reconciliation for any root busy
+/// enough to hit this (#230). Only a `NotFound` that survives every retry
+/// is treated as real.
+const TRANSIENT_STAT_RETRIES: u32 = 4;
+const TRANSIENT_STAT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+fn retry_transient_not_found<T>(mut stat: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0;
+    loop {
+        match stat() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && attempt + 1 < TRANSIENT_STAT_RETRIES =>
+            {
+                std::thread::sleep(TRANSIENT_STAT_RETRY_DELAY * (1 << attempt));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Pure synchronous directory walk — see [`discover_media_files`]'s doc
 /// comment for why this must only ever run via `spawn_blocking`, never
 /// inline on the shared async runtime. Sends completed batches through `tx`
@@ -964,7 +994,7 @@ fn walk_media_files(
         // The root itself not existing is a real unavailable-root failure.
         // A descendant can legitimately disappear after its parent was
         // listed, so tolerate only NotFound below the root.
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match retry_transient_not_found(|| std::fs::read_dir(&dir)) {
             Ok(entries) => entries,
             Err(error) if dir != root_path && error.kind() == std::io::ErrorKind::NotFound => {
                 complete = false;
@@ -989,7 +1019,9 @@ fn walk_media_files(
             if name.starts_with('.') {
                 continue;
             }
-            let Some(file_type) = walk_value(entry.file_type(), &mut complete)? else {
+            let Some(file_type) =
+                walk_value(retry_transient_not_found(|| entry.file_type()), &mut complete)?
+            else {
                 continue;
             };
             if file_type.is_symlink() {
@@ -1022,7 +1054,9 @@ fn walk_media_files(
                 continue;
             }
             if classify::media_extension(&relative_under_root).is_some() {
-                let Some(metadata) = walk_value(entry.metadata(), &mut complete)? else {
+                let Some(metadata) =
+                    walk_value(retry_transient_not_found(|| entry.metadata()), &mut complete)?
+                else {
                     continue;
                 };
                 let modified_time = metadata

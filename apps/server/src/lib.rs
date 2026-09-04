@@ -454,9 +454,20 @@ impl ServerCore {
     /// Reconcile only named roots while preserving the current full root
     /// namespace. Used by network recovery so a returning SMB share does not
     /// force unrelated local roots to make another complete filesystem walk.
+    ///
+    /// `pause_transcription` controls whether this scoped scan sets
+    /// `scan_active` (which pauses local transcription and surfaces "Paused
+    /// while the media library is being scanned."). An automatic, unattended
+    /// background rescan — the periodic library watch, or a share recovering
+    /// from an outage — should never show the user a message implying a scan
+    /// they didn't start is stuck; that pause is reserved for the initial
+    /// scan and a scan the user explicitly asked for (repairing an SMB root).
+    /// A flaky share can otherwise put one of these scoped scans in flight
+    /// often enough to starve transcription almost entirely (#230).
     pub async fn rescan_roots_by_label(
         &self,
         labels: &[String],
+        pause_transcription: bool,
     ) -> Result<ScanReport, ServerError> {
         let all_roots = self.media_roots.roots();
         let requested = labels.iter().map(String::as_str).collect::<HashSet<_>>();
@@ -476,7 +487,8 @@ impl ServerCore {
         }
 
         let _guard = self.scan_lock.lock().await;
-        let _scan_activity = ScanActivityGuard::start(&self.scan_active);
+        let _scan_activity =
+            pause_transcription.then(|| ScanActivityGuard::start(&self.scan_active));
         self.scan_status
             .send_modify(|state| *state = ScanState::Scanning);
         match scan_roots_scoped(&self.library, &selected, all_roots.len() > 1, None).await {
