@@ -15,6 +15,9 @@
 //!   the `/art/*` route.
 //! - [`scrape`] — TMDb/MusicBrainz/Cover Art Archive/Wikimedia metadata and
 //!   artwork, with the inherited two-tier-error job discipline.
+//! - [`plex`] — the centralized Plex media-organization compatibility layer
+//!   (ids, editions, extras, multi-episode files, subtitle folders, season
+//!   folders, deterministic validation) shared by every consumer above.
 //!
 //! - [`transcode`] — upload-budgeted direct/HLS playback sessions backed by
 //!   FFmpeg, with an adaptive H.264/AAC ladder and idle cleanup.
@@ -22,6 +25,7 @@
 pub mod artwork_cache;
 pub mod bandwidth;
 pub mod classify;
+pub mod plex;
 pub mod probe;
 pub mod range;
 pub mod roots;
