@@ -36,13 +36,15 @@ impl TestApp {
 static NEXT_PORT: AtomicU16 = AtomicU16::new(23000);
 static PORT_LOCK: Mutex<()> = Mutex::new(());
 
-fn next_port_pair() -> (std::net::SocketAddr, std::net::SocketAddr) {
+fn next_port_pair() -> (std::net::SocketAddr, std::net::SocketAddr, std::net::SocketAddr) {
     let _guard = PORT_LOCK.lock().unwrap();
-    let peer_port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+    let peer_port = NEXT_PORT.fetch_add(3, Ordering::Relaxed);
     let http_port = peer_port + 1;
+    let http_tls_port = peer_port + 2;
     (
         format!("127.0.0.1:{peer_port}").parse().unwrap(),
         format!("127.0.0.1:{http_port}").parse().unwrap(),
+        format!("127.0.0.1:{http_tls_port}").parse().unwrap(),
     )
 }
 
@@ -53,14 +55,14 @@ fn next_port_pair() -> (std::net::SocketAddr, std::net::SocketAddr) {
 /// network port.
 pub fn test_app() -> TestApp {
     let data_dir = tempfile::tempdir().expect("create temp data dir");
-    let (bind, http_media_bind) = next_port_pair();
+    let (bind, http_media_bind, http_media_tls_bind) = next_port_pair();
     let app = mock_builder()
         .manage(AppState {
             core: tokio::sync::OnceCell::new(),
             library_maintenance_cancel: tokio::sync::Mutex::new(None),
             _sleep_inhibitor: None,
             test_data_dir: Some(data_dir.path().to_path_buf()),
-            test_bind_override: Some((bind, http_media_bind)),
+            test_bind_override: Some((bind, http_media_bind, http_media_tls_bind)),
             last_scrape_issues: tokio::sync::Mutex::new(Vec::new()),
             reorg_plans: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             next_reorg_plan_id: std::sync::atomic::AtomicU64::new(1),

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Fetches the full catalog manifest -- see http-client-contract.md's
+  catalog section. v1 simplification (documented gap, not a silent
+  shortcut): always fetches the uncompressed /catalog/manifest, skipping
+  Fire TV's .gz-then-fallback and incremental /catalog/changes long-poll.
+  A full refetch on every catalog visit costs bandwidth on a large library
+  but is correct; live-delta updates are a follow-up.
+-->
+<component name="CatalogTask" extends="Task">
+    <interface>
+        <field id="baseUrl" type="string" />
+        <field id="authToken" type="string" />
+        <!-- { ok: boolean, entries: array, errorMessage: string } -->
+        <field id="result" type="assocarray" alwaysNotify="true" />
+    </interface>
+</component>

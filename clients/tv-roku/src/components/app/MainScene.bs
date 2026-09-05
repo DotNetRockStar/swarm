@@ -1,0 +1,58 @@
+' Root scene controller. Observes AppState.currentScreen and mounts exactly
+' one screen component at a time -- the SceneGraph analogue of
+' MainActivity's `SwarmApp` `when (state)` router. See
+' swarm-client-platform-knowledge/references/state-model.md.
+
+sub init()
+    m.appState = m.top.findNode("appState")
+    m.screenContainer = m.top.findNode("screenContainer")
+    m.toastHost = m.top.findNode("toastHost")
+    m.toastHost.appState = m.appState
+
+    m.appState.observeField("currentScreen", "onScreenChanged")
+
+    m.startupTask = CreateObject("roSGNode", "StartupTask")
+    m.startupTask.appState = m.appState
+    m.startupTask.control = "RUN"
+end sub
+
+sub onScreenChanged()
+    mountScreen(m.appState.currentScreen, m.appState.screenData)
+end sub
+
+sub mountScreen(screenName as string, screenData as object)
+    childCount = m.screenContainer.getChildCount()
+    if childCount > 0
+        m.screenContainer.removeChildrenIndex(childCount, 0)
+    end if
+    componentName = screenNameToComponent(screenName)
+    if componentName = ""
+        return
+    end if
+    screen = CreateObject("roSGNode", componentName)
+    screen.appState = m.appState
+    if screen.hasField("screenData")
+        screen.screenData = screenData
+    end if
+    m.screenContainer.appendChild(screen)
+    screen.setFocus(true)
+end sub
+
+function screenNameToComponent(screenName as string) as string
+    ' Pairing itself is an in-screen state on DashboardScreen (matching
+    ' Fire TV's LanPairingOverlay, which is a modal on SwarmDashboardScreen
+    ' rather than a separate top-level screen) -- see roku.md's "LAN-first"
+    ' scope note. There is no standalone activation/pairing-code screen.
+    screenMap = {
+        loading: "LoadingScreen"
+        dashboard: "DashboardScreen"
+        settings: "SettingsScreen"
+        catalog: "CatalogScreen"
+        movieDetail: "MovieDetailScreen"
+        player: "PlayerScreen"
+    }
+    if screenMap.DoesExist(screenName)
+        return screenMap[screenName]
+    end if
+    return "LoadingScreen"
+end function

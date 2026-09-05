@@ -188,6 +188,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,

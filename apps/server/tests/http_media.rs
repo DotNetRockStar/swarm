@@ -70,6 +70,7 @@ fn test_config(media_root: &std::path::Path, data_dir: std::path::PathBuf) -> Se
         data_dir,
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
@@ -133,6 +134,7 @@ async fn pair_negotiate_and_range_fetch_media_over_real_http() {
         data_dir: base.join("server-data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
@@ -280,6 +282,7 @@ async fn browse_catalog_and_fetch_artwork_over_real_http() {
         data_dir: base.join("server-data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
@@ -793,6 +796,143 @@ async fn error_reporting_and_likes_work_over_real_http() {
     assert_eq!(like_response.status(), 204);
     let counts = core.library.like_counts().await.unwrap();
     assert_eq!(counts.get(entry.entry_key.as_str()), Some(&1));
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Proves the TLS listener end-to-end: a device pairs over the plain
+/// listener (as always — `/pair/*` is `is_lan_ip`-gated and has no reason to
+/// require TLS), learns the server's HTTP CA from `/pair/poll`'s `Approved`
+/// response, and can then reach every authenticated route over the TLS
+/// listener using *only* that CA as its trust root — exactly what a Roku
+/// `HTTPCertificatesFile` would do. Also proves a client that does *not*
+/// trust the CA is refused at the TLS handshake itself (never reaches the
+/// app), and that the plain listener keeps working unaffected.
+#[tokio::test]
+async fn pair_over_http_learns_ca_then_media_is_reachable_over_pinned_tls() {
+    let base = std::env::temp_dir().join(format!("swarm-http-media-tls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let media_root = base.join("media");
+    std::fs::create_dir_all(&media_root).unwrap();
+
+    let mut config = test_config(&media_root, base.join("server-data"));
+    config.http_media_tls_bind = Some("127.0.0.1:0".parse().unwrap());
+    let core = ServerCore::start(config).await.unwrap();
+    core.wait_for_scan().await.unwrap();
+
+    let relative_path = "movies/example.mp4";
+    let media_bytes = deterministic_bytes(500_000, 3);
+    let media_path = media_root.join(relative_path);
+    std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    std::fs::write(&media_path, &media_bytes).unwrap();
+    let entry = direct_play_entry(
+        "abc123abc123abc123abc123",
+        relative_path,
+        media_bytes.len() as u64,
+    );
+    core.library.upsert(&entry).await.unwrap();
+
+    let tls_addr = core
+        .http_media_tls_addr
+        .expect("TLS listener should have started when http_media_tls_bind is Some");
+    let http_base_url = format!("http://{}", core.http_media_addr);
+    let https_base_url = format!("https://127.0.0.1:{}", tls_addr.port());
+
+    let plain_client = reqwest::Client::new();
+    let token = pair_and_get_token(&plain_client, &http_base_url, &core, "Living Room Roku").await;
+
+    // pair_and_get_token only asserts on `token`; re-poll independently to
+    // inspect `http_ca_pem`, the field this test actually cares about.
+    // (A second /pair/poll after approval is a legitimate no-op per the
+    // pairing state machine — the token is re-returned, not reissued.)
+    let begin: Value = plain_client
+        .post(format!("{http_base_url}/pair/begin"))
+        .json(&json!({ "name": "Living Room Roku (second device)" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    core.approve_http_media_pairing(begin["code"].as_str().unwrap())
+        .await
+        .unwrap();
+    let poll: Value = plain_client
+        .post(format!("{http_base_url}/pair/poll"))
+        .json(&json!({
+            "activation_id": begin["activation_id"],
+            "poll_token": begin["poll_token"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(poll["status"], "approved");
+    let ca_pem = poll["http_ca_pem"]
+        .as_str()
+        .expect("Approved response must carry the HTTP CA PEM when the TLS listener is running")
+        .to_string();
+    assert!(ca_pem.contains("BEGIN CERTIFICATE"));
+    assert!(core.http_ca_fingerprint().is_some());
+
+    // --- A client trusting only this CA reaches authenticated routes over TLS. ---
+    let pinned_client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+        .build()
+        .unwrap();
+
+    let plan: PlaybackPlan = pinned_client
+        .post(format!("{https_base_url}/play/{}", entry.entry_key))
+        .bearer_auth(&token)
+        .json(&json!({
+            "capabilities": CapabilityProfile::fire_tv_baseline(),
+            "start_position_secs": 0,
+            "prefer_direct": true,
+            "preview": false,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(plan.mode, PlaybackMode::Direct);
+
+    let range_response = pinned_client
+        .get(format!("{https_base_url}{}", plan.path))
+        .bearer_auth(&token)
+        .header("range", "bytes=0-99")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(range_response.status(), 206);
+    let body = range_response.bytes().await.unwrap();
+    assert_eq!(body.len(), 100);
+    assert_eq!(&body[..], &media_bytes[0..100]);
+
+    // --- A client that does NOT trust this CA fails at the handshake, not merely with an HTTP error. ---
+    let untrusting_client = reqwest::Client::builder().build().unwrap();
+    let untrusted_attempt = untrusting_client
+        .get(format!("{https_base_url}/media/{}", entry.entry_key))
+        .bearer_auth(&token)
+        .send()
+        .await;
+    assert!(
+        untrusted_attempt.is_err(),
+        "a client that doesn't trust the server's HTTP CA must fail the TLS handshake outright"
+    );
+
+    // --- The plain listener keeps working unaffected. ---
+    let plain_ok = plain_client
+        .get(format!("{http_base_url}/catalog/thumbprint"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain_ok.status(), 200);
 
     drop(core);
     let _ = std::fs::remove_dir_all(&base);

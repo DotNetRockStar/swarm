@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  The one shared button interaction language (see ux-rules.md): white at
+  rest, cyan when focused, gold while pressed, always with the on-Accent
+  foreground on focused/pressed. `isFocused`/`isPressed` are driven
+  explicitly by the owning screen's manual key-routing rather than native
+  SceneGraph focus traversal -- see CatalogScreen for the one place native
+  RowList/MarkupGrid focus is used instead, where it's the right tool.
+-->
+<component name="SwarmButton" extends="Group">
+    <interface>
+        <field id="text" type="string" value="" onChange="render" />
+        <field id="buttonWidth" type="float" value="220" onChange="render" />
+        <field id="buttonHeight" type="float" value="50" onChange="render" />
+        <field id="isFocused" type="boolean" value="false" onChange="render" />
+        <field id="isPressed" type="boolean" value="false" onChange="render" />
+        <field id="isEnabled" type="boolean" value="true" onChange="render" />
+    </interface>
+    <children>
+        <Rectangle id="bg" />
+        <Label id="label" horizAlign="center" vertAlign="center" />
+    </children>
+</component>

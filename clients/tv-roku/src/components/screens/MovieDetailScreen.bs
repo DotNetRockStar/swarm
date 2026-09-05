@@ -1,0 +1,156 @@
+import "pkg:/source/Registry.bs"
+import "pkg:/source/Artwork.bs"
+
+sub init()
+    m.appState = m.top.appState
+    m.entry = m.top.screenData.entry
+
+    m.posterTile = m.top.findNode("poster")
+    m.titleLabel = m.top.findNode("title")
+    m.metaLine = m.top.findNode("metaLine")
+    m.buttonsGroup = m.top.findNode("buttons")
+
+    m.posterTile.authToken = m.appState.authToken
+    m.posterTile.entryUrl = Swarm.Artwork.FullPoster(m.appState.serverBaseUrl, m.entry)
+
+    displayTitle = m.entry.title
+    if m.entry.scraped_title <> invalid and m.entry.scraped_title <> ""
+        displayTitle = m.entry.scraped_title
+    end if
+    m.titleLabel.text = displayTitle
+
+    metaParts = []
+    if m.entry.year <> invalid
+        metaParts.Push(m.entry.year.ToStr())
+    end if
+    if m.entry.genres <> invalid and m.entry.genres.Count() > 0
+        genreList = ""
+        maxGenres = 4
+        if m.entry.genres.Count() < maxGenres
+            maxGenres = m.entry.genres.Count()
+        end if
+        for i = 0 to maxGenres - 1
+            if genreList <> ""
+                genreList = genreList + ", "
+            end if
+            genreList = genreList + m.entry.genres[i]
+        end for
+        metaParts.Push(genreList)
+    end if
+    m.metaLine.text = metaParts.Join("  •  ")
+
+    m.watchlistKey = "movie:" + m.entry.fingerprint
+
+    m.buttons = []
+    m.buttonActions = []
+    m.focusedIndex = 0
+    x = 0
+    x = addButton("Play", "play", x)
+    x = addButton(likeLabel(), "like", x)
+    x = addButton(watchlistLabel(), "watchlist", x)
+
+    m.top.setFocus(true)
+    applyFocus()
+end sub
+
+function likeLabel() as string
+    if Swarm.Registry.IsLiked(m.entry.fingerprint)
+        return "Liked"
+    end if
+    return "Like"
+end function
+
+function watchlistLabel() as string
+    if Swarm.Registry.IsWatchlisted(m.watchlistKey)
+        return "Watchlisted"
+    end if
+    return "+ Watchlist"
+end function
+
+function addButton(text as string, action as string, x as float) as float
+    btn = CreateObject("roSGNode", "SwarmButton")
+    btn.text = text
+    btn.buttonWidth = 220
+    btn.translation = [x, 0]
+    m.buttonsGroup.appendChild(btn)
+    m.buttons.Push(btn)
+    m.buttonActions.Push(action)
+    return x + 232
+end function
+
+sub applyFocus()
+    for i = 0 to m.buttons.Count() - 1
+        m.buttons[i].isFocused = (i = m.focusedIndex)
+    end for
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press
+        return false
+    end if
+    if key = "right"
+        if m.focusedIndex < m.buttons.Count() - 1
+            m.focusedIndex = m.focusedIndex + 1
+            applyFocus()
+        end if
+        return true
+    else if key = "left"
+        if m.focusedIndex > 0
+            m.focusedIndex = m.focusedIndex - 1
+            applyFocus()
+        end if
+        return true
+    else if key = "OK"
+        activateFocusedButton()
+        return true
+    else if key = "back"
+        m.appState.callFunc("popScreen", invalid)
+        return true
+    end if
+    return false
+end function
+
+sub activateFocusedButton()
+    action = m.buttonActions[m.focusedIndex]
+    if action = "play"
+        m.appState.callFunc("pushScreen", { screen: "player", data: { entry: m.entry, resumePositionSecs: resumePositionSecs() } })
+    else if action = "like"
+        toggleLike()
+    else if action = "watchlist"
+        toggleWatchlist()
+    end if
+end sub
+
+function resumePositionSecs() as float
+    saved = Swarm.Registry.GetWatchState(m.entry.fingerprint)
+    if saved <> invalid and not saved.watched and saved.positionSecs > 0.0
+        return saved.positionSecs
+    end if
+    return 0.0
+end function
+
+sub toggleLike()
+    newState = not Swarm.Registry.IsLiked(m.entry.fingerprint)
+    Swarm.Registry.SetLiked(m.entry.fingerprint, newState)
+    m.buttons[m.focusedIndex].text = likeLabel()
+
+    task = CreateObject("roSGNode", "LikeTask")
+    task.baseUrl = m.appState.serverBaseUrl
+    task.authToken = m.appState.authToken
+    task.deviceId = m.appState.deviceId
+    task.deviceName = m.appState.deviceName
+    task.entryKey = m.entry.entry_key
+    task.liked = newState
+    task.control = "RUN"
+end sub
+
+sub toggleWatchlist()
+    newState = not Swarm.Registry.IsWatchlisted(m.watchlistKey)
+    Swarm.Registry.SetWatchlisted(m.watchlistKey, newState)
+    m.buttons[m.focusedIndex].text = watchlistLabel()
+    message = "Added to Watchlist."
+    if not newState
+        message = "Removed from Watchlist."
+    end if
+    m.appState.callFunc("notify", { message: message, kind: "success" })
+end sub

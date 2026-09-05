@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Playback negotiation (POST /play/{entry_key}) and session release
+  (POST /stop/{session_id}) -- see http-client-contract.md. Exactly one of
+  these should be in flight per player instance at a time; PlayerScreen
+  owns that discipline, this Task is just the transport.
+-->
+<component name="PlaybackTask" extends="Task">
+    <interface>
+        <field id="baseUrl" type="string" />
+        <field id="authToken" type="string" />
+        <field id="entryKey" type="string" />
+        <field id="startPositionSecs" type="float" value="0.0" />
+        <field id="sessionIdToStop" type="string" />
+        <!-- "negotiate" or "stop" -->
+        <field id="operation" type="string" value="negotiate" />
+        <!-- negotiate result: { ok, mode, path, maxBitrate, sessionId, subtitles, errorMessage } -->
+        <field id="negotiateResult" type="assocarray" alwaysNotify="true" />
+    </interface>
+</component>

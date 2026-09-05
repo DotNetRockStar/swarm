@@ -1,0 +1,31 @@
+' AppState's own logic: the one bit of stack-management behavior tightly
+' coupled to its data (pushScreen/popScreen), plus the toast helper. Screens
+' otherwise read/write AppState's plain fields directly.
+
+' params: { screen: string, data: assocarray (optional) }
+function pushScreen(params as object) as void
+    state = m.top
+    state.previousScreen = state.currentScreen
+    state.previousScreenData = state.screenData
+    state.currentScreen = params.screen
+    if params.data <> invalid
+        state.screenData = params.data
+    else
+        state.screenData = {}
+    end if
+end function
+
+function popScreen(params = invalid as dynamic) as void
+    state = m.top
+    if state.previousScreen <> ""
+        state.currentScreen = state.previousScreen
+        state.screenData = state.previousScreenData
+        state.previousScreen = ""
+        state.previousScreenData = {}
+    end if
+end function
+
+' params: { message: string, kind: "success" | "warning" | "error" }
+function notify(params as object) as void
+    m.top.notification = params
+end function

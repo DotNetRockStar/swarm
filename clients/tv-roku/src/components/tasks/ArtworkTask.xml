@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Fetches one artwork image (bearer-authenticated) into cachefs, returning
+  a local path a Poster node can load directly. v1 simplification vs.
+  ArtworkCache.kt's 30-day TTL + refresh-on-hit-only policy (documented,
+  not silent): an unconditional "if the file already exists in cachefs,
+  reuse it" -- cachefs is already OS-evictable, so this degrades gracefully
+  rather than needing its own expiry bookkeeping. See
+  platform-notes/roku.md's "Artwork" section.
+-->
+<component name="ArtworkTask" extends="Task">
+    <interface>
+        <field id="url" type="string" />
+        <field id="authToken" type="string" />
+        <!-- Local cachefs path, or "" on failure. -->
+        <field id="localPath" type="string" alwaysNotify="true" />
+    </interface>
+</component>

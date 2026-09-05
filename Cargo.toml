@@ -28,7 +28,9 @@ utoipa = "5"
 tokio = { version = "1", features = ["full"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rcgen = "0.13"
+rustls-pki-types = "1"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+time = "0.3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros"] }
 lofty = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

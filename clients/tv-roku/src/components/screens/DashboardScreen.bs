@@ -1,0 +1,240 @@
+import "pkg:/source/Registry.bs"
+import "pkg:/source/Theme.bs"
+
+sub init()
+    m.appState = m.top.appState
+    m.heading = m.top.findNode("heading")
+    m.subheading = m.top.findNode("subheading")
+    m.buttonList = m.top.findNode("buttonList")
+    m.pairingOverlay = m.top.findNode("pairingOverlay")
+    m.pairingCode = m.top.findNode("pairingCode")
+    m.pairingStatus = m.top.findNode("pairingStatus")
+    m.pairingCancelButton = m.top.findNode("pairingCancelButton")
+
+    m.mode = "list"
+    m.buttons = []
+    m.buttonActions = []
+    m.focusedIndex = 0
+    m.discovered = []
+
+    m.top.setFocus(true)
+
+    refreshConnectedState()
+    startDiscovery()
+end sub
+
+sub refreshConnectedState()
+    if m.appState.serverBaseUrl <> invalid and m.appState.serverBaseUrl <> ""
+        m.subheading.text = "Connected to " + m.appState.serverName
+    else
+        m.subheading.text = "Select a media server found on this network."
+    end if
+    rebuildButtons()
+end sub
+
+sub startDiscovery()
+    m.discoveryTask = CreateObject("roSGNode", "MdnsDiscoveryTask")
+    m.discoveryTask.listenSeconds = 4
+    m.discoveryTask.ObserveField("discoveredServers", "onDiscovered")
+    m.discoveryTask.control = "RUN"
+end sub
+
+sub onDiscovered()
+    m.discovered = m.discoveryTask.discoveredServers
+    rebuildButtons()
+end sub
+
+sub rebuildButtons()
+    childCount = m.buttonList.getChildCount()
+    if childCount > 0
+        m.buttonList.removeChildrenIndex(childCount, 0)
+    end if
+    m.buttons = []
+    m.buttonActions = []
+
+    y = 0
+    connected = (m.appState.serverBaseUrl <> invalid and m.appState.serverBaseUrl <> "")
+
+    if connected
+        addButton("Browse Library", { action: "browse" }, y)
+        y = y + 60
+        addButton("Settings", { action: "settings" }, y)
+        y = y + 60
+        addButton("Forget this server", { action: "forget" }, y)
+        y = y + 60
+        y = y + 20
+    end if
+
+    addButton("Rescan", { action: "rescan" }, y)
+    y = y + 60
+
+    for each server in m.discovered
+        alreadyConnected = connected and (m.appState.serverFingerprint = server.fingerprint)
+        if not alreadyConnected
+            addButton("Pair with " + server.name, { action: "pair", server: server }, y)
+            y = y + 60
+        end if
+    end for
+
+    if m.focusedIndex >= m.buttons.Count()
+        m.focusedIndex = 0
+    end if
+    applyFocus()
+end sub
+
+sub addButton(text as string, action as object, y as integer)
+    btn = CreateObject("roSGNode", "SwarmButton")
+    btn.text = text
+    btn.buttonWidth = 460
+    btn.translation = [0, y]
+    m.buttonList.appendChild(btn)
+    m.buttons.Push(btn)
+    m.buttonActions.Push(action)
+end sub
+
+sub applyFocus()
+    for i = 0 to m.buttons.Count() - 1
+        m.buttons[i].isFocused = (i = m.focusedIndex)
+    end for
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press
+        return false
+    end if
+
+    if m.mode = "pairing"
+        if key = "back" or key = "OK"
+            cancelPairing()
+            return true
+        end if
+        return false
+    end if
+
+    if key = "down"
+        if m.buttons.Count() > 0
+            m.focusedIndex = (m.focusedIndex + 1) mod m.buttons.Count()
+            applyFocus()
+        end if
+        return true
+    else if key = "up"
+        if m.buttons.Count() > 0
+            m.focusedIndex = (m.focusedIndex - 1 + m.buttons.Count()) mod m.buttons.Count()
+            applyFocus()
+        end if
+        return true
+    else if key = "OK"
+        activateFocusedButton()
+        return true
+    end if
+    return false
+end function
+
+sub activateFocusedButton()
+    if m.buttons.Count() = 0
+        return
+    end if
+    action = m.buttonActions[m.focusedIndex]
+    if action.action = "browse"
+        m.appState.callFunc("pushScreen", { screen: "catalog", data: {} })
+    else if action.action = "settings"
+        m.appState.callFunc("pushScreen", { screen: "settings", data: {} })
+    else if action.action = "forget"
+        forgetServer()
+    else if action.action = "rescan"
+        startDiscovery()
+    else if action.action = "pair"
+        startPairing(action.server)
+    end if
+end sub
+
+sub forgetServer()
+    Swarm.Registry.ClearConnection()
+    Swarm.Registry.ClearAuthToken()
+    m.appState.serverBaseUrl = ""
+    m.appState.serverFingerprint = ""
+    m.appState.serverName = ""
+    m.appState.authToken = ""
+    m.appState.callFunc("notify", { message: "Forgot this server.", kind: "warning" })
+    refreshConnectedState()
+end sub
+
+sub startPairing(server as object)
+    m.pairingServer = server
+    m.mode = "pairing"
+    m.pairingOverlay.visible = true
+    m.pairingCode.text = ""
+    m.pairingStatus.text = "Requesting a pairing code..."
+
+    baseUrl = "http://" + server.host + ":" + server.httpMediaPort.ToStr()
+    m.pairingBaseUrl = baseUrl
+
+    m.pairingTask = CreateObject("roSGNode", "PairingTask")
+    m.pairingTask.baseUrl = baseUrl
+    m.pairingTask.deviceName = m.appState.deviceName
+    m.pairingTask.ObserveField("pairingState", "onPairingStateChanged")
+    m.pairingTask.control = "RUN"
+end sub
+
+sub onPairingStateChanged()
+    state = m.pairingTask.pairingState
+    if state.status = "requesting"
+        m.pairingStatus.text = "Requesting a pairing code..."
+    else if state.status = "waiting"
+        m.pairingCode.text = chunkCode(state.code)
+        m.pairingStatus.text = "Waiting for approval..."
+    else if state.status = "approved"
+        completePairing(state)
+    else if state.status = "expired"
+        m.pairingStatus.text = "This code expired. Select OK or Back and try again."
+    else if state.status = "cancelled"
+        closePairingOverlay()
+    else if state.status = "error"
+        m.pairingStatus.text = state.errorMessage
+    end if
+end sub
+
+function chunkCode(code as dynamic) as string
+    if code = invalid
+        return ""
+    end if
+    if Len(code) <> 8
+        return code
+    end if
+    return Left(code, 4) + "  " + Right(code, 4)
+end function
+
+sub completePairing(state as object)
+    server = m.pairingServer
+    connection = {
+        baseUrl: m.pairingBaseUrl
+        serverName: server.name
+        serverFingerprint: server.fingerprint
+        httpCaPem: state.httpCaPem
+    }
+    Swarm.Registry.SaveConnection(connection)
+    Swarm.Registry.SaveAuthToken(state.token)
+
+    m.appState.authToken = state.token
+    m.appState.serverBaseUrl = connection.baseUrl
+    m.appState.serverFingerprint = connection.serverFingerprint
+    m.appState.serverName = connection.serverName
+    m.appState.httpCaPem = connection.httpCaPem
+
+    closePairingOverlay()
+    m.appState.callFunc("notify", { message: server.name + " approved this TV.", kind: "success" })
+    m.appState.callFunc("pushScreen", { screen: "catalog", data: {} })
+end sub
+
+sub cancelPairing()
+    if m.pairingTask <> invalid
+        m.pairingTask.cancelRequested = true
+    end if
+    closePairingOverlay()
+end sub
+
+sub closePairingOverlay()
+    m.mode = "list"
+    m.pairingOverlay.visible = false
+    refreshConnectedState()
+end sub

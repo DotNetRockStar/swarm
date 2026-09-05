@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Cold-start session restore -- the Roku analogue of SwarmViewModel's
+  restoreSession(). Runs once from MainScene.init(). Loads any saved
+  connection + token from the registry, probes reachability, and pushes
+  the correct initial screen: catalog (restored + reachable), dashboard
+  (saved but unreachable, or never configured), matching Fire TV's rule
+  that Loading is a real state and a device with valid saved credentials
+  must never flash the wrong screen -- see state-model.md.
+-->
+<component name="StartupTask" extends="Task">
+    <interface>
+        <field id="appState" type="node" />
+    </interface>
+</component>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Merged catalog browse -- Roku analogue of CatalogScreen.kt, scoped for
+  this pass to three flat shelves (Movies / Shows / Music), first 10 items
+  each, no search/filter/genre-shelves/Continue-Watching/Watchlist rows yet
+  -- see feature-inventory.md for the full list of what's deferred.
+  Selecting a show/artist plays its first episode/track directly (season/
+  album browsing is deferred); selecting a movie opens MovieDetailScreen.
+-->
+<component name="CatalogScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+        <field id="screenData" type="assocarray" />
+    </interface>
+    <children>
+        <Label id="loadingLabel" translation="[810, 520]" width="300" horizAlign="center" color="0x9FB0C9FF" text="Buzzing up your stream..." />
+        <Label id="emptyLabel" translation="[120, 90]" width="1600" color="0x9FB0C9FF" visible="false" />
+        <Group id="shelvesGroup" visible="false">
+            <Label id="moviesHeader" translation="[120, 60]" text="Movies" color="0xECF6FFFF" />
+            <Group id="moviesRow" translation="[120, 100]" />
+            <Label id="showsHeader" translation="[120, 340]" text="Shows" color="0xECF6FFFF" />
+            <Group id="showsRow" translation="[120, 380]" />
+            <Label id="musicHeader" translation="[120, 620]" text="Music" color="0xECF6FFFF" />
+            <Group id="musicRow" translation="[120, 660]" />
+        </Group>
+    </children>
+</component>

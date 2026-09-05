@@ -1,0 +1,233 @@
+import "pkg:/source/CatalogGrouping.bs"
+import "pkg:/source/Artwork.bs"
+
+const MaxShelfItems = 10
+const TileWidth = 130
+const TileHeight = 195
+const TileStride = 150
+
+sub init()
+    m.appState = m.top.appState
+    m.loadingLabel = m.top.findNode("loadingLabel")
+    m.emptyLabel = m.top.findNode("emptyLabel")
+    m.shelvesGroup = m.top.findNode("shelvesGroup")
+    m.rows = [m.top.findNode("moviesRow"), m.top.findNode("showsRow"), m.top.findNode("musicRow")]
+
+    m.shelfIndex = 0
+    m.itemIndex = 0
+    ' m.shelfTiles[shelfIndex] = array of PosterTile nodes
+    ' m.shelfActions[shelfIndex] = parallel array of { kind, entry|show|artist }
+    m.shelfTiles = [[], [], []]
+    m.shelfActions = [[], [], []]
+
+    m.top.setFocus(true)
+    fetchCatalog()
+end sub
+
+sub fetchCatalog()
+    m.catalogTask = CreateObject("roSGNode", "CatalogTask")
+    m.catalogTask.baseUrl = m.appState.serverBaseUrl
+    m.catalogTask.authToken = m.appState.authToken
+    m.catalogTask.ObserveField("result", "onCatalogResult")
+    m.catalogTask.control = "RUN"
+end sub
+
+sub onCatalogResult()
+    result = m.catalogTask.result
+    if not result.ok
+        m.loadingLabel.visible = false
+        m.emptyLabel.visible = true
+        m.emptyLabel.text = result.errorMessage
+        m.appState.callFunc("notify", { message: result.errorMessage, kind: "warning" })
+        return
+    end if
+
+    entries = result.entries
+    if entries.Count() = 0
+        m.loadingLabel.visible = false
+        m.emptyLabel.visible = true
+        m.emptyLabel.text = "Nothing in the catalog yet."
+        return
+    end if
+
+    movies = Swarm.CatalogGrouping.Movies(entries)
+    shows = Swarm.CatalogGrouping.Shows(entries)
+    artists = Swarm.CatalogGrouping.Artists(entries)
+
+    buildShelf(0, movies, "movie")
+    buildShelf(1, shows, "show")
+    buildShelf(2, artists, "artist")
+
+    m.loadingLabel.visible = false
+    m.shelvesGroup.visible = true
+
+    m.shelfIndex = firstNonEmptyShelf()
+    m.itemIndex = 0
+    applyFocus()
+end sub
+
+function firstNonEmptyShelf() as integer
+    for i = 0 to 2
+        if m.shelfTiles[i].Count() > 0
+            return i
+        end if
+    end for
+    return 0
+end function
+
+sub buildShelf(shelfIndex as integer, items as object, kind as string)
+    row = m.rows[shelfIndex]
+    childCount = row.getChildCount()
+    if childCount > 0
+        row.removeChildrenIndex(childCount, 0)
+    end if
+    tiles = []
+    actions = []
+
+    count = items.Count()
+    if count > MaxShelfItems
+        count = MaxShelfItems
+    end if
+
+    for i = 0 to count - 1
+        item = items[i]
+        tile = CreateObject("roSGNode", "PosterTile")
+        tile.tileWidth = TileWidth
+        tile.tileHeight = TileHeight
+        tile.authToken = m.appState.authToken
+        tile.translation = [i * TileStride, 0]
+
+        if kind = "movie"
+            tile.caption = displayTitle(item)
+            tile.entryUrl = artworkUrlFor(item)
+            actions.Push({ kind: "movie", entry: item })
+        else if kind = "show"
+            tile.caption = item.title
+            firstEp = Swarm.CatalogGrouping.FirstEpisode(item.episodes)
+            if firstEp <> invalid
+                tile.entryUrl = artworkUrlFor(firstEp)
+            end if
+            actions.Push({ kind: "show", show: item })
+        else
+            tile.caption = item.artist
+            firstTrack = Swarm.CatalogGrouping.FirstTrack(item.tracks)
+            if firstTrack <> invalid
+                tile.entryUrl = artworkUrlFor(firstTrack)
+            end if
+            actions.Push({ kind: "artist", artist: item })
+        end if
+
+        row.appendChild(tile)
+        tiles.Push(tile)
+    end for
+
+    m.shelfTiles[shelfIndex] = tiles
+    m.shelfActions[shelfIndex] = actions
+end sub
+
+function displayTitle(entry as object) as string
+    if entry.scraped_title <> invalid and entry.scraped_title <> ""
+        return entry.scraped_title
+    end if
+    return entry.title
+end function
+
+function artworkUrlFor(entry as object) as dynamic
+    return Swarm.Artwork.Poster(m.appState.serverBaseUrl, entry, 320)
+end function
+
+sub applyFocus()
+    for shelfIdx = 0 to 2
+        tiles = m.shelfTiles[shelfIdx]
+        for i = 0 to tiles.Count() - 1
+            tiles[i].isFocused = (shelfIdx = m.shelfIndex and i = m.itemIndex)
+        end for
+    end for
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press
+        return false
+    end if
+
+    if key = "down"
+        nextShelf = nextNonEmptyShelf(m.shelfIndex, 1)
+        if nextShelf <> -1
+            m.shelfIndex = nextShelf
+            clampItemIndex()
+            applyFocus()
+        end if
+        return true
+    else if key = "up"
+        nextShelf = nextNonEmptyShelf(m.shelfIndex, -1)
+        if nextShelf <> -1
+            m.shelfIndex = nextShelf
+            clampItemIndex()
+            applyFocus()
+        end if
+        return true
+    else if key = "right"
+        tiles = m.shelfTiles[m.shelfIndex]
+        if m.itemIndex < tiles.Count() - 1
+            m.itemIndex = m.itemIndex + 1
+            applyFocus()
+        end if
+        return true
+    else if key = "left"
+        if m.itemIndex > 0
+            m.itemIndex = m.itemIndex - 1
+            applyFocus()
+        end if
+        return true
+    else if key = "OK"
+        activateFocusedTile()
+        return true
+    end if
+    return false
+end function
+
+function nextNonEmptyShelf(fromIndex as integer, direction as integer) as integer
+    candidate = fromIndex + direction
+    while candidate >= 0 and candidate <= 2
+        if m.shelfTiles[candidate].Count() > 0
+            return candidate
+        end if
+        candidate = candidate + direction
+    end while
+    return -1
+end function
+
+sub clampItemIndex()
+    tiles = m.shelfTiles[m.shelfIndex]
+    if m.itemIndex >= tiles.Count()
+        m.itemIndex = tiles.Count() - 1
+    end if
+    if m.itemIndex < 0
+        m.itemIndex = 0
+    end if
+end sub
+
+sub activateFocusedTile()
+    actions = m.shelfActions[m.shelfIndex]
+    if m.itemIndex >= actions.Count()
+        return
+    end if
+    action = actions[m.itemIndex]
+    if action.kind = "movie"
+        m.appState.callFunc("pushScreen", { screen: "movieDetail", data: { entry: action.entry } })
+    else if action.kind = "show"
+        firstEp = Swarm.CatalogGrouping.FirstEpisode(action.show.episodes)
+        if firstEp <> invalid
+            startPlayback(firstEp)
+        end if
+    else if action.kind = "artist"
+        firstTrack = Swarm.CatalogGrouping.FirstTrack(action.artist.tracks)
+        if firstTrack <> invalid
+            startPlayback(firstTrack)
+        end if
+    end if
+end sub
+
+sub startPlayback(entry as object)
+    m.appState.callFunc("pushScreen", { screen: "player", data: { entry: entry, resumePositionSecs: 0.0 } })
+end sub

@@ -1,0 +1,4 @@
+node_modules/
+out/
+.roku-deploy-staging/
+.deploy-bsconfig.json

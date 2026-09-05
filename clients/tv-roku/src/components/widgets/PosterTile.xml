@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  A single shelf/grid card: fetches its artwork (bearer-authenticated, so it
+  cannot go straight into a Poster node's uri -- see platform-notes/roku.md's
+  "Artwork" section) via a per-tile ArtworkTask into cachefs, then shows it.
+  Always draws the branded placeholder underneath first, matching
+  MusicArtwork.kt's "never a blank card" rule.
+-->
+<component name="PosterTile" extends="Group">
+    <interface>
+        <field id="entryUrl" type="string" onChange="onEntryUrlChanged" />
+        <field id="authToken" type="string" />
+        <field id="tileWidth" type="float" value="130" onChange="render" />
+        <field id="tileHeight" type="float" value="195" onChange="render" />
+        <field id="caption" type="string" value="" onChange="render" />
+        <field id="isFocused" type="boolean" value="false" onChange="render" />
+    </interface>
+    <children>
+        <!-- Drawn first (behind), slightly larger than the tile, so a focus
+             ring peeks out around every edge -- there is no border-only
+             draw primitive in base SceneGraph. -->
+        <Rectangle id="focusBorder" visible="false" />
+        <Rectangle id="placeholder" color="0x1F2A44FF" />
+        <Poster id="poster" visible="false" />
+        <Label id="label" wrap="true" maxLines="2" color="0xECF6FFFF" />
+    </children>
+</component>

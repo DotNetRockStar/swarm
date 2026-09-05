@@ -1,0 +1,84 @@
+' Thin synchronous roUrlTransfer wrapper. Every call here blocks the
+' calling thread -- correct and required to live inside a Task node's own
+' RUN thread, never on the render thread. See
+' swarm-client-platform-knowledge/references/http-client-contract.md for
+' the wire shapes these calls carry.
+namespace Swarm.Http
+
+    function Get(url as string, authToken = "" as string) as object
+        xfer = newTransfer(url, authToken)
+        body = xfer.GetToString()
+        return responseFrom(xfer, body)
+    end function
+
+    function PostJson(url as string, payload as object, authToken = "" as string) as object
+        xfer = newTransfer(url, authToken)
+        xfer.AddHeader("Content-Type", "application/json")
+        body = xfer.PostFromString(FormatJson(payload))
+        return responseFrom(xfer, body)
+    end function
+
+    ' Range-fetches bytes into a local file -- used by ArtworkTask, never
+    ' loads a full media file into memory (video/audio playback goes
+    ' straight through the Video node's own ContentNode url, not through
+    ' this wrapper).
+    function GetToFile(url as string, authToken as string, localPath as string) as boolean
+        xfer = newTransfer(url, authToken)
+        return xfer.GetToFile(localPath) > 0
+    end function
+
+    ' Same as Get/PostJson but validates the server's certificate against a
+    ' single pinned CA file instead of Roku's public trust store -- the
+    ' path a device takes once it has learned httpCaPem at pairing time and
+    ' cached it locally (see StartupTask/PairingTask and
+    ' platform-notes/roku.md's TLS section). Implemented; verify against
+    ' real hardware before relying on it as the default path.
+    function GetPinned(url as string, authToken as string, caFilePath as string) as object
+        xfer = newTransfer(url, authToken)
+        pin(xfer, caFilePath)
+        body = xfer.GetToString()
+        return responseFrom(xfer, body)
+    end function
+
+    function PostJsonPinned(url as string, payload as object, authToken as string, caFilePath as string) as object
+        xfer = newTransfer(url, authToken)
+        pin(xfer, caFilePath)
+        xfer.AddHeader("Content-Type", "application/json")
+        body = xfer.PostFromString(FormatJson(payload))
+        return responseFrom(xfer, body)
+    end function
+
+    function newTransfer(url as string, authToken as string) as object
+        xfer = CreateObject("roUrlTransfer")
+        xfer.SetUrl(url)
+        if authToken <> invalid and authToken <> ""
+            xfer.AddHeader("Authorization", "Bearer " + authToken)
+        end if
+        return xfer
+    end function
+
+    sub pin(xfer as object, caFilePath as string)
+        xfer.SetCertificatesFile(caFilePath)
+        xfer.EnableHostVerification(true)
+        xfer.EnablePeerVerification(true)
+        xfer.InitClientCertificates()
+    end sub
+
+    function responseFrom(xfer as object, body as dynamic) as object
+        code = xfer.GetResponseCode()
+        result = {
+            status: code
+            ok: code >= 200 and code < 300
+            body: body
+            json: invalid
+        }
+        if body <> invalid and body <> ""
+            parsed = ParseJson(body)
+            if parsed <> invalid
+                result.json = parsed
+            end if
+        end if
+        return result
+    end function
+
+end namespace

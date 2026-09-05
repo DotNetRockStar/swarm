@@ -1,0 +1,66 @@
+import "pkg:/source/Http.bs"
+import "pkg:/source/Registry.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    baseUrl = m.top.baseUrl
+    m.top.pairingState = { status: "requesting" }
+
+    beginResponse = Swarm.Http.PostJson(baseUrl + "/pair/begin", { name: m.top.deviceName })
+    if not beginResponse.ok or beginResponse.json = invalid
+        m.top.pairingState = { status: "error", errorMessage: "Could not request a pairing code." }
+        return
+    end if
+
+    activationId = beginResponse.json.activation_id
+    pollToken = beginResponse.json.poll_token
+    code = beginResponse.json.code
+    expiresIn = beginResponse.json.expires_in_seconds
+
+    m.top.pairingState = { status: "waiting", code: code, expiresInSeconds: expiresIn }
+
+    deadline = Swarm.Registry.NowSeconds() + expiresIn
+    while true
+        if m.top.cancelRequested
+            m.top.pairingState = { status: "cancelled" }
+            return
+        end if
+        if Swarm.Registry.NowSeconds() > deadline
+            m.top.pairingState = { status: "expired" }
+            return
+        end if
+
+        sleep(2000)
+        if m.top.cancelRequested
+            m.top.pairingState = { status: "cancelled" }
+            return
+        end if
+
+        pollResponse = Swarm.Http.PostJson(baseUrl + "/pair/poll", {
+            activation_id: activationId
+            poll_token: pollToken
+        })
+        if pollResponse.ok and pollResponse.json <> invalid
+            pollStatus = pollResponse.json.status
+            if pollStatus = "approved"
+                httpCaPem = ""
+                if pollResponse.json.http_ca_pem <> invalid
+                    httpCaPem = pollResponse.json.http_ca_pem
+                end if
+                m.top.pairingState = {
+                    status: "approved"
+                    token: pollResponse.json.token
+                    httpCaPem: httpCaPem
+                }
+                return
+            else if pollStatus = "expired"
+                m.top.pairingState = { status: "expired" }
+                return
+            end if
+            ' "pending" -- keep polling.
+        end if
+    end while
+end sub

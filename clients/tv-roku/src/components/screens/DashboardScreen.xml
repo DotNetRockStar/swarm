@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  SWARM home / server connection screen -- Roku analogue of
+  SwarmDashboardScreen.kt, scoped LAN-first for v1 (see
+  platform-notes/roku.md): discovers servers via mDNS, pairs over
+  /pair/begin + /pair/poll (matching Fire TV's LanPairingOverlay, folded
+  into this screen rather than a separate top-level state), and once
+  connected offers Browse Library / Settings / Forget this server.
+-->
+<component name="DashboardScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+        <field id="screenData" type="assocarray" />
+    </interface>
+    <children>
+        <Label id="heading" translation="[120, 90]" text="SWARM" color="0x00C2FFFF" />
+        <Label id="subheading" translation="[120, 150]" width="1200" color="0x9FB0C9FF" />
+        <Group id="buttonList" translation="[120, 230]" />
+
+        <!-- Pairing overlay -->
+        <Group id="pairingOverlay" visible="false">
+            <Rectangle color="0x000000D8" width="1920" height="1080" />
+            <Group translation="[810, 380]">
+                <Rectangle id="pairingCard" width="300" height="320" color="0x151F32FF" />
+                <Label id="pairingTitle" translation="[24, 24]" width="252" text="Pair with this server" color="0xECF6FFFF" />
+                <Label id="pairingBody" translation="[24, 64]" width="252" wrap="true" color="0x9FB0C9FF" text="Enter this code on the media server's SWARM page" />
+                <Label id="pairingCode" translation="[24, 150]" width="252" horizAlign="center" color="0x00C2FFFF" />
+                <Label id="pairingStatus" translation="[24, 210]" width="252" wrap="true" color="0x9FB0C9FF" />
+                <SwarmButton id="pairingCancelButton" translation="[24, 260]" text="Cancel" buttonWidth="252" />
+            </Group>
+        </Group>
+    </children>
+</component>

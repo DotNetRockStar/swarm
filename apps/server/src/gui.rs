@@ -53,13 +53,15 @@ struct AppState {
     /// gives each test's own `AppState` instance a genuinely unique temp
     /// directory instead. Always `None` in production.
     test_data_dir: Option<PathBuf>,
-    /// Test-only override for the QUIC/HTTP-media bind addresses `core()`
-    /// otherwise reads from `SWARM_PEER_BIND`/`SWARM_HTTP_MEDIA_BIND` (which
-    /// default to fixed ports). Those env vars are process-global, so two
-    /// tests that started a real `ServerCore` concurrently in the same test
-    /// binary would race to bind the same ports; this gives each test's
-    /// `AppState` its own unique pair instead. Always `None` in production.
-    test_bind_override: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
+    /// Test-only override for the QUIC/HTTP-media/HTTP-media-TLS bind
+    /// addresses `core()` otherwise reads from
+    /// `SWARM_PEER_BIND`/`SWARM_HTTP_MEDIA_BIND`/`SWARM_HTTP_MEDIA_TLS_BIND`
+    /// (which default to fixed ports). Those env vars are process-global, so
+    /// two tests that started a real `ServerCore` concurrently in the same
+    /// test binary would race to bind the same ports; this gives each
+    /// test's `AppState` its own unique triple instead. Always `None` in
+    /// production.
+    test_bind_override: Option<(std::net::SocketAddr, std::net::SocketAddr, std::net::SocketAddr)>,
     /// Issues from the most recent `run_scrape` call, for the AI tab's scan
     /// assist to offer help on — see `ai_scrape_assist`. Deliberately
     /// in-memory only (lost on restart): same "not a persisted queryable
@@ -205,12 +207,13 @@ impl AppState {
                     settings::save(&dir, &settings).map_err(|e| e.to_string())?;
                 }
                 let recovery_settings_dir = dir.clone();
-                let (default_bind, default_http_media_bind) = self
+                let (default_bind, default_http_media_bind, default_http_media_tls_bind) = self
                     .test_bind_override
                     .unwrap_or_else(|| {
                         (
                             "0.0.0.0:8543".parse().unwrap(),
                             "0.0.0.0:8546".parse().unwrap(),
+                            "0.0.0.0:8547".parse().unwrap(),
                         )
                     });
                 let config = ServerConfig {
@@ -242,6 +245,19 @@ impl AppState {
                             .parse()
                             .expect("SWARM_HTTP_MEDIA_BIND must be host:port")
                     },
+                    // Same "always on, no Settings/UI toggle" convention as
+                    // http_media_bind above. TLS on this second port is what
+                    // lets a paired HTTP-only device (Roku) reach the media
+                    // server off-LAN through the relay — see http_media.rs
+                    // and swarm_p2p::http_tls.
+                    http_media_tls_bind: Some(if self.test_bind_override.is_some() {
+                        default_http_media_tls_bind
+                    } else {
+                        std::env::var("SWARM_HTTP_MEDIA_TLS_BIND")
+                            .unwrap_or_else(|_| "0.0.0.0:8547".into())
+                            .parse()
+                            .expect("SWARM_HTTP_MEDIA_TLS_BIND must be host:port")
+                    }),
                     allowed_fingerprints: vec![],
                     // Real bug, found live: with PreferKeyring, a token saved
                     // successfully via the OS keychain has no file backup —

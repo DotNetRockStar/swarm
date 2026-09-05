@@ -1,0 +1,51 @@
+import "pkg:/source/Registry.bs"
+import "pkg:/source/Http.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    appState = m.top.appState
+
+    ' Device-level identity: a per-device, per-channel stable id Roku
+    ' already provides (survives restarts, no client cert to manage --
+    ' see platform-notes/roku.md's "Identity & pairing" section). This is
+    ' what LikeToggle.device_id / ClientErrorReport.device_id carry; it is
+    ' independent of which server is currently paired.
+    deviceInfo = CreateObject("roDeviceInfo")
+    appState.deviceId = deviceInfo.GetChannelClientId()
+
+    settings = Swarm.Registry.LoadSettings()
+    if settings.deviceName <> invalid and settings.deviceName <> ""
+        appState.deviceName = settings.deviceName
+    else
+        appState.deviceName = deviceInfo.GetModelDisplayName()
+    end if
+
+    connection = Swarm.Registry.LoadConnection()
+    token = Swarm.Registry.LoadAuthToken()
+
+    if connection = invalid or token = invalid or connection.baseUrl = invalid
+        appState.callFunc("pushScreen", { screen: "dashboard", data: {} })
+        return
+    end if
+
+    appState.authToken = token
+    appState.serverBaseUrl = connection.baseUrl
+    appState.serverFingerprint = connection.serverFingerprint
+    appState.serverName = connection.serverName
+    if connection.httpCaPem <> invalid
+        appState.httpCaPem = connection.httpCaPem
+    end if
+
+    ' Probe reachability the same way restoreSession() does on Fire TV -- a
+    ' stale/unreachable saved connection still shows the dashboard rather
+    ' than blocking forever or silently bouncing back to pairing.
+    response = Swarm.Http.Get(connection.baseUrl + "/catalog/thumbprint", token)
+    if response.ok
+        appState.callFunc("pushScreen", { screen: "catalog", data: {} })
+    else
+        appState.callFunc("pushScreen", { screen: "dashboard", data: { unreachable: true } })
+    end if
+end sub

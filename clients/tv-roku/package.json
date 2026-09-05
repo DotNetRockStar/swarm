@@ -1,0 +1,16 @@
+{
+  "name": "swarm-tv-roku",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SWARM media client for Roku (BrighterScript + SceneGraph)",
+  "scripts": {
+    "build": "bsc --project bsconfig.json",
+    "watch": "bsc --project bsconfig.json --watch",
+    "package": "roku-deploy package --project bsconfig.json",
+    "test": "ropm-cli run rooibos -- --config rooibos.json"
+  },
+  "devDependencies": {
+    "brighterscript": "^0.69.9",
+    "roku-deploy": "^3.12.4"
+  }
+}

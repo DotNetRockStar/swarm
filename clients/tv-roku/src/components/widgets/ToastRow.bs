@@ -1,0 +1,33 @@
+import "pkg:/source/Theme.bs"
+
+sub init()
+    m.bg = m.top.findNode("bg")
+    m.stripe = m.top.findNode("stripe")
+    m.label = m.top.findNode("label")
+    m.timer = m.top.findNode("dismissTimer")
+    m.top.focusable = false
+    m.timer.observeField("fire", "onFire")
+end sub
+
+sub render()
+    m.label.text = m.top.message
+    color = Swarm.Theme.AccentHot
+    duration = Swarm.Theme.ToastDurationWarningMs
+    if m.top.kind = "success"
+        color = Swarm.Theme.GreenColor
+        duration = Swarm.Theme.ToastDurationSuccessMs
+    else if m.top.kind = "error"
+        color = Swarm.Theme.ErrorColor
+        duration = Swarm.Theme.ToastDurationErrorMs
+    end if
+    m.stripe.color = color
+    m.timer.duration = duration / 1000.0
+    m.timer.control = "start"
+end sub
+
+sub onFire()
+    parent = m.top.getParent()
+    if parent <> invalid
+        parent.removeChild(m.top)
+    end if
+end sub

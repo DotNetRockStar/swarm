@@ -1,0 +1,34 @@
+import "pkg:/source/Http.bs"
+import "pkg:/source/Artwork.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    url = m.top.url
+    if url = invalid or url = ""
+        m.top.localPath = ""
+        return
+    end if
+
+    fileName = Swarm.Artwork.CacheFileName(url)
+    localPath = "cachefs:/artwork/" + fileName
+
+    fs = CreateObject("roFileSystem")
+    if not fs.Exists("cachefs:/artwork")
+        fs.CreateDirectory("cachefs:/artwork")
+    end if
+
+    if fs.Exists(localPath)
+        m.top.localPath = localPath
+        return
+    end if
+
+    ok = Swarm.Http.GetToFile(url, m.top.authToken, localPath)
+    if ok
+        m.top.localPath = localPath
+    else
+        m.top.localPath = ""
+    end if
+end sub

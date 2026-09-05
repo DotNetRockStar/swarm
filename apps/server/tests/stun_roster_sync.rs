@@ -199,6 +199,7 @@ async fn spawn_media_server(tag: &str) -> Arc<ServerCore> {
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         // Real OS keyring behavior isn't something to assert on in an
         // automated test — see swarm_stun_client::TokenStore::file_only.
@@ -353,6 +354,7 @@ async fn restart_restores_the_stun_link_and_allowed_peers() {
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
@@ -408,6 +410,7 @@ async fn configured_managed_swarm_migrates_an_existing_manual_link_before_tv_app
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: None,
@@ -483,6 +486,7 @@ async fn managed_swarm_adopts_a_new_endpoint_after_owner_claim_validation() {
         data_dir: base.join("data"),
         bind: "127.0.0.1:0".parse().unwrap(),
         http_media_bind: "127.0.0.1:0".parse().unwrap(),
+        http_media_tls_bind: None,
         allowed_fingerprints: vec![],
         token_store_mode: TokenStoreMode::FileOnly,
         managed_rendezvous_url: Some(stun_base.clone()),

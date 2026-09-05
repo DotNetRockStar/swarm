@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Root scene. Owns the single AppState node and the screen container --
+  the Roku analogue of MainActivity's SwarmApp `when (state)` router: it
+  observes AppState.currentScreen and mounts exactly one screen component
+  at a time, tearing the previous one down. See
+  swarm-client-platform-knowledge/references/state-model.md.
+-->
+<component name="MainScene" extends="Scene">
+    <children>
+        <AppState id="appState" />
+        <Rectangle id="background" color="0x101828FF" width="1920" height="1080" />
+        <Group id="screenContainer" />
+        <ToastHost id="toastHost" translation="[1500, 780]" />
+    </children>
+</component>

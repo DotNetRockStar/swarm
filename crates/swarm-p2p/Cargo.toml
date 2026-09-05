@@ -14,10 +14,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 rcgen = { workspace = true }
+time = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 if-addrs = { workspace = true }
 
 [dev-dependencies]
 stun-server = { path = "../../apps/stun-server" }
+tempfile = "3"

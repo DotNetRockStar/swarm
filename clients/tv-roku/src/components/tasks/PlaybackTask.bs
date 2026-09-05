@@ -1,0 +1,53 @@
+import "pkg:/source/Http.bs"
+import "pkg:/source/Capability.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    if m.top.operation = "stop"
+        doStop()
+    else
+        doNegotiate()
+    end if
+end sub
+
+sub doNegotiate()
+    payload = {
+        capabilities: Swarm.Capability.Baseline()
+        start_position_secs: m.top.startPositionSecs
+        prefer_direct: true
+        preview: false
+    }
+    response = Swarm.Http.PostJson(m.top.baseUrl + "/play/" + m.top.entryKey, payload, m.top.authToken)
+    if not response.ok or response.json = invalid
+        errorMessage = "Could not prepare playback."
+        if response.status = 429
+            errorMessage = "The media server is at capacity right now. Try again shortly."
+        else if response.status = 503
+            errorMessage = "This title can't be played on this device."
+        end if
+        m.top.negotiateResult = { ok: false, errorMessage: errorMessage }
+        return
+    end if
+
+    json = response.json
+    subtitles = []
+    if json.subtitles <> invalid
+        subtitles = json.subtitles
+    end if
+    m.top.negotiateResult = {
+        ok: true
+        mode: json.mode
+        path: json.path
+        maxBitrate: json.max_bitrate
+        sessionId: json.session_id
+        subtitles: subtitles
+    }
+end sub
+
+sub doStop()
+    Swarm.Http.PostJson(m.top.baseUrl + "/stop/" + m.top.sessionIdToStop, {}, m.top.authToken)
+    m.top.negotiateResult = { ok: true }
+end sub

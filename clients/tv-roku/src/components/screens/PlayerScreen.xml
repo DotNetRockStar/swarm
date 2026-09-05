@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Video playback -- Roku analogue of PlayerScreen.kt, scoped for this pass
+  to the core loop: negotiate -> play -> periodic resume-position save ->
+  release the session on every exit path. No pause overlay, skip-intro
+  markers, audio/subtitle picker, or "up next" continue prompt yet -- see
+  feature-inventory.md. The exact Video-node/ContentNode field behavior
+  here (PlayStart, HttpHeaders, state transitions) has not been verified
+  against real hardware -- see platform-notes/roku.md's open items.
+-->
+<component name="PlayerScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+        <field id="screenData" type="assocarray" />
+    </interface>
+    <children>
+        <Rectangle color="0x000000FF" width="1920" height="1080" />
+        <Video id="video" width="1920" height="1080" visible="false" />
+        <Label id="statusLabel" translation="[810, 500]" width="300" horizAlign="center" color="0x9FB0C9FF" />
+    </children>
+</component>

@@ -1,0 +1,66 @@
+import "pkg:/source/Mdns.bs"
+import "pkg:/source/Registry.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+' NOTE: this function's exact roDatagramSocket call shape (Send/Receive
+' arity, whether an explicit multicast-group join is required to receive
+' mDNS responses at all) is the least-verified code in this client -- it
+' has not been exercised against real hardware or a real network. See
+' platform-notes/roku.md's open items. If real-device testing shows
+' responses never arrive, this is the one function to revisit; nothing
+' else in the discovery path depends on its internals. The DNS *parsing*
+' logic it feeds into (Swarm.Mdns.ParseMessage) was independently verified
+' against a hand-built packet before being ported here and is not in
+' question.
+sub doRun()
+    serversByFingerprint = {}
+
+    socket = CreateObject("roDatagramSocket")
+    if socket = invalid
+        m.top.discoveredServers = []
+        return
+    end if
+
+    messagePort = CreateObject("roMessagePort")
+    socket.SetMessagePort(messagePort)
+    socket.NotifyReadable(true)
+    socket.SetPort(Swarm.Mdns.MulticastPort)
+
+    query = Swarm.Mdns.BuildQuery()
+    multicastPort = Swarm.Mdns.MulticastPort
+    socket.SetSendToAddress(Swarm.Mdns.MulticastAddress + ":" + multicastPort.ToStr())
+    socket.Send(query, query.Count())
+
+    deadline = Swarm.Registry.NowSeconds() + m.top.listenSeconds
+    while Swarm.Registry.NowSeconds() < deadline
+        remainingMs = (deadline - Swarm.Registry.NowSeconds()) * 1000
+        if remainingMs <= 0
+            exit while
+        end if
+        event = wait(remainingMs, messagePort)
+        if type(event) = "roSocketEvent" and socket.IsReadable()
+            buffer = CreateObject("roByteArray")
+            buffer[4096] = 0
+            received = socket.Receive(buffer, 4096)
+            if received > 0
+                trimmed = CreateObject("roByteArray")
+                for i = 0 to received - 1
+                    trimmed.Push(buffer[i])
+                end for
+                servers = Swarm.Mdns.ParseMessage(trimmed)
+                for each server in servers
+                    serversByFingerprint[server.fingerprint] = server
+                end for
+            end if
+        end if
+    end while
+
+    results = []
+    for each fingerprint in serversByFingerprint
+        results.Push(serversByFingerprint[fingerprint])
+    end for
+    m.top.discoveredServers = results
+end sub
