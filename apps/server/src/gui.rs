@@ -11,20 +11,22 @@
 //! torn down, only the shared `SharedRootResolver` both the core and its
 //! `MediaService` hold is swapped and a scan run against the new set.
 
+mod ai;
 mod mcp;
+mod reorganize;
 mod settings;
 
 use rand::RngCore;
-use settings::{MediaRootHealth, MediaRootSetting, Settings};
+use settings::{AiProviderSetting, MediaRootHealth, MediaRootSetting, Settings};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use swarm_core::peer::MediaKind;
 use swarm_media::roots::MediaRoot;
 use swarm_media::scan::ScanProgressEvent;
-use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig, ScrapeProgressEvent};
+use swarm_media::scrape::{BulkScrapeReport, ScrapeConfig, ScrapeIssue, ScrapeProgressEvent};
 use swarm_server::{
     ScanState, ServerConfig, ServerCore, ServerError, ServerStatus, TokenStoreMode,
 };
@@ -58,6 +60,25 @@ struct AppState {
     /// binary would race to bind the same ports; this gives each test's
     /// `AppState` its own unique pair instead. Always `None` in production.
     test_bind_override: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
+    /// Issues from the most recent `run_scrape` call, for the AI tab's scan
+    /// assist to offer help on — see `ai_scrape_assist`. Deliberately
+    /// in-memory only (lost on restart): same "not a persisted queryable
+    /// table" status the underlying `BulkScrapeReport::issues` already had
+    /// before this feature existed, just kept around one call longer.
+    last_scrape_issues: Mutex<Vec<ScrapeIssue>>,
+    /// Reorganize plans proposed by `ai_reorganize_scan`, awaiting the
+    /// user's approve/reject — see `reorganize.rs`. In-memory only: a plan
+    /// is a short-lived review artifact, not library state, so it doesn't
+    /// need to survive a restart any more than an unconfirmed dialog would.
+    reorg_plans: Mutex<HashMap<u64, StoredReorgPlan>>,
+    next_reorg_plan_id: AtomicU64,
+}
+
+struct StoredReorgPlan {
+    plan: reorganize::ReorgPlan,
+    root_path: PathBuf,
+    status: &'static str,
+    apply_outcome: Option<reorganize::ApplyOutcome>,
 }
 
 fn acquire_sleep_inhibitor() -> Option<keepawake::KeepAwake> {
@@ -831,6 +852,33 @@ struct SettingsView {
     hls_segment_seconds: u32,
     auto_update: String,
     app_version: String,
+    ai_providers: Vec<AiProviderView>,
+    ai_scan_assist_enabled: bool,
+    ai_reorganize_enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct AiProviderView {
+    id: String,
+    label: String,
+    enabled: bool,
+    model: String,
+    has_api_key: bool,
+}
+
+fn ai_provider_views(providers: &[AiProviderSetting]) -> Vec<AiProviderView> {
+    providers
+        .iter()
+        .map(|p| AiProviderView {
+            id: p.id.clone(),
+            label: ai::AiProviderKind::from_id(&p.id)
+                .map(|k| k.label().to_string())
+                .unwrap_or_else(|| p.id.clone()),
+            enabled: p.enabled,
+            model: p.model.clone(),
+            has_api_key: p.api_key.is_some(),
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -854,6 +902,9 @@ async fn get_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Set
         hls_segment_seconds: settings.hls_segment_seconds,
         auto_update: settings.auto_update,
         app_version: app.package_info().version.to_string(),
+        ai_providers: ai_provider_views(&settings.ai_providers),
+        ai_scan_assist_enabled: settings.ai_scan_assist_enabled,
+        ai_reorganize_enabled: settings.ai_reorganize_enabled,
     })
 }
 
@@ -1482,6 +1533,114 @@ async fn generate_mcp_access_token<R: tauri::Runtime>(app: tauri::AppHandle<R>) 
     Ok(token)
 }
 
+fn find_ai_provider_mut<'a>(settings: &'a mut Settings, id: &str) -> Result<&'a mut AiProviderSetting, String> {
+    settings
+        .ai_providers
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("unknown AI provider \"{id}\""))
+}
+
+#[tauri::command]
+async fn set_ai_provider_enabled<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    find_ai_provider_mut(&mut settings, &id)?.enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_ai_provider_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("model name cannot be empty".to_string());
+    }
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    find_ai_provider_mut(&mut settings, &id)?.model = model;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_ai_provider_api_key<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    key: String,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    find_ai_provider_mut(&mut settings, &id)?.api_key = if key.trim().is_empty() {
+        None
+    } else {
+        Some(key.trim().to_string())
+    };
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_ai_scan_assist_enabled<R: tauri::Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.ai_scan_assist_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_ai_reorganize_enabled<R: tauri::Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let mut settings = settings::load(&dir);
+    settings.ai_reorganize_enabled = enabled;
+    settings::save(&dir, &settings).map_err(|e| e.to_string())
+}
+
+/// Sends a trivial prompt to the configured provider so the AI tab can show
+/// "connected" without waiting for a real feature to fail first.
+#[tauri::command]
+async fn test_ai_provider<R: tauri::Runtime>(app: tauri::AppHandle<R>, id: String) -> Result<String, String> {
+    let settings = settings::load(&app_data_dir(&app)?);
+    let provider = settings
+        .ai_providers
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("unknown AI provider \"{id}\""))?;
+    let api_key = provider
+        .api_key
+        .clone()
+        .ok_or_else(|| "Add an API key first.".to_string())?;
+    let kind = ai::AiProviderKind::from_id(&id).ok_or_else(|| format!("unknown AI provider \"{id}\""))?;
+    let client = ai::AiClient::new(kind, api_key, provider.model.clone());
+    client
+        .complete(
+            "You are a connectivity check for a media server's AI integration. Reply with exactly one word.",
+            "Reply with the single word: ok",
+        )
+        .await
+        .map(|reply| reply.trim().to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// Finds the first enabled, keyed provider (settings order: Claude, Codex,
+/// Grok) — the advanced AI features don't let a user pick per call, since
+/// there is normally only one configured anyway.
+fn ai_client_from_settings(settings: &Settings) -> Result<ai::AiClient, String> {
+    let provider = settings
+        .ai_providers
+        .iter()
+        .find(|p| p.enabled && p.api_key.is_some())
+        .ok_or_else(|| "Enable and configure at least one AI provider in the AI tab first.".to_string())?;
+    let kind = ai::AiProviderKind::from_id(&provider.id)
+        .ok_or_else(|| format!("unknown AI provider \"{}\"", provider.id))?;
+    Ok(ai::AiClient::new(kind, provider.api_key.clone().unwrap(), provider.model.clone()))
+}
+
 #[tauri::command]
 async fn get_status<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -1596,6 +1755,165 @@ async fn reclassify_library<R: tauri::Runtime>(
         .reclassify_all(&core.media_roots)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ApplySummaryView {
+    applied: u32,
+    skipped: u32,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReorgPlanView {
+    id: u64,
+    root_label: String,
+    items: Vec<reorganize::ReorgItem>,
+    ai_assisted_count: u32,
+    conflict_count: u32,
+    status: String,
+    apply_summary: Option<ApplySummaryView>,
+}
+
+fn reorg_plan_view(
+    id: u64,
+    plan: &reorganize::ReorgPlan,
+    status: &str,
+    outcome: Option<&reorganize::ApplyOutcome>,
+) -> ReorgPlanView {
+    ReorgPlanView {
+        id,
+        root_label: plan.root_label.clone(),
+        items: plan.items.clone(),
+        ai_assisted_count: plan.ai_assisted_count,
+        conflict_count: plan.conflict_count,
+        status: status.to_string(),
+        apply_summary: outcome.map(|o| ApplySummaryView {
+            applied: o.applied,
+            skipped: o.skipped,
+            errors: o.errors.clone(),
+        }),
+    }
+}
+
+fn resolve_media_root(settings: &Settings, root_label: &str) -> Result<PathBuf, String> {
+    settings
+        .media_roots
+        .iter()
+        .find(|r| r.label == root_label)
+        .map(|r| PathBuf::from(&r.path))
+        .ok_or_else(|| format!("unknown media root \"{root_label}\""))
+}
+
+/// Scans one configured media root and proposes a rename/move plan — pure
+/// computation, nothing on disk changes until `approve_ai_reorg_plan` runs.
+/// Gated by `ai_reorganize_enabled`; an AI provider is used only for the
+/// long tail of filenames `classify` can't place at all (see
+/// `reorganize::scan_root`) — if none is configured, the scan still runs,
+/// just without that fallback.
+#[tauri::command]
+async fn ai_reorganize_scan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    root_label: String,
+) -> Result<ReorgPlanView, String> {
+    let dir = app_data_dir(&app)?;
+    let settings = settings::load(&dir);
+    if !settings.ai_reorganize_enabled {
+        return Err("Enable \"AI reorganize\" on the AI tab first.".to_string());
+    }
+    let root_path = resolve_media_root(&settings, &root_label)?;
+    let ai_client = ai_client_from_settings(&settings).ok();
+    let plan = reorganize::scan_root(&root_label, &root_path, ai_client.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let id = state.next_reorg_plan_id.fetch_add(1, Ordering::Relaxed);
+    let view = reorg_plan_view(id, &plan, "proposed", None);
+    state.reorg_plans.lock().await.insert(
+        id,
+        StoredReorgPlan {
+            plan,
+            root_path,
+            status: "proposed",
+            apply_outcome: None,
+        },
+    );
+    Ok(view)
+}
+
+#[tauri::command]
+async fn list_ai_reorg_plans(state: tauri::State<'_, AppState>) -> Result<Vec<ReorgPlanView>, String> {
+    let plans = state.reorg_plans.lock().await;
+    let mut views: Vec<ReorgPlanView> = plans
+        .iter()
+        .map(|(id, stored)| reorg_plan_view(*id, &stored.plan, stored.status, stored.apply_outcome.as_ref()))
+        .collect();
+    views.sort_by_key(|v| v.id);
+    Ok(views)
+}
+
+/// Applies every non-conflicting item in a still-`proposed` plan (see
+/// `reorganize::apply_plan` — renames only, never a delete, never an
+/// overwrite), records a notification either way, and kicks off a rescan so
+/// the library picks up the new layout. Filesystem work runs on a blocking
+/// thread since `apply_plan` is synchronous I/O over potentially many files.
+#[tauri::command]
+async fn approve_ai_reorg_plan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    id: u64,
+) -> Result<ReorgPlanView, String> {
+    let (root_path, items) = {
+        let plans = state.reorg_plans.lock().await;
+        let stored = plans.get(&id).ok_or_else(|| "reorganize plan not found".to_string())?;
+        if stored.status != "proposed" {
+            return Err(format!("this plan is already {}", stored.status));
+        }
+        (stored.root_path.clone(), stored.plan.items.clone())
+    };
+    let outcome = tokio::task::spawn_blocking(move || reorganize::apply_plan(&root_path, &items))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let view = {
+        let mut plans = state.reorg_plans.lock().await;
+        let stored = plans.get_mut(&id).ok_or_else(|| "reorganize plan not found".to_string())?;
+        stored.status = "applied";
+        stored.apply_outcome = Some(outcome);
+        reorg_plan_view(id, &stored.plan, stored.status, stored.apply_outcome.as_ref())
+    };
+
+    let core = state.core(&app).await?;
+    let summary = view.apply_summary.as_ref();
+    let level = if summary.is_some_and(|s| !s.errors.is_empty()) {
+        "warning"
+    } else {
+        "success"
+    };
+    let message = format!(
+        "Reorganized \"{}\": {} file(s) moved, {} skipped.",
+        view.root_label,
+        summary.map(|s| s.applied).unwrap_or(0),
+        summary.map(|s| s.skipped).unwrap_or(0),
+    );
+    if let Err(error) = core
+        .library
+        .record_server_notification(level, "AI reorganize finished", &message)
+        .await
+    {
+        tracing::warn!(%error, "could not save reorganize notification");
+    }
+    let _ = core.rescan(None).await;
+    Ok(view)
+}
+
+#[tauri::command]
+async fn reject_ai_reorg_plan(state: tauri::State<'_, AppState>, id: u64) -> Result<(), String> {
+    let mut plans = state.reorg_plans.lock().await;
+    let stored = plans.get_mut(&id).ok_or_else(|| "reorganize plan not found".to_string())?;
+    stored.status = "rejected";
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -1930,6 +2248,9 @@ async fn run_library_maintenance<R: tauri::Runtime>(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".to_string());
         }
+        if let Ok(report) = &scrape_result {
+            *state.last_scrape_issues.lock().await = report.issues.clone();
+        }
         record_scrape_result_notification(
             &core,
             &scrape_result,
@@ -2024,6 +2345,9 @@ async fn run_scrape<R: tauri::Runtime>(
     // its final report, so the frontend can't see "done" before the last
     // per-entry update.
     let _ = forward.await;
+    if let Ok(report) = &result {
+        *state.last_scrape_issues.lock().await = report.issues.clone();
+    }
     record_scrape_result_notification(
         &core,
         &result,
@@ -2055,6 +2379,108 @@ async fn rescrape_entry<R: tauri::Runtime>(
     core.rescrape_entry(&entry_key, config, tmdb_override)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Entries the most recent `run_scrape`/library-maintenance pass couldn't
+/// match, for the AI tab's "Ask AI" affordance — see `ai_scrape_assist`.
+/// Empty if no scrape has run yet this session.
+#[tauri::command]
+async fn list_scrape_issues(state: tauri::State<'_, AppState>) -> Result<Vec<ScrapeIssue>, String> {
+    Ok(state.last_scrape_issues.lock().await.clone())
+}
+
+#[derive(serde::Deserialize)]
+struct AiTitleGuess {
+    title: String,
+    #[serde(default)]
+    year: Option<u32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AiScrapeSuggestion {
+    suggested_title: String,
+    suggested_year: Option<u32>,
+    tmdb_id: u64,
+    tmdb_title: String,
+    tmdb_url: String,
+    poster_url: Option<String>,
+}
+
+/// Asks the configured AI provider to guess a clean title/year for an entry
+/// the ordinary scrape pass couldn't match on TMDb, then retries the TMDb
+/// search with that guess. Never writes anything itself — it only returns a
+/// suggestion; the frontend applies it (if the user accepts) through the
+/// existing `rescrape_entry` command, exactly like a manual TMDb URL fix.
+#[tauri::command]
+async fn ai_scrape_assist<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    entry_key: String,
+) -> Result<AiScrapeSuggestion, String> {
+    let dir = app_data_dir(&app)?;
+    let settings = settings::load(&dir);
+    if !settings.ai_scan_assist_enabled {
+        return Err("Enable \"AI scan & scrape assist\" on the AI tab first.".to_string());
+    }
+    let client = ai_client_from_settings(&settings)?;
+    let tmdb_api_key = settings
+        .tmdb_api_key
+        .clone()
+        .ok_or_else(|| "Add a TMDb API key on the Details tab before using scan assist.".to_string())?;
+
+    let core = state.core(&app).await?;
+    let entry = core
+        .library
+        .get(&entry_key)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "entry not found".to_string())?;
+    if entry.kind == MediaKind::Track {
+        return Err("AI scan assist only helps with movies and TV episodes right now.".to_string());
+    }
+
+    let filename = entry.relative_path.rsplit('/').next().unwrap_or(&entry.relative_path);
+    let system = "You help identify movies and TV shows from messy filenames for a personal media \
+        server. Reply with ONLY a JSON object, no prose, no code fences.";
+    let user = format!(
+        "Filename: \"{filename}\"\n\
+        Parsed title guess: \"{}\"\n\
+        Parsed year guess: {}\n\
+        Media kind: {}\n\n\
+        Reply with a JSON object exactly like {{\"title\": \"<best-guess canonical title>\", \
+        \"year\": <release year or null>}}.",
+        entry.title,
+        entry.year.map(|y| y.to_string()).unwrap_or_else(|| "unknown".to_string()),
+        if entry.kind == MediaKind::Episode { "TV show" } else { "movie" },
+    );
+    let reply = client.complete(system, &user).await.map_err(|e| e.to_string())?;
+    let guess: AiTitleGuess =
+        ai::parse_json_object(&reply).ok_or_else(|| format!("AI reply was not valid JSON: {reply}"))?;
+    if guess.title.trim().is_empty() {
+        return Err("AI could not suggest a title for this file.".to_string());
+    }
+
+    let tmdb = swarm_media::scrape::tmdb::TmdbClient::new(tmdb_api_key);
+    let scraped = if entry.kind == MediaKind::Episode {
+        tmdb.search_and_fetch_tv(guess.title.trim()).await
+    } else {
+        tmdb.search_and_fetch_movie(guess.title.trim(), guess.year).await
+    }
+    .map_err(|e| format!("AI suggested \"{}\" but the TMDb lookup failed: {e}", guess.title))?;
+
+    let tmdb_url = format!(
+        "https://www.themoviedb.org/{}/{}",
+        if entry.kind == MediaKind::Episode { "tv" } else { "movie" },
+        scraped.tmdb_id
+    );
+    Ok(AiScrapeSuggestion {
+        suggested_title: guess.title,
+        suggested_year: guess.year,
+        tmdb_id: scraped.tmdb_id,
+        tmdb_title: scraped.title,
+        tmdb_url,
+        poster_url: scraped.poster_url,
+    })
 }
 
 /// Manually override an entry's display title, genre/category list,
@@ -2769,6 +3195,9 @@ fn main() {
             _sleep_inhibitor: acquire_sleep_inhibitor(),
             test_data_dir: None,
             test_bind_override: None,
+            last_scrape_issues: Mutex::new(Vec::new()),
+            reorg_plans: Mutex::new(HashMap::new()),
+            next_reorg_plan_id: AtomicU64::new(1),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -2845,6 +3274,18 @@ fn main() {
             notification_count,
             delete_server_notification,
             clear_server_notifications,
+            set_ai_provider_enabled,
+            set_ai_provider_model,
+            set_ai_provider_api_key,
+            set_ai_scan_assist_enabled,
+            set_ai_reorganize_enabled,
+            test_ai_provider,
+            list_scrape_issues,
+            ai_scrape_assist,
+            ai_reorganize_scan,
+            list_ai_reorg_plans,
+            approve_ai_reorg_plan,
+            reject_ai_reorg_plan,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build SWARM Server");

@@ -322,7 +322,39 @@
 
   <div id="tabPanel-ai" class="d-none">
     <div class="card">
-      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button"><i class="bi bi-stars heading-icon"></i>What is MCP? <i class="bi bi-info-circle info-affordance"></i></h2>
+      <h2><i class="bi bi-stars heading-icon"></i>AI providers</h2>
+      <p class="muted">Configure the same AI providers used elsewhere — Claude, Codex, or Grok — so SWARM can call out to them for the advanced features below. Nothing here is required for MCP (further down this tab), which works the other way around: an AI tool connecting <em>to</em> SWARM.</p>
+      <div id="aiProvidersList"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2><i class="bi bi-search-heart-fill heading-icon"></i>Scan &amp; scrape assist</h2></div>
+      <div class="row">
+        <label class="checkbox-label"><input type="checkbox" id="aiScanAssistCheck"> Enable AI scan &amp; scrape assist</label>
+        <button id="saveAiScanAssistBtn" class="secondary"><i class="bi bi-check-lg"></i>Save</button>
+      </div>
+      <p class="muted" style="margin-top:8px">When a scrape can't find a confident TMDb match, ask AI to suggest a cleaner title from the filename and retry the lookup. Nothing is changed automatically — you review and apply each suggestion yourself.</p>
+      <p id="aiScanAssistStatus" class="note"></p>
+      <div id="scrapeAssistWrap" class="d-none">
+        <h3 style="margin:14px 0 8px; font-size:.95rem">Needs review</h3>
+        <ul id="scrapeAssistList" class="issue-list"></ul>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2><i class="bi bi-folder-symlink-fill heading-icon"></i>Reorganize media</h2></div>
+      <div class="row">
+        <label class="checkbox-label"><input type="checkbox" id="aiReorganizeCheck"> Enable AI reorganize</label>
+        <button id="saveAiReorganizeBtn" class="secondary"><i class="bi bi-check-lg"></i>Save</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Scan a media root and propose consistent folder names and file locations (subtitles included) so both the scanner and you can read your library easily. Nothing changes until you review and approve the plan — SWARM only ever renames/moves files here, never deletes.</p>
+      <p id="aiReorganizeStatus" class="note"></p>
+      <div id="aiReorganizeScanWrap" class="row d-none" style="margin-top:10px">
+        <select id="aiReorganizeRootSelect" style="flex:1"></select>
+        <button id="aiReorganizeScanBtn" class="secondary"><i class="bi bi-search"></i>Scan for cleanup</button>
+      </div>
+      <div id="aiReorgPlansList"></div>
+    </div>
+    <div class="card">
+      <h2 class="info-trigger" data-info="mcp-protocol" tabindex="0" role="button"><i class="bi bi-question-circle-fill heading-icon"></i>What is MCP? <i class="bi bi-info-circle info-affordance"></i></h2>
       <p class="muted">MCP lets an AI assistant — Claude, Codex, or any other MCP-compatible client — look things up in your library on your behalf. It's read-only: it can search and check status, but it can't change settings or touch your files.</p>
     </div>
     <div class="card">
