@@ -279,6 +279,7 @@ One Rust test file per category under `apps/server/src/gui_tests/`:
 | `notifications_and_errors.rs` | Client-error report → list → resolve → clear round-trip, seeded through the same write path a real client uses |
 | `metadata_editing.rs` | Manual title/genres/overview/rating overrides on a real scanned entry |
 | `mcp_tokens.rs` | MCP access-token generation/rotation and the enabled toggle |
+| `ai_integration.rs` | AI provider settings round-trip (never leaking a saved key back to the UI); scan-assist/reorganize enablement gates; the reorganize scan/approve/reject lifecycle on real files (approve moves and rescans, reject never touches disk) |
 
 Real UI-visible flows (browse, playback, watchlist, ...) aren't covered here
 by design — see `swarm-media-server-uat-tests` (skill) for why (no reliable
