@@ -285,6 +285,48 @@ fn parse_ep_marker(stem: &str) -> Option<u32> {
     None
 }
 
+/// A bare leading episode number with no `S`/`x`/"Ep" marker at all —
+/// e.g. `"101 - Simpsons Roasting on an Open Fire.avi"` sitting directly in
+/// a `Season 01` folder. Real, common convention for older "Complete
+/// Series" rips of very long-running shows (The Simpsons chief among
+/// them): without any of the markers `parse_episode_marker`/`parse_ep_
+/// marker` look for, every file like this used to fall into the season-0
+/// "bonus content" bucket below with no episode number at all, so nothing
+/// under the show ever looked properly identified. `season` is always the
+/// real ancestor `Season N`/`SNN` folder's number, known at every call
+/// site. Two real shapes, disambiguated by digit count:
+/// - Absolute numbering (season folded into the number itself — the
+///   dominant convention for this case): 3-4 digits whose leading portion
+///   equals `season` exactly and leaves a 2-digit remainder — episode is
+///   that remainder (`"101"` under `Season 01` → episode 1, `"714"` under
+///   `Season 07` → episode 14).
+/// - Otherwise, the number is read as a plain per-season episode number.
+/// Requires a non-digit separator right after the digit run (space, `-`,
+/// `.`, `_`), same boundary discipline as `split_track_number`, so a title
+/// that's just a bare number with nothing after it (`"2001.mkv"`) never
+/// misfires.
+fn parse_leading_episode_number(stem: &str, season: u32) -> Option<u32> {
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || digits.len() > 4 {
+        return None;
+    }
+    let rest = &stem[digits.len()..];
+    let trimmed = rest.trim_start_matches([' ', '-', '.', '_']);
+    if trimmed.is_empty() || trimmed.len() == rest.len() {
+        return None;
+    }
+    if digits.len() >= 3 {
+        if let Some(episode_part) = digits.strip_prefix(season.to_string().as_str()) {
+            if episode_part.len() == 2 {
+                if let Ok(episode) = episode_part.parse() {
+                    return Some(episode);
+                }
+            }
+        }
+    }
+    digits.parse().ok()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classified {
     pub kind: MediaKind,
@@ -359,15 +401,29 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         // `Artist/Compilation/<Real Release>/track.mp3`) is skipped so the
         // real album name underneath it is used instead of the category
         // label — see CATEGORY_FOLDER_NAMES.
-        let artist = dirs
-            .first()
-            .map(|s| clean_title(strip_discography_suffix(s)));
-        let album = match dirs.get(1) {
-            Some(second) if is_category_folder(second) && dirs.len() >= 3 => {
-                Some(clean_title(dirs[2]))
-            }
-            Some(second) => Some(clean_title(second)),
-            None => None,
+        //
+        // No artist folder at all (a flat single-folder library, or files
+        // dropped directly under a bare MEDIA_TYPE_WRAPPER_NAMES root) means
+        // there is nothing here to anchor from, so fall back to parsing the
+        // same information out of the filename instead — see
+        // `parse_flat_track_fields`. The scraper (`scrape_tracks` in
+        // `scrape/runner.rs`) requires both artist and album before it will
+        // even attempt a MusicBrainz lookup, so without this fallback every
+        // track in a flat library is permanently skipped.
+        let (artist, album, track_number, title) = if dirs.is_empty() {
+            parse_flat_track_fields(&title, track_number)
+        } else {
+            let artist = dirs
+                .first()
+                .map(|s| clean_title(strip_discography_suffix(s)));
+            let album = match dirs.get(1) {
+                Some(second) if is_category_folder(second) && dirs.len() >= 3 => {
+                    Some(clean_title(dirs[2]))
+                }
+                Some(second) => Some(clean_title(second)),
+                None => None,
+            };
+            (artist, album, track_number, title)
         };
         return Some(Classified {
             kind: MediaKind::Track,
@@ -474,16 +530,34 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     }
 
     // No SxxEyy anywhere in the filename itself, but the file sits somewhere
-    // under a real season folder — bonus/extra content (a featurette,
-    // interview, deleted scene, blooper reel, behind-the-scenes clip...).
-    // The specific containing subfolder name isn't matched against a list of
-    // known synonyms (too fragile — it varies by uploader); the structural
-    // signal alone (nested under a season folder, no episode marker of its
-    // own) is what matters. `season: Some(0)` is the real-world Plex/Kodi/
-    // TheTVDB convention for "Specials" — deliberately a single show-level
-    // bucket rather than per-season, since bonus content isn't numbered
-    // against any one season the way real episodes are.
-    if let Some((show_title, _season, folder_year)) = find_ancestor_season(&dirs) {
+    // under a real season folder. Two cases:
+    // - A bare leading episode number (see [parse_leading_episode_number])
+    //   — the real episode, just numbered without any S/x/Ep marker. Common
+    //   for older "Complete Series" rips of long-running shows.
+    // - Anything else is bonus/extra content (a featurette, interview,
+    //   deleted scene, blooper reel, behind-the-scenes clip...). The
+    //   specific containing subfolder name isn't matched against a list of
+    //   known synonyms (too fragile — it varies by uploader); the
+    //   structural signal alone (nested under a season folder, no episode
+    //   marker of its own) is what matters. `season: Some(0)` is the
+    //   real-world Plex/Kodi/TheTVDB convention for "Specials" —
+    //   deliberately a single show-level bucket rather than per-season,
+    //   since bonus content isn't numbered against any one season the way
+    //   real episodes are.
+    if let Some((show_title, ancestor_season, folder_year)) = find_ancestor_season(&dirs) {
+        // Only trust a bare leading number as the real episode number when
+        // the file sits directly inside the season folder itself — deeper
+        // nesting (e.g. `Season 03/Featurettes/Access - Granted/11. clip
+        // .mkv`) is genuine bonus content that just happens to start with a
+        // number, not an absolute-numbered episode.
+        let directly_in_season_folder = dirs.last().is_some_and(|dir| is_season_folder(dir));
+        let leading_episode = directly_in_season_folder
+            .then(|| parse_leading_episode_number(&stem_clean, ancestor_season))
+            .flatten();
+        let (season, episode) = match leading_episode {
+            Some(episode) => (ancestor_season, Some(episode)),
+            None => (0, None),
+        };
         return Some(Classified {
             kind: MediaKind::Episode,
             title: clean_title(&stem_clean),
@@ -491,8 +565,8 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             album: None,
             track_number: None,
             show_title: Some(show_title),
-            season: Some(0),
-            episode: None,
+            season: Some(season),
+            episode,
             year: year.or(folder_year),
         });
     }
@@ -697,10 +771,27 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
         let Some(season) = literal_season.or_else(|| parse_bare_season_folder(dir)) else {
             continue;
         };
-        let show_title = wrapper_derived_show_name(&dirs[..idx])
-            .unwrap_or_else(|| show_title_from_ancestors(&dirs[..idx]));
+        // A `wrapper_derived_show_name` hit is left exactly as-is (see its
+        // own doc comment and the `bonus_content_under_a_literal_season_
+        // folder_finds_the_real_show_past_a_wrapper_folder` test — that
+        // folder's quality/edition tags are deliberately kept). Only the
+        // naive `show_title_from_ancestors` fallback needs a year stripped:
+        // real libraries commonly name a show folder with its premiere
+        // year (`"The Simpsons (1989)"`, the Sonarr/TVDB-matched default
+        // folder convention), and with no wrapper folder above it to take
+        // the raw-text path instead, that year previously stayed baked
+        // into `show_title` verbatim and was sent to TMDb as part of the
+        // search query — confirmed live for exactly this show.
+        let (show_title, year) = match wrapper_derived_show_name(&dirs[..idx]) {
+            Some(name) => (name, None),
+            None => {
+                let raw = show_title_from_ancestors(&dirs[..idx]);
+                let (stripped, year) = extract_year_and_strip(&raw);
+                (clean_title(&stripped), year)
+            }
+        };
         if !show_title.is_empty() {
-            return Some((show_title, season, None));
+            return Some((show_title, season, year));
         }
     }
     None
@@ -822,6 +913,69 @@ fn split_track_number(stem: &str) -> (Option<u32>, String) {
         return (None, clean_title(stem));
     }
     (digits.parse().ok(), clean_title(trimmed))
+}
+
+/// Recover artist/album/track-number from the filename itself when there is
+/// no artist folder to anchor from (see the `classify` call site). Real flat
+/// libraries — everything dropped in one folder with no per-artist/per-album
+/// structure, the dominant shape produced by older ripping/download tools —
+/// encode the same fields with `" - "` as the separator:
+/// `Artist - Album - Track.mp3`, `Artist - Album - 03 - Track.mp3`, or just
+/// `Artist - Track.mp3` for a single/loose track. `title` has already been
+/// through [`clean_title`] (so `.`/`_` separators read the same as spaces)
+/// and had any *leading* digit-run track number stripped by
+/// [`split_track_number`]; this only looks for one placed as its own
+/// segment in the middle (`Artist - Album - 03 - Track`), since a leading
+/// one is already handled before this runs.
+///
+/// A file with no `" - "` at all carries no recoverable signal, so it's
+/// returned unchanged (`artist`/`album` stay `None`, same as before this
+/// fallback existed) rather than guessed at. A two-segment name is read as
+/// `Artist - Track` rather than `Album - Track`, since a loose/single track
+/// with no album is the far more common real-world case than a lone track
+/// carrying only its album name. This is a best-effort heuristic, not a
+/// guarantee — a genuine one-word title that happens to contain " - " (e.g.
+/// `"Come As You Are - Live Version"`) reads as an artist/title split, but
+/// the alternative is the status quo: a flat-library track never enters
+/// `scrape_tracks` in `scrape/runner.rs` at all (it requires both artist and
+/// album to be non-empty), so it's never scraped no matter what.
+fn parse_flat_track_fields(
+    title: &str,
+    track_number: Option<u32>,
+) -> (Option<String>, Option<String>, Option<u32>, String) {
+    let mut segments: Vec<&str> = title
+        .split(" - ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return (None, None, track_number, title.to_string());
+    }
+
+    let mut track_number = track_number;
+    if track_number.is_none() && segments.len() > 2 {
+        let interior = &segments[1..segments.len() - 1];
+        if let Some(offset) = interior
+            .iter()
+            .position(|s| !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            let index = offset + 1;
+            if let Ok(number) = segments[index].parse() {
+                track_number = Some(number);
+                segments.remove(index);
+            }
+        }
+    }
+
+    if segments.len() < 2 {
+        return (None, None, track_number, clean_title(&segments.join(" - ")));
+    }
+
+    let artist = Some(clean_title(segments[0]));
+    let album = (segments.len() > 2).then(|| clean_title(segments[1]));
+    let title_start = if segments.len() > 2 { 2 } else { 1 };
+    let title = clean_title(&segments[title_start..].join(" - "));
+    (artist, album, track_number, title)
 }
 
 /// Remove every top-level `[...]`, `(...)`, `{...}` span from `text`
@@ -1246,6 +1400,78 @@ mod tests {
         let entry = classify("Artist/Song.mp3").unwrap();
         assert_eq!(entry.artist.as_deref(), Some("Artist"));
         assert_eq!(entry.album, None);
+    }
+
+    #[test]
+    fn flat_library_track_recovers_artist_and_album_from_the_filename() {
+        // No artist folder at all — the dominant shape produced by older
+        // ripping/download tools that dump everything into one folder.
+        // Without the filename fallback this permanently fails to scrape
+        // (`scrape_tracks` requires both artist and album non-empty).
+        let entry = classify("Pink Floyd - The Wall - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.kind, MediaKind::Track);
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, None);
+    }
+
+    #[test]
+    fn flat_library_track_with_a_leading_track_number_is_still_recovered() {
+        let entry = classify("01 - Pink Floyd - The Wall - Comfortably Numb.flac").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, Some(1));
+    }
+
+    #[test]
+    fn flat_library_track_with_an_embedded_middle_track_number_is_recovered() {
+        // Some flat-library tools place the track number as its own
+        // dash-separated segment rather than as a filename prefix.
+        let entry = classify("Pink Floyd - The Wall - 06 - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+        assert_eq!(entry.title, "Comfortably Numb");
+        assert_eq!(entry.track_number, Some(6));
+    }
+
+    #[test]
+    fn flat_library_loose_track_with_no_album_reads_as_artist_and_title() {
+        let entry = classify("Radiohead - Creep.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Radiohead"));
+        assert_eq!(entry.album, None);
+        assert_eq!(entry.title, "Creep");
+    }
+
+    #[test]
+    fn flat_library_track_under_a_bare_music_wrapper_is_also_recovered() {
+        let entry = classify("Music/Pink Floyd - The Wall - Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(entry.album.as_deref(), Some("The Wall"));
+    }
+
+    #[test]
+    fn flat_library_track_with_no_separator_is_left_unrecovered() {
+        // No "-" at all carries no recoverable signal; stays exactly as
+        // before this fallback existed rather than guessing.
+        let entry = classify("Comfortably Numb.mp3").unwrap();
+        assert_eq!(entry.artist, None);
+        assert_eq!(entry.album, None);
+        assert_eq!(entry.title, "Comfortably Numb");
+    }
+
+    #[test]
+    fn folder_based_classification_is_unaffected_by_dashes_in_the_title() {
+        // A real artist/album folder structure must never be overridden by
+        // the flat-filename fallback, even when the title itself contains
+        // " - " (e.g. a live-version suffix).
+        let entry =
+            classify("Nirvana/Unplugged In New York/01 - Come As You Are - Live.flac").unwrap();
+        assert_eq!(entry.artist.as_deref(), Some("Nirvana"));
+        assert_eq!(entry.album.as_deref(), Some("Unplugged In New York"));
+        assert_eq!(entry.title, "Come As You Are - Live");
+        assert_eq!(entry.track_number, Some(1));
     }
 
     #[test]
@@ -1794,6 +2020,66 @@ mod tests {
         // Real, valid matches, both digit widths, case-insensitive.
         assert_eq!(parse_bare_season_folder("S06"), Some(6));
         assert_eq!(parse_bare_season_folder("s6"), Some(6));
+    }
+
+    // --- absolute-numbered episodes and year-bearing show folders ---
+    // Real bug, reported against The Simpsons: a "Complete Series" rip
+    // organized as `<Show> (<year>)/Season NN/<absolute number> - <title>`
+    // with no SxxEyy/NxNN/Ep marker anywhere was falling into the season-0
+    // bonus bucket with no episode number, and the show folder's own
+    // "(1989)" year was leaking into the show_title used for TMDb search.
+
+    #[test]
+    fn absolute_numbered_episode_under_a_season_folder_recovers_season_and_episode() {
+        let entry = classify(
+            "Shows/The Simpsons/Season 01/101 - Simpsons Roasting on an Open Fire.avi",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("The Simpsons"));
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
+    }
+
+    #[test]
+    fn absolute_numbered_episode_with_two_digit_season_recovers_correctly() {
+        let entry = classify(
+            "Shows/The Simpsons/Season 28/2822 - Dad Behavior.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.season, Some(28));
+        assert_eq!(entry.episode, Some(22));
+    }
+
+    #[test]
+    fn plain_numbered_episode_under_a_season_folder_uses_the_number_directly() {
+        // No absolute-numbering signal (leading digits don't start with the
+        // season number) — read as a plain per-season episode number rather
+        // than treated as bonus content.
+        let entry = classify("Shows/Dexter/Season 03/07 - Easy as Pie.mkv").unwrap();
+        assert_eq!(entry.season, Some(3));
+        assert_eq!(entry.episode, Some(7));
+    }
+
+    #[test]
+    fn genuine_bonus_content_under_a_season_folder_is_still_season_zero() {
+        // No leading digit run at all — must remain the pre-existing
+        // season-0 "Specials" bucket, not misread as episode content.
+        let entry =
+            classify("Shows/The Simpsons/Season 01/Deleted Scene.mkv").unwrap();
+        assert_eq!(entry.season, Some(0));
+        assert_eq!(entry.episode, None);
+    }
+
+    #[test]
+    fn year_in_show_folder_name_is_stripped_from_the_derived_show_title() {
+        let entry = classify(
+            "The Simpsons (1989)/Season 01/The Simpsons - S01E01 - Simpsons Roasting on an Open Fire.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.show_title.as_deref(), Some("The Simpsons"));
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
     }
 
     // --- movie "local extras" subfolders ---

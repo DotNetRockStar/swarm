@@ -10,6 +10,35 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+/// One configured AI provider (issue #235's "AI" tab) — Claude, Codex, or
+/// Grok, all held to the same shape so the tab can render one row per
+/// provider from a loop rather than three hand-written sections. `id` is
+/// the stable key (`ai::AiProviderKind::id()`), never shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiProviderSetting {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub model: String,
+}
+
+/// The three supported providers, seeded disabled/keyless — a brand-new
+/// install (or one upgrading from a pre-#235 settings.json) starts with
+/// every advanced AI feature inert until a user opts in from the AI tab.
+fn default_ai_providers() -> Vec<AiProviderSetting> {
+    crate::ai::AiProviderKind::all()
+        .into_iter()
+        .map(|kind| AiProviderSetting {
+            id: kind.id().to_string(),
+            enabled: false,
+            api_key: None,
+            model: kind.default_model().to_string(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRootSetting {
     pub label: String,
@@ -576,6 +605,24 @@ pub struct Settings {
     /// server holds live playback connections). Defaults to `"notify"`.
     #[serde(default = "default_auto_update")]
     pub auto_update: String,
+    /// Configured AI providers for the AI tab's advanced features (issue
+    /// #235) — always exactly the three entries `default_ai_providers`
+    /// seeds, present or not on disk. Adding a fourth provider later means
+    /// extending that function, not this field's shape.
+    #[serde(default = "default_ai_providers")]
+    pub ai_providers: Vec<AiProviderSetting>,
+    /// Gates `ai::scrape assist` (AI-assisted TMDb matching for entries the
+    /// ordinary scrape pass couldn't match) — off until a user opts in, even
+    /// once a provider is configured, since it makes outbound calls with
+    /// filenames from the user's library.
+    #[serde(default)]
+    pub ai_scan_assist_enabled: bool,
+    /// Gates the AI reorganize feature (`reorganize.rs`): scanning a media
+    /// root and proposing a rename/move plan. The plan itself always still
+    /// requires explicit per-run approval before anything on disk changes —
+    /// this toggle only controls whether the feature is offered at all.
+    #[serde(default)]
+    pub ai_reorganize_enabled: bool,
 }
 
 fn default_streaming_upload_budget_enabled() -> bool {
@@ -645,6 +692,9 @@ impl Default for Settings {
             max_transcode_height: 0,
             hls_segment_seconds: default_hls_segment_seconds(),
             auto_update: default_auto_update(),
+            ai_providers: default_ai_providers(),
+            ai_scan_assist_enabled: false,
+            ai_reorganize_enabled: false,
         }
     }
 }

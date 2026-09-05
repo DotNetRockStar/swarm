@@ -34,3 +34,4 @@ mod notifications_and_errors;
 mod metadata_editing;
 mod mcp_tokens;
 mod transcoding_settings;
+mod ai_integration;

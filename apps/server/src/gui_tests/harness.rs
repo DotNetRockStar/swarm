@@ -61,6 +61,9 @@ pub fn test_app() -> TestApp {
             _sleep_inhibitor: None,
             test_data_dir: Some(data_dir.path().to_path_buf()),
             test_bind_override: Some((bind, http_media_bind)),
+            last_scrape_issues: tokio::sync::Mutex::new(Vec::new()),
+            reorg_plans: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            next_reorg_plan_id: std::sync::atomic::AtomicU64::new(1),
         })
         .build(mock_context(noop_assets()))
         .expect("build mock tauri app");
