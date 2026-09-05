@@ -285,6 +285,48 @@ fn parse_ep_marker(stem: &str) -> Option<u32> {
     None
 }
 
+/// A bare leading episode number with no `S`/`x`/"Ep" marker at all —
+/// e.g. `"101 - Simpsons Roasting on an Open Fire.avi"` sitting directly in
+/// a `Season 01` folder. Real, common convention for older "Complete
+/// Series" rips of very long-running shows (The Simpsons chief among
+/// them): without any of the markers `parse_episode_marker`/`parse_ep_
+/// marker` look for, every file like this used to fall into the season-0
+/// "bonus content" bucket below with no episode number at all, so nothing
+/// under the show ever looked properly identified. `season` is always the
+/// real ancestor `Season N`/`SNN` folder's number, known at every call
+/// site. Two real shapes, disambiguated by digit count:
+/// - Absolute numbering (season folded into the number itself — the
+///   dominant convention for this case): 3-4 digits whose leading portion
+///   equals `season` exactly and leaves a 2-digit remainder — episode is
+///   that remainder (`"101"` under `Season 01` → episode 1, `"714"` under
+///   `Season 07` → episode 14).
+/// - Otherwise, the number is read as a plain per-season episode number.
+/// Requires a non-digit separator right after the digit run (space, `-`,
+/// `.`, `_`), same boundary discipline as `split_track_number`, so a title
+/// that's just a bare number with nothing after it (`"2001.mkv"`) never
+/// misfires.
+fn parse_leading_episode_number(stem: &str, season: u32) -> Option<u32> {
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || digits.len() > 4 {
+        return None;
+    }
+    let rest = &stem[digits.len()..];
+    let trimmed = rest.trim_start_matches([' ', '-', '.', '_']);
+    if trimmed.is_empty() || trimmed.len() == rest.len() {
+        return None;
+    }
+    if digits.len() >= 3 {
+        if let Some(episode_part) = digits.strip_prefix(season.to_string().as_str()) {
+            if episode_part.len() == 2 {
+                if let Ok(episode) = episode_part.parse() {
+                    return Some(episode);
+                }
+            }
+        }
+    }
+    digits.parse().ok()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classified {
     pub kind: MediaKind,
@@ -488,16 +530,34 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     }
 
     // No SxxEyy anywhere in the filename itself, but the file sits somewhere
-    // under a real season folder — bonus/extra content (a featurette,
-    // interview, deleted scene, blooper reel, behind-the-scenes clip...).
-    // The specific containing subfolder name isn't matched against a list of
-    // known synonyms (too fragile — it varies by uploader); the structural
-    // signal alone (nested under a season folder, no episode marker of its
-    // own) is what matters. `season: Some(0)` is the real-world Plex/Kodi/
-    // TheTVDB convention for "Specials" — deliberately a single show-level
-    // bucket rather than per-season, since bonus content isn't numbered
-    // against any one season the way real episodes are.
-    if let Some((show_title, _season, folder_year)) = find_ancestor_season(&dirs) {
+    // under a real season folder. Two cases:
+    // - A bare leading episode number (see [parse_leading_episode_number])
+    //   — the real episode, just numbered without any S/x/Ep marker. Common
+    //   for older "Complete Series" rips of long-running shows.
+    // - Anything else is bonus/extra content (a featurette, interview,
+    //   deleted scene, blooper reel, behind-the-scenes clip...). The
+    //   specific containing subfolder name isn't matched against a list of
+    //   known synonyms (too fragile — it varies by uploader); the
+    //   structural signal alone (nested under a season folder, no episode
+    //   marker of its own) is what matters. `season: Some(0)` is the
+    //   real-world Plex/Kodi/TheTVDB convention for "Specials" —
+    //   deliberately a single show-level bucket rather than per-season,
+    //   since bonus content isn't numbered against any one season the way
+    //   real episodes are.
+    if let Some((show_title, ancestor_season, folder_year)) = find_ancestor_season(&dirs) {
+        // Only trust a bare leading number as the real episode number when
+        // the file sits directly inside the season folder itself — deeper
+        // nesting (e.g. `Season 03/Featurettes/Access - Granted/11. clip
+        // .mkv`) is genuine bonus content that just happens to start with a
+        // number, not an absolute-numbered episode.
+        let directly_in_season_folder = dirs.last().is_some_and(|dir| is_season_folder(dir));
+        let leading_episode = directly_in_season_folder
+            .then(|| parse_leading_episode_number(&stem_clean, ancestor_season))
+            .flatten();
+        let (season, episode) = match leading_episode {
+            Some(episode) => (ancestor_season, Some(episode)),
+            None => (0, None),
+        };
         return Some(Classified {
             kind: MediaKind::Episode,
             title: clean_title(&stem_clean),
@@ -505,8 +565,8 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             album: None,
             track_number: None,
             show_title: Some(show_title),
-            season: Some(0),
-            episode: None,
+            season: Some(season),
+            episode,
             year: year.or(folder_year),
         });
     }
@@ -711,10 +771,27 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
         let Some(season) = literal_season.or_else(|| parse_bare_season_folder(dir)) else {
             continue;
         };
-        let show_title = wrapper_derived_show_name(&dirs[..idx])
-            .unwrap_or_else(|| show_title_from_ancestors(&dirs[..idx]));
+        // A `wrapper_derived_show_name` hit is left exactly as-is (see its
+        // own doc comment and the `bonus_content_under_a_literal_season_
+        // folder_finds_the_real_show_past_a_wrapper_folder` test — that
+        // folder's quality/edition tags are deliberately kept). Only the
+        // naive `show_title_from_ancestors` fallback needs a year stripped:
+        // real libraries commonly name a show folder with its premiere
+        // year (`"The Simpsons (1989)"`, the Sonarr/TVDB-matched default
+        // folder convention), and with no wrapper folder above it to take
+        // the raw-text path instead, that year previously stayed baked
+        // into `show_title` verbatim and was sent to TMDb as part of the
+        // search query — confirmed live for exactly this show.
+        let (show_title, year) = match wrapper_derived_show_name(&dirs[..idx]) {
+            Some(name) => (name, None),
+            None => {
+                let raw = show_title_from_ancestors(&dirs[..idx]);
+                let (stripped, year) = extract_year_and_strip(&raw);
+                (clean_title(&stripped), year)
+            }
+        };
         if !show_title.is_empty() {
-            return Some((show_title, season, None));
+            return Some((show_title, season, year));
         }
     }
     None
@@ -1943,6 +2020,66 @@ mod tests {
         // Real, valid matches, both digit widths, case-insensitive.
         assert_eq!(parse_bare_season_folder("S06"), Some(6));
         assert_eq!(parse_bare_season_folder("s6"), Some(6));
+    }
+
+    // --- absolute-numbered episodes and year-bearing show folders ---
+    // Real bug, reported against The Simpsons: a "Complete Series" rip
+    // organized as `<Show> (<year>)/Season NN/<absolute number> - <title>`
+    // with no SxxEyy/NxNN/Ep marker anywhere was falling into the season-0
+    // bonus bucket with no episode number, and the show folder's own
+    // "(1989)" year was leaking into the show_title used for TMDb search.
+
+    #[test]
+    fn absolute_numbered_episode_under_a_season_folder_recovers_season_and_episode() {
+        let entry = classify(
+            "Shows/The Simpsons/Season 01/101 - Simpsons Roasting on an Open Fire.avi",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("The Simpsons"));
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
+    }
+
+    #[test]
+    fn absolute_numbered_episode_with_two_digit_season_recovers_correctly() {
+        let entry = classify(
+            "Shows/The Simpsons/Season 28/2822 - Dad Behavior.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.season, Some(28));
+        assert_eq!(entry.episode, Some(22));
+    }
+
+    #[test]
+    fn plain_numbered_episode_under_a_season_folder_uses_the_number_directly() {
+        // No absolute-numbering signal (leading digits don't start with the
+        // season number) — read as a plain per-season episode number rather
+        // than treated as bonus content.
+        let entry = classify("Shows/Dexter/Season 03/07 - Easy as Pie.mkv").unwrap();
+        assert_eq!(entry.season, Some(3));
+        assert_eq!(entry.episode, Some(7));
+    }
+
+    #[test]
+    fn genuine_bonus_content_under_a_season_folder_is_still_season_zero() {
+        // No leading digit run at all — must remain the pre-existing
+        // season-0 "Specials" bucket, not misread as episode content.
+        let entry =
+            classify("Shows/The Simpsons/Season 01/Deleted Scene.mkv").unwrap();
+        assert_eq!(entry.season, Some(0));
+        assert_eq!(entry.episode, None);
+    }
+
+    #[test]
+    fn year_in_show_folder_name_is_stripped_from_the_derived_show_title() {
+        let entry = classify(
+            "The Simpsons (1989)/Season 01/The Simpsons - S01E01 - Simpsons Roasting on an Open Fire.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.show_title.as_deref(), Some("The Simpsons"));
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
     }
 
     // --- movie "local extras" subfolders ---
