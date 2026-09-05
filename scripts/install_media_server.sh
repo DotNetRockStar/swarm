@@ -39,7 +39,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SWARM Server"
 BUNDLE_ID="app.swarm.server"
 BUNDLE_BIN="swarm-server-app"   # macOS exe name = Cargo bin, not product name
-BUILT_APP="$REPO_ROOT/target/release/bundle/macos/$APP_NAME.app"
+BUNDLE_DIR="$REPO_ROOT/target/release/bundle/macos"
+BUILT_APP="$BUNDLE_DIR/$APP_NAME.app"
 CMD_SRC="$REPO_ROOT/scripts/swarm-server"
 CMD_DST="$HOME/.local/bin/swarm-server"
 DATA_DIR="$HOME/Library/Application Support/$BUNDLE_ID"
@@ -86,6 +87,16 @@ detect_lan_ip() {
         [ -n "$ip" ] && { echo "$ip"; return; }
     done
     echo "127.0.0.1"
+}
+
+detach_stale_dmg() {
+    local vol
+    for vol in "/Volumes/$APP_NAME"*; do
+        [ -d "$vol" ] || continue
+        echo "   detaching stale DMG volume: $vol"
+        hdiutil detach "$vol" -quiet 2>/dev/null || hdiutil detach "$vol" -force -quiet 2>/dev/null || true
+    done
+    return 0
 }
 
 remove_old_launchagent() {
@@ -145,12 +156,23 @@ do_install() {
     cargo clean --release -p whisper-rs-sys 2>/dev/null || true
 
     echo
-    echo "==> Building the release app (~10-20 min the first time) ..."
-    # Only the .app is needed for a local install. Skip the DMG bundle: it adds
-    # minutes, needs Finder/AppleScript access, and bundle_dmg.sh fails outright
-    # when a stale "SWARM Server" volume is still mounted from an earlier run.
+    echo "==> Building the release app + DMG (~10-20 min the first time) ..."
+    detach_stale_dmg   # avoid bundle_dmg.sh failing on a volume left mounted from an earlier run
+    # tauri.conf.json enables the updater (createUpdaterArtifacts) for the real
+    # release pipeline, which signs its update artifact with
+    # TAURI_SIGNING_PRIVATE_KEY. That key is a CI/CD release secret this local
+    # script has no business holding, so `tauri build` errors out looking for
+    # it — after it has already produced the .app — and aborts the whole
+    # install before anything gets copied to /Applications. Disable that
+    # artifact for local builds only; the checked-in config is untouched.
+    # The DMG bundle step (bundle_dmg.sh) is best-effort: a leftover mounted
+    # volume or missing Finder/AppleScript access can still make it fail even
+    # after detach_stale_dmg, so a nonzero exit here does not abort the
+    # install — only a missing .app (checked next) does.
     ( cd "$REPO_ROOT/apps/server" \
-        && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}" "$tauri_cli" build --bundles app )
+        && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}" "$tauri_cli" build \
+            --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}' ) \
+        || echo "   (DMG/bundle step reported an error — continuing if the .app was still produced)"
     [ -d "$BUILT_APP" ] || { echo "Build did not produce $BUILT_APP" >&2; exit 1; }
 
     echo
@@ -190,6 +212,9 @@ do_install() {
     SWARM_PEER_PORT="$PEER_PORT" SWARM_HTTP_MEDIA_PORT="$HTTP_MEDIA_PORT" "$CMD_DST" start || true
 
     local lan_ip; lan_ip="$(detect_lan_ip)"
+    local dmg
+    dmg="$(find "$REPO_ROOT/target/release/bundle/dmg" -maxdepth 1 -iname "*.dmg" ! -iname "rw.*" -print0 2>/dev/null \
+        | xargs -0 ls -t 2>/dev/null | head -1 || true)"
     cat <<EOF
 
 --------------------------------------------------------------------
@@ -198,6 +223,7 @@ $APP_NAME is installed. It does not auto-start or auto-restart.
   Control:    swarm-server {start|stop|restart|status|logs [-f]}
               (add ~/.local/bin to PATH if 'swarm-server' isn't found)
   App:        $APP_PATH
+  DMG:        ${dmg:-not built this run (bundle_dmg.sh step failed — see log above)}
   Dashboard:  the SWARM tray icon (menu bar) -> the app window
   LAN:        $lan_ip:$PEER_PORT   (mDNS-advertised to TVs)
   Data dir:   $DATA_DIR   (library + LAN pairings carried over)
