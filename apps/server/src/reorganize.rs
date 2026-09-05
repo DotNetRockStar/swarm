@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use swarm_core::peer::MediaKind;
 use swarm_media::classify::{self, Classified};
+use swarm_media::plex::{self, PlexValidationIssue};
 use swarm_media::subtitles::{parse_subtitle_name, subtitle_extension};
 
 /// Cap on how many AI calls one scan will make, so a folder full of
@@ -49,6 +50,12 @@ pub struct ReorgPlan {
     pub items: Vec<ReorgItem>,
     pub ai_assisted_count: u32,
     pub conflict_count: u32,
+    /// Every deterministic Plex-conformance problem found in the root
+    /// (issue #247) — the complete list, unlike the bounded best-effort
+    /// subset a library scan reports. Each carries the current path, the
+    /// problem, the expected Plex-compatible structure, and a recommended
+    /// fix, so the AI helper can offer automatic repair.
+    pub validation: Vec<PlexValidationIssue>,
 }
 
 /// Walks `root` (a configured media root's real path) and proposes a
@@ -114,12 +121,28 @@ pub async fn scan_root(root_label: &str, root: &Path, ai: Option<&AiClient>) -> 
         }
     }
 
+    // Deterministic Plex-conformance validation over every media file in
+    // the root — movies, episodes, and tracks alike, not just the videos
+    // considered for a move above.
+    let mut validation = Vec::new();
+    for relative in &video_files {
+        let unix_relative = to_unix(relative);
+        if classify::media_extension(&unix_relative).is_none() {
+            continue;
+        }
+        let classified = classify::classify(&unix_relative);
+        if let Some(issue) = plex::validate_media_file(&unix_relative, classified.as_ref()) {
+            validation.push(issue);
+        }
+    }
+
     let conflict_count = items.iter().filter(|i| i.conflict.is_some()).count() as u32;
     Ok(ReorgPlan {
         root_label: root_label.to_string(),
         items,
         ai_assisted_count,
         conflict_count,
+        validation,
     })
 }
 
@@ -212,6 +235,10 @@ async fn guess_with_ai(client: &AiClient, relative_path: &str) -> Option<Classif
             season: None,
             episode: None,
             year: guess.year,
+            episode_end: None,
+            plex_guid: None,
+            edition: None,
+            extra_kind: None,
         }),
         Some("episode")
             if guess.show_title.as_deref().is_some_and(|s| !s.trim().is_empty())
@@ -228,6 +255,10 @@ async fn guess_with_ai(client: &AiClient, relative_path: &str) -> Option<Classif
                 season: guess.season,
                 episode: guess.episode,
                 year: guess.year,
+                episode_end: None,
+                plex_guid: None,
+                edition: None,
+                extra_kind: None,
             })
         }
         _ => None,

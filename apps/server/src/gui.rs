@@ -334,6 +334,7 @@ impl AppState {
             removed: report.removed,
             unchanged: report.unchanged,
             incomplete_roots: report.incomplete_roots,
+            validation_issues: report.validation_issues,
         }))
     }
 }
@@ -1321,6 +1322,7 @@ async fn repair_smb_root<R: tauri::Runtime>(
             removed: report.removed,
             unchanged: report.unchanged,
             incomplete_roots: report.incomplete_roots,
+            validation_issues: report.validation_issues,
         })
     } else {
         None
@@ -1705,6 +1707,10 @@ struct RescanResult {
     /// contents were not reconciled this pass (#222). Empty on a clean scan.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     incomplete_roots: Vec<String>,
+    /// Best-effort, bounded Plex-conformance problems found this scan
+    /// (issue #247). Empty when every scanned file conforms.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    validation_issues: Vec<swarm_media::plex::PlexValidationIssue>,
 }
 
 /// `scan-progress` event name emitted to the webview during [`rescan`] —
@@ -1745,12 +1751,44 @@ async fn rescan<R: tauri::Runtime>(
             tracing::warn!(%error, "could not save incomplete-rescan notification");
         }
     }
+    // Plex-conformance problems found this scan (issue #247). Deterministic
+    // and non-fatal — the affected files were still scanned as best as
+    // possible; this just tells the user which ones Plex would also
+    // struggle with and how to bring them into a Plex-compatible shape.
+    if !report.validation_issues.is_empty() {
+        let shown = report.validation_issues.len().min(20);
+        let mut message = format!(
+            "{} file(s) don't fully match a Plex-supported layout. They were still scanned; \
+             fixing them keeps the library portable to and from Plex.\n",
+            report.validation_issues.len()
+        );
+        for issue in &report.validation_issues[..shown] {
+            message.push_str(&format!(
+                "\n• {}\n  problem: {}\n  expected: {}\n  fix: {}\n",
+                issue.current_path, issue.problem, issue.expected, issue.recommended_fix
+            ));
+        }
+        if report.validation_issues.len() > shown {
+            message.push_str(&format!(
+                "\n…and {} more. Use the AI tab's \"Reorganize\" scan for the full list.",
+                report.validation_issues.len() - shown
+            ));
+        }
+        if let Err(error) = core
+            .library
+            .record_server_notification("warning", "Some media isn't in a Plex-compatible layout", &message)
+            .await
+        {
+            tracing::warn!(%error, "could not save media-validation notification");
+        }
+    }
     Ok(RescanResult {
         added: report.added,
         updated: report.updated,
         removed: report.removed,
         unchanged: report.unchanged,
         incomplete_roots: report.incomplete_roots,
+        validation_issues: report.validation_issues,
     })
 }
 
@@ -1787,6 +1825,9 @@ struct ReorgPlanView {
     items: Vec<reorganize::ReorgItem>,
     ai_assisted_count: u32,
     conflict_count: u32,
+    /// Deterministic Plex-conformance problems found in the root (issue
+    /// #247) — surfaced to the AI tab alongside the proposed moves.
+    validation: Vec<swarm_media::plex::PlexValidationIssue>,
     status: String,
     apply_summary: Option<ApplySummaryView>,
 }
@@ -1803,6 +1844,7 @@ fn reorg_plan_view(
         items: plan.items.clone(),
         ai_assisted_count: plan.ai_assisted_count,
         conflict_count: plan.conflict_count,
+        validation: plan.validation.clone(),
         status: status.to_string(),
         apply_summary: outcome.map(|o| ApplySummaryView {
             applied: o.applied,
@@ -2299,6 +2341,7 @@ async fn run_library_maintenance<R: tauri::Runtime>(
                 removed: scan.removed,
                 unchanged: scan.unchanged,
                 incomplete_roots: scan.incomplete_roots,
+                validation_issues: scan.validation_issues,
             },
             scrape,
             classifications,

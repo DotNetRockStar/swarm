@@ -234,8 +234,41 @@ fn movie_extra_from_dirs(dirs: &[&str], clip_stem: &str) -> Option<(String, u32,
 /// picked up show_title `"Featurettes"` before this existed.
 fn wrapper_derived_show_name(dirs: &[&str]) -> Option<String> {
     let wrapper_idx = dirs.iter().position(|d| is_video_type_wrapper(d))?;
-    let show_title = clean_title(dirs.get(wrapper_idx + 1)?);
+    // Strip Plex `{tvdb-…}` / `{imdb-…}` / `{edition-…}` tokens and a
+    // trailing `(YYYY)` premiere year — Plex shows neither in the display
+    // title (the year is a separate field) — but keep everything else this
+    // fallback deliberately preserves (quality/edition parentheticals; see
+    // the doc comment).
+    let raw = crate::plex::strip_plex_tokens(dirs.get(wrapper_idx + 1)?);
+    let show_title = clean_title(strip_trailing_year_paren(&raw));
     (!show_title.is_empty()).then_some(show_title)
+}
+
+/// Remove a trailing ` (YYYY)` where the parenthetical is exactly a
+/// `1900..=2099` year — the Plex `Show Name (Year)` folder convention. A
+/// non-year trailing parenthetical (`(1080p BluRay …)`, `(US)`) is left
+/// untouched.
+fn strip_trailing_year_paren(name: &str) -> &str {
+    let trimmed = name.trim_end();
+    let Some(inner) = trimmed.strip_suffix(')') else {
+        return name;
+    };
+    let Some(open) = inner.rfind('(') else {
+        return name;
+    };
+    let candidate = &inner[open + 1..];
+    if candidate.len() == 4
+        && candidate.bytes().all(|b| b.is_ascii_digit())
+        && candidate
+            .parse::<u32>()
+            .is_ok_and(|y| (1900..=2099).contains(&y))
+    {
+        let head = inner[..open].trim_end();
+        if !head.is_empty() {
+            return head;
+        }
+    }
+    name
 }
 
 /// Find an `Ep`/`Episode` marker (case-insensitive, optional trailing `.`,
@@ -338,6 +371,41 @@ pub struct Classified {
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub year: Option<u32>,
+    /// Last episode of a Plex multi-episode file (`S01E01-E03` → `episode`
+    /// = 1, `episode_end` = Some(3)). `None` for ordinary single-episode
+    /// files. See [`crate::plex::parse_episode_range`].
+    pub episode_end: Option<u32>,
+    /// Plex agent id embedded in the file/folder name as `{tmdb-…}` /
+    /// `{imdb-…}` / `{tvdb-…}`, stored in `agent-id` token form. Lets the
+    /// scraper skip its fuzzy matcher. See [`crate::plex::parse_guid`].
+    pub plex_guid: Option<String>,
+    /// Plex `{edition-<label>}` token, e.g. `Director's Cut`.
+    pub edition: Option<String>,
+    /// When the file is a Plex "extra" (trailer / behind the scenes /
+    /// deleted scene / …) rather than a feature or a numbered episode, the
+    /// extras category slug (see [`crate::plex::PlexExtraKind::slug`]).
+    pub extra_kind: Option<&'static str>,
+}
+
+/// A `Classified` with every field at its neutral default, so the many
+/// call sites below only have to name the fields that actually apply. Used
+/// with struct-update syntax: `Classified { kind, title, ..blank() }`.
+fn blank_classified() -> Classified {
+    Classified {
+        kind: MediaKind::Movie,
+        title: String::new(),
+        artist: None,
+        album: None,
+        track_number: None,
+        show_title: None,
+        season: None,
+        episode: None,
+        year: None,
+        episode_end: None,
+        plex_guid: None,
+        edition: None,
+        extra_kind: None,
+    }
 }
 
 pub fn media_extension(relative_path: &str) -> Option<(&'static str, bool)> {
@@ -431,10 +499,7 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             artist,
             album,
             track_number,
-            show_title: None,
-            season: None,
-            episode: None,
-            year: None,
+            ..blank_classified()
         });
     }
 
@@ -457,7 +522,24 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         year = dirs.last().and_then(|dir| extract_year_and_strip(dir).1);
     }
 
+    // Plex "Movie/Show Specific Naming": an agent id and/or an edition label
+    // embedded in the file stem or any ancestor folder as `{tmdb-…}` /
+    // `{imdb-…}` / `{tvdb-…}` / `{edition-…}`. The existing bracket handling
+    // already strips both from the derived title; this captures them so the
+    // scraper can skip its fuzzy matcher and the catalog can show the
+    // edition. Nearest name wins (file over folder).
+    let plex_guid = crate::plex::parse_guid(stem)
+        .or_else(|| dirs.iter().rev().find_map(|d| crate::plex::parse_guid(d)))
+        .map(|g| g.token());
+    let edition = crate::plex::parse_edition(stem)
+        .or_else(|| dirs.iter().rev().find_map(|d| crate::plex::parse_edition(d)));
+
     if let Some((season, episode, title_prefix)) = parse_episode_marker(&stem_clean) {
+        // Plex multi-episode file (`S01E01-E03`): keep the first episode as
+        // the primary number and record the span end.
+        let episode_end = crate::plex::parse_episode_range(&stem_clean)
+            .filter(|r| r.season == season && r.first == episode && r.last > episode)
+            .map(|r| r.last);
         // Show title: prefer an ancestor season folder (either shape — see
         // find_ancestor_season) over the text before the SxxEyy/NxNN
         // marker, else fall back to the marker's own stem-prefix text, else
@@ -486,13 +568,14 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
         return Some(Classified {
             kind: MediaKind::Episode,
             title: clean_title(&stem_clean),
-            artist: None,
-            album: None,
-            track_number: None,
             show_title: (!show_title.is_empty()).then_some(show_title),
             season: Some(season),
             episode: Some(episode),
+            episode_end,
             year,
+            plex_guid,
+            edition,
+            ..blank_classified()
         });
     }
 
@@ -518,13 +601,13 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             return Some(Classified {
                 kind: MediaKind::Episode,
                 title: clean_title(&stem_clean),
-                artist: None,
-                album: None,
-                track_number: None,
                 show_title: Some(show_title),
                 season: Some(season),
                 episode: Some(episode),
                 year: year.or(folder_year),
+                plex_guid,
+                edition,
+                ..blank_classified()
             });
         }
     }
@@ -558,16 +641,26 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             Some(episode) => (ancestor_season, Some(episode)),
             None => (0, None),
         };
+        // Season-0 bonus content sitting in a recognized Plex extras folder
+        // (`Featurettes/`, `Deleted Scenes/`, …) carries that category.
+        let extra_kind = (season == 0)
+            .then(|| {
+                dirs.iter()
+                    .find_map(|d| crate::plex::PlexExtraKind::from_dir_name(d))
+            })
+            .flatten()
+            .map(|k| k.slug());
         return Some(Classified {
             kind: MediaKind::Episode,
             title: clean_title(&stem_clean),
-            artist: None,
-            album: None,
-            track_number: None,
             show_title: Some(show_title),
             season: Some(season),
             episode,
             year: year.or(folder_year),
+            plex_guid,
+            edition,
+            extra_kind,
+            ..blank_classified()
         });
     }
 
@@ -586,16 +679,20 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // since a real path may carry an extra leading multi-root label segment
     // ahead of the wrapper.
     if let Some(show_title) = wrapper_derived_show_name(&dirs) {
+        let extra_kind = dirs
+            .iter()
+            .find_map(|d| crate::plex::PlexExtraKind::from_dir_name(d))
+            .map(|k| k.slug());
         return Some(Classified {
             kind: MediaKind::Episode,
             title: clean_title(&stem_clean),
-            artist: None,
-            album: None,
-            track_number: None,
             show_title: Some(show_title),
             season: Some(0),
-            episode: None,
             year,
+            plex_guid,
+            edition,
+            extra_kind,
+            ..blank_classified()
         });
     }
 
@@ -605,6 +702,10 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     // and year — so it groups with the feature and scrapes as the same
     // title — with the clip's own name appended for the catalog list.
     if let Some((movie_title, movie_year, clip)) = movie_extra_from_dirs(&dirs, &stem_clean) {
+        let extra_kind = dirs
+            .iter()
+            .find_map(|d| crate::plex::PlexExtraKind::from_dir_name(d))
+            .map(|k| k.slug());
         return Some(Classified {
             kind: MediaKind::Movie,
             title: if clip.is_empty() || clip.eq_ignore_ascii_case(&movie_title) {
@@ -612,14 +713,32 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
             } else {
                 format!("{movie_title} - {clip}")
             },
-            artist: None,
-            album: None,
-            track_number: None,
-            show_title: None,
-            season: None,
-            episode: None,
             year: year.or(Some(movie_year)),
+            plex_guid,
+            edition,
+            extra_kind,
+            ..blank_classified()
         });
+    }
+
+    // Plex extras named by filename suffix rather than by folder:
+    // `Inception (2010)-trailer.mkv`, `Big Buck Bunny (2008)-behindthescenes.mkv`.
+    // The base stem before the suffix is the feature's own name, so the clip
+    // groups and scrapes with the feature.
+    if let Some((extra_kind, base)) = crate::plex::PlexExtraKind::from_filename_suffix(stem) {
+        let (base_clean, base_year) = extract_year_and_strip(&base);
+        let base_title = clean_title(&base_clean);
+        if !base_title.is_empty() {
+            return Some(Classified {
+                kind: MediaKind::Movie,
+                title: base_title,
+                year: year.or(base_year),
+                plex_guid,
+                edition,
+                extra_kind: Some(extra_kind.slug()),
+                ..blank_classified()
+            });
+        }
     }
 
     // Some personal libraries append cast/genre/language descriptors after
@@ -647,13 +766,10 @@ pub fn classify(relative_path: &str) -> Option<Classified> {
     Some(Classified {
         kind: MediaKind::Movie,
         title,
-        artist: None,
-        album: None,
-        track_number: None,
-        show_title: None,
-        season: None,
-        episode: None,
         year,
+        plex_guid,
+        edition,
+        ..blank_classified()
     })
 }
 
@@ -680,6 +796,9 @@ fn is_season_folder(name: &str) -> bool {
         .map(|rest| rest.trim().bytes().all(|b| b.is_ascii_digit()))
         .unwrap_or(false);
     literal
+        // Plex treats a `Specials` folder as season 0, exactly like
+        // `Season 00` (issue #247).
+        || lower == "specials"
         || parse_season_suffix_folder(name).is_some()
         || parse_bare_season_folder(name).is_some()
 }
@@ -767,7 +886,8 @@ fn find_ancestor_season(dirs: &[&str]) -> Option<(String, u32, Option<u32>)> {
         let lower = dir.to_lowercase();
         let literal_season = lower
             .strip_prefix("season")
-            .and_then(|rest| rest.trim().parse().ok());
+            .and_then(|rest| rest.trim().parse().ok())
+            .or_else(|| (lower == "specials").then_some(0));
         let Some(season) = literal_season.or_else(|| parse_bare_season_folder(dir)) else {
             continue;
         };
@@ -2195,6 +2315,83 @@ mod tests {
             classify("movies/Mission Impossible - Ghost Protocol (2011) [1080p].mkv").unwrap();
         assert_eq!(entry.title, "Mission Impossible - Ghost Protocol");
         assert_eq!(entry.year, Some(2011));
+    }
+
+    // --- Plex compatibility layer (issue #247) ---
+
+    #[test]
+    fn plex_movie_id_and_edition_tokens_are_captured_and_stripped_from_the_title() {
+        let entry = classify(
+            "Movies/Blade Runner (1982) {edition-Final Cut} {imdb-tt0083658}/Blade Runner (1982) {edition-Final Cut} {imdb-tt0083658}.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "Blade Runner");
+        assert_eq!(entry.year, Some(1982));
+        assert_eq!(entry.plex_guid.as_deref(), Some("imdb-tt0083658"));
+        assert_eq!(entry.edition.as_deref(), Some("Final Cut"));
+    }
+
+    #[test]
+    fn plex_show_tvdb_id_on_the_show_folder_is_captured_for_an_episode() {
+        let entry = classify(
+            "The Wire (2002) {tvdb-79126}/Season 01/The Wire (2002) - S01E01 - The Target.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.show_title.as_deref(), Some("The Wire"));
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
+        assert_eq!(entry.plex_guid.as_deref(), Some("tvdb-79126"));
+    }
+
+    #[test]
+    fn plex_id_token_is_stripped_from_a_wrapper_derived_show_name() {
+        let entry = classify(
+            "TV/The Wire (2002) {tvdb-79126}/Season 01/The Wire (2002) - S01E01 - The Target.mkv",
+        )
+        .unwrap();
+        let show = entry.show_title.unwrap();
+        assert!(show.contains("The Wire"), "{show}");
+        assert!(!show.contains("tvdb"), "{show}");
+        assert_eq!(entry.plex_guid.as_deref(), Some("tvdb-79126"));
+    }
+
+    #[test]
+    fn plex_multi_episode_file_records_the_span_end() {
+        let entry =
+            classify("TV/Firefly/Season 01/Firefly - S01E01-E02 - Serenity.mkv").unwrap();
+        assert_eq!(entry.season, Some(1));
+        assert_eq!(entry.episode, Some(1));
+        assert_eq!(entry.episode_end, Some(2));
+    }
+
+    #[test]
+    fn plex_movie_extra_by_filename_suffix_groups_with_the_feature() {
+        let entry = classify("Movies/Sintel (2010)/Sintel (2010)-trailer.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.title, "Sintel");
+        assert_eq!(entry.year, Some(2010));
+        assert_eq!(entry.extra_kind, Some("trailer"));
+    }
+
+    #[test]
+    fn plex_movie_extra_in_a_canonical_extras_folder_carries_its_category() {
+        let entry =
+            classify("Movies/Inception (2010)/Behind The Scenes/The Making Of.mkv").unwrap();
+        assert_eq!(entry.kind, MediaKind::Movie);
+        assert_eq!(entry.extra_kind, Some("behindTheScenes"));
+    }
+
+    #[test]
+    fn plex_tv_specials_folder_is_season_zero_with_an_extras_category_when_applicable() {
+        let entry = classify(
+            "TV/Doctor Who (2005)/Specials/Deleted Scenes/An Unearthly Cut.mkv",
+        )
+        .unwrap();
+        assert_eq!(entry.kind, MediaKind::Episode);
+        assert_eq!(entry.season, Some(0));
+        assert_eq!(entry.extra_kind, Some("deletedScene"));
     }
 
     #[test]

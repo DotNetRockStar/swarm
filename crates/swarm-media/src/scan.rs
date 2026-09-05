@@ -31,7 +31,21 @@ pub struct ScanReport {
     /// exponentially longer rescan interval instead of re-walking it every
     /// cycle.
     pub incomplete_roots: Vec<String>,
+    /// Deterministic Plex-conformance problems found while scanning (issue
+    /// #247): files that match no supported Plex layout, or match one only
+    /// partially (an episode with no `Season NN` folder, a movie with no
+    /// derivable title, …). Best-effort and bounded at
+    /// [`MAX_VALIDATION_ISSUES`]; the full library-wide validator is the
+    /// reorganize planner (`apps/server/src/reorganize.rs`). Empty when
+    /// every scanned file conforms. The AI helper consumes these as ground
+    /// truth for automatic Plex-compatible repair.
+    pub validation_issues: Vec<crate::plex::PlexValidationIssue>,
 }
+
+/// Ceiling on how many [`crate::plex::PlexValidationIssue`]s one scan
+/// collects, so a pathologically messy library can't grow the report
+/// unboundedly. The reorganize planner reports the complete set.
+pub const MAX_VALIDATION_ISSUES: usize = 500;
 
 /// Live progress for [`scan_roots`], in two phases matching its own two
 /// passes: `Discovering` while the directory walk across every root is
@@ -358,6 +372,18 @@ async fn scan_roots_scoped_inner(
             }
             if !entry_in_completed_scope(&relative) {
                 continue;
+            }
+            // Deterministic Plex-conformance check (issue #247). Pure string
+            // work, no I/O — cheap even on a full rescan. Bounded so a very
+            // messy library can't grow the report without limit.
+            if report.validation_issues.len() < MAX_VALIDATION_ISSUES {
+                let classified = classify::classify(&file.relative_under_root);
+                if let Some(issue) = crate::plex::validate_media_file(
+                    &file.relative_under_root,
+                    classified.as_ref(),
+                ) {
+                    report.validation_issues.push(issue);
+                }
             }
             let known = library.known_entry_by_path(&relative).await?;
             if let Some(known_entry) = known.as_ref() {
