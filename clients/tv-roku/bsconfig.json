@@ -1,0 +1,15 @@
+{
+  "rootDir": "src",
+  "outFile": "./out/swarm-tv-roku.zip",
+  "retainStagingDir": true,
+  "createPackage": false,
+  "autoImportComponentScript": true,
+  "diagnosticFilters": [],
+  "files": [
+    "manifest",
+    "source/**/*.bs",
+    "components/**/*.xml",
+    "components/**/*.bs",
+    "images/**/*"
+  ]
+}

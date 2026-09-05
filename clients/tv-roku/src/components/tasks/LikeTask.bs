@@ -1,0 +1,14 @@
+import "pkg:/source/Http.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    Swarm.Http.PostJson(m.top.baseUrl + "/likes/toggle", {
+        device_id: m.top.deviceId
+        device_name: m.top.deviceName
+        entry_key: m.top.entryKey
+        liked: m.top.liked
+    }, m.top.authToken)
+end sub

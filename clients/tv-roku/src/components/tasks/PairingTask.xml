@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Implements /pair/begin + /pair/poll against a discovered server's plain
+  HTTP surface -- the Roku analogue of Fire TV's LAN pairing flow (a
+  different, HTTP-native protocol; see http-client-contract.md's "What
+  deliberately has no HTTP equivalent" section). Runs the whole
+  begin-then-poll-until-approved-or-expired sequence on its own thread,
+  driven entirely by cancelRequested + the code's own expiry.
+-->
+<component name="PairingTask" extends="Task">
+    <interface>
+        <field id="baseUrl" type="string" />
+        <field id="deviceName" type="string" value="Roku" />
+        <!-- { status: "requesting"|"waiting"|"approved"|"expired"|"cancelled"|"error",
+               code, expiresInSeconds, token, httpCaPem, errorMessage } -->
+        <field id="pairingState" type="assocarray" alwaysNotify="true" />
+        <field id="cancelRequested" type="boolean" value="false" />
+    </interface>
+</component>

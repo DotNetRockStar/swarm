@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Cold-start / navigation-level loading state. Mirrors
+  ui/components/SwarmLoadingIndicator.kt's Loading UiState treatment --
+  NOT used for mid-playback buffering (that stays on the player screen with
+  a toast, see ux-rules.md).
+-->
+<component name="LoadingScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+    </interface>
+    <children>
+        <Label id="message" translation="[810, 520]" width="300" horizAlign="center" color="0x9FB0C9FF" text="Buzzing up your stream..." />
+    </children>
+</component>

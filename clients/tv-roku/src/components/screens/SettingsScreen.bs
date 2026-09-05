@@ -1,0 +1,25 @@
+sub init()
+    m.appState = m.top.appState
+    m.body = m.top.findNode("body")
+    m.backButton = m.top.findNode("backButton")
+
+    lines = [
+        "Device name: " + m.appState.deviceName
+        "Server: " + m.appState.serverName
+        "Address: " + m.appState.serverBaseUrl
+    ]
+    m.body.text = lines.Join(Chr(10))
+
+    m.top.setFocus(true)
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press
+        return false
+    end if
+    if key = "OK" or key = "back"
+        m.appState.callFunc("popScreen", invalid)
+        return true
+    end if
+    return false
+end function

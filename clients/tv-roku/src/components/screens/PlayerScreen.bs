@@ -1,0 +1,172 @@
+import "pkg:/source/Registry.bs"
+
+const PositionSaveIntervalSecs = 15
+
+sub init()
+    m.appState = m.top.appState
+    m.video = m.top.findNode("video")
+    m.statusLabel = m.top.findNode("statusLabel")
+    m.top.setFocus(true)
+
+    m.entry = m.top.screenData.entry
+    m.resumePositionSecs = 0.0
+    if m.top.screenData.resumePositionSecs <> invalid
+        m.resumePositionSecs = m.top.screenData.resumePositionSecs
+    end if
+    m.positionOffsetSecs = 0.0
+    m.sessionId = ""
+    m.lastSaveAt = 0
+    m.torndown = false
+
+    m.statusLabel.text = "Getting your stream ready..."
+
+    m.video.ObserveField("state", "onVideoStateChanged")
+    m.video.ObserveField("position", "onPositionChanged")
+
+    negotiate()
+end sub
+
+sub negotiate()
+    m.playbackTask = CreateObject("roSGNode", "PlaybackTask")
+    m.playbackTask.baseUrl = m.appState.serverBaseUrl
+    m.playbackTask.authToken = m.appState.authToken
+    m.playbackTask.entryKey = m.entry.entry_key
+    m.playbackTask.startPositionSecs = m.resumePositionSecs
+    m.playbackTask.operation = "negotiate"
+    m.playbackTask.ObserveField("negotiateResult", "onNegotiateResult")
+    m.playbackTask.control = "RUN"
+end sub
+
+sub onNegotiateResult()
+    result = m.playbackTask.negotiateResult
+    if not result.ok
+        m.statusLabel.text = result.errorMessage
+        m.appState.callFunc("notify", { message: result.errorMessage, kind: "error" })
+        return
+    end if
+
+    m.sessionId = result.sessionId
+    m.appState.activeSessionId = result.sessionId
+    m.appState.activeServerBaseUrl = m.appState.serverBaseUrl
+
+    content = CreateObject("roSGNode", "ContentNode")
+    fullUrl = m.appState.serverBaseUrl + result.path
+
+    ' HLS: the server starts the transcode at the resume offset, so the
+    ' player's own timeline starts at 0 and positionOffsetSecs carries the
+    ' true absolute position for save/display. Direct: the player itself
+    ' seeks via PlayStart, so no offset is needed. See
+    ' http-client-contract.md's "PlaybackPreferences -> PlaybackPlan"
+    ' section -- getting this backwards double-applies or drops the resume
+    ' offset.
+    if result.mode = "hls"
+        content.streamFormat = "hls"
+        m.positionOffsetSecs = m.resumePositionSecs
+    else
+        content.streamFormat = streamFormatForEntry(m.entry)
+        content.PlayStart = m.resumePositionSecs
+        m.positionOffsetSecs = 0.0
+    end if
+
+    content.url = fullUrl
+    content.HttpHeaders = ["Authorization: Bearer " + m.appState.authToken]
+
+    m.video.content = content
+    m.video.visible = true
+    m.statusLabel.text = ""
+    m.video.control = "play"
+end sub
+
+function streamFormatForEntry(entry as object) as string
+    relativePath = entry.title
+    if entry.relative_path <> invalid
+        relativePath = entry.relative_path
+    end if
+    lowered = LCase(relativePath)
+    if Right(lowered, 4) = ".mkv"
+        return "mkv"
+    end if
+    return "mp4"
+end function
+
+sub onVideoStateChanged()
+    videoState = m.video.state
+    if videoState = "error"
+        m.appState.callFunc("notify", { message: "Playback error.", kind: "error" })
+    else if videoState = "finished"
+        teardown()
+    end if
+end sub
+
+sub onPositionChanged()
+    playerPosition = m.video.position
+    if playerPosition = invalid
+        return
+    end if
+    now = Swarm.Registry.NowSeconds()
+    if now - m.lastSaveAt >= PositionSaveIntervalSecs
+        m.lastSaveAt = now
+        savePosition(playerPosition)
+    end if
+end sub
+
+sub savePosition(playerPositionSecs as float)
+    if m.entry.fingerprint = invalid
+        return
+    end if
+    absolutePosition = m.positionOffsetSecs + playerPositionSecs
+    durationSecs = 0.0
+    if m.entry.duration_secs <> invalid
+        durationSecs = m.entry.duration_secs
+    end if
+    Swarm.Registry.SetWatchState(m.entry.fingerprint, absolutePosition, durationSecs)
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press
+        return false
+    end if
+    if key = "back"
+        teardown()
+        return true
+    else if key = "OK" or key = "play"
+        togglePlayPause()
+        return true
+    end if
+    return false
+end function
+
+sub togglePlayPause()
+    if m.video.state = "playing"
+        m.video.control = "pause"
+    else
+        m.video.control = "resume"
+    end if
+end sub
+
+sub teardown()
+    if m.torndown
+        return
+    end if
+    m.torndown = true
+    if m.video.position <> invalid
+        savePosition(m.video.position)
+    end if
+    m.video.control = "stop"
+    releaseSession()
+    m.appState.callFunc("popScreen", invalid)
+end sub
+
+sub releaseSession()
+    if m.sessionId = invalid or m.sessionId = ""
+        return
+    end if
+    stopTask = CreateObject("roSGNode", "PlaybackTask")
+    stopTask.baseUrl = m.appState.serverBaseUrl
+    stopTask.authToken = m.appState.authToken
+    stopTask.operation = "stop"
+    stopTask.sessionIdToStop = m.sessionId
+    stopTask.control = "RUN"
+    m.appState.activeSessionId = ""
+    m.sessionId = ""
+end sub

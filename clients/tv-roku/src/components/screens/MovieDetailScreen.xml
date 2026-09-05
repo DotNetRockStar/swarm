@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Movie detail -- Roku analogue of MovieDetailScreen.kt, scoped for this
+  pass to poster, title, year, genres, and Play/Like/Watchlist actions. No
+  backdrop/cast/overview/report-a-problem yet -- see feature-inventory.md.
+-->
+<component name="MovieDetailScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+        <field id="screenData" type="assocarray" />
+    </interface>
+    <children>
+        <PosterTile id="poster" translation="[120, 90]" tileWidth="280" tileHeight="420" />
+        <Label id="title" translation="[440, 100]" width="1200" color="0xECF6FFFF" />
+        <Label id="metaLine" translation="[440, 160]" width="1200" color="0x9FB0C9FF" />
+        <Group id="buttons" translation="[440, 210]" />
+    </children>
+</component>

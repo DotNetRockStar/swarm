@@ -1,0 +1,34 @@
+' Shared visual identity, ported hex-for-hex from the Fire TV client's
+' ui/theme/Theme.kt, which itself mirrors the STUN server's and Tauri media
+' server dashboard's shared :root CSS variables. See
+' swarm-client-platform-knowledge/references/ux-rules.md -- these values
+' must never drift from that file; if a new semantic color is needed here,
+' add the matching CSS variable server-side too (and vice versa).
+'
+' SceneGraph color fields take "0xRRGGBBAA" hex strings.
+namespace Swarm.Theme
+    const Background = "0x101828FF"
+    const Surface = "0x151F32FF"
+    const SurfaceMuted = "0x1F2A44FF"
+    const Border = "0x31405FFF"
+    const Accent = "0x00C2FFFF"
+    const AccentHot = "0xF5C451FF"
+    const ErrorColor = "0xFF5D7AFF"
+    const LikeColor = "0xFF4D67FF"
+    const GreenColor = "0x34D399FF"
+    const TextColor = "0xECF6FFFF"
+    const MutedColor = "0x9FB0C9FF"
+    ' Text/icon color on top of an Accent or AccentHot fill -- this app's
+    ' standing "on light button" foreground, matching the server
+    ' dashboard's own button foreground (#04263a).
+    const OnAccent = "0x04263AFF"
+    ' Foreground on a pressed-state fill, where distinct from OnAccent.
+    const OnPressed = "0x241A00FF"
+
+    ' Toast severities -- see ux-rules.md's "Loading, empty, and error
+    ' states" section for the exact duration convention this backs.
+    const ToastDurationSuccessMs = 4000
+    const ToastDurationWarningMs = 5000
+    const ToastDurationErrorMs = 7000
+    const ToastMaxVisible = 4
+end namespace

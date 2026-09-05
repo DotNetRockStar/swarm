@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- Fire-and-forget POST /likes/toggle -- see http-client-contract.md. Local
+     state is the source of truth (Registry.SetLiked), this just best-effort
+     mirrors it server-side, matching Fire TV's optimistic-local-first
+     pattern (no read-back, no revert on failure). -->
+<component name="LikeTask" extends="Task">
+    <interface>
+        <field id="baseUrl" type="string" />
+        <field id="authToken" type="string" />
+        <field id="deviceId" type="string" />
+        <field id="deviceName" type="string" />
+        <field id="entryKey" type="string" />
+        <field id="liked" type="boolean" />
+    </interface>
+</component>

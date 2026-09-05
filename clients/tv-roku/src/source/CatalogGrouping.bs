@@ -1,0 +1,162 @@
+' Client-side catalog grouping -- mirrors CatalogGrouping.kt: movies stay a
+' flat list, shows/music are grouped client-side since the server has no
+' "show"/"artist" entity of its own. See
+' swarm-client-platform-knowledge/references/state-model.md.
+namespace Swarm.CatalogGrouping
+
+    function Movies(entries as object) as object
+        movies = []
+        for each e in entries
+            if e.kind = "movie"
+                movies.Push(e)
+            end if
+        end for
+        return movies
+    end function
+
+    ' Returns [{ title, episodes: [entries...] }], insertion-ordered by
+    ' first appearance, grouped case-insensitively by show_title.
+    function Shows(entries as object) as object
+        byTitle = {}
+        order = []
+        for each e in entries
+            if e.kind = "episode" and e.show_title <> invalid
+                key = LCase(e.show_title)
+                if not byTitle.DoesExist(key)
+                    byTitle[key] = { title: e.show_title, episodes: [] }
+                    order.Push(key)
+                end if
+                byTitle[key].episodes.Push(e)
+            end if
+        end for
+        result = []
+        for each key in order
+            result.Push(byTitle[key])
+        end for
+        return result
+    end function
+
+    ' Returns [{ artist, tracks: [entries...] }], insertion-ordered,
+    ' grouped case-insensitively by artist (falling back to "Unknown
+    ' Artist" for untagged tracks, matching the server-side classify.rs
+    ' fallback convention).
+    function Artists(entries as object) as object
+        byArtist = {}
+        order = []
+        for each e in entries
+            if e.kind = "track"
+                artistName = e.artist
+                if artistName = invalid or artistName = ""
+                    artistName = "Unknown Artist"
+                end if
+                key = LCase(artistName)
+                if not byArtist.DoesExist(key)
+                    byArtist[key] = { artist: artistName, tracks: [] }
+                    order.Push(key)
+                end if
+                byArtist[key].tracks.Push(e)
+            end if
+        end for
+        result = []
+        for each key in order
+            result.Push(byArtist[key])
+        end for
+        return result
+    end function
+
+    ' Groups a show's episodes by season number (nulls become "Unnumbered",
+    ' 0 becomes "Specials" -- the Plex/Kodi/TheTVDB bonus-content
+    ' convention, matching SeasonScreen.kt).
+    function Seasons(episodes as object) as object
+        bySeason = {}
+        order = []
+        for each e in episodes
+            seasonKey = "unnumbered"
+            if e.season <> invalid
+                seasonKey = e.season.ToStr()
+            end if
+            if not bySeason.DoesExist(seasonKey)
+                bySeason[seasonKey] = { season: e.season, episodes: [] }
+                order.Push(seasonKey)
+            end if
+            bySeason[seasonKey].episodes.Push(e)
+        end for
+        result = []
+        for each key in order
+            result.Push(bySeason[key])
+        end for
+        return result
+    end function
+
+    ' Lowest (season, episode) pair, unnumbered treated as last -- used for
+    ' v1's "select a show plays its first episode" simplification (full
+    ' season/episode navigation is deferred, see feature-inventory.md).
+    function FirstEpisode(episodes as object) as dynamic
+        best = invalid
+        for each e in episodes
+            if best = invalid
+                best = e
+            else
+                eSeason = 999999
+                if e.season <> invalid
+                    eSeason = e.season
+                end if
+                bestSeason = 999999
+                if best.season <> invalid
+                    bestSeason = best.season
+                end if
+                if eSeason < bestSeason
+                    best = e
+                else if eSeason = bestSeason
+                    eEpisode = 999999
+                    if e.episode <> invalid
+                        eEpisode = e.episode
+                    end if
+                    bestEpisode = 999999
+                    if best.episode <> invalid
+                        bestEpisode = best.episode
+                    end if
+                    if eEpisode < bestEpisode
+                        best = e
+                    end if
+                end if
+            end if
+        end for
+        return best
+    end function
+
+    ' Lowest track_number, unnumbered last -- same v1 simplification as
+    ' FirstEpisode, for "select an artist plays their first track" (full
+    ' album/track navigation is deferred).
+    function FirstTrack(tracks as object) as dynamic
+        best = invalid
+        for each t in tracks
+            if best = invalid
+                best = t
+            else
+                tNum = 999999
+                if t.track_number <> invalid
+                    tNum = t.track_number
+                end if
+                bestNum = 999999
+                if best.track_number <> invalid
+                    bestNum = best.track_number
+                end if
+                if tNum < bestNum
+                    best = t
+                end if
+            end if
+        end for
+        return best
+    end function
+
+    function SeasonLabel(season as dynamic) as string
+        if season = invalid
+            return "Unnumbered"
+        else if season = 0
+            return "Specials"
+        end if
+        return "Season " + season.ToStr()
+    end function
+
+end namespace

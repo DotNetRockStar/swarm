@@ -1,0 +1,25 @@
+import "pkg:/source/Theme.bs"
+
+sub init()
+    m.stack = m.top.findNode("stack")
+end sub
+
+sub onAppStateSet()
+    if m.top.appState <> invalid
+        m.top.appState.observeField("notification", "onNotification")
+    end if
+end sub
+
+sub onNotification()
+    params = m.top.appState.notification
+    if params = invalid or params.message = invalid
+        return
+    end if
+    while m.stack.getChildCount() >= Swarm.Theme.ToastMaxVisible
+        m.stack.removeChildIndex(0)
+    end while
+    row = CreateObject("roSGNode", "ToastRow")
+    row.kind = params.kind
+    row.message = params.message
+    m.stack.appendChild(row)
+end sub

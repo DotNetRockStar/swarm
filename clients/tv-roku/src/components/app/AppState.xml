@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Central observable state node -- the Roku analogue of the Fire TV
+  client's SwarmViewModel.UiState. Screens read fields from this node
+  (passed to them at creation time) and write back to it directly or via
+  its own small set of functions; MainScene observes currentScreen /
+  screenData and swaps the mounted screen component accordingly. See
+  swarm-client-platform-knowledge/references/state-model.md.
+-->
+<component name="AppState" extends="Node">
+    <interface>
+        <!-- Navigation. previousScreen/previousScreenData form the single-
+             level-at-a-time back chain (mirrors UiState.previous). -->
+        <field id="currentScreen" type="string" value="loading" alwaysNotify="true" />
+        <field id="screenData" type="assocarray" alwaysNotify="true" />
+        <field id="previousScreen" type="string" />
+        <field id="previousScreenData" type="assocarray" />
+
+        <!-- Session / connection (see http-client-contract.md). -->
+        <field id="authToken" type="string" />
+        <field id="deviceId" type="string" />
+        <field id="deviceName" type="string" value="Roku" />
+        <field id="serverBaseUrl" type="string" />
+        <field id="serverFingerprint" type="string" />
+        <field id="serverName" type="string" />
+        <!-- PEM of the server's HTTP CA, learned once at pairing time
+             (/pair/poll's Approved.http_ca_pem) -- see platform-notes/roku.md. -->
+        <field id="httpCaPem" type="string" />
+
+        <!-- Catalog (see http-client-contract.md's catalog section).
+             Reserved for a future increment: v1's CatalogScreen owns its
+             own local entries/loading state directly rather than routing
+             through AppState, since nothing else needs to read the
+             catalog yet. These fields exist so a later Continue-Watching
+             row / cross-screen cache reuse doesn't need an interface
+             change -- not currently written to. -->
+        <field id="catalogEntries" type="array" alwaysNotify="true" />
+        <field id="catalogLoading" type="boolean" value="true" />
+        <field id="catalogThumbprint" type="string" />
+        <field id="catalogUnreachable" type="array" />
+
+        <!-- Cross-cutting overlay: the toast/notification surface (see
+             ux-rules.md's "Loading, empty, and error states"). -->
+        <field id="notification" type="assocarray" alwaysNotify="true" />
+
+        <!-- Playback session bookkeeping. Exactly one negotiation at a time;
+             every abandoned reservation must be released via /stop -- see
+             state-model.md's "Playback session & negotiation discipline". -->
+        <field id="activeSessionId" type="string" />
+        <field id="activeServerBaseUrl" type="string" />
+
+        <function name="pushScreen" />
+        <function name="popScreen" />
+        <function name="notify" />
+    </interface>
+</component>

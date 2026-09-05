@@ -1,0 +1,14 @@
+import "pkg:/source/Http.bs"
+
+sub init()
+    m.top.functionName = "doRun"
+end sub
+
+sub doRun()
+    response = Swarm.Http.Get(m.top.baseUrl + "/catalog/manifest", m.top.authToken)
+    if not response.ok or response.json = invalid or response.json.entries = invalid
+        m.top.result = { ok: false, entries: [], errorMessage: "The media server is not reachable right now." }
+        return
+    end if
+    m.top.result = { ok: true, entries: response.json.entries, errorMessage: "" }
+end sub

@@ -1,0 +1,211 @@
+' On-device persistence. roRegistrySection is Roku's only durable store
+' (~32KB per section, flat string keys) -- there is no relational/SQLite
+' equivalent, so state is split into small independent sections by concern
+' rather than one big blob, and anything unbounded on the Fire TV client
+' (watch state, likes, watchlist, resolved-notification tombstones) is
+' explicitly LRU-capped here. This is a real, intentional platform
+' deviation -- see feature-inventory.md and platform-notes/roku.md.
+namespace Swarm.Registry
+    const SectionAuth = "swarm_auth"
+    const SectionConn = "swarm_conn"
+    const SectionSettings = "swarm_settings"
+    const SectionWatch = "swarm_watch"
+    const SectionLists = "swarm_lists"
+    const SectionNotify = "swarm_notify"
+
+    const MaxWatchStateEntries = 500
+    const MaxLikedEntries = 500
+    const MaxWatchlistEntries = 300
+    const MaxNotifications = 100
+
+    ' ---- generic helpers ----
+
+    function ReadJson(sectionName as string, key as string) as dynamic
+        section = CreateObject("roRegistrySection", sectionName)
+        if not section.Exists(key)
+            return invalid
+        end if
+        raw = section.Read(key)
+        if raw = invalid or raw = ""
+            return invalid
+        end if
+        return ParseJson(raw)
+    end function
+
+    sub WriteJson(sectionName as string, key as string, data as dynamic)
+        section = CreateObject("roRegistrySection", sectionName)
+        section.Write(key, FormatJson(data))
+        section.Flush()
+    end sub
+
+    sub DeleteKey(sectionName as string, key as string)
+        section = CreateObject("roRegistrySection", sectionName)
+        section.Delete(key)
+        section.Flush()
+    end sub
+
+    function ReadMap(sectionName as string, key as string) as object
+        parsed = ReadJson(sectionName, key)
+        if parsed = invalid
+            return {}
+        end if
+        return parsed
+    end function
+
+    ' Drops the oldest entries (by `.updatedAt`, ascending) once a map
+    ' exceeds maxEntries. Every capped map in this file stores records with
+    ' an `updatedAt` (unix seconds) field for exactly this purpose.
+    function EnforceLru(dataMap as object, maxEntries as integer) as object
+        keyList = dataMap.Keys()
+        if keyList.Count() <= maxEntries
+            return dataMap
+        end if
+        ordered = []
+        for each k in keyList
+            ordered.Push({ key: k, updatedAt: dataMap[k].updatedAt })
+        end for
+        ordered.SortBy("updatedAt")
+        dropCount = ordered.Count() - maxEntries
+        for i = 0 to dropCount - 1
+            dataMap.Delete(ordered[i].key)
+        end for
+        return dataMap
+    end function
+
+    function NowSeconds() as integer
+        return CreateObject("roDateTime").AsSeconds()
+    end function
+
+    ' ---- auth token ----
+
+    function LoadAuthToken() as dynamic
+        section = CreateObject("roRegistrySection", SectionAuth)
+        if not section.Exists("token")
+            return invalid
+        end if
+        return section.Read("token")
+    end function
+
+    sub SaveAuthToken(token as string)
+        section = CreateObject("roRegistrySection", SectionAuth)
+        section.Write("token", token)
+        section.Flush()
+    end sub
+
+    sub ClearAuthToken()
+        DeleteKey(SectionAuth, "token")
+    end sub
+
+    ' ---- server connection ----
+    ' { baseUrl, deviceId, deviceName, serverName, serverFingerprint, httpCaPem }
+
+    function LoadConnection() as dynamic
+        return ReadJson(SectionConn, "connection")
+    end function
+
+    sub SaveConnection(connection as object)
+        WriteJson(SectionConn, "connection", connection)
+    end sub
+
+    sub ClearConnection()
+        DeleteKey(SectionConn, "connection")
+    end sub
+
+    ' ---- settings ----
+
+    function LoadSettings() as object
+        loaded = ReadJson(SectionSettings, "settings")
+        if loaded = invalid
+            return { deviceName: "Roku" }
+        end if
+        return loaded
+    end function
+
+    sub SaveSettings(settings as object)
+        WriteJson(SectionSettings, "settings", settings)
+    end sub
+
+    ' ---- watch state ----
+    ' fingerprint -> { positionSecs, durationSecs, watched, updatedAt }
+
+    function GetWatchState(fingerprint as string) as dynamic
+        all = ReadMap(SectionWatch, "entries")
+        if all.DoesExist(fingerprint)
+            return all[fingerprint]
+        end if
+        return invalid
+    end function
+
+    sub SetWatchState(fingerprint as string, positionSecs as float, durationSecs as float)
+        all = ReadMap(SectionWatch, "entries")
+        watched = durationSecs > 0.0 and (positionSecs / durationSecs) >= 0.95
+        all[fingerprint] = {
+            positionSecs: positionSecs
+            durationSecs: durationSecs
+            watched: watched
+            updatedAt: NowSeconds()
+        }
+        all = EnforceLru(all, MaxWatchStateEntries)
+        WriteJson(SectionWatch, "entries", all)
+    end sub
+
+    ' ---- likes / watchlist ----
+    ' Both are LRU-capped sets keyed by identity string (content
+    ' fingerprint for likes/movies, normalized show title for shows -- see
+    ' state-model.md's identity rules), stored as { key -> updatedAt }.
+
+    function IsLiked(fingerprint as string) as boolean
+        all = ReadMap(SectionLists, "liked")
+        return all.DoesExist(fingerprint)
+    end function
+
+    sub SetLiked(fingerprint as string, liked as boolean)
+        all = ReadMap(SectionLists, "liked")
+        if liked
+            all[fingerprint] = { updatedAt: NowSeconds() }
+            all = EnforceLru(all, MaxLikedEntries)
+        else
+            all.Delete(fingerprint)
+        end if
+        WriteJson(SectionLists, "liked", all)
+    end sub
+
+    function IsWatchlisted(watchlistKey as string) as boolean
+        all = ReadMap(SectionLists, "watchlist")
+        return all.DoesExist(watchlistKey)
+    end function
+
+    sub SetWatchlisted(watchlistKey as string, listed as boolean)
+        all = ReadMap(SectionLists, "watchlist")
+        if listed
+            all[watchlistKey] = { updatedAt: NowSeconds() }
+            all = EnforceLru(all, MaxWatchlistEntries)
+        else
+            all.Delete(watchlistKey)
+        end if
+        WriteJson(SectionLists, "watchlist", all)
+    end sub
+
+    ' ---- resolved-problem notification tombstones ----
+
+    function LoadNotifications() as object
+        return ReadMap(SectionNotify, "resolved")
+    end function
+
+    sub MarkNotificationSeen(notificationKey as string)
+        all = ReadMap(SectionNotify, "resolved")
+        all[notificationKey] = { updatedAt: NowSeconds(), dismissed: false }
+        all = EnforceLru(all, MaxNotifications)
+        WriteJson(SectionNotify, "resolved", all)
+    end sub
+
+    sub DismissNotification(notificationKey as string)
+        all = ReadMap(SectionNotify, "resolved")
+        if all.DoesExist(notificationKey)
+            all[notificationKey].dismissed = true
+            all[notificationKey].updatedAt = NowSeconds()
+        end if
+        WriteJson(SectionNotify, "resolved", all)
+    end sub
+
+end namespace

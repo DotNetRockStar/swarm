@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Discovers SWARM media servers on the LAN via `_swarm-peer._udp.local.`
+  mDNS -- Roku has no built-in mDNS API, see Swarm.Mdns and
+  platform-notes/roku.md. Runs for a bounded window (listenSeconds) then
+  finishes; DashboardScreen re-runs it on demand (e.g. pressing a
+  "Rescan" action) rather than keeping a socket open indefinitely.
+-->
+<component name="MdnsDiscoveryTask" extends="Task">
+    <interface>
+        <field id="listenSeconds" type="integer" value="4" />
+        <!-- Output: array of { name, host, httpMediaPort, httpMediaTlsPort, fingerprint }, deduplicated by fingerprint. -->
+        <field id="discoveredServers" type="array" alwaysNotify="true" />
+    </interface>
+</component>

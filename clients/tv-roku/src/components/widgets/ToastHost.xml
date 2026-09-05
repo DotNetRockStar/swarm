@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Bottom-right queued toast stack -- the Roku analogue of
+  ui/components/ClientToastHost.kt. Observes AppState.notification and
+  appends a capped, auto-dismissing ToastRow per notification.
+-->
+<component name="ToastHost" extends="Group">
+    <interface>
+        <field id="appState" type="node" onChange="onAppStateSet" />
+    </interface>
+    <children>
+        <LayoutGroup id="stack" layoutDirection="vert" itemSpacings="[10]" horizAlignment="right" />
+    </children>
+</component>

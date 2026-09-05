@@ -1,0 +1,31 @@
+import "pkg:/source/Theme.bs"
+
+sub init()
+    m.bg = m.top.findNode("bg")
+    m.label = m.top.findNode("label")
+    render()
+end sub
+
+sub render()
+    w = m.top.buttonWidth
+    h = m.top.buttonHeight
+    m.bg.width = w
+    m.bg.height = h
+    m.label.width = w
+    m.label.height = h
+    m.label.text = m.top.text
+
+    if not m.top.isEnabled
+        m.bg.color = Swarm.Theme.MutedColor
+        m.label.color = Swarm.Theme.Background
+    else if m.top.isPressed
+        m.bg.color = Swarm.Theme.AccentHot
+        m.label.color = Swarm.Theme.OnPressed
+    else if m.top.isFocused
+        m.bg.color = Swarm.Theme.Accent
+        m.label.color = Swarm.Theme.OnAccent
+    else
+        m.bg.color = "0xFFFFFFFF"
+        m.label.color = Swarm.Theme.OnAccent
+    end if
+end sub

@@ -1,0 +1,51 @@
+import "pkg:/source/Theme.bs"
+
+sub init()
+    m.placeholder = m.top.findNode("placeholder")
+    m.poster = m.top.findNode("poster")
+    m.focusBorder = m.top.findNode("focusBorder")
+    m.label = m.top.findNode("label")
+    render()
+end sub
+
+sub render()
+    w = m.top.tileWidth
+    h = m.top.tileHeight
+    m.placeholder.width = w
+    m.placeholder.height = h
+    m.poster.width = w
+    m.poster.height = h
+    m.poster.loadWidth = w
+    m.poster.loadHeight = h
+
+    m.focusBorder.translation = [-4, -4]
+    m.focusBorder.width = w + 8
+    m.focusBorder.height = h + 8
+    m.focusBorder.visible = m.top.isFocused
+    m.focusBorder.color = Swarm.Theme.Accent
+
+    m.label.translation = [4, h + 4]
+    m.label.width = w - 8
+    m.label.text = m.top.caption
+end sub
+
+sub onEntryUrlChanged()
+    m.poster.visible = false
+    if m.top.entryUrl = invalid or m.top.entryUrl = ""
+        return
+    end if
+    task = CreateObject("roSGNode", "ArtworkTask")
+    task.url = m.top.entryUrl
+    task.authToken = m.top.authToken
+    task.ObserveField("localPath", "onArtworkLoaded")
+    m.artworkTask = task
+    task.control = "RUN"
+end sub
+
+sub onArtworkLoaded()
+    localPath = m.artworkTask.localPath
+    if localPath <> invalid and localPath <> ""
+        m.poster.uri = localPath
+        m.poster.visible = true
+    end if
+end sub

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Settings -- Roku analogue of SwarmSettingsScreen.kt, scoped for this pass
+  to a read-only connection summary. Editing device name/server URL (needs
+  a Keyboard overlay) and Kid Mode are deferred -- see
+  feature-inventory.md.
+-->
+<component name="SettingsScreen" extends="Group">
+    <interface>
+        <field id="appState" type="node" />
+        <field id="screenData" type="assocarray" />
+    </interface>
+    <children>
+        <Label id="heading" translation="[120, 90]" text="Settings" color="0x00C2FFFF" />
+        <Label id="body" translation="[120, 150]" width="1200" wrap="true" color="0x9FB0C9FF" />
+        <SwarmButton id="backButton" translation="[120, 320]" text="Back" buttonWidth="220" isFocused="true" />
+    </children>
+</component>

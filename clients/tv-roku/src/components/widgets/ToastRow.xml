@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  A single toast. Owns its own auto-dismiss timer and removes itself from
+  its parent on fire -- ToastHost only ever needs to cap how many exist and
+  append new ones. Non-focusable by design (see ux-rules.md): a toast must
+  never be reachable by or steal D-pad focus.
+-->
+<component name="ToastRow" extends="Group">
+    <interface>
+        <field id="message" type="string" onChange="render" />
+        <field id="kind" type="string" value="warning" onChange="render" />
+    </interface>
+    <children>
+        <Rectangle id="bg" color="0x151F32FF" width="460" height="64" />
+        <Rectangle id="stripe" width="5" height="64" />
+        <Label id="label" translation="[24, 12]" width="420" height="40" wrap="true" maxLines="4" color="0xECF6FFFF" />
+        <Timer id="dismissTimer" repeat="false" />
+    </children>
+</component>

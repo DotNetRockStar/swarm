@@ -1,0 +1,255 @@
+' Minimal DNS-SD/mDNS client for `_swarm-peer._udp.local.` -- Roku has no
+' built-in mDNS browsing API (unlike Android's NsdManager), so this parses
+' raw DNS wire format over a UDP multicast socket. See
+' swarm-client-platform-knowledge/references/platform-notes/roku.md.
+'
+' The parsing algorithm (name decompression, PTR/SRV/TXT/A correlation) was
+' independently verified against a hand-built RFC 1035-shaped packet using
+' an equivalent Python implementation before being ported here -- see the
+' commit that introduced this file. It has NOT been exercised against a
+' real device/real network yet; that verification is still open (see
+' platform-notes/roku.md's open items).
+namespace Swarm.Mdns
+    const MulticastAddress = "224.0.0.251"
+    const MulticastPort = 5353
+    const ServiceName = "_swarm-peer._udp.local."
+
+    function ReadUint16(bytes as object, offset as integer) as integer
+        return (bytes[offset] * 256) + bytes[offset + 1]
+    end function
+
+    ' Parses a (possibly compressed) DNS name starting at `offset`. Returns
+    ' { name, nextOffset } where nextOffset is the position immediately
+    ' after this name *as encoded at `offset`* -- correct regardless of how
+    ' many compression-pointer indirections the name follows, since it's
+    ' captured at the first terminator/pointer seen, before any jump.
+    function ReadName(bytes as object, offset as integer) as object
+        labels = []
+        cursor = offset
+        jumped = false
+        firstNextOffset = -1
+        safety = 0
+
+        while true
+            safety = safety + 1
+            if safety > 128
+                exit while ' malformed/hostile packet guard
+            end if
+
+            lengthByte = bytes[cursor]
+            if lengthByte = 0
+                if not jumped
+                    firstNextOffset = cursor + 1
+                end if
+                cursor = cursor + 1
+                exit while
+            else if (lengthByte and &hC0) = &hC0
+                if not jumped
+                    firstNextOffset = cursor + 2
+                end if
+                jumped = true
+                pointerOffset = ((lengthByte and &h3F) * 256) + bytes[cursor + 1]
+                cursor = pointerOffset
+            else
+                label = ""
+                for i = 1 to lengthByte
+                    label = label + Chr(bytes[cursor + i])
+                end for
+                labels.Push(label)
+                cursor = cursor + 1 + lengthByte
+            end if
+        end while
+
+        name = ""
+        for each label in labels
+            if name <> ""
+                name = name + "."
+            end if
+            name = name + label
+        end for
+
+        return { name: name, nextOffset: firstNextOffset }
+    end function
+
+    function ReadTxtRecord(bytes as object, offset as integer, rdLength as integer) as object
+        result = {}
+        cursor = offset
+        endPos = offset + rdLength
+        while cursor < endPos
+            entryLen = bytes[cursor]
+            cursor = cursor + 1
+            if entryLen > 0
+                entry = ""
+                for i = 0 to entryLen - 1
+                    entry = entry + Chr(bytes[cursor + i])
+                end for
+                cursor = cursor + entryLen
+                eqIndex = Instr(1, entry, "=")
+                if eqIndex > 0
+                    key = Left(entry, eqIndex - 1)
+                    value = Mid(entry, eqIndex + 1)
+                    result[key] = value
+                end if
+            end if
+        end while
+        return result
+    end function
+
+    function ReadSrvRecord(bytes as object, offset as integer) as object
+        port = ReadUint16(bytes, offset + 4)
+        targetResult = ReadName(bytes, offset + 6)
+        return { port: port, target: targetResult.name }
+    end function
+
+    function ReadARecord(bytes as object, offset as integer) as string
+        return bytes[offset].ToStr() + "." + bytes[offset + 1].ToStr() + "." + bytes[offset + 2].ToStr() + "." + bytes[offset + 3].ToStr()
+    end function
+
+    ' Validates exactly as strictly as Fire TV's LanDiscoveryManager.parse:
+    ' the fingerprint must be exactly 64 lowercase hex characters. A LAN is
+    ' a real threat surface for a spoofed/malformed advertisement.
+    function IsValidFingerprint(value as string) as boolean
+        if Len(value) <> 64
+            return false
+        end if
+        for i = 1 to 64
+            c = Mid(value, i, 1)
+            isDigit = (c >= "0") and (c <= "9")
+            isLower = (c >= "a") and (c <= "f")
+            if not isDigit and not isLower
+                return false
+            end if
+        end for
+        return true
+    end function
+
+    ' Parses one raw mDNS UDP payload into zero or more discovered servers.
+    ' A single response may announce multiple instances (PTR records); each
+    ' is only included once its SRV, TXT (with a valid fingerprint), and a
+    ' resolvable A record are all present -- a partial/still-arriving
+    ' announcement is silently skipped rather than surfaced incomplete.
+    function ParseMessage(bytes as object) as object
+        byteCount = bytes.Count()
+        if byteCount < 12
+            return []
+        end if
+
+        qdcount = ReadUint16(bytes, 4)
+        ancount = ReadUint16(bytes, 6)
+        nscount = ReadUint16(bytes, 8)
+        arcount = ReadUint16(bytes, 10)
+        cursor = 12
+
+        for i = 1 to qdcount
+            nameResult = ReadName(bytes, cursor)
+            cursor = nameResult.nextOffset
+            cursor = cursor + 4 ' QTYPE + QCLASS
+        end for
+
+        ptrTargets = []
+        srvByName = {}
+        txtByName = {}
+        aByName = {}
+
+        totalRecords = ancount + nscount + arcount
+        for i = 1 to totalRecords
+            nameResult = ReadName(bytes, cursor)
+            recordName = nameResult.name
+            cursor = nameResult.nextOffset
+            rrType = ReadUint16(bytes, cursor)
+            rdLength = ReadUint16(bytes, cursor + 8)
+            rdataOffset = cursor + 10
+
+            if rrType = 12 ' PTR
+                targetResult = ReadName(bytes, rdataOffset)
+                ptrTargets.Push(targetResult.name)
+            else if rrType = 33 ' SRV
+                srvByName[recordName] = ReadSrvRecord(bytes, rdataOffset)
+            else if rrType = 16 ' TXT
+                txtByName[recordName] = ReadTxtRecord(bytes, rdataOffset, rdLength)
+            else if rrType = 1 ' A
+                aByName[recordName] = ReadARecord(bytes, rdataOffset)
+            end if
+
+            cursor = rdataOffset + rdLength
+        end for
+
+        servers = []
+        for each instanceName in ptrTargets
+            srv = invalid
+            if srvByName.DoesExist(instanceName)
+                srv = srvByName[instanceName]
+            end if
+            if srv <> invalid
+                txt = {}
+                if txtByName.DoesExist(instanceName)
+                    txt = txtByName[instanceName]
+                end if
+                host = ""
+                if aByName.DoesExist(srv.target)
+                    host = aByName[srv.target]
+                end if
+                fingerprint = ""
+                if txt.DoesExist("fingerprint")
+                    fingerprint = txt.fingerprint
+                end if
+                httpMediaPort = 0
+                if txt.DoesExist("http_media_port")
+                    httpMediaPort = Val(txt.http_media_port)
+                end if
+                httpMediaTlsPort = 0
+                if txt.DoesExist("http_media_tls_port")
+                    httpMediaTlsPort = Val(txt.http_media_tls_port)
+                end if
+                serverName = "SWARM Media Server"
+                if txt.DoesExist("name")
+                    serverName = txt.name
+                end if
+
+                if IsValidFingerprint(fingerprint) and host <> "" and httpMediaPort > 0 and httpMediaPort <= 65535
+                    servers.Push({
+                        name: serverName
+                        host: host
+                        httpMediaPort: httpMediaPort
+                        httpMediaTlsPort: httpMediaTlsPort
+                        fingerprint: fingerprint
+                    })
+                end if
+            end if
+        end for
+
+        return servers
+    end function
+
+    ' Builds a minimal standards-shaped DNS query packet requesting PTR
+    ' records for ServiceName -- sent once per discovery pass; responders
+    ' (mdns_sd on the server side) also periodically re-announce
+    ' unsolicited, which ParseMessage handles identically.
+    function BuildQuery() as object
+        bytes = CreateObject("roByteArray")
+        ' 12-byte header: ID=0x0000, Flags=0x0000 (plain query, per RFC 6762
+        ' sec 18 -- ID and Opcode must be zero on transmission for mDNS),
+        ' QDCOUNT=0x0001, AN/NS/ARCOUNT=0x0000.
+        bytes.FromHexString("000000000001000000000000")
+        appendName(bytes, ServiceName)
+        bytes.Push(0)
+        bytes.Push(12) ' QTYPE = PTR
+        bytes.Push(0)
+        bytes.Push(1) ' QCLASS = IN
+        return bytes
+    end function
+
+    sub appendName(bytes as object, dottedName as string)
+        trimmed = dottedName
+        if Right(trimmed, 1) = "."
+            trimmed = Left(trimmed, Len(trimmed) - 1)
+        end if
+        parts = trimmed.Split(".")
+        for each part in parts
+            bytes.Push(Len(part))
+            for i = 1 to Len(part)
+                bytes.Push(Asc(Mid(part, i, 1)))
+            end for
+        end for
+    end sub
+end namespace
