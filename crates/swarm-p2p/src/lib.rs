@@ -13,6 +13,10 @@
 //! - [`reflector`] — reflexive (NAT-mapped) address discovery client, the
 //!   device half of `apps/stun-server`'s UDP reflector.
 //! - [`punch`] — the simultaneous `PUNCH_MAGIC` UDP hole-punch handshake.
+//! - [`http_tls`] — a second, independent CA (deliberately not `identity`'s
+//!   pinned QUIC leaf) that issues short-lived leaves for the plain-HTTPS
+//!   media surface HTTP-only clients (Roku) use instead of QUIC. See its
+//!   module doc comment.
 //!
 //! Planned (Phase 4 remainder): the orchestration that ties `punch`,
 //! `reflector`, `local_addr`, and `swarm-stun-client::signaling` together
@@ -25,6 +29,7 @@
 //! original protocol this one is modeled on.
 
 pub mod endpoint;
+pub mod http_tls;
 pub mod identity;
 pub mod local_addr;
 pub mod pin;

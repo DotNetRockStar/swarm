@@ -223,6 +223,7 @@ impl LanService {
         allowed: AllowedPeers,
         state_db: Arc<StateDb>,
         http_media_port: u16,
+        http_media_tls_port: Option<u16>,
     ) -> std::io::Result<Self> {
         // TCP and QUIC/UDP can share the same numeric port. Keeping activation
         // on the peer port avoids an unpredictable firewall exception.
@@ -270,6 +271,7 @@ impl LanService {
             peer_addr,
             pairing_port,
             http_media_port,
+            http_media_tls_port,
         );
         Ok(Self {
             pairing,
@@ -301,6 +303,7 @@ fn advertise(
     peer_addr: SocketAddr,
     pairing_port: u16,
     http_media_port: u16,
+    http_media_tls_port: Option<u16>,
 ) -> Option<Advertisement> {
     let daemon = ServiceDaemon::new()
         .map_err(|err| tracing::warn!(%err, "could not start mDNS advertiser"))
@@ -310,14 +313,15 @@ fn advertise(
     let hostname = format!("swarm-{short}.local.");
     let peer_port = peer_addr.port().to_string();
     let pair_port = pairing_port.to_string();
-    // Not consumed by any existing client — the Fire TV client only ever
-    // reads fingerprint/peer_port/pair_port here and pairs over QUIC, never
-    // this port. Advertised for a future HTTP-only client (Roku) that can't
-    // speak QUIC at all and has no other way to discover this port; adding
-    // it now costs nothing and means that client's own resolver work
-    // doesn't also need a server-side change.
+    // Not consumed by the Fire TV client — it only ever reads
+    // fingerprint/peer_port/pair_port here and pairs over QUIC, never these
+    // two. Advertised for an HTTP-only client (Roku) that can't speak QUIC
+    // at all and has no other way to discover these ports; adding them
+    // costs nothing and means that client's own resolver work doesn't also
+    // need a server-side change.
     let http_media_port_str = http_media_port.to_string();
-    let properties = [
+    let http_media_tls_port_str = http_media_tls_port.map(|port| port.to_string());
+    let mut properties = vec![
         ("protocol", "2"),
         ("name", "SWARM Media Server"),
         ("fingerprint", server_fingerprint),
@@ -325,6 +329,12 @@ fn advertise(
         ("pair_port", pair_port.as_str()),
         ("http_media_port", http_media_port_str.as_str()),
     ];
+    // Only present once the TLS listener actually started (see
+    // ServerCore::start) — a client must never learn a port nothing is
+    // listening on.
+    if let Some(tls_port) = &http_media_tls_port_str {
+        properties.push(("http_media_tls_port", tls_port.as_str()));
+    }
     let address = swarm_p2p::local_addr::detect_local_ipv4().to_string();
     let info = ServiceInfo::new(
         SERVICE_TYPE,

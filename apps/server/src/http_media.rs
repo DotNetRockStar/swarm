@@ -23,6 +23,20 @@
 //!   `state_db.rs`), modeled on `apps/stun-server/src/authn.rs::require_device`'s
 //!   per-device hash-lookup shape, deliberately not `mcp.rs::has_valid_bearer`'s
 //!   single static-shared-secret comparison — a different, weaker model.
+//!
+//! `start()` optionally runs a **second** listener on its own port serving
+//! the exact same `Router` over TLS (`HttpMediaTlsConfig`), terminated with
+//! a leaf certificate freshly issued from this server's own long-lived HTTP
+//! CA (`swarm_p2p::http_tls` — deliberately not the QUIC peer identity cert;
+//! see that module's doc comment for why). This is what lets a paired
+//! HTTP-only client reach the server through the relay (issue #54) without
+//! the relay ever seeing plaintext: the relay only ever forwards already-
+//! TLS-wrapped bytes, ciphertext in, ciphertext out. The plain listener is
+//! unaffected either way and keeps serving ordinary same-LAN clients.
+//! `/pair/poll`'s `Approved` response carries the CA's PEM
+//! (`http_ca_pem`) so a device that just paired learns its trust anchor at
+//! the same moment it learns its bearer token — it has no other way to
+//! obtain it, since the CA is generated fresh per server install.
 
 use crate::state_db::StateDb;
 use axum::extract::{ConnectInfo, Extension, Json, OriginalUri, Path as AxumPath, State};
@@ -249,6 +263,21 @@ pub struct HttpMediaService {
     /// only way to learn what was actually chosen. Mirrors
     /// `ServerCore::listen_addr`'s identical role for the QUIC listener.
     pub local_addr: SocketAddr,
+    /// The real bound address of the TLS listener, `None` when
+    /// `HttpMediaTlsConfig` wasn't supplied to `start()`. Same `:0`-in-tests
+    /// reasoning as `local_addr`.
+    pub tls_local_addr: Option<SocketAddr>,
+}
+
+/// Configuration for the optional second, TLS-terminated listener. See the
+/// module doc comment for why this exists and what it's for.
+pub struct HttpMediaTlsConfig {
+    pub bind: SocketAddr,
+    pub ca: Arc<swarm_p2p::http_tls::HttpCa>,
+    /// SANs the freshly issued leaf must cover — every address/hostname a
+    /// client might actually connect through (LAN IP, loopback, and,
+    /// eventually, a granted relay hostname).
+    pub sans: Vec<String>,
 }
 
 impl HttpMediaService {
@@ -280,6 +309,12 @@ struct AppState {
     state_db: Arc<StateDb>,
     pairing: Arc<Mutex<PairingState>>,
     pair_limiter: Arc<AllocationLimiter>,
+    /// The HTTP CA's PEM, handed back once in `/pair/poll`'s `Approved`
+    /// response so a freshly paired device learns its trust anchor at the
+    /// same moment it learns its bearer token. `None` when the TLS listener
+    /// isn't running — such a device is LAN-only and has no relay path to
+    /// need a trust anchor for.
+    http_ca_pem: Option<String>,
 }
 
 #[derive(Clone)]
@@ -294,14 +329,17 @@ pub async fn start(
     service: Arc<MediaService>,
     state_db: Arc<StateDb>,
     bind: SocketAddr,
+    tls: Option<HttpMediaTlsConfig>,
 ) -> std::io::Result<HttpMediaService> {
     let pairing = Arc::new(Mutex::new(PairingState::default()));
     let pair_limiter = Arc::new(AllocationLimiter::new(20, Duration::from_secs(3600)));
+    let http_ca_pem = tls.as_ref().map(|config| config.ca.cert_pem.clone());
     let state = AppState {
         service,
         state_db: Arc::clone(&state_db),
         pairing: Arc::clone(&pairing),
         pair_limiter,
+        http_ca_pem,
     };
 
     let pairing_routes = Router::new()
@@ -366,18 +404,62 @@ pub async fn start(
 
     let listener = TcpListener::bind(bind).await?;
     let local_addr = listener.local_addr()?;
-    tokio::spawn(async move {
-        let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
-        if let Err(err) = axum::serve(listener, make_service).await {
-            tracing::error!(%err, "http media server stopped");
-        }
-    });
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+            if let Err(err) = axum::serve(listener, make_service).await {
+                tracing::error!(%err, "http media server stopped");
+            }
+        });
+    }
+
+    let tls_local_addr = match tls {
+        Some(config) => Some(start_tls_listener(app, config).await?),
+        None => None,
+    };
 
     Ok(HttpMediaService {
         pairing,
         state_db,
         local_addr,
+        tls_local_addr,
     })
+}
+
+/// Issues a fresh leaf from `config.ca` and starts the second, TLS-wrapped
+/// listener serving the identical `app` — see the module doc comment and
+/// `HttpMediaTlsConfig`. Returns the real bound address (mirrors `start`'s
+/// own plain-listener handling of a `:0` ephemeral test port).
+async fn start_tls_listener(app: Router, config: HttpMediaTlsConfig) -> std::io::Result<SocketAddr> {
+    let leaf = swarm_p2p::http_tls::issue_http_leaf(&config.ca, config.sans)
+        .map_err(std::io::Error::other)?;
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_der(
+        vec![leaf.cert_der.to_vec()],
+        leaf.key_der.secret_der().to_vec(),
+    )
+    .await?;
+
+    // A std listener, not tokio's: `axum_server::from_tcp_rustls` takes
+    // ownership of one and converts it internally, and binding it
+    // synchronously (rather than `TcpListener::bind(..).await`) means the
+    // real address is known before this function returns — the same
+    // ":0`-in-tests reasoning as the plain listener above, since
+    // `axum_server::Server::serve` runs the accept loop itself and offers
+    // no synchronous "what did I actually bind" hook otherwise.
+    let std_listener = std::net::TcpListener::bind(config.bind)?;
+    std_listener.set_nonblocking(true)?;
+    let tls_local_addr = std_listener.local_addr()?;
+    let server = axum_server::from_tcp_rustls(std_listener, rustls_config)?;
+
+    tokio::spawn(async move {
+        let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+        if let Err(err) = server.serve(make_service).await {
+            tracing::error!(%err, "http media TLS server stopped");
+        }
+    });
+
+    Ok(tls_local_addr)
 }
 
 async fn require_lan(
@@ -482,7 +564,16 @@ struct PairPollRequest {
 #[serde(tag = "status", rename_all = "lowercase")]
 enum PairPollResponse {
     Pending,
-    Approved { token: String },
+    Approved {
+        token: String,
+        /// PEM of this server's HTTP CA — the device's sole trust anchor
+        /// for the TLS listener (see `swarm_p2p::http_tls`). `None` when
+        /// the TLS listener isn't running, in which case the device is
+        /// LAN-only. Additive field: existing callers that only read
+        /// `token` are unaffected.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        http_ca_pem: Option<String>,
+    },
     Expired,
 }
 
@@ -497,7 +588,10 @@ async fn pair_poll(
     };
     Json(match status {
         PollStatus::Pending => PairPollResponse::Pending,
-        PollStatus::Approved(token) => PairPollResponse::Approved { token },
+        PollStatus::Approved(token) => PairPollResponse::Approved {
+            token,
+            http_ca_pem: state.http_ca_pem.clone(),
+        },
         PollStatus::Expired => PairPollResponse::Expired,
     })
 }

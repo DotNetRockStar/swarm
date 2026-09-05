@@ -81,6 +81,15 @@ pub struct ServerConfig {
     /// devices. Runs unconditionally once the core starts, the same as
     /// `bind`'s QUIC listener, not gated behind a settings toggle.
     pub http_media_bind: SocketAddr,
+    /// A second listener serving the exact same routes as `http_media_bind`
+    /// over TLS, using a leaf certificate issued from this server's own
+    /// long-lived HTTP CA (`swarm_p2p::http_tls`, deliberately not the QUIC
+    /// peer identity — see that module's doc comment). `None` disables it
+    /// (every test fixture that doesn't specifically exercise TLS). This is
+    /// what lets an HTTP-only client reach the server off-LAN through the
+    /// relay, which requires TLS end-to-end so the relay never sees
+    /// plaintext.
+    pub http_media_tls_bind: Option<SocketAddr>,
     /// Fingerprints allowed to connect regardless of STUN membership — for
     /// running without a STUN server at all (local testing, air-gapped use).
     /// A registered STUN link's roster is added on top of this set, never
@@ -134,6 +143,8 @@ pub struct ServerCore {
     pub allowed: AllowedPeers,
     pub listen_addr: SocketAddr,
     pub http_media_addr: SocketAddr,
+    pub http_media_tls_addr: Option<SocketAddr>,
+    http_ca: Option<Arc<swarm_p2p::http_tls::HttpCa>>,
     service: Arc<MediaService>,
     transcription: Arc<TranscriptionManager>,
     transcode_activity: Arc<TranscodeActivityMeter>,
@@ -242,6 +253,23 @@ impl ServerCore {
             .map(|value| value.trim_end_matches('/').to_string());
         std::fs::create_dir_all(&config.data_dir)?;
         let identity = swarm_p2p::identity::ensure_identity(&config.data_dir)?;
+        // Deliberately non-fatal, unlike the QUIC identity above: this CA
+        // only backs the secondary HTTP-only-client TLS surface (see
+        // swarm_p2p::http_tls's doc comment), and a failure here must never
+        // take down QUIC/LAN connectivity for every other client. The
+        // plain-HTTP listener still starts either way; only the TLS one is
+        // skipped.
+        let http_ca = match swarm_p2p::http_tls::ensure_http_ca(&config.data_dir.join("http_ca"))
+        {
+            Ok(ca) => Some(Arc::new(ca)),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "could not establish the HTTP media TLS CA; only the plain-HTTP media surface will be available"
+                );
+                None
+            }
+        };
         let library = Arc::new(
             Library::open(
                 config
@@ -282,6 +310,12 @@ impl ServerCore {
             // same value anyway, and advertising it doesn't need to block
             // on the listener actually being up.
             config.http_media_bind.port(),
+            // Same reasoning, and `None` when TLS is disabled (or its CA
+            // failed above) so nothing advertises a port nothing is
+            // actually listening on.
+            http_ca
+                .as_ref()
+                .and_then(|_| config.http_media_tls_bind.map(|addr| addr.port())),
         )
         .await?;
 
@@ -314,10 +348,28 @@ impl ServerCore {
         // Always on, like the QUIC listener above — not gated behind a
         // settings toggle the way MCP is. See http_media.rs's module doc
         // comment for why it gets its own port rather than sharing bind's.
+        let http_media_tls = match (&http_ca, config.http_media_tls_bind) {
+            (Some(ca), Some(tls_bind)) => Some(http_media::HttpMediaTlsConfig {
+                bind: tls_bind,
+                ca: Arc::clone(ca),
+                // The SANs a relay-reached or LAN-reached client might
+                // connect through. `detect_local_ipv4` is the same
+                // zero-packet route-table probe `lan.rs`'s mDNS
+                // advertisement already trusts for this server's LAN
+                // address; loopback/localhost cover same-machine testing.
+                sans: vec![
+                    "127.0.0.1".to_string(),
+                    "localhost".to_string(),
+                    swarm_p2p::local_addr::detect_local_ipv4().to_string(),
+                ],
+            }),
+            _ => None,
+        };
         let http_media = http_media::start(
             Arc::clone(&service),
             Arc::clone(&state_db),
             config.http_media_bind,
+            http_media_tls,
         )
         .await?;
         // Startup always schedules an initial scan below. Start in the active
@@ -346,6 +398,8 @@ impl ServerCore {
             allowed,
             listen_addr,
             http_media_addr: http_media.local_addr,
+            http_media_tls_addr: http_media.tls_local_addr,
+            http_ca,
             service,
             transcription,
             transcode_activity,
@@ -764,6 +818,14 @@ impl ServerCore {
     /// Details tab's live "Transcoding" graph.
     pub fn transcode_activity_history(&self) -> Vec<TranscodeActivitySample> {
         self.transcode_activity.history()
+    }
+
+    /// Fingerprint of this server's HTTP-media TLS CA (`swarm_p2p::http_tls`
+    /// — deliberately not the QUIC peer identity fingerprint), for
+    /// dashboard/diagnostic display. `None` when the TLS listener never
+    /// started (CA generation failed, or `http_media_tls_bind` was `None`).
+    pub fn http_ca_fingerprint(&self) -> Option<&str> {
+        self.http_ca.as_deref().map(|ca| ca.fingerprint.as_str())
     }
 
     pub async fn artwork_cache_snapshot(&self) -> swarm_media::artwork_cache::ArtworkCacheSnapshot {
